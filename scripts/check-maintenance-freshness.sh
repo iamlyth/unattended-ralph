@@ -21,7 +21,7 @@ BUG_ID=$(tr -d '[:space:]' < "$SELECTION")
 ./scripts/validate-maintenance-plan.py current "$PLAN" >/dev/null
 
 mapfile -t META < <(python3 - "$PLAN" "$PHASE" <<'PY'
-import importlib.util, json, pathlib, subprocess, sys
+import importlib.util, os, pathlib, subprocess, sys
 plan_path, phase = pathlib.Path(sys.argv[1]), sys.argv[2]
 module_path = pathlib.Path('scripts/validate-maintenance-plan.py')
 spec = importlib.util.spec_from_file_location('maintenance_plan_validator', module_path)
@@ -32,40 +32,38 @@ immutable = tuple(key for key in module.KEYS if key != 'status')
 def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 
-checkpoint = ''
-for commit in git('log', '--format=%H', '--', 'MAINTENANCE_PLAN.md').splitlines():
-    body = git('show', '-s', '--format=%B', commit)
-    if any(line == 'Mode: maintenance-planning' for line in body.splitlines()):
-        checkpoint = commit
-        break
-
-bound = False
-checkpoint_meta = None
-if checkpoint:
+if phase == 'planning':
+    expected_base = os.environ.get('FACTORY_MAINTENANCE_BASE_COMMIT', '').strip()
+    if not expected_base:
+        marker = pathlib.Path('.factory-state/maintenance-base-commit')
+        expected_base = marker.read_text(encoding='utf-8').strip() if marker.is_file() else ''
+    if not expected_base or current['base_commit'] != expected_base:
+        raise SystemExit('maintenance-freshness: planning base_commit differs from the selected cycle base')
     try:
-        checkpoint_text = subprocess.check_output(
-            ['git', 'show', f'{checkpoint}:MAINTENANCE_PLAN.md'], text=True,
-            stderr=subprocess.DEVNULL,
-        )
-        checkpoint_meta, _ = module.parse(checkpoint_text)
-        bound = all(current[key] == checkpoint_meta[key] for key in immutable)
-    except (subprocess.CalledProcessError, ValueError):
-        if phase == 'committed':
-            raise SystemExit('maintenance-freshness: invalid committed maintenance planning checkpoint')
-
-if phase == 'committed':
-    if not checkpoint:
-        raise SystemExit('maintenance-freshness: no committed maintenance planning checkpoint')
-    if not bound:
-        raise SystemExit('maintenance-freshness: immutable plan metadata differs from planning checkpoint')
-if bound:
-    parent = git('rev-parse', f'{checkpoint}^')
-    if current['base_commit'] != parent:
-        raise SystemExit('maintenance-freshness: base_commit is not the planning checkpoint parent')
+        git('cat-file', '-e', f'{expected_base}^{{commit}}')
+    except subprocess.CalledProcessError:
+        raise SystemExit('maintenance-freshness: selected cycle base is not a commit')
 else:
-    head = git('rev-parse', 'HEAD')
-    if current['base_commit'] != head:
-        raise SystemExit('maintenance-freshness: uncommitted planning base_commit must equal HEAD')
+    checkpoint_meta = None
+    for commit in git('log', '--format=%H', '--', 'MAINTENANCE_PLAN.md').splitlines():
+        body = git('show', '-s', '--format=%B', commit)
+        if not any(line == 'Mode: maintenance-planning' for line in body.splitlines()):
+            continue
+        try:
+            checkpoint_text = subprocess.check_output(
+                ['git', 'show', f'{commit}:MAINTENANCE_PLAN.md'], text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            checkpoint_meta, _ = module.parse(checkpoint_text)
+            break
+        except (subprocess.CalledProcessError, ValueError):
+            # A draft checkpoint may be structurally invalid. The final wrapper
+            # creates a newer valid lifecycle checkpoint after the planning gate.
+            continue
+    if checkpoint_meta is None:
+        raise SystemExit('maintenance-freshness: no valid committed maintenance planning checkpoint')
+    if any(current[key] != checkpoint_meta[key] for key in immutable):
+        raise SystemExit('maintenance-freshness: immutable plan metadata differs from planning checkpoint')
 
 for key in module.KEYS:
     print(current[key])

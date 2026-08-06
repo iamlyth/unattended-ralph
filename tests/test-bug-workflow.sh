@@ -8,10 +8,34 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory-state"
 cp "$PROJECT_ROOT/scripts/bug-ledger.py" "$PROJECT_ROOT/scripts/check-maintenance-freshness.sh" \
     "$PROJECT_ROOT/scripts/validate-maintenance-plan.py" "$PROJECT_ROOT/scripts/final-gate.sh" "$tmp/scripts/"
-cp "$PROJECT_ROOT/open-bugs.md" "$PROJECT_ROOT/closed-bugs.md" "$tmp/"
 chmod +x "$tmp/scripts/"*
 cd "$tmp"
 
+reset_ledgers() {
+    cat > open-bugs.md <<'EOF'
+# Open Bugs
+
+Canonical queue of defects awaiting maintenance.
+
+Schema: `ralph-bug-ledger/v1`
+
+```json
+[]
+```
+EOF
+    cat > closed-bugs.md <<'EOF'
+# Closed Bugs
+
+Completed defects and their verification evidence.
+
+Schema: `ralph-bug-ledger/v1`
+
+```json
+[]
+```
+EOF
+}
+reset_ledgers
 ./scripts/bug-ledger.py validate >/dev/null
 add_bug() {
     ./scripts/bug-ledger.py add --title "$1" --severity high --reported 2026-08-06 \
@@ -149,8 +173,7 @@ set +e; ./scripts/bug-ledger.py validate >/dev/null 2>&1; interrupted_rc=$?; set
 ./scripts/bug-ledger.py validate >/dev/null
 
 # Freshness succeeds for an open bug and after closure only when the final audit is complete.
-cp "$PROJECT_ROOT/open-bugs.md" open-bugs.md
-cp "$PROJECT_ROOT/closed-bugs.md" closed-bugs.md
+reset_ledgers
 add_bug "Freshness bug" >/dev/null
 printf '# Trial spec\n' > docs/SPEC.md
 cat > factory.toml <<'EOF'
@@ -189,6 +212,15 @@ status: active
 - Documentation impact: none
 EOF
 ./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null
+printf '%s\n' "$base" > .factory-state/maintenance-base-commit
+./scripts/check-maintenance-freshness.sh --planning >/dev/null
+# A malformed draft lifecycle checkpoint must not deadlock a corrected plan.
+cp MAINTENANCE_PLAN.md valid-planning-plan.md
+printf '\n## Tasks\n' >> MAINTENANCE_PLAN.md
+git add MAINTENANCE_PLAN.md
+git commit -qm draft-plan -m 'Mode: maintenance-planning'
+cp valid-planning-plan.md MAINTENANCE_PLAN.md
+./scripts/check-maintenance-freshness.sh --planning >/dev/null
 git add MAINTENANCE_PLAN.md
 git commit -qm plan -m 'Mode: maintenance-planning'
 ./scripts/check-maintenance-freshness.sh >/dev/null

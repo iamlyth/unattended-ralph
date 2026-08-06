@@ -34,6 +34,15 @@ source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 mkdir -p .factory-state
 printf '%s\n' maintenance-planning > .factory-state/loop-mode
+BASE_MARKER=.factory-state/maintenance-base-commit
+if [[ "$RESUME" == false ]]; then
+    git rev-parse HEAD > "$BASE_MARKER"
+elif [[ ! -s "$BASE_MARKER" ]]; then
+    echo "ralph-maintenance-plan: missing cycle base marker for resume" >&2
+    exit 1
+fi
+FACTORY_MAINTENANCE_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
+export FACTORY_MAINTENANCE_BASE_COMMIT
 ./scripts/bug-ledger.py validate >/dev/null
 BUG_STATUS=$(python3 - "$BUG_ID" "$RESUME" <<'PY'
 import json, subprocess, sys
