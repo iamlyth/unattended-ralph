@@ -59,4 +59,50 @@ set -e
 
 FACTORY_ALLOW_TRIAL_BRANCH=1 "$PROJECT_ROOT/scripts/branch-guard.sh" >/dev/null
 
+"$PROJECT_ROOT/scripts/bug-ledger.py" validate >/dev/null
+cmp -s "$PROJECT_ROOT/.github/ISSUE_TEMPLATE/bug_report.md" "$PROJECT_ROOT/.forgejo/ISSUE_TEMPLATE/bug_report.md"
+python3 - "$PROJECT_ROOT" <<'PY'
+import pathlib, sys, tomllib
+root = pathlib.Path(sys.argv[1])
+with (root / 'factory.toml').open('rb') as stream:
+    config = tomllib.load(stream)
+assert config['concurrency']['mutating_workers'] == 1
+assert config['concurrency']['integration_workers'] == 1
+assert config['git']['allow_worktrees'] is False
+assert config['verification']['maintenance_command'] == ['./scripts/verify-project.sh']
+assert config['issues']['providers'] == ['github', 'forgejo']
+assert config['issues']['external_sync'] == 'manual'
+assert config['issues']['credentials'] is False
+for path in ('open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
+             'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
+             'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
+             'scripts/ralph-maintenance-plan.sh',
+             'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md'):
+    assert (root / path).is_file(), f'missing maintenance artifact: {path}'
+PY
+for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
+    grep -q 'parallel: false' "$PROJECT_ROOT/$config"
+done
+python3 - "$PROJECT_ROOT" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for name, mode in {
+    'ralph-plan.sh': 'planning', 'ralph-run.sh': 'implementation',
+    'ralph-maintenance-plan.sh': 'maintenance-planning',
+    'ralph-maintenance-run.sh': 'maintenance',
+}.items():
+    text = (root / 'scripts' / name).read_text(encoding='utf-8')
+    lock = text.index('factory_lock_acquire')
+    marker = text.index(f"printf '%s\\n' {mode} > .factory-state/loop-mode")
+    assert marker > lock, f'{name}: loop-mode marker is not under factory lock'
+maintenance = (root / 'scripts/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
+lock = maintenance.index('factory_lock_acquire')
+selection = maintenance.index('> .factory-state/maintenance-bug-id')
+clean = maintenance.index('git status --porcelain')
+assert lock < clean < selection, 'maintenance selection/clean check is not serialized'
+recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
+assert "does not match recorded loop mode" in recover
+PY
+"$PROJECT_ROOT/tests/test-bug-workflow.sh"
+
 echo "test: boilerplate integration checks passed"

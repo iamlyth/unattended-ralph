@@ -15,6 +15,7 @@
 # Factory runtime state
 .factory-state/
 .factory-lock
+.bug-ledger.lock
 
 # Pi runtime output (agent definitions/settings remain tracked)
 .pi/output/
@@ -37,6 +38,10 @@ coverage/
 *.a
 *.so
 *.log
+
+# Python runtime output
+__pycache__/
+*.py[cod]
 
 # Editor and OS files
 .DS_Store

@@ -21,7 +21,7 @@ Usage: scripts/ralph-recover.sh [options]
 
 Options:
   --loop-id ID       Override inferred loop ID
-  --mode MODE        implementation (default) or planning
+  --mode MODE        implementation (default), planning, maintenance-planning, or maintenance
   --prepare-only     Repair markers but do not start Ralph
   --dry-run          Print the recovery plan without changing files
   -h, --help         Show help
@@ -41,7 +41,10 @@ while (( $# > 0 )); do
         *) die "unknown option '$1'" ;;
     esac
 done
-[[ "$MODE" == implementation || "$MODE" == planning ]] || die "mode must be implementation or planning"
+case "$MODE" in
+    implementation|planning|maintenance-planning|maintenance) ;;
+    *) die "invalid mode '$MODE'" ;;
+esac
 [[ -d "$RALPH_DIR" ]] || die "missing $RALPH_DIR"
 
 # Serialize recovery with planning and implementation, and pass the inherited
@@ -49,6 +52,13 @@ done
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
+MODE_MARKER="$PROJECT_ROOT/.factory-state/loop-mode"
+if [[ -s "$MODE_MARKER" ]]; then
+    recorded_mode=$(tr -d '[:space:]' < "$MODE_MARKER")
+    [[ "$recorded_mode" == "$MODE" ]] || die "requested mode '$MODE' does not match recorded loop mode '$recorded_mode'"
+else
+    warn "old run has no .factory-state/loop-mode marker; continuing with requested mode '$MODE'"
+fi
 
 if [[ -f "$LOCK_FILE" ]]; then
     lock_pid=$(python3 - "$LOCK_FILE" <<'PY'
@@ -141,8 +151,14 @@ printf '%s\n' "$loop_id" > "$LOOP_MARKER"
 printf '%s\n' "$event_relative" > "$EVENTS_MARKER"
 $PREPARE_ONLY && exit 0
 
-if [[ "$MODE" == planning ]]; then
-    exec "$SCRIPT_DIR/ralph-plan.sh" --resume
-else
-    exec "$SCRIPT_DIR/ralph-run.sh" --resume
-fi
+case "$MODE" in
+    planning) exec "$SCRIPT_DIR/ralph-plan.sh" --resume ;;
+    implementation) exec "$SCRIPT_DIR/ralph-run.sh" --resume ;;
+    maintenance-planning)
+        selection="$PROJECT_ROOT/.factory-state/maintenance-bug-id"
+        [[ -s "$selection" ]] || die "missing maintenance bug selection"
+        bug_id=$(tr -d '[:space:]' < "$selection")
+        exec "$SCRIPT_DIR/ralph-maintenance-plan.sh" "$bug_id" --resume
+        ;;
+    maintenance) exec "$SCRIPT_DIR/ralph-maintenance-run.sh" --resume ;;
+esac

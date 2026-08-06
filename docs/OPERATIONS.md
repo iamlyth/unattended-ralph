@@ -6,6 +6,8 @@ Durable, tracked state:
 
 - `docs/SPEC.md`: approved requirements
 - `IMPLEMENTATION_PLAN.md`: task status and verification evidence
+- `open-bugs.md` / `closed-bugs.md`: portable canonical defect state
+- `MAINTENANCE_PLAN.md`: one selected bug, fingerprint, tasks, and evidence
 - `.ralph/agent/scratchpad.md`: concise crash handoff
 - source, tests, README, and operational documentation
 - `factory.toml`, Ralph configs, prompts, and project subagent definitions
@@ -15,7 +17,7 @@ Volatile, ignored state:
 - event streams and pointer files under `.ralph/`
 - loop locks, diagnostics, API state, task/memory stores, and TUI exports
 - Pi transcripts and scheduled-agent state
-- `.factory-lock`
+- `.factory-lock`, `.bug-ledger.lock`, and `.factory-state/` selection/loop-mode markers
 - `.ollama-usage-env`
 
 Git checkpoints make the plan, scratchpad, and implementation recoverable. Event/task files improve same-disk recovery but are not treated as portable project history.
@@ -76,13 +78,26 @@ For a headless process, read `.ralph/loop.lock` and send SIGINT to its PID from 
    ./scripts/ralph-recover.sh
    ```
 
-The script restores a missing tracked scratchpad, removes only a stale lock, recognizes timestamped and fallback event streams, reconstructs pointer files, and starts `ralph-run.sh --resume`.
+The script restores a missing tracked scratchpad, removes only a stale lock, recognizes timestamped and fallback event streams, reconstructs pointer files, and starts `ralph-run.sh --resume`. New launches persist `.factory-state/loop-mode`; recovery rejects a requested mode that differs. Legacy runs without the marker retain inference behavior with a warning.
 
 If unfinished runtime tasks belong to multiple loop IDs, recovery refuses to guess; pass the intended ID explicitly:
 
 ```bash
 ./scripts/ralph-recover.sh --loop-id primary-YYYYMMDD-HHMMSS
 ```
+
+## Bug maintenance
+
+GitHub and Forgejo issues are optional manual references; a bug may link either or both with `bug-ledger.py link|unlink`. Never store PATs in the repo or embed credentials/query tokens in URLs. Validate and inspect canonical state with `scripts/bug-ledger.py validate|list|show|fingerprint` and maintain it with `add`, `link`, `unlink`, `set-status`, `close`, and safe interrupted-close `recover`. States are `open`, `triaged`, `planned`, `in_progress`, `blocked`, and `closed`; close requires `in_progress`.
+
+An ordinary defect restores the approved contract and can use:
+
+```bash
+./scripts/ralph-maintenance-plan.sh BUG-0001
+./scripts/ralph-maintenance-run.sh
+```
+
+Triage the bug before planning. Successful planning marks it `planned`; the first implementation task marks it `in_progress`. If `contract_change` is true, expected behavior requires a product decision, or the spec would need editing, block maintenance and use the human specification workflow. One cycle handles one bug. Recovery uses `--mode maintenance-planning` or `--mode maintenance`; both preserve quota waiting, the factory lock, clean-tree policy, loop-mode binding, and checkpoints. Maintenance completion also requires the executable argv configured as `[verification].maintenance_command`; this boilerplate intentionally leaves `scripts/verify-project.sh` for each project to provide. Full details are in `docs/BUG_WORKFLOW.md`.
 
 ## Specification changes
 

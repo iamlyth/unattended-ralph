@@ -3,12 +3,14 @@
 set -euo pipefail
 
 MODE=implementation
-if [[ ${1:-} == --plan-only ]]; then
-    MODE=planning
-elif (( $# > 0 )); then
-    echo "ralph-checkpoint: unknown argument '$1'" >&2
-    exit 2
-fi
+case ${1:-} in
+    "") ;;
+    --plan-only) MODE=planning ;;
+    --maintenance-plan) MODE=maintenance-planning ;;
+    --maintenance) MODE=maintenance ;;
+    --maintenance-ledger) MODE=maintenance-ledger ;;
+    *) echo "ralph-checkpoint: unknown argument '$1'" >&2; exit 2 ;;
+esac
 
 HOOK_PAYLOAD=$(cat)
 mapfile -t HOOK_META < <(python3 -c '
@@ -30,12 +32,13 @@ cd -- "$WORKSPACE"
 SCRATCHPAD=.ralph/agent/scratchpad.md
 git restore --staged -- .ralph 2>/dev/null || true
 
-if [[ "$MODE" == planning ]]; then
-    git add -- IMPLEMENTATION_PLAN.md
-else
-    git add -A -- . ':(exclude).ralph/**'
-fi
-if [[ -f "$SCRATCHPAD" ]]; then
+case "$MODE" in
+    planning) git add -- IMPLEMENTATION_PLAN.md ;;
+    maintenance-planning) git add -- MAINTENANCE_PLAN.md ;;
+    maintenance-ledger) git add -- open-bugs.md closed-bugs.md ;;
+    implementation|maintenance) git add -A -- . ':(exclude).ralph/**' ;;
+esac
+if [[ "$MODE" != maintenance-ledger && -f "$SCRATCHPAD" ]]; then
     git add -f -- "$SCRATCHPAD"
 fi
 

@@ -24,6 +24,12 @@ if not re.search(r'^status:\s*active\s*$', text, re.M):
 PY
         echo "final-gate: planning completion accepted"
         ;;
+    --maintenance-planning)
+        ./scripts/maintenance-plan-scope-guard.sh
+        ./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null
+        ./scripts/check-maintenance-freshness.sh --planning
+        echo "final-gate: maintenance planning completion accepted"
+        ;;
     --implementation)
         ./scripts/check-plan-freshness.sh
         python3 - <<'PY'
@@ -48,8 +54,62 @@ PY
         fi
         echo "final-gate: implementation, specification, tests, and documentation accepted"
         ;;
+    --maintenance)
+        ./scripts/validate-maintenance-plan.py complete MAINTENANCE_PLAN.md >/dev/null
+        ./scripts/check-maintenance-freshness.sh
+        ./scripts/bug-ledger.py validate
+        python3 - <<'PY'
+import json, re, subprocess
+meta = json.loads(subprocess.check_output(
+    ['./scripts/validate-maintenance-plan.py', 'metadata', 'MAINTENANCE_PLAN.md'], text=True,
+))
+bug_id, base = meta['bug_id'], meta['base_commit']
+shown = subprocess.check_output(['./scripts/bug-ledger.py', 'show', bug_id], text=True)
+record = json.loads(shown.split('\nfingerprint:', 1)[0])
+if record['status'] != 'closed' or not record['resolution'].strip() or not record['verification'].strip():
+    raise SystemExit('final-gate: selected bug is not closed with resolution and verification')
+def records(text):
+    return {r['id']: r for r in json.loads(re.search(r'```json\s*\n(.*?)\n```', text, re.S).group(1))}
+before = {}
+for ledger in ('open-bugs.md', 'closed-bugs.md'):
+    before.update(records(subprocess.check_output(['git', 'show', f'{base}:{ledger}'], text=True)))
+after = {}
+for ledger in ('open-bugs.md', 'closed-bugs.md'):
+    after.update(records(open(ledger, encoding='utf-8').read()))
+if set(before) != set(after) or bug_id not in before:
+    raise SystemExit('final-gate: maintenance must not add or remove unrelated bug IDs')
+changed = {key for key in before if before[key] != after[key]}
+if changed != {bug_id}:
+    raise SystemExit(f'final-gate: only selected bug may change in a maintenance cycle (changed: {sorted(changed)})')
+PY
+        ./scripts/verify-boilerplate.sh
+        mapfile -d '' -t MAINTENANCE_COMMAND < <(python3 - <<'PY'
+import os, tomllib
+with open('factory.toml', 'rb') as stream:
+    command = tomllib.load(stream).get('verification', {}).get('maintenance_command')
+if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
+    raise SystemExit('final-gate: verification.maintenance_command must be a non-empty argv array')
+for arg in command:
+    os.write(1, arg.encode() + b'\0')
+PY
+        )
+        (( ${#MAINTENANCE_COMMAND[@]} > 0 )) || { echo "final-gate: maintenance verifier is not configured" >&2; exit 1; }
+        if [[ "${MAINTENANCE_COMMAND[0]}" == */* ]]; then
+            [[ -x "${MAINTENANCE_COMMAND[0]}" ]] || {
+                echo "final-gate: configured maintenance verifier is missing or not executable: ${MAINTENANCE_COMMAND[0]}" >&2
+                exit 1
+            }
+        else
+            command -v "${MAINTENANCE_COMMAND[0]}" >/dev/null || {
+                echo "final-gate: configured maintenance verifier is missing or not executable: ${MAINTENANCE_COMMAND[0]}" >&2
+                exit 1
+            }
+        fi
+        "${MAINTENANCE_COMMAND[@]}"
+        echo "final-gate: maintenance implementation and audit accepted"
+        ;;
     *)
-        echo "Usage: scripts/final-gate.sh --planning|--implementation" >&2
+        echo "Usage: scripts/final-gate.sh --planning|--implementation|--maintenance-planning|--maintenance" >&2
         exit 2
         ;;
 esac

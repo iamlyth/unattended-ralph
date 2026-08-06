@@ -28,6 +28,19 @@ readme = "README.md"
 operations = "docs/OPERATIONS.md"
 final_task_title = "Final documentation and specification audit"
 
+[verification]
+maintenance_command = ["./scripts/verify-project.sh"]
+
+[issues]
+schema = "ralph-bug-ledger/v1"
+open_ledger = "open-bugs.md"
+closed_ledger = "closed-bugs.md"
+maintenance_plan = "MAINTENANCE_PLAN.md"
+final_task_title = "Maintenance verification and documentation audit"
+providers = ["github", "forgejo"]
+external_sync = "manual"
+credentials = false
+
 [git]
 autonomous_branch = "develop"
 human_release_branch = "main"

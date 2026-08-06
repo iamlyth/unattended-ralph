@@ -39,6 +39,8 @@ fi
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
+mkdir -p .factory-state
+printf '%s\n' planning > .factory-state/loop-mode
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
 

@@ -96,6 +96,19 @@ Each iteration:
 
 Only the final documentation and specification audit may produce `LOOP_COMPLETE`.
 
+## Maintain one bug
+
+Portable canonical bug state lives in `open-bugs.md` and `closed-bugs.md`; GitHub and Forgejo issue URLs are optional manual references and may exist on either or both providers. No issue API, automatic sync, or credentials are used.
+
+```bash
+./scripts/bug-ledger.py validate
+./scripts/bug-ledger.py list
+./scripts/ralph-maintenance-plan.sh BUG-0001
+./scripts/ralph-maintenance-run.sh
+```
+
+A maintenance cycle selects exactly one triaged ordinary defect. Planning commits a strictly parsed plan and then marks the defect `planned`; implementation marks it `in_progress` before product changes, and only an `in_progress` defect may close. Contract changes or product decisions are blocked and returned to the human specification workflow; maintenance never edits `docs/SPEC.md`. Ignored runtime state binds the selected ID and loop mode, while immutable `MAINTENANCE_PLAN.md` metadata binds the planning checkpoint parent, bug fingerprint, and committed spec. Ledger writes serialize and interrupted closure has a narrowly safe `recover` command. See `docs/BUG_WORKFLOW.md` for intake, ticket states, link/unlink commands, GitHub/Forgejo URL expectations, closure evidence, and recovery.
+
 ## Adaptive concurrency
 
 Configured ceilings live in `factory.toml`:
@@ -149,10 +162,12 @@ Preview recovery without changes:
 ./scripts/ralph-recover.sh --dry-run
 ```
 
-Planning recovery uses:
+Planning and maintenance recovery use:
 
 ```bash
 ./scripts/ralph-recover.sh --mode planning
+./scripts/ralph-recover.sh --mode maintenance-planning
+./scripts/ralph-recover.sh --mode maintenance
 ```
 
 Recovery never resets Git or starts a second writer. See `docs/OPERATIONS.md` for details.
@@ -165,7 +180,7 @@ Recovery never resets Git or starts a second writer. See `docs/OPERATIONS.md` fo
 
 The verifier checks shell syntax, ShellCheck when available, TOML/JSON configuration, read-only agent tools, single-writer settings, quota behavior, plan freshness, branch policy, removed product artifacts, and secret tracking.
 
-Project implementation plans should add their own build, lint, test, and documentation commands to the final gate.
+Project implementation plans should add their own build, lint, test, and documentation commands to the final gate. Maintenance executes `[verification].maintenance_command` directly as argv and fails if its executable is absent. The generic boilerplate intentionally has no `scripts/verify-project.sh`; projects must supply it before running maintenance.
 
 ## Release
 
