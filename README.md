@@ -58,7 +58,7 @@ Run the planning-only fresh-context loop:
 ./scripts/ralph-plan.sh
 ```
 
-The planner may only modify `IMPLEMENTATION_PLAN.md` and the recovery scratchpad. The generated plan records:
+The planner may only modify `IMPLEMENTATION_PLAN.md` and the recovery scratchpad. A fresh invocation atomically replaces both with minimal cycle state before Ralph starts, so completed tasks are not carried into every future prompt. Previous plans remain available through Git history. `--resume` preserves the current draft byte-for-byte. The generated plan records:
 
 - the spec path;
 - the latest commit that changed the spec;
@@ -67,7 +67,7 @@ The planner may only modify `IMPLEMENTATION_PLAN.md` and the recovery scratchpad
 - bounded tasks, dependencies, acceptance evidence, and documentation impact;
 - a mandatory final documentation/specification audit.
 
-Inspect the plan before implementation. `scripts/check-plan-freshness.sh` prevents a stale plan from running after the specification changes.
+Inspect the plan before implementation. Every task in a newly accepted plan must be `pending`; inherited completed or in-progress tasks fail the planning gate. `scripts/check-plan-freshness.sh` prevents a stale plan or altered cycle base from running after the specification changes.
 
 For a headless planning loop:
 
@@ -107,7 +107,7 @@ Portable canonical bug state lives in `open-bugs.md` and `closed-bugs.md`; GitHu
 ./scripts/ralph-maintenance-run.sh
 ```
 
-A maintenance cycle selects exactly one triaged ordinary defect. Planning commits a strictly parsed plan and then marks the defect `planned`; implementation marks it `in_progress` before product changes, and only an `in_progress` defect may close. Contract changes or product decisions are blocked and returned to the human specification workflow; maintenance never edits `docs/SPEC.md`. Ignored runtime state binds the selected ID and loop mode, while immutable `MAINTENANCE_PLAN.md` metadata binds the planning checkpoint parent, bug fingerprint, and committed spec. Ledger writes serialize and interrupted closure has a narrowly safe `recover` command. See `docs/BUG_WORKFLOW.md` for intake, ticket states, link/unlink commands, GitHub/Forgejo URL expectations, closure evidence, and recovery.
+A maintenance cycle selects exactly one triaged ordinary defect. A fresh planning invocation replaces the prior maintenance plan and scratchpad with a minimal selected-bug skeleton; Git and `closed-bugs.md` retain prior evidence, while `--resume` preserves the active draft. All newly planned tasks must be `pending`. Planning commits the strictly parsed plan and then marks the defect `planned`; implementation marks it `in_progress` before product changes, and only an `in_progress` defect may close. Contract changes or product decisions are blocked and returned to the human specification workflow; maintenance never edits `docs/SPEC.md`. Ignored runtime state binds the selected ID and loop mode, while immutable `MAINTENANCE_PLAN.md` metadata binds the planning checkpoint parent, bug fingerprint, and committed spec. Ledger writes serialize and interrupted closure has a narrowly safe `recover` command. See `docs/BUG_WORKFLOW.md` for intake, ticket states, link/unlink commands, GitHub/Forgejo URL expectations, closure evidence, and recovery.
 
 ## Adaptive concurrency
 

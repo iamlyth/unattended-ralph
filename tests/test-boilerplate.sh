@@ -104,5 +104,6 @@ recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
 assert "does not match recorded loop mode" in recover
 PY
 "$PROJECT_ROOT/tests/test-bug-workflow.sh"
+"$PROJECT_ROOT/tests/test-plan-cycle.sh"
 
 echo "test: boilerplate integration checks passed"

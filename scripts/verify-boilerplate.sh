@@ -38,10 +38,11 @@ required = [
     'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
     'prompts/MAINTENANCE.md', 'prompts/MAINTENANCE_PLAN.md',
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
-    'scripts/check-maintenance-freshness.sh',
+    'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
     'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
     'docs/BUG_WORKFLOW.md', 'tests/test-bug-workflow.sh',
+    'tests/test-plan-cycle.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'

@@ -32,14 +32,25 @@ command -v pi2 >/dev/null || { echo "ralph-maintenance-plan: pi2 is unavailable"
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
+./scripts/branch-guard.sh
 mkdir -p .factory-state
-printf '%s\n' maintenance-planning > .factory-state/loop-mode
 BASE_MARKER=.factory-state/maintenance-base-commit
 if [[ "$RESUME" == false ]]; then
+    printf '%s\n' maintenance-planning > .factory-state/loop-mode
     git rev-parse HEAD > "$BASE_MARKER"
-elif [[ ! -s "$BASE_MARKER" ]]; then
-    echo "ralph-maintenance-plan: missing cycle base marker for resume" >&2
-    exit 1
+else
+    [[ -s "$BASE_MARKER" ]] || {
+        echo "ralph-maintenance-plan: missing cycle base marker for resume" >&2; exit 1;
+    }
+    [[ $(cat .factory-state/loop-mode 2>/dev/null) == maintenance-planning ]] || {
+        echo "ralph-maintenance-plan: saved lifecycle is not maintenance planning" >&2; exit 1;
+    }
+    [[ $(cat .factory-state/maintenance-bug-id 2>/dev/null) == "$BUG_ID" ]] || {
+        echo "ralph-maintenance-plan: saved maintenance selection does not match $BUG_ID" >&2; exit 1;
+    }
+    [[ -s MAINTENANCE_PLAN.md ]] || {
+        echo "ralph-maintenance-plan: missing maintenance draft for resume" >&2; exit 1;
+    }
 fi
 FACTORY_MAINTENANCE_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
 export FACTORY_MAINTENANCE_BASE_COMMIT
@@ -93,6 +104,10 @@ PY
 }
 if ! git diff --quiet -- "$SPEC" || ! git diff --cached --quiet -- "$SPEC"; then
     echo "ralph-maintenance-plan: specification changed while selecting bug" >&2; exit 1
+fi
+if [[ "$RESUME" == false ]]; then
+    ./scripts/initialize-plan-cycle.py maintenance \
+        --base "$FACTORY_MAINTENANCE_BASE_COMMIT" --bug-id "$BUG_ID"
 fi
 while true; do
     ./scripts/ollama-usage-guard.sh --wait

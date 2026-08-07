@@ -35,12 +35,38 @@ if ! git diff --quiet -- "$SPEC" || ! git diff --cached --quiet -- "$SPEC"; then
     echo "ralph-plan: commit '$SPEC' before planning" >&2
     exit 1
 fi
+if [[ "$RESUME" == false && -n $(git status --porcelain --untracked-files=normal) ]]; then
+    echo "ralph-plan: start a fresh planning cycle from a clean Git tree" >&2
+    exit 1
+fi
 
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
+./scripts/branch-guard.sh
 mkdir -p .factory-state
-printf '%s\n' planning > .factory-state/loop-mode
+BASE_MARKER=.factory-state/planning-base-commit
+if ! git diff --quiet -- "$SPEC" || ! git diff --cached --quiet -- "$SPEC"; then
+    echo "ralph-plan: specification changed while acquiring the planning lock" >&2
+    exit 1
+fi
+if [[ "$RESUME" == false ]]; then
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "ralph-plan: tree changed while starting the planning cycle" >&2; exit 1;
+    }
+    git rev-parse HEAD > "$BASE_MARKER"
+    printf '%s\n' planning > .factory-state/loop-mode
+    FACTORY_PLANNING_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
+    ./scripts/initialize-plan-cycle.py specification --base "$FACTORY_PLANNING_BASE_COMMIT"
+else
+    [[ -s "$BASE_MARKER" ]] || { echo "ralph-plan: missing planning base marker for resume" >&2; exit 1; }
+    [[ $(cat .factory-state/loop-mode 2>/dev/null) == planning ]] || {
+        echo "ralph-plan: saved lifecycle is not specification planning" >&2; exit 1;
+    }
+    [[ -s IMPLEMENTATION_PLAN.md ]] || { echo "ralph-plan: missing planning draft for resume" >&2; exit 1; }
+    FACTORY_PLANNING_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
+fi
+export FACTORY_PLANNING_BASE_COMMIT
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
 

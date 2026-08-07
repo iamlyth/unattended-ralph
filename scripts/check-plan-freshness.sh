@@ -4,6 +4,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PLAN=${FACTORY_PLAN_PATH:-$PROJECT_ROOT/IMPLEMENTATION_PLAN.md}
+PHASE=committed
+if [[ ${1:-} == --planning ]]; then
+    PHASE=planning
+    shift
+fi
+(( $# == 0 )) || { echo "Usage: scripts/check-plan-freshness.sh [--planning]" >&2; exit 2; }
 cd -- "$PROJECT_ROOT"
 
 [[ -s "$PLAN" ]] || { echo "plan-freshness: missing IMPLEMENTATION_PLAN.md; run ./scripts/ralph-plan.sh" >&2; exit 1; }
@@ -48,10 +54,15 @@ PY
     echo "plan-freshness: plan is unplanned; run ./scripts/ralph-plan.sh" >&2
     exit 1
 }
-[[ "$STATUS" == active || "$STATUS" == complete ]] || {
-    echo "plan-freshness: plan status is '$STATUS', expected 'active' or 'complete'" >&2
-    exit 1
-}
+if [[ "$PHASE" == planning ]]; then
+    [[ "$STATUS" == active ]] || {
+        echo "plan-freshness: planning status is '$STATUS', expected 'active'" >&2; exit 1;
+    }
+else
+    [[ "$STATUS" == active || "$STATUS" == complete ]] || {
+        echo "plan-freshness: plan status is '$STATUS', expected 'active' or 'complete'" >&2; exit 1;
+    }
+fi
 git cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null || {
     echo "plan-freshness: invalid base commit '$BASE_COMMIT'" >&2
     exit 1
@@ -60,6 +71,15 @@ git merge-base --is-ancestor "$BASE_COMMIT" HEAD || {
     echo "plan-freshness: base commit '$BASE_COMMIT' is not an ancestor of HEAD" >&2
     exit 1
 }
+if [[ "$PHASE" == planning ]]; then
+    EXPECTED_BASE=${FACTORY_PLANNING_BASE_COMMIT:-}
+    if [[ -z "$EXPECTED_BASE" && -s .factory-state/planning-base-commit ]]; then
+        EXPECTED_BASE=$(tr -d '[:space:]' < .factory-state/planning-base-commit)
+    fi
+    [[ -n "$EXPECTED_BASE" && "$BASE_COMMIT" == "$EXPECTED_BASE" ]] || {
+        echo "plan-freshness: base_commit differs from the selected planning cycle base" >&2; exit 1;
+    }
+fi
 
 if ! git diff --quiet -- "$SPEC_PATH" || ! git diff --cached --quiet -- "$SPEC_PATH"; then
     echo "plan-freshness: '$SPEC_PATH' has uncommitted changes; commit the spec and replan" >&2

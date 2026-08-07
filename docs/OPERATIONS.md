@@ -97,7 +97,7 @@ An ordinary defect restores the approved contract and can use:
 ./scripts/ralph-maintenance-run.sh
 ```
 
-Triage the bug before planning. Successful planning marks it `planned`; the first implementation task marks it `in_progress`. If `contract_change` is true, expected behavior requires a product decision, or the spec would need editing, block maintenance and use the human specification workflow. One cycle handles one bug. Recovery uses `--mode maintenance-planning` or `--mode maintenance`; both preserve quota waiting, the factory lock, clean-tree policy, loop-mode binding, and checkpoints. Maintenance completion also requires the executable argv configured as `[verification].maintenance_command`; this boilerplate intentionally leaves `scripts/verify-project.sh` for each project to provide. Full details are in `docs/BUG_WORKFLOW.md`.
+Triage the bug before planning. A fresh maintenance-planning command atomically seeds a minimal selected-bug plan and scratchpad; it never copies the prior cycle, and the planning gate accepts only pending tasks. Use `--resume` to preserve an interrupted draft instead of starting over. Successful planning marks it `planned`; the first implementation task marks it `in_progress`. If `contract_change` is true, expected behavior requires a product decision, or the spec would need editing, block maintenance and use the human specification workflow. One cycle handles one bug. Recovery uses `--mode maintenance-planning` or `--mode maintenance`; both preserve quota waiting, the factory lock, clean-tree policy, loop-mode binding, and checkpoints. Maintenance completion also requires the executable argv configured as `[verification].maintenance_command`; this boilerplate intentionally leaves `scripts/verify-project.sh` for each project to provide. Full details are in `docs/BUG_WORKFLOW.md`.
 
 ## Specification changes
 
@@ -105,8 +105,8 @@ Never edit the specification during implementation. `check-plan-freshness.sh` co
 
 1. stop the implementation loop;
 2. commit the revised `docs/SPEC.md`;
-3. run `./scripts/ralph-plan.sh`;
-4. inspect the replacement plan;
+3. run `./scripts/ralph-plan.sh`; this atomically seeds a minimal plan and scratchpad and leaves the completed plan only in Git history;
+4. inspect the replacement plan and confirm it contains only current pending gaps, not completed historical tasks;
 5. start a new implementation loop.
 
 ## Documentation gate
@@ -118,6 +118,8 @@ Every implementation plan ends with **Final documentation and specification audi
 - **`expected develop`**: merge/switch to `develop`; use the trial override only for this boilerplate branch.
 - **`exactly one working tree`**: remove stale worktrees and run `git worktree prune`.
 - **`plan is unplanned`**: run the planning loop.
+- **`fresh implementation plan may contain only pending tasks`**: remove carried-over lifecycle tasks; inspect current code and plan only remaining spec gaps.
+- **missing planning base/draft on resume**: recover the interrupted lifecycle markers; never restore an old completed plan as the active draft.
 - **`specification changed after planning`**: commit the spec and replan.
 - **`another factory process holds .factory-lock`**: confirm the existing planner/worker is stopped before deleting a stale `.factory-lock`.
 - **quota wait appears idle**: the guard prints each usage poll; lower the polling interval temporarily for diagnostics.

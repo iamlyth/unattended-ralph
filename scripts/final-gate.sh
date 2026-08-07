@@ -10,13 +10,17 @@ cd -- "$PROJECT_ROOT"
 case "$MODE" in
     --planning)
         ./scripts/plan-scope-guard.sh
-        ./scripts/check-plan-freshness.sh
+        ./scripts/check-plan-freshness.sh --planning
         python3 - <<'PY'
 import re
 text = open('IMPLEMENTATION_PLAN.md', encoding='utf-8').read()
-statuses = re.findall(r'^- Status:\s*(pending|in_progress|complete|blocked)\s*$', text, re.M)
-if not statuses:
-    raise SystemExit('final-gate: plan has no tasks using required `- Status:` format')
+tasks = re.findall(r'^## Task\s+\d+:', text, re.M)
+statuses = re.findall(r'^- Status:\s*([^\n]+?)\s*$', text, re.M)
+if not tasks or len(statuses) != len(tasks):
+    raise SystemExit('final-gate: every new plan task requires exactly one `- Status:` field')
+non_pending = [status for status in statuses if status != 'pending']
+if non_pending:
+    raise SystemExit('final-gate: a fresh implementation plan may contain only pending tasks')
 if 'Final documentation and specification audit' not in text:
     raise SystemExit('final-gate: mandatory final documentation task is missing')
 if not re.search(r'^status:\s*active\s*$', text, re.M):

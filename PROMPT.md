@@ -11,7 +11,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 5. You are the only repository writer. Subagents report findings and must not edit, write, commit, or run mutating commands.
 6. Implement only the selected task. Run its acceptance checks and relevant regression tests.
 7. Update nearby documentation as behavior changes. Record concise evidence in the plan.
-8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason.
+8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason. Never prune, renumber, replace, or recycle planned tasks during an active implementation cycle; the final gate requires the complete cycle ledger.
 9. Commit a coherent checkpoint to `develop`, then update `.ralph/agent/scratchpad.md` with a short handoff and exit. One task per fresh context.
 
 ## Adaptive subagent use

@@ -7,9 +7,9 @@ You are the planning coordinator for a Huntley-style Ralph loop. Produce or impr
 - Canonical specification: `docs/SPEC.md`
 - Existing repository state and tests
 - Factory policy: `factory.toml`
-- Existing plan, if any: `IMPLEMENTATION_PLAN.md`
+- Fresh launcher-provided skeleton: `IMPLEMENTATION_PLAN.md`
 
-The specification must already be committed. If it is dirty, stop and explain the required commit.
+The specification must already be committed. If it is dirty, stop and explain the required commit. A new cycle intentionally removes the prior plan from the working tree. Do not retrieve, copy, summarize, or append tasks from older plans in Git history. Inspect current code and tests and plan only implementation gaps against the committed specification; Git history is the archive for completed plans.
 
 ## Context strategy
 
@@ -53,7 +53,7 @@ Obtain values from Git; never invent them. Then include:
    - Documentation impact: README/docs sections
    ```
 
-4. Status must be exactly `pending`, `in_progress`, `complete`, or `blocked`. The implementation worker changes the front-matter `status` from `active` to `complete` only after the final task passes.
+4. Every task in a newly generated plan must start with exactly `pending`; planning completion rejects inherited `complete`, `in_progress`, or `blocked` tasks. The implementation worker changes statuses during execution and changes the front-matter `status` from `active` to `complete` only after the final task passes.
 5. Small tasks sized for one fresh implementation context.
 6. Tests alongside the behavior they validate, never deferred to a testing-only phase.
 7. A final task titled **Final documentation and specification audit** that depends on every implementation task and requires README/docs to match actual behavior.

@@ -105,6 +105,9 @@ def main() -> int:
     if args.mode == "planning":
         if metadata["status"] != "active":
             fail("planning mode requires front-matter status active")
+        non_pending = [task["number"] for task in tasks if task["fields"]["Status"] != "pending"]
+        if non_pending:
+            fail(f"planning mode requires every task pending (non-pending: {non_pending})")
     elif args.mode == "complete":
         if metadata["status"] != "complete":
             fail("complete mode requires front-matter status complete")
