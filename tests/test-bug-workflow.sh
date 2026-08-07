@@ -297,4 +297,5 @@ set +e; ./scripts/final-gate.sh --maintenance > verifier.out 2>&1; verifier_rc=$
 grep -q 'configured maintenance verifier is missing or not executable' verifier.out
 
 cmp -s "$PROJECT_ROOT/.github/ISSUE_TEMPLATE/bug_report.md" "$PROJECT_ROOT/.forgejo/ISSUE_TEMPLATE/bug_report.md"
+grep -Fq -- "write \`- Status: complete\`, never \`done\`" "$PROJECT_ROOT/prompts/MAINTENANCE.md"
 echo "test: provider-neutral bug workflow checks passed"

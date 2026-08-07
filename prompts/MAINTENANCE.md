@@ -9,7 +9,7 @@ Non-negotiable rules:
 3. On the first implementation task, transition the selected bug from `planned` to `in_progress` with `bug-ledger.py` before changing product code. Then select one ready pending task, mark it in_progress, and implement only that bounded task.
 4. You are the sole writer. Subagents are read-only.
 5. Test against the selected record's reproduction, expected behavior, and acceptance criteria; record objective evidence.
-6. Mark tasks complete only after verification. Keep the front status active until all tasks complete.
+6. Mark tasks complete only after verification. Task status values are exact: `pending`, `in_progress`, `complete`, or `blocked`; write `- Status: complete`, never `done`. Keep the front status active until all tasks complete.
 7. Do not change intake fields of the bug. External URLs and workflow status are mutable and excluded from its fingerprint.
 8. Move the selected `in_progress` bug from `open-bugs.md` to `closed-bugs.md` only in the final task, using `bug-ledger.py close` with non-empty resolution and verification. Do not close any other bug.
 9. The final task is exactly **Maintenance verification and documentation audit**. It runs boilerplate verification and the configured `[verification].maintenance_command`, audits docs and acceptance evidence, then sets front status complete. The configured argv must name an executable project verifier.
