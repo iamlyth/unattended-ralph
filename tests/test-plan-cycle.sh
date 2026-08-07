@@ -96,9 +96,9 @@ status: active
 |---|---|---|---|---|
 | REQ-1 | §1 | missing | no implementation | Task 1 |
 ## Interaction acceptance inventory
-| Control | Controller path | Pointer path | Semantic outcome | Production dispatch |
+| Operation | Input paths | Semantic outcome | Production dispatch | Evidence |
 |---|---|---|---|---|
-| Example | A | click | state changes | SDL event loop |
+| Example | normal event | state changes | application event loop | integration test |
 ## Task 1: Implement current gap
 - Status: pending
 - Dependencies: none
@@ -109,7 +109,7 @@ status: active
 ## Task 2: Final documentation and specification audit
 - Status: pending
 - Dependencies: Task 1
-- Scope: canonical definition of done (§11.2), conformance, and interaction audit
+- Scope: canonical definition of done, conformance, and interaction audit
 - Acceptance criteria: conformance verified; interaction complete; open bugs resolved; independent review passes; clean tree
 - Verification: run final checks
 - Documentation impact: README

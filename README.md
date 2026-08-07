@@ -64,10 +64,12 @@ The planner may only modify `IMPLEMENTATION_PLAN.md` and the recovery scratchpad
 - the latest commit that changed the spec;
 - the exact spec blob ID;
 - the base commit;
+- a requirement-by-requirement conformance matrix;
+- an exhaustive interaction/API/CLI acceptance inventory;
 - bounded tasks, dependencies, acceptance evidence, and documentation impact;
-- a mandatory final documentation/specification audit.
+- a mandatory final documentation/specification audit that depends on every other task.
 
-Inspect the plan before implementation. Every task in a newly accepted plan must be `pending`; inherited completed or in-progress tasks fail the planning gate. `scripts/check-plan-freshness.sh` prevents a stale plan or altered cycle base from running after the specification changes.
+Inspect the plan before implementation. Every task in a newly accepted plan must be `pending`; inherited completed or in-progress tasks fail the planning gate. Every partial, missing, or ambiguous conformance row must map to a pending task. `scripts/check-plan-freshness.sh` prevents a stale plan or altered cycle base from running after the specification changes.
 
 For a headless planning loop:
 
@@ -94,7 +96,9 @@ Each iteration:
 7. creates a Git checkpoint;
 8. exits so the next task receives fresh context.
 
-Only the final documentation and specification audit may produce `LOOP_COMPLETE`.
+Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs before project verification.
+
+Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff and never emits `LOOP_COMPLETE`.
 
 ## Maintain one bug
 

@@ -84,7 +84,7 @@ def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
 
 def validate_interactions(text: str) -> None:
     inventory = section(text, "Interaction acceptance inventory").lower()
-    for term in ("controller", "pointer", "semantic", "production"):
+    for term in ("input", "semantic", "production", "evidence"):
         if term not in inventory:
             fail(f"interaction inventory must describe `{term}` coverage")
 

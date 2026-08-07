@@ -62,7 +62,7 @@ done
 grep -q 'Final documentation and specification audit' prompts/PLAN.md
 grep -q 'Specification conformance matrix' prompts/PLAN.md
 grep -q 'Interaction acceptance inventory' prompts/PLAN.md
-grep -q '§11.2' PROMPT.md
+grep -q 'canonical definition of done' PROMPT.md
 grep -q 'Maintenance verification and documentation audit' prompts/MAINTENANCE_PLAN.md
 grep -q 'LOOP_COMPLETE' PROMPT.md
 grep -q 'MAINTENANCE_COMPLETE' prompts/MAINTENANCE.md

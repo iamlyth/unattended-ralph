@@ -27,16 +27,16 @@ Use only the agents needed for the task. Launch independent read-only investigat
 
 ## Final documentation and verification gate
 
-The final audit task may run only after every implementation and appended remediation task is complete. It must apply the full definition of done in `docs/SPEC.md` §11.2, not infer completion from task count or prior green tests. It must:
+The final audit task may run only after every implementation and appended remediation task is complete. It must apply the canonical specification's full definition of done (plus the factory defaults below), not infer completion from task count or prior green tests. It must:
 
 - update the plan's specification conformance matrix so every normative requirement is `verified` with source and executable evidence; no `partial`, `missing`, or `ambiguous` classification may remain;
-- execute the complete §5.7 control inventory through normal production event dispatch, proving controller and pointer semantic outcomes rather than only pixels, focus, handler return values, or no-crash behavior;
-- run installed end-to-end workflows, visual/degraded-state acceptance, clean-build regression, packaging, and project verification—not only tests changed by the cycle;
-- validate bug ledgers and resolve every open defect that contradicts v1; only an explicit human-approved specification/release decision can defer one;
+- execute the complete interaction/API/CLI inventory through normal production dispatch, proving semantic outcomes rather than only handler return values, object existence, output shape, or no-crash behavior;
+- run installed end-to-end workflows, required degraded/error-state acceptance, clean-build regression, packaging, and project verification—not only tests changed by the cycle;
+- validate bug ledgers and resolve every open defect that contradicts the release scope; only an explicit human-approved specification/release decision can defer one;
 - launch parallel read-only correctness, security, test-quality, and documentation reviews designed to find false-positive tests and production-path gaps;
 - update `README.md` and `docs/` so commands, configuration, recovery, limitations, and behavior are accurate;
 - run `scripts/verify-boilerplate.sh` plus project-specific verification added by the implementation plan;
 - set the plan front-matter `status: complete` only after every task and gate passes;
 - ensure the Git tree is clean after its documentation commit.
 
-A final audit that finds a gap is successful discovery, not completion: apply operating-model step 9 and keep looping. There is no minimum iteration count, but there is also no early completion based on apparent progress. Only objective satisfaction of §11.2 permits `LOOP_COMPLETE`. If Ralph reaches its configured iteration/runtime limit or an external session limit first, leave the plan `active` or `blocked`, write an exact recovery handoff, and do not emit `LOOP_COMPLETE`.
+A final audit that finds a gap is successful discovery, not completion: apply operating-model step 9 and keep looping. There is no minimum iteration count, but there is also no early completion based on apparent progress. Only objective satisfaction of the canonical definition of done permits `LOOP_COMPLETE`. If Ralph reaches its configured iteration/runtime limit or an external session limit first, leave the plan `active` or `blocked`, write an exact recovery handoff, and do not emit `LOOP_COMPLETE`.
