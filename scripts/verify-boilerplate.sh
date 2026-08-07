@@ -34,7 +34,7 @@ assert config['issues'] == {
     'credentials': False,
 }
 required = [
-    'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
+    'AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
     'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
     'prompts/MAINTENANCE.md', 'prompts/MAINTENANCE_PLAN.md',
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
@@ -59,6 +59,10 @@ PY
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$config"
 done
+grep -q '^## Build' AGENTS.md
+grep -q '^## Immediate validation' AGENTS.md
+(( $(wc -l < AGENTS.md) <= 100 )) || { echo 'verify: AGENTS.md must remain concise (100 lines maximum)' >&2; exit 1; }
+grep -q 'Do not assume functionality is missing or complete' PROMPT.md
 grep -q 'Final documentation and specification audit' prompts/PLAN.md
 grep -q 'Specification conformance matrix' prompts/PLAN.md
 grep -q 'Interaction acceptance inventory' prompts/PLAN.md

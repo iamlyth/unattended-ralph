@@ -18,6 +18,12 @@ A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum deve
 
 No Git worktrees are used. `features.parallel` is disabled in both Ralph configurations.
 
+## Relationship to Huntley's playbook
+
+The prompts track the high-value patterns in [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at `88d488a148af97e4a3f22b11b4c3598c79d6a577`): deterministic orientation, search-before-assumption, a concise operational `AGENTS.md`, acceptance-derived test backpressure, a scheduler-style primary context, immediate plan updates for discoveries, complete implementations without placeholders, investigation of unrelated failures, and documentation that captures why.
+
+Deliberate safety differences remain: eight adaptive read-only subagents rather than hundreds of mutating agents; one writer and serialized builds; jailed Pi rather than skipped permissions; no worktrees; no autonomous specification edits; no active-ledger pruning; and no automatic push, tag, or promotion to `main`.
+
 ## Prerequisites
 
 - Ralph Orchestrator with the native Pi backend
@@ -43,7 +49,8 @@ The project tracks `.pi/subagents.json` with a maximum of eight simultaneous rea
    ./scripts/ollama-usage-guard.sh --check
    ```
 
-4. Edit `docs/SPEC.md` and commit it separately:
+4. Replace every placeholder in `AGENTS.md` with concise project-specific build, run, targeted-test, full-verification, and production-smoke commands.
+5. Edit `docs/SPEC.md` and commit it separately:
 
    ```bash
    git add docs/SPEC.md

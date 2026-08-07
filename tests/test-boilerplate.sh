@@ -73,7 +73,7 @@ assert config['verification']['maintenance_command'] == ['./scripts/verify-proje
 assert config['issues']['providers'] == ['github', 'forgejo']
 assert config['issues']['external_sync'] == 'manual'
 assert config['issues']['credentials'] is False
-for path in ('open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
+for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
              'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
              'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
              'scripts/validate-implementation-plan.py',

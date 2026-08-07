@@ -2,6 +2,12 @@
 
 Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTATION_PLAN.md` on the autonomous `develop` branch.
 
+## Orient before acting
+
+1. Study `docs/SPEC.md`, `AGENTS.md`, the complete active `IMPLEMENTATION_PLAN.md`, and the latest scratchpad handoff before selecting work.
+2. Search the relevant source, tests, shared utilities, and call paths with read-only subagents. **Do not assume functionality is missing or complete** from names, TODOs, prior evidence, or object existence; confirm production behavior.
+3. Use `AGENTS.md` for exact build/run/validation commands. Keep the primary context as scheduler and keep build/test execution serialized.
+
 ## Non-negotiable operating model
 
 1. `docs/SPEC.md` is the source of truth. Never change it during implementation. A spec change requires a separate human commit and a new planning loop.
@@ -9,11 +15,12 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 3. Select exactly one highest-priority `pending` task whose dependencies are complete. Mark it `in_progress`.
 4. Keep the primary context focused. Adaptively launch read-only subagents in parallel for source study, research, security, tests, and documentation. Respect `factory.toml` ceilings.
 5. You are the only repository writer. Subagents report findings and must not edit, write, commit, or run mutating commands.
-6. Implement only the selected task. Fix root causes rather than masking symptoms; do not weaken assertions, bypass production paths, or substitute direct callbacks for user-visible interaction. Run its acceptance checks and relevant regression tests.
-7. Update nearby documentation as behavior changes. Record concise evidence in the plan, including the exact command, result, production path exercised, and semantic outcome—not merely compilation or event consumption.
+6. Implement only the selected task, completely. Fix root causes rather than masking symptoms; do not leave placeholders/stubs, weaken assertions, bypass production paths, or substitute direct callbacks for user-visible interaction. Derive tests from specification acceptance outcomes—behavior, performance, and edge cases—without prescribing implementation details. Run targeted backpressure first, then relevant regression tests.
+7. Update nearby documentation as behavior changes and capture why the implementation and tests matter. Record concise evidence in the plan, including the exact command, result, production path exercised, and semantic outcome—not merely compilation or event consumption. If any test fails, including one apparently unrelated to the task, investigate it; fix it when safe or append a remediation task rather than dismissing it.
 8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason. Never prune, renumber, replace, or recycle planned tasks during an active implementation cycle; the final gate requires the complete cycle ledger.
 9. If implementation or final verification discovers an unplanned specification, interaction, quality, or regression gap, do not declare completion. Preserve every existing task, append a uniquely numbered `pending` remediation task, add it to the dependencies of the final audit, set that audit back to `pending`, and continue in later fresh iterations.
-10. Commit a coherent checkpoint to `develop`, then update `.ralph/agent/scratchpad.md` with a short handoff and exit. One task per fresh context.
+10. When a repeated build/run/validation attempt teaches a durable operational fact, update `AGENTS.md` and keep it concise; never put status or progress history there.
+11. Commit a coherent checkpoint to `develop`, then **replace rather than append to** `.ralph/agent/scratchpad.md` with one short current handoff and exit. One task per fresh context.
 
 ## Adaptive subagent use
 
