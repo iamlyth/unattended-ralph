@@ -11,6 +11,7 @@ cp "$PROJECT_ROOT/scripts/initialize-plan-cycle.py" \
    "$PROJECT_ROOT/scripts/check-plan-freshness.sh" \
    "$PROJECT_ROOT/scripts/plan-scope-guard.sh" \
    "$PROJECT_ROOT/scripts/final-gate.sh" \
+   "$PROJECT_ROOT/scripts/validate-implementation-plan.py" \
    "$PROJECT_ROOT/scripts/validate-maintenance-plan.py" "$tmp/scripts/"
 chmod +x "$tmp/scripts/"*
 cat > "$tmp/factory.toml" <<'EOF'
@@ -90,6 +91,14 @@ base_commit: $base
 status: active
 ---
 # Implementation Plan
+## Specification conformance matrix
+| Requirement | Spec section | Classification | Evidence | Task |
+|---|---|---|---|---|
+| REQ-1 | §1 | missing | no implementation | Task 1 |
+## Interaction acceptance inventory
+| Control | Controller path | Pointer path | Semantic outcome | Production dispatch |
+|---|---|---|---|---|
+| Example | A | click | state changes | SDL event loop |
 ## Task 1: Implement current gap
 - Status: pending
 - Dependencies: none
@@ -100,19 +109,30 @@ status: active
 ## Task 2: Final documentation and specification audit
 - Status: pending
 - Dependencies: Task 1
-- Scope: audit
-- Acceptance criteria: docs match
+- Scope: §11.2 conformance and interaction audit
+- Acceptance criteria: conformance verified; interaction complete; open bugs resolved; independent review passes; clean tree
 - Verification: run final checks
 - Documentation impact: README
 EOF
 printf '%s\n' "$base" > .factory-state/planning-base-commit
 FACTORY_PLANNING_BASE_COMMIT=$base ./scripts/final-gate.sh --planning >/dev/null
+cp IMPLEMENTATION_PLAN.md "$tmp/valid-plan.md"
 sed -i '0,/- Status: pending/s//- Status: complete/' IMPLEMENTATION_PLAN.md
 set +e
 FACTORY_PLANNING_BASE_COMMIT=$base ./scripts/final-gate.sh --planning >/dev/null 2>&1
 non_pending_rc=$?
 set -e
 [[ $non_pending_rc -eq 1 ]]
+
+cp "$tmp/valid-plan.md" IMPLEMENTATION_PLAN.md
+sed -i 's/status: active/status: complete/; s/- Status: pending/- Status: complete/g; s/| missing |/| verified |/' IMPLEMENTATION_PLAN.md
+./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md >/dev/null
+set +e
+./scripts/final-gate.sh --implementation >/dev/null 2>&1
+open_bug_rc=$?
+set -e
+[[ $open_bug_rc -eq 1 ]]
+
 git restore -- IMPLEMENTATION_PLAN.md .ralph/agent/scratchpad.md
 
 ./scripts/initialize-plan-cycle.py maintenance --base "$base" --bug-id BUG-0001 >/dev/null

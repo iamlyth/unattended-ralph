@@ -11,21 +11,7 @@ case "$MODE" in
     --planning)
         ./scripts/plan-scope-guard.sh
         ./scripts/check-plan-freshness.sh --planning
-        python3 - <<'PY'
-import re
-text = open('IMPLEMENTATION_PLAN.md', encoding='utf-8').read()
-tasks = re.findall(r'^## Task\s+\d+:', text, re.M)
-statuses = re.findall(r'^- Status:\s*([^\n]+?)\s*$', text, re.M)
-if not tasks or len(statuses) != len(tasks):
-    raise SystemExit('final-gate: every new plan task requires exactly one `- Status:` field')
-non_pending = [status for status in statuses if status != 'pending']
-if non_pending:
-    raise SystemExit('final-gate: a fresh implementation plan may contain only pending tasks')
-if 'Final documentation and specification audit' not in text:
-    raise SystemExit('final-gate: mandatory final documentation task is missing')
-if not re.search(r'^status:\s*active\s*$', text, re.M):
-    raise SystemExit('final-gate: new plan front matter must have status: active')
-PY
+        ./scripts/validate-implementation-plan.py planning IMPLEMENTATION_PLAN.md
         echo "final-gate: planning completion accepted"
         ;;
     --maintenance-planning)
@@ -36,21 +22,24 @@ PY
         ;;
     --implementation)
         ./scripts/check-plan-freshness.sh
-        python3 - <<'PY'
+        ./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md
+        if [[ -x scripts/bug-ledger.py && -f open-bugs.md ]]; then
+            ./scripts/bug-ledger.py validate
+            python3 - <<'PY'
+import json
 import re
-text = open('IMPLEMENTATION_PLAN.md', encoding='utf-8').read()
-statuses = re.findall(r'^- Status:\s*(pending|in_progress|complete|blocked)\s*$', text, re.M)
-if not statuses:
-    raise SystemExit('final-gate: plan has no machine-checkable task statuses')
-unfinished = [status for status in statuses if status != 'complete']
-if unfinished:
-    raise SystemExit(f'final-gate: {len(unfinished)} plan task(s) are not complete')
-pattern = r'^## Task[^\n]*Final documentation and specification audit\s*$.*?^- Status:\s*complete\s*$'
-if not re.search(pattern, text, re.M | re.S):
-    raise SystemExit('final-gate: final documentation task is missing or incomplete')
-if not re.search(r'^status:\s*complete\s*$', text, re.M):
-    raise SystemExit('final-gate: plan front matter must have status: complete')
+from pathlib import Path
+
+text = Path('open-bugs.md').read_text(encoding='utf-8')
+match = re.search(r'```json\s*\n(.*?)\n```', text, re.S)
+if not match:
+    raise SystemExit('final-gate: open-bugs.md has no JSON ledger')
+records = json.loads(match.group(1))
+if records:
+    ids = ', '.join(str(record.get('id', '<unknown>')) for record in records)
+    raise SystemExit(f'final-gate: autonomous definition of done rejects unresolved open bugs: {ids}')
 PY
+        fi
         ./scripts/check-docs-sync.sh
         ./scripts/verify-boilerplate.sh
         if [[ -x scripts/verify-project.sh ]]; then

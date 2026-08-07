@@ -38,6 +38,7 @@ required = [
     'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
     'prompts/MAINTENANCE.md', 'prompts/MAINTENANCE_PLAN.md',
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
+    'scripts/validate-implementation-plan.py',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
     'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
@@ -59,6 +60,9 @@ for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-p
     grep -q 'parallel: false' "$config"
 done
 grep -q 'Final documentation and specification audit' prompts/PLAN.md
+grep -q 'Specification conformance matrix' prompts/PLAN.md
+grep -q 'Interaction acceptance inventory' prompts/PLAN.md
+grep -q '§11.2' PROMPT.md
 grep -q 'Maintenance verification and documentation audit' prompts/MAINTENANCE_PLAN.md
 grep -q 'LOOP_COMPLETE' PROMPT.md
 grep -q 'MAINTENANCE_COMPLETE' prompts/MAINTENANCE.md

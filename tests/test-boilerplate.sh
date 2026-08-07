@@ -76,6 +76,7 @@ assert config['issues']['credentials'] is False
 for path in ('open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
              'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
              'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
+             'scripts/validate-implementation-plan.py',
              'scripts/ralph-maintenance-plan.sh',
              'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'

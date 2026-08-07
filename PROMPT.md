@@ -9,10 +9,11 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 3. Select exactly one highest-priority `pending` task whose dependencies are complete. Mark it `in_progress`.
 4. Keep the primary context focused. Adaptively launch read-only subagents in parallel for source study, research, security, tests, and documentation. Respect `factory.toml` ceilings.
 5. You are the only repository writer. Subagents report findings and must not edit, write, commit, or run mutating commands.
-6. Implement only the selected task. Run its acceptance checks and relevant regression tests.
-7. Update nearby documentation as behavior changes. Record concise evidence in the plan.
+6. Implement only the selected task. Fix root causes rather than masking symptoms; do not weaken assertions, bypass production paths, or substitute direct callbacks for user-visible interaction. Run its acceptance checks and relevant regression tests.
+7. Update nearby documentation as behavior changes. Record concise evidence in the plan, including the exact command, result, production path exercised, and semantic outcome—not merely compilation or event consumption.
 8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason. Never prune, renumber, replace, or recycle planned tasks during an active implementation cycle; the final gate requires the complete cycle ledger.
-9. Commit a coherent checkpoint to `develop`, then update `.ralph/agent/scratchpad.md` with a short handoff and exit. One task per fresh context.
+9. If implementation or final verification discovers an unplanned specification, interaction, quality, or regression gap, do not declare completion. Preserve every existing task, append a uniquely numbered `pending` remediation task, add it to the dependencies of the final audit, set that audit back to `pending`, and continue in later fresh iterations.
+10. Commit a coherent checkpoint to `develop`, then update `.ralph/agent/scratchpad.md` with a short handoff and exit. One task per fresh context.
 
 ## Adaptive subagent use
 
@@ -26,13 +27,16 @@ Use only the agents needed for the task. Launch independent read-only investigat
 
 ## Final documentation and verification gate
 
-The final plan task must run only after every implementation task is complete. It must:
+The final audit task may run only after every implementation and appended remediation task is complete. It must apply the full definition of done in `docs/SPEC.md` §11.2, not infer completion from task count or prior green tests. It must:
 
-- compare the implementation and tests against every applicable specification requirement;
-- launch parallel read-only correctness, security, test, and documentation reviews;
+- update the plan's specification conformance matrix so every normative requirement is `verified` with source and executable evidence; no `partial`, `missing`, or `ambiguous` classification may remain;
+- execute the complete §5.7 control inventory through normal production event dispatch, proving controller and pointer semantic outcomes rather than only pixels, focus, handler return values, or no-crash behavior;
+- run installed end-to-end workflows, visual/degraded-state acceptance, clean-build regression, packaging, and project verification—not only tests changed by the cycle;
+- validate bug ledgers and resolve every open defect that contradicts v1; only an explicit human-approved specification/release decision can defer one;
+- launch parallel read-only correctness, security, test-quality, and documentation reviews designed to find false-positive tests and production-path gaps;
 - update `README.md` and `docs/` so commands, configuration, recovery, limitations, and behavior are accurate;
 - run `scripts/verify-boilerplate.sh` plus project-specific verification added by the implementation plan;
 - set the plan front-matter `status: complete` only after every task and gate passes;
 - ensure the Git tree is clean after its documentation commit.
 
-Do not claim completion while documentation is stale, tests fail, the specification is unmet, or plan tasks remain. Only after the final audit passes may the final response end with `LOOP_COMPLETE`.
+A final audit that finds a gap is successful discovery, not completion: apply operating-model step 9 and keep looping. There is no minimum iteration count, but there is also no early completion based on apparent progress. Only objective satisfaction of §11.2 permits `LOOP_COMPLETE`. If Ralph reaches its configured iteration/runtime limit or an external session limit first, leave the plan `active` or `blocked`, write an exact recovery handoff, and do not emit `LOOP_COMPLETE`.
