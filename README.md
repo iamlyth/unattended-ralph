@@ -105,7 +105,9 @@ Each iteration:
 
 Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs before project verification.
 
-Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff and never emits `LOOP_COMPLETE`.
+Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff.
+
+Ralph recognizes a completion promise only as the exact final non-empty line outside all event tags. Prompts forbid reserved tokens in event payloads and scratchpads. Before checkpointing, planning revalidates immutable launcher metadata and every mode runs `scripts/check-scratchpad.sh`, which rejects appended history, completion tokens, and oversized handoffs. Stale-loop fallback is accepted only when these guards and the final gate pass.
 
 ## Maintain one bug
 

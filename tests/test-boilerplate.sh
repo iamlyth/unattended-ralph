@@ -77,12 +77,14 @@ for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md
              'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
              'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
              'scripts/validate-implementation-plan.py',
+             'scripts/check-scratchpad.sh', 'tests/test-scratchpad-guard.sh',
              'scripts/ralph-maintenance-plan.sh',
              'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
 PY
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$PROJECT_ROOT/$config"
+    grep -q 'check-scratchpad.sh' "$PROJECT_ROOT/$config"
 done
 python3 - "$PROJECT_ROOT" <<'PY'
 import pathlib, sys
@@ -96,6 +98,13 @@ for name, mode in {
     lock = text.index('factory_lock_acquire')
     marker = text.index(f"printf '%s\\n' {mode} > .factory-state/loop-mode")
     assert marker > lock, f'{name}: loop-mode marker is not under factory lock'
+for name in ('ralph.yml', 'ralph.plan.yml', 'ralph.maintenance.yml', 'ralph.maintenance-plan.yml'):
+    text = (root / name).read_text(encoding='utf-8')
+    assert text.index('check-scratchpad.sh') < text.index('git-commit-hook.sh'), \
+        f'{name}: scratchpad guard must run before checkpoint'
+planning = (root / 'ralph.plan.yml').read_text(encoding='utf-8')
+assert planning.index('check-plan-freshness.sh", "--planning') < planning.index('git-commit-hook.sh'), \
+    'ralph.plan.yml: immutable planning metadata must be checked before checkpoint'
 maintenance = (root / 'scripts/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
 lock = maintenance.index('factory_lock_acquire')
 selection = maintenance.index('> .factory-state/maintenance-bug-id')

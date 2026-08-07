@@ -8,7 +8,7 @@ Validate the ledgers and study `AGENTS.md` plus the selected `triaged` record wi
 
 You are the only writer. Read-only subagents may inspect code, tests, security, and documentation. Modify only `MAINTENANCE_PLAN.md` and `.ralph/agent/scratchpad.md`.
 
-Replace the plan with this exact front-matter key set, using values obtained from Git and `bug-ledger.py fingerprint`:
+Preserve the launcher-provided front-matter values from the fresh skeleton throughout the cycle, especially the immutable `base_commit`; do not recompute it from planning-checkpoint `HEAD`. Replace the plan body while retaining this exact front-matter key set:
 
 ```yaml
 ---
@@ -38,4 +38,8 @@ Every task in a newly generated maintenance plan must start with exactly `pendin
 
 The strict parser requires front matter at byte zero, exactly those seven unique keys, contiguous task numbering, and exactly one of every listed task field. `Status` must have its value on the same line. Other fields may continue on following indented lines, but each field must contain non-empty content. Do not add front-matter keys or omit task fields.
 
-When the plan is coherent, fresh, and limited to an ordinary defect, end with `MAINTENANCE_PLAN_COMPLETE`. The launcher commits the planning checkpoint, transitions `triaged` to `planned`, and creates a separate ledger-only checkpoint. Otherwise replace rather than append to the scratchpad with one concise next action and continue another iteration.
+When the plan is not yet coherent, fresh, and limited to one ordinary defect, replace rather than append to the scratchpad with one concise next action and continue another iteration. The launcher commits an accepted planning checkpoint, transitions `triaged` to `planned`, and creates a separate ledger-only checkpoint.
+
+## Completion protocol
+
+`MAINTENANCE_PLAN_COMPLETE` is a reserved protocol token. Never write it into the maintenance plan, scratchpad, an event topic or payload, a summary, or explanatory prose. When and only when planning is complete, publish any required `factory.maintenance.plan` summary without that token, close the event tag, and then output exactly `MAINTENANCE_PLAN_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it.

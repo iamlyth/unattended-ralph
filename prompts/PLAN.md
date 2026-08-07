@@ -40,7 +40,7 @@ status: active
 ---
 ```
 
-Obtain values from Git; never invent them. Then include:
+The launcher has already written all five metadata values into the fresh skeleton. Preserve `spec_path`, `spec_commit`, `spec_blob`, and especially `base_commit` byte-for-byte for the entire planning cycle; do not recompute them from the changing planning-checkpoint `HEAD`. Keep `status: active`. Then include:
 
 1. Goal and non-goals.
 2. Architecture and constraints inferred from the approved specification.
@@ -68,4 +68,8 @@ This repository uses one autonomous `develop` branch and one mutating worker. Pa
 
 ## Finish
 
-Review the plan with read-only subagents. Challenge assumptions, priority, duplicated implementation, test backpressure, and whether existing tests can pass while production remains broken. End with `PLAN_COMPLETE` only when the conformance matrix covers the whole specification, every non-verified row maps to a task, the interaction inventory is exhaustive, known release-scope bugs are accounted for, the final audit depends on every other task, and the plan is internally consistent and executable one task at a time. Otherwise **replace rather than append to** the scratchpad with one concise next planning action and exit normally for another fresh iteration.
+Review the plan with read-only subagents. Challenge assumptions, priority, duplicated implementation, test backpressure, and whether existing tests can pass while production remains broken. Completion is allowed only when the conformance matrix covers the whole specification, every non-verified row maps to an explicit existing `Task N`, the interaction inventory is exhaustive, known release-scope bugs are accounted for, the final audit depends on every other task, and the plan is internally consistent and executable one task at a time. Otherwise **replace rather than append to** the scratchpad with one concise next planning action and exit normally for another fresh iteration.
+
+## Completion protocol
+
+`PLAN_COMPLETE` is a reserved protocol token. Never write it into `IMPLEMENTATION_PLAN.md`, the scratchpad, an event topic or payload, a summary, or explanatory prose. When and only when planning is complete, publish any required `factory.plan` summary without that token, close the event tag, and then output exactly `PLAN_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it.

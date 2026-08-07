@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Keep the tracked Ralph handoff concise and free of reserved completion tokens.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+SCRATCHPAD=${FACTORY_SCRATCHPAD_PATH:-$PROJECT_ROOT/.ralph/agent/scratchpad.md}
+TOKEN=${1:-}
+MAX_LINES=${FACTORY_SCRATCHPAD_MAX_LINES:-80}
+MAX_BYTES=${FACTORY_SCRATCHPAD_MAX_BYTES:-8192}
+
+[[ -s "$SCRATCHPAD" ]] || { echo "scratchpad-guard: missing or empty scratchpad: $SCRATCHPAD" >&2; exit 1; }
+[[ "$MAX_LINES" =~ ^[1-9][0-9]*$ ]] || { echo "scratchpad-guard: invalid line limit" >&2; exit 2; }
+[[ "$MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "scratchpad-guard: invalid byte limit" >&2; exit 2; }
+
+lines=$(wc -l < "$SCRATCHPAD")
+bytes=$(wc -c < "$SCRATCHPAD")
+(( lines <= MAX_LINES )) || {
+    echo "scratchpad-guard: scratchpad has $lines lines; replace it with one handoff of at most $MAX_LINES lines" >&2
+    exit 1
+}
+(( bytes <= MAX_BYTES )) || {
+    echo "scratchpad-guard: scratchpad has $bytes bytes; limit is $MAX_BYTES" >&2
+    exit 1
+}
+
+subheadings=$(grep -Ec '^##[[:space:]]+' "$SCRATCHPAD" || true)
+(( subheadings <= 1 )) || {
+    echo "scratchpad-guard: scratchpad contains $subheadings handoff sections; replace rather than append" >&2
+    exit 1
+}
+if grep -Eq '^###[[:space:]]+' "$SCRATCHPAD"; then
+    echo "scratchpad-guard: historical sub-sections are forbidden; keep only the current handoff" >&2
+    exit 1
+fi
+if [[ -n "$TOKEN" ]] && grep -Fq -- "$TOKEN" "$SCRATCHPAD"; then
+    echo "scratchpad-guard: reserved completion token '$TOKEN' must not appear in the scratchpad" >&2
+    exit 1
+fi
+
+echo "scratchpad-guard: concise current handoff accepted ($lines lines, $bytes bytes)"

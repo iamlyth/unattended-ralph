@@ -20,7 +20,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason. Never prune, renumber, replace, or recycle planned tasks during an active implementation cycle; the final gate requires the complete cycle ledger.
 9. If implementation or final verification discovers an unplanned specification, interaction, quality, or regression gap, do not declare completion. Preserve every existing task, append a uniquely numbered `pending` remediation task, add it to the dependencies of the final audit, set that audit back to `pending`, and continue in later fresh iterations.
 10. When a repeated build/run/validation attempt teaches a durable operational fact, update `AGENTS.md` and keep it concise; never put status or progress history there.
-11. Commit a coherent checkpoint to `develop`, then **replace rather than append to** `.ralph/agent/scratchpad.md` with one short current handoff and exit. One task per fresh context.
+11. Commit a coherent checkpoint to `develop`, then **replace rather than append to** `.ralph/agent/scratchpad.md` with one short current handoff that does not contain the reserved completion token, and exit. One task per fresh context.
 
 ## Adaptive subagent use
 
@@ -46,4 +46,8 @@ The final audit task may run only after every implementation and appended remedi
 - set the plan front-matter `status: complete` only after every task and gate passes;
 - ensure the Git tree is clean after its documentation commit.
 
-A final audit that finds a gap is successful discovery, not completion: apply operating-model step 9 and keep looping. There is no minimum iteration count, but there is also no early completion based on apparent progress. Only objective satisfaction of the canonical definition of done permits `LOOP_COMPLETE`. If Ralph reaches its configured iteration/runtime limit or an external session limit first, leave the plan `active` or `blocked`, write an exact recovery handoff, and do not emit `LOOP_COMPLETE`.
+A final audit that finds a gap is successful discovery, not completion: apply operating-model step 9 and keep looping. There is no minimum iteration count, but there is also no early completion based on apparent progress. If Ralph reaches its configured iteration/runtime limit or an external session limit first, leave the plan `active` or `blocked` with an exact recovery handoff.
+
+## Completion protocol
+
+`LOOP_COMPLETE` is a reserved protocol token. Never write it into the plan, scratchpad, an event topic or payload, a summary, or explanatory prose. Only after objective satisfaction of the canonical specification's definition of done and the factory defaults above, publish any required `factory.implement` summary without that token, close the event tag, and then output exactly `LOOP_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it.

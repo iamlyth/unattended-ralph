@@ -38,12 +38,12 @@ required = [
     'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
     'prompts/MAINTENANCE.md', 'prompts/MAINTENANCE_PLAN.md',
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
-    'scripts/validate-implementation-plan.py',
+    'scripts/validate-implementation-plan.py', 'scripts/check-scratchpad.sh',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
     'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
     'docs/BUG_WORKFLOW.md', 'tests/test-bug-workflow.sh',
-    'tests/test-plan-cycle.sh',
+    'tests/test-plan-cycle.sh', 'tests/test-scratchpad-guard.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -66,10 +66,12 @@ grep -q 'Do not assume functionality is missing or complete' PROMPT.md
 grep -q 'Final documentation and specification audit' prompts/PLAN.md
 grep -q 'Specification conformance matrix' prompts/PLAN.md
 grep -q 'Interaction acceptance inventory' prompts/PLAN.md
-grep -q 'canonical definition of done' PROMPT.md
+grep -q 'definition of done' PROMPT.md
 grep -q 'Maintenance verification and documentation audit' prompts/MAINTENANCE_PLAN.md
-grep -q 'LOOP_COMPLETE' PROMPT.md
-grep -q 'MAINTENANCE_COMPLETE' prompts/MAINTENANCE.md
+grep -q 'PLAN_COMPLETE.*final non-empty line outside every event tag' prompts/PLAN.md
+grep -q 'LOOP_COMPLETE.*final non-empty line outside every event tag' PROMPT.md
+grep -q 'MAINTENANCE_PLAN_COMPLETE.*final non-empty line outside every event tag' prompts/MAINTENANCE_PLAN.md
+grep -q 'MAINTENANCE_COMPLETE.*final non-empty line outside every event tag' prompts/MAINTENANCE.md
 cmp -s .github/ISSUE_TEMPLATE/bug_report.md .forgejo/ISSUE_TEMPLATE/bug_report.md
 ./scripts/bug-ledger.py validate
 
@@ -86,5 +88,6 @@ for name in subprocess.check_output(['git', 'remote'], text=True).split():
         raise SystemExit(f'verify: remote {name} embeds credentials; use SSH or a credential helper')
 PY
 
+./tests/test-scratchpad-guard.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

@@ -57,9 +57,22 @@ def parse_tasks(text: str) -> list[dict[str, object]]:
     return tasks
 
 
+def task_references(cell: str) -> set[int]:
+    """Parse explicit `Task N` references and inclusive `Tasks N-M` ranges."""
+    refs = {int(value) for value in re.findall(r"\bTasks?\s+(\d+)\b", cell, re.I)}
+    for start_text, end_text in re.findall(
+        r"\bTasks?\s+(\d+)\s*[-–—]\s*(\d+)\b", cell, re.I
+    ):
+        start, end = int(start_text), int(end_text)
+        if end < start:
+            fail(f"descending task range is invalid: {start_text}-{end_text}")
+        refs.update(range(start, end + 1))
+    return refs
+
+
 def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
     matrix = section(text, "Specification conformance matrix")
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     for line in matrix.splitlines():
         if not line.lstrip().startswith("|"):
             continue
@@ -69,15 +82,15 @@ def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
             None,
         )
         if classification:
-            rows.append((classification, " | ".join(cells)))
+            rows.append((classification, " | ".join(cells), cells[-1]))
     if not rows:
         fail("conformance matrix has no machine-checkable requirement rows")
 
-    for classification, row in rows:
+    for classification, row, task_cell in rows:
         if complete and classification != "verified":
             fail(f"completion rejected while conformance row is `{classification}`: {row}")
         if classification != "verified":
-            task_refs = {int(value) for value in re.findall(r"\bTask\s+(\d+)\b", row, re.I)}
+            task_refs = task_references(task_cell)
             if not task_refs or not task_refs.issubset(task_numbers):
                 fail(f"non-verified conformance row must reference an existing task: {row}")
 

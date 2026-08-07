@@ -16,6 +16,8 @@ Non-negotiable rules:
 8. Move the selected `in_progress` bug from `open-bugs.md` to `closed-bugs.md` only in the final task, using `bug-ledger.py close` with non-empty resolution and verification. Do not close any other bug.
 9. The final task is exactly **Maintenance verification and documentation audit**. It runs boilerplate verification and the configured `[verification].maintenance_command`, audits docs and acceptance evidence, then sets front status complete. The configured argv must name an executable project verifier.
 10. Capture why a regression test or operational constraint matters in nearby documentation. If a durable build/run/validation fact is learned, update `AGENTS.md` but keep it concise and free of progress history.
-11. Commit one coherent checkpoint and replace rather than append to the recovery scratchpad with one short current handoff each iteration.
+11. Commit one coherent checkpoint and replace rather than append to the recovery scratchpad with one short current handoff that does not contain the reserved completion token.
 
-Only after the final gate passes may the response end with `MAINTENANCE_COMPLETE`.
+## Completion protocol
+
+`MAINTENANCE_COMPLETE` is a reserved protocol token. Never write it into the maintenance plan, scratchpad, an event topic or payload, a summary, or explanatory prose. Only after the final gate passes, publish any required `factory.maintenance.implement` summary without that token, close the event tag, and then output exactly `MAINTENANCE_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it.

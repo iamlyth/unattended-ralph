@@ -11,6 +11,7 @@ case "$MODE" in
     --planning)
         ./scripts/plan-scope-guard.sh
         ./scripts/check-plan-freshness.sh --planning
+        ./scripts/check-scratchpad.sh PLAN_COMPLETE
         ./scripts/validate-implementation-plan.py planning IMPLEMENTATION_PLAN.md
         echo "final-gate: planning completion accepted"
         ;;
@@ -18,10 +19,12 @@ case "$MODE" in
         ./scripts/maintenance-plan-scope-guard.sh
         ./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null
         ./scripts/check-maintenance-freshness.sh --planning
+        ./scripts/check-scratchpad.sh MAINTENANCE_PLAN_COMPLETE
         echo "final-gate: maintenance planning completion accepted"
         ;;
     --implementation)
         ./scripts/check-plan-freshness.sh
+        ./scripts/check-scratchpad.sh LOOP_COMPLETE
         ./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md
         if [[ -x scripts/bug-ledger.py && -f open-bugs.md ]]; then
             ./scripts/bug-ledger.py validate
@@ -50,6 +53,7 @@ PY
     --maintenance)
         ./scripts/validate-maintenance-plan.py complete MAINTENANCE_PLAN.md >/dev/null
         ./scripts/check-maintenance-freshness.sh
+        ./scripts/check-scratchpad.sh MAINTENANCE_COMPLETE
         ./scripts/bug-ledger.py validate
         python3 - <<'PY'
 import json, re, subprocess

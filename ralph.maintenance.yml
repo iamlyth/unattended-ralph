@@ -27,7 +27,9 @@ hats:
     default_publishes: "factory.maintenance.implement"
     instructions: |
       Follow prompts/MAINTENANCE.md. Complete one bounded ready task per context.
-      You are the sole writer; all Pi subagents remain read-only.
+      You are the sole writer; all Pi subagents remain read-only. Never place
+      MAINTENANCE_COMPLETE in an event payload; completion requires that exact token
+      alone as the final line outside events.
 
 hooks:
   enabled: true
@@ -44,6 +46,9 @@ hooks:
     post.iteration.start:
       - name: protect-maintenance-contract
         command: ["./scripts/check-maintenance-freshness.sh"]
+        on_error: block
+      - name: maintenance-scratchpad
+        command: ["./scripts/check-scratchpad.sh", "MAINTENANCE_COMPLETE"]
         on_error: block
       - name: maintenance-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--maintenance"]
