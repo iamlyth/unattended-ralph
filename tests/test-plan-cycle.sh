@@ -109,7 +109,7 @@ status: active
 ## Task 2: Final documentation and specification audit
 - Status: pending
 - Dependencies: Task 1
-- Scope: §11.2 conformance and interaction audit
+- Scope: canonical definition of done (§11.2), conformance, and interaction audit
 - Acceptance criteria: conformance verified; interaction complete; open bugs resolved; independent review passes; clean tree
 - Verification: run final checks
 - Documentation impact: README

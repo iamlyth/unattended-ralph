@@ -100,7 +100,7 @@ def validate_final_task(tasks: list[dict[str, object]]) -> None:
     if missing:
         fail(f"final audit must depend on every other task (missing: {missing})")
     body = str(final["body"]).lower()
-    for term in ("§11.2", "conformance", "interaction", "open", "review", "clean"):
+    for term in ("definition of done", "conformance", "interaction", "open", "review", "clean"):
         if term not in body:
             fail(f"final audit task must explicitly cover `{term}`")
 
