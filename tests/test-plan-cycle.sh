@@ -138,7 +138,8 @@ status: active
 - Dependencies: none
 - Scope: verify
 - Acceptance criteria: fixed
-- Verification: run checks
+- Verification:
+  run checks
 - Documentation impact: none
 EOF
 ./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null

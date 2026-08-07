@@ -70,18 +70,31 @@ def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
             fail("task numbering must be contiguous starting at 1")
         stop = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
         found: dict[str, str] = {}
-        for line_number, line in enumerate(lines[start + 1 : stop], start + 2):
+        task_lines = lines[start + 1 : stop]
+        entries: list[tuple[int, str, str | None]] = []
+        for offset, line in enumerate(task_lines):
             match = FIELD_LINE.fullmatch(line)
-            if not match:
-                continue
-            name, value = match.groups()
+            if match:
+                name, value = match.groups()
+                entries.append((offset, name, value))
+        for entry_index, (offset, name, value) in enumerate(entries):
             if name not in FIELDS:
                 continue
             if name in found:
                 fail(f"Task {number}: duplicate {name}")
-            if value is None or not value.strip():
+            next_offset = entries[entry_index + 1][0] if entry_index + 1 < len(entries) else len(task_lines)
+            content = []
+            if value and value.strip():
+                content.append(value.strip())
+            content.extend(
+                line.strip() for line in task_lines[offset + 1 : next_offset]
+                if line.strip()
+            )
+            if name == "Status" and (value is None or not value.strip()):
+                fail(f"Task {number}: Status must be non-empty on its field line")
+            if not content:
                 fail(f"Task {number}: {name} must be non-empty")
-            found[name] = value.strip()
+            found[name] = "\n".join(content)
         missing_fields = [name for name in FIELDS if name not in found]
         if missing_fields:
             fail(f"Task {number}: missing {', '.join(missing_fields)}")

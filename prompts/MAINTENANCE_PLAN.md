@@ -36,6 +36,6 @@ Include goal, non-goals, defect analysis, and numbered bounded tasks. Every task
 
 Every task in a newly generated maintenance plan must start with exactly `pending`; planning completion rejects inherited `complete`, `in_progress`, or `blocked` tasks. Include tests with each change. The last task must be titled exactly **Maintenance verification and documentation audit**, depend on every prior task, verify the acceptance criteria, close only the selected bug with non-empty resolution and verification, run final checks, and update relevant docs. One maintenance cycle handles one bug.
 
-The strict parser requires front matter at byte zero, exactly those seven unique keys, contiguous task numbering, and exactly one of every listed task field. Do not add front-matter keys or omit task fields.
+The strict parser requires front matter at byte zero, exactly those seven unique keys, contiguous task numbering, and exactly one of every listed task field. `Status` must have its value on the same line. Other fields may continue on following indented lines, but each field must contain non-empty content. Do not add front-matter keys or omit task fields.
 
 When the plan is coherent, fresh, and limited to an ordinary defect, end with `MAINTENANCE_PLAN_COMPLETE`. The launcher commits the planning checkpoint, transitions `triaged` to `planned`, and creates a separate ledger-only checkpoint. Otherwise record the next action in the scratchpad and continue another iteration.

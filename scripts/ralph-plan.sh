@@ -67,6 +67,19 @@ else
     FACTORY_PLANNING_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
 fi
 export FACTORY_PLANNING_BASE_COMMIT
+
+finish_planning_cycle() {
+    ./scripts/final-gate.sh --planning || return 1
+    local payload
+    payload=$(printf '{"loop":{"workspace":"%s","id":"planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
+    printf '%s' "$payload" | ./scripts/git-commit-hook.sh --plan-only || return 1
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "ralph-plan: completion left a dirty Git tree" >&2; return 1;
+    }
+    ./scripts/check-plan-freshness.sh || return 1
+    printf 'ralph-plan: plan is committed and fresh for %s\n' "$SPEC"
+}
+
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
 
@@ -79,15 +92,7 @@ while true; do
     set -e
 
     if (( rc == 0 )); then
-        ./scripts/final-gate.sh --planning
-        payload=$(printf '{"loop":{"workspace":"%s","id":"planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
-        printf '%s' "$payload" | ./scripts/git-commit-hook.sh --plan-only
-        [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
-            echo "ralph-plan: completion left a dirty Git tree" >&2
-            exit 1
-        }
-        ./scripts/check-plan-freshness.sh
-        printf 'ralph-plan: plan is committed and fresh for %s\n' "$SPEC"
+        finish_planning_cycle
         exit 0
     fi
     if (( rc == 130 || rc == 143 )); then
@@ -105,6 +110,10 @@ while true; do
         ./scripts/ralph-recover.sh --mode planning --prepare-only
         RESUME=true
         continue
+    fi
+    if finish_planning_cycle; then
+        echo "ralph-plan: accepted valid planning artifacts after Ralph exited with status $rc" >&2
+        exit 0
     fi
     echo "ralph-plan: Ralph exited with status $rc for a non-quota failure" >&2
     exit "$rc"

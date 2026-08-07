@@ -23,7 +23,6 @@ command -v pi2 >/dev/null || { echo "ralph-maintenance-run: pi2 is unavailable" 
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 mkdir -p .factory-state
-printf '%s\n' maintenance > .factory-state/loop-mode
 ./scripts/check-maintenance-freshness.sh
 python3 - <<'PY'
 import json, pathlib, subprocess
@@ -43,6 +42,7 @@ fi
 [[ -z $(git status --porcelain --untracked-files=normal) || "$RESUME" == true ]] || {
     echo "ralph-maintenance-run: tree changed before launch" >&2; exit 1;
 }
+printf '%s\n' maintenance > .factory-state/loop-mode
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     command=("$RALPH_BIN" -c ralph.maintenance.yml run --exclusive)

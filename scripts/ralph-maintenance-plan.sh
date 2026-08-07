@@ -109,6 +109,28 @@ if [[ "$RESUME" == false ]]; then
     ./scripts/initialize-plan-cycle.py maintenance \
         --base "$FACTORY_MAINTENANCE_BASE_COMMIT" --bug-id "$BUG_ID"
 fi
+
+finish_maintenance_planning_cycle() {
+    ./scripts/final-gate.sh --maintenance-planning || return 1
+    local payload ledger_payload
+    payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
+    printf '%s' "$payload" | ./scripts/git-commit-hook.sh --maintenance-plan || return 1
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "ralph-maintenance-plan: completion left a dirty tree" >&2; return 1;
+    }
+    ./scripts/check-maintenance-freshness.sh || return 1
+    if [[ "$BUG_STATUS" == triaged ]]; then
+        ./scripts/bug-ledger.py set-status "$BUG_ID" planned || return 1
+        ledger_payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-ledger"},"iteration":{"current":"planned"}}' "$PROJECT_ROOT")
+        printf '%s' "$ledger_payload" | ./scripts/git-commit-hook.sh --maintenance-ledger || return 1
+    fi
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "ralph-maintenance-plan: ledger checkpoint left a dirty tree" >&2; return 1;
+    }
+    ./scripts/check-maintenance-freshness.sh || return 1
+    echo "ralph-maintenance-plan: plan committed and bug marked planned for $BUG_ID"
+}
+
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     command=("$RALPH_BIN" -c ralph.maintenance-plan.yml run --exclusive)
@@ -119,19 +141,7 @@ while true; do
     rc=$?
     set -e
     if (( rc == 0 )); then
-        ./scripts/final-gate.sh --maintenance-planning
-        payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
-        printf '%s' "$payload" | ./scripts/git-commit-hook.sh --maintenance-plan
-        [[ -z $(git status --porcelain --untracked-files=normal) ]] || { echo "ralph-maintenance-plan: completion left a dirty tree" >&2; exit 1; }
-        ./scripts/check-maintenance-freshness.sh
-        if [[ "$BUG_STATUS" == triaged ]]; then
-            ./scripts/bug-ledger.py set-status "$BUG_ID" planned
-            ledger_payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-ledger"},"iteration":{"current":"planned"}}' "$PROJECT_ROOT")
-            printf '%s' "$ledger_payload" | ./scripts/git-commit-hook.sh --maintenance-ledger
-        fi
-        [[ -z $(git status --porcelain --untracked-files=normal) ]] || { echo "ralph-maintenance-plan: ledger checkpoint left a dirty tree" >&2; exit 1; }
-        ./scripts/check-maintenance-freshness.sh
-        echo "ralph-maintenance-plan: plan committed and bug marked planned for $BUG_ID"
+        finish_maintenance_planning_cycle
         exit 0
     fi
     if (( rc == 130 || rc == 143 )); then
@@ -147,6 +157,10 @@ while true; do
         ./scripts/ralph-recover.sh --mode maintenance-planning --prepare-only
         RESUME=true
         continue
+    fi
+    if finish_maintenance_planning_cycle; then
+        echo "ralph-maintenance-plan: accepted valid planning artifacts after Ralph exited with status $rc" >&2
+        exit 0
     fi
     echo "ralph-maintenance-plan: Ralph failed with status $rc" >&2
     exit "$rc"
