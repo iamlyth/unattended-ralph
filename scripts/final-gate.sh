@@ -48,6 +48,7 @@ PY
         if [[ -x scripts/verify-project.sh ]]; then
             ./scripts/verify-project.sh
         fi
+        ./scripts/check-installed-functional-evidence.sh
         echo "final-gate: implementation, specification, tests, and documentation accepted"
         ;;
     --maintenance)
