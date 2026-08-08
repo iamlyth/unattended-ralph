@@ -68,7 +68,7 @@ This repository uses one autonomous `develop` branch and one mutating worker. Pa
 
 ## Finish
 
-Review the plan with read-only subagents. Challenge assumptions, priority, duplicated implementation, test backpressure, and whether existing tests can pass while production remains broken. Completion is allowed only when the conformance matrix covers the whole specification, every non-verified row maps to an explicit existing `Task N`, the interaction inventory is exhaustive, known release-scope bugs are accounted for, the final audit depends on every other task, and the plan is internally consistent and executable one task at a time. Otherwise **replace rather than append to** the scratchpad with one concise next planning action and exit normally for another fresh iteration.
+Review the plan with read-only subagents. Challenge assumptions, priority, duplicated implementation, test backpressure, and whether existing tests can pass while production remains broken. Completion is allowed only when the conformance matrix covers the whole specification, every non-verified row maps to an explicit existing `Task N`, the interaction inventory is exhaustive, known release-scope bugs are accounted for, the final audit depends on every other task, and the plan is internally consistent and executable one task at a time. Otherwise **replace rather than append to** the scratchpad with one concise next planning action and exit normally for another fresh iteration. Use one level-one title plus brief bullets, stay below 80 lines and 8 KiB, and omit detailed iteration history.
 
 ## Completion protocol
 

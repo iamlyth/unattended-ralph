@@ -7,6 +7,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 SCRATCHPAD=${FACTORY_SCRATCHPAD_PATH:-$PROJECT_ROOT/.ralph/agent/scratchpad.md}
 TOKEN=
 ALLOW_MISSING=false
+ALLOW_OVERSIZE=false
 MAX_LINES=${FACTORY_SCRATCHPAD_MAX_LINES:-80}
 MAX_BYTES=${FACTORY_SCRATCHPAD_MAX_BYTES:-8192}
 
@@ -14,6 +15,9 @@ for arg in "$@"; do
     case "$arg" in
         --allow-missing)
             ALLOW_MISSING=true
+            ;;
+        --allow-oversize)
+            ALLOW_OVERSIZE=true
             ;;
         --*)
             echo "scratchpad-guard: unknown option: $arg" >&2
@@ -39,14 +43,23 @@ fi
 
 lines=$(wc -l < "$SCRATCHPAD")
 bytes=$(wc -c < "$SCRATCHPAD")
-(( lines <= MAX_LINES )) || {
-    echo "scratchpad-guard: scratchpad has $lines lines; replace it with one handoff of at most $MAX_LINES lines" >&2
-    exit 1
-}
-(( bytes <= MAX_BYTES )) || {
-    echo "scratchpad-guard: scratchpad has $bytes bytes; limit is $MAX_BYTES" >&2
-    exit 1
-}
+oversize=false
+if (( lines > MAX_LINES )); then
+    if [[ "$ALLOW_OVERSIZE" != true ]]; then
+        echo "scratchpad-guard: scratchpad has $lines lines; replace it with one handoff of at most $MAX_LINES lines" >&2
+        exit 1
+    fi
+    echo "scratchpad-guard: warning: checkpoint handoff has $lines lines; final limit is $MAX_LINES" >&2
+    oversize=true
+fi
+if (( bytes > MAX_BYTES )); then
+    if [[ "$ALLOW_OVERSIZE" != true ]]; then
+        echo "scratchpad-guard: scratchpad has $bytes bytes; limit is $MAX_BYTES" >&2
+        exit 1
+    fi
+    echo "scratchpad-guard: warning: checkpoint handoff has $bytes bytes; final limit is $MAX_BYTES" >&2
+    oversize=true
+fi
 
 documents=$(grep -Ec '^#[[:space:]]+' "$SCRATCHPAD" || true)
 (( documents == 1 )) || {
@@ -58,4 +71,8 @@ if [[ -n "$TOKEN" ]] && grep -Fq -- "$TOKEN" "$SCRATCHPAD"; then
     exit 1
 fi
 
-echo "scratchpad-guard: concise current handoff accepted ($lines lines, $bytes bytes)"
+if [[ "$oversize" == true ]]; then
+    echo "scratchpad-guard: structurally valid checkpoint handoff accepted; worker must shorten it before final completion"
+else
+    echo "scratchpad-guard: concise current handoff accepted ($lines lines, $bytes bytes)"
+fi

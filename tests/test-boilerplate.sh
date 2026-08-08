@@ -87,6 +87,7 @@ PY
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$PROJECT_ROOT/$config"
     grep -q 'check-scratchpad.sh' "$PROJECT_ROOT/$config"
+    grep -q -- '--allow-oversize' "$PROJECT_ROOT/$config"
     grep -q 'ralph-completion-gate.sh' "$PROJECT_ROOT/$config"
 done
 python3 - "$PROJECT_ROOT" <<'PY'

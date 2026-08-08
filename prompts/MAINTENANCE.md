@@ -16,7 +16,7 @@ Non-negotiable rules:
 8. Move the selected `in_progress` bug from `open-bugs.md` to `closed-bugs.md` only in the final task, using `bug-ledger.py close` with non-empty resolution and verification. Do not close any other bug.
 9. The final task is exactly **Maintenance verification and documentation audit**. It runs boilerplate verification and the configured `[verification].maintenance_command`, audits docs and acceptance evidence, then sets front status complete. The configured argv must name an executable project verifier.
 10. Capture why a regression test or operational constraint matters in nearby documentation. If a durable build/run/validation fact is learned, update `AGENTS.md` but keep it concise and free of progress history.
-11. Commit one coherent checkpoint and replace rather than append to the recovery scratchpad with one short current handoff that does not contain the reserved completion token.
+11. Commit one coherent checkpoint and replace rather than append to the recovery scratchpad with one short current handoff. Use one level-one title plus concise bullets for outcome, exact verification, commit, and next task; stay below 80 lines and 8 KiB, omit detailed change history, and never include the reserved completion token.
 
 ## Completion protocol
 

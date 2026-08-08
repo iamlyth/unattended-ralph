@@ -60,6 +60,7 @@ PY
 
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$config"
+    grep -q -- '--allow-oversize' "$config"
     grep -q 'ralph-completion-gate.sh' "$config"
 done
 for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do

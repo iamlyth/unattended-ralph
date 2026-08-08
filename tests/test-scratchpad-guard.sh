@@ -37,7 +37,7 @@ if "$GUARD" PLAN_COMPLETE --allow-missing >/dev/null 2>&1; then
 fi
 
 printf '# First handoff\n\n## Details\n\n# Second handoff\n' > "$tmp"
-if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
+if "$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1; then
     echo 'test-scratchpad-guard: appended handoff document was accepted' >&2
     exit 1
 fi
@@ -49,7 +49,7 @@ if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
 fi
 
 printf '# Current handoff\n\n## Status\n\nPLAN_COMPLETE\n' > "$tmp"
-if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
+if "$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1; then
     echo 'test-scratchpad-guard: reserved completion token was accepted' >&2
     exit 1
 fi
@@ -59,8 +59,9 @@ fi
     for i in $(seq 1 81); do printf 'line %s\n' "$i"; done
 } > "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
-    echo 'test-scratchpad-guard: oversized scratchpad was accepted' >&2
+    echo 'test-scratchpad-guard: strict mode accepted an oversized scratchpad' >&2
     exit 1
 fi
+"$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1
 
 echo 'test: scratchpad guard checks passed'

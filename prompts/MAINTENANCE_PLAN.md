@@ -38,7 +38,7 @@ Every task in a newly generated maintenance plan must start with exactly `pendin
 
 The strict parser requires front matter at byte zero, exactly those seven unique keys, contiguous task numbering, and exactly one of every listed task field. `Status` must have its value on the same line. Other fields may continue on following indented lines, but each field must contain non-empty content. Do not add front-matter keys or omit task fields.
 
-When the plan is not yet coherent, fresh, and limited to one ordinary defect, replace rather than append to the scratchpad with one concise next action and continue another iteration. The launcher commits an accepted planning checkpoint, transitions `triaged` to `planned`, and creates a separate ledger-only checkpoint.
+When the plan is not yet coherent, fresh, and limited to one ordinary defect, replace rather than append to the scratchpad with one concise next action and continue another iteration. Use one level-one title plus brief bullets, stay below 80 lines and 8 KiB, and omit detailed iteration history. The launcher commits an accepted planning checkpoint, transitions `triaged` to `planned`, and creates a separate ledger-only checkpoint.
 
 ## Completion protocol
 

@@ -20,7 +20,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 8. Mark the task `complete` only with objective evidence; otherwise mark it `blocked` with the exact reason. Never prune, renumber, replace, or recycle planned tasks during an active implementation cycle; the final gate requires the complete cycle ledger.
 9. If implementation or final verification discovers an unplanned specification, interaction, quality, or regression gap, do not declare completion. Preserve every existing task, append a uniquely numbered `pending` remediation task, add it to the dependencies of the final audit, set that audit back to `pending`, and continue in later fresh iterations.
 10. When a repeated build/run/validation attempt teaches a durable operational fact, update `AGENTS.md` and keep it concise; never put status or progress history there.
-11. Commit a coherent checkpoint to `develop`, then **replace rather than append to** `.ralph/agent/scratchpad.md` with one short current handoff that does not contain the reserved completion token, and exit. One task per fresh context.
+11. Commit a coherent checkpoint to `develop`, then **replace rather than append to** `.ralph/agent/scratchpad.md` with one short current handoff and exit. Use one level-one title plus concise bullets for outcome, exact verification, commit, and next task; keep it below 80 lines and 8 KiB, omit detailed change history, and never include the reserved completion token. One task per fresh context.
 
 ## Adaptive subagent use
 
