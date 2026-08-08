@@ -17,6 +17,19 @@ cat > "$tmp" <<'EOF'
 EOF
 "$GUARD" PLAN_COMPLETE >/dev/null
 
+rm -f "$tmp"
+if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
+    echo 'test-scratchpad-guard: strict mode accepted a missing scratchpad' >&2
+    exit 1
+fi
+"$GUARD" PLAN_COMPLETE --allow-missing >/dev/null
+
+touch "$tmp"
+if "$GUARD" PLAN_COMPLETE --allow-missing >/dev/null 2>&1; then
+    echo 'test-scratchpad-guard: allow-missing mode accepted an empty scratchpad' >&2
+    exit 1
+fi
+
 printf '# Scratchpad\n\n## First\n\n## Second\n' > "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
     echo 'test-scratchpad-guard: appended handoffs were accepted' >&2
