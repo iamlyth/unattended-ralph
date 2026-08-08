@@ -21,7 +21,8 @@ Usage: scripts/ralph-recover.sh [options]
 
 Options:
   --loop-id ID       Override inferred loop ID
-  --mode MODE        implementation (default), planning, maintenance-planning, or maintenance
+  --mode MODE        implementation (default), planning, campaign-audit,
+                     maintenance-planning, or maintenance
   --prepare-only     Repair markers but do not start Ralph
   --dry-run          Print the recovery plan without changing files
   -h, --help         Show help
@@ -42,7 +43,7 @@ while (( $# > 0 )); do
     esac
 done
 case "$MODE" in
-    implementation|planning|maintenance-planning|maintenance) ;;
+    implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
     *) die "invalid mode '$MODE'" ;;
 esac
 [[ -d "$RALPH_DIR" ]] || die "missing $RALPH_DIR"
@@ -154,6 +155,7 @@ $PREPARE_ONLY && exit 0
 case "$MODE" in
     planning) exec "$SCRIPT_DIR/ralph-plan.sh" --resume ;;
     implementation) exec "$SCRIPT_DIR/ralph-run.sh" --resume ;;
+    campaign-audit) exec "$SCRIPT_DIR/ralph-audit.sh" --resume ;;
     maintenance-planning)
         selection="$PROJECT_ROOT/.factory-state/maintenance-bug-id"
         [[ -s "$selection" ]] || die "missing maintenance bug selection"

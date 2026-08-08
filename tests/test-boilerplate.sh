@@ -69,7 +69,12 @@ with (root / 'factory.toml').open('rb') as stream:
 assert config['concurrency']['mutating_workers'] == 1
 assert config['concurrency']['integration_workers'] == 1
 assert config['git']['allow_worktrees'] is False
+assert isinstance(config.get('campaign', {}).get('required_capabilities'), list)
+assert all(isinstance(item, str) and item for item in config['campaign']['required_capabilities'])
 assert config['verification']['maintenance_command'] == ['./scripts/verify-project.sh']
+assert isinstance(config['verification']['campaign_command'], list)
+assert config['verification']['campaign_command']
+assert all(isinstance(arg, str) and arg for arg in config['verification']['campaign_command'])
 assert config['issues']['providers'] == ['github', 'forgejo']
 assert config['issues']['external_sync'] == 'manual'
 assert config['issues']['credentials'] is False
@@ -81,10 +86,17 @@ for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md
              'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
              'tests/test-ralph-completion-recovery.sh',
              'scripts/ralph-maintenance-plan.sh',
-             'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md'):
+             'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md',
+             'factory-environment.toml', 'CAMPAIGN_AUDIT.md', 'ralph.audit.yml',
+             'prompts/AUDIT.md', 'scripts/check-factory-environment.py',
+             'scripts/ralph-campaign-state.py', 'scripts/initialize-campaign-audit.py',
+             'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
+             'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
+             'tests/test-factory-environment.sh', 'tests/test-campaign-audit.sh',
+             'tests/test-ralph-campaign.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
 PY
-for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
+for config in ralph.yml ralph.plan.yml ralph.audit.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$PROJECT_ROOT/$config"
     grep -q 'check-scratchpad.sh' "$PROJECT_ROOT/$config"
     grep -q -- '--allow-oversize' "$PROJECT_ROOT/$config"
@@ -95,6 +107,7 @@ import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 for name, mode in {
     'ralph-plan.sh': 'planning', 'ralph-run.sh': 'implementation',
+    'ralph-audit.sh': 'campaign-audit',
     'ralph-maintenance-plan.sh': 'maintenance-planning',
     'ralph-maintenance-run.sh': 'maintenance',
 }.items():
@@ -102,7 +115,7 @@ for name, mode in {
     lock = text.index('factory_lock_acquire')
     marker = text.index(f"printf '%s\\n' {mode} > .factory-state/loop-mode")
     assert marker > lock, f'{name}: loop-mode marker is not under factory lock'
-for name in ('ralph.yml', 'ralph.plan.yml', 'ralph.maintenance.yml', 'ralph.maintenance-plan.yml'):
+for name in ('ralph.yml', 'ralph.plan.yml', 'ralph.audit.yml', 'ralph.maintenance.yml', 'ralph.maintenance-plan.yml'):
     text = (root / name).read_text(encoding='utf-8')
     assert text.index('check-scratchpad.sh') < text.index('git-commit-hook.sh'), \
         f'{name}: scratchpad guard must run before checkpoint'
@@ -116,7 +129,7 @@ clean = maintenance.index('git status --porcelain')
 assert lock < clean < selection, 'maintenance selection/clean check is not serialized'
 recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
 assert "does not match recorded loop mode" in recover
-for name in ('ralph-run.sh', 'ralph-plan.sh', 'ralph-maintenance-run.sh', 'ralph-maintenance-plan.sh'):
+for name in ('ralph-run.sh', 'ralph-plan.sh', 'ralph-audit.sh', 'ralph-maintenance-run.sh', 'ralph-maintenance-plan.sh'):
     launcher = (root / 'scripts' / name).read_text(encoding='utf-8')
     assert 'ralph-supervision.sh' in launcher
     assert 'ralph_supervision_begin' in launcher
@@ -126,5 +139,8 @@ PY
 "$PROJECT_ROOT/tests/test-bug-workflow.sh"
 "$PROJECT_ROOT/tests/test-plan-cycle.sh"
 "$PROJECT_ROOT/tests/test-ralph-completion-recovery.sh"
+"$PROJECT_ROOT/tests/test-factory-environment.sh"
+"$PROJECT_ROOT/tests/test-campaign-audit.sh"
+"$PROJECT_ROOT/tests/test-ralph-campaign.sh"
 
 echo "test: boilerplate integration checks passed"

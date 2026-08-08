@@ -15,6 +15,11 @@ integration_workers = 1
 min_model_requests = 1
 max_model_requests = 8
 
+[campaign]
+# Populate this in the adopting product with capabilities that a clean
+# independent audit must obtain from factory-environment.toml.
+required_capabilities = []
+
 [quota]
 threshold_percent = 80
 poll_interval_seconds = 300
@@ -30,6 +35,7 @@ final_task_title = "Final documentation and specification audit"
 
 [verification]
 maintenance_command = ["./scripts/verify-project.sh"]
+campaign_command = ["./scripts/verify-boilerplate.sh"]
 
 [issues]
 schema = "ralph-bug-ledger/v1"

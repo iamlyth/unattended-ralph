@@ -111,6 +111,27 @@ Ralph recognizes a completion promise only as the exact final non-empty line out
 
 A `pre.loop.complete` gate runs through `scripts/ralph-completion-gate.sh`. When that strict gate rejects a premature completion request, it writes an atomic, one-shot marker bound to the current launcher nonce, lifecycle mode, loop ID, and canonical workspace. The supervisor consumes only a matching marker, repairs Ralph's volatile markers, and continues the same cycle with `--continue`, preserving the selected TUI mode. Stale, malformed, mismatched, or unsafe markers cannot authorize continuation, and arbitrary non-quota failures remain terminal. Quota exhaustion continues through its independent verified wait path. A cycle is accepted as complete only when the normal final gate passes.
 
+## Run a finite multi-round campaign
+
+Run a predetermined sequence of fresh adversarial planning, implementation,
+verification, and independent audit rounds with one command:
+
+```bash
+./scripts/ralph-campaign.sh --rounds 3
+```
+
+Every round records a new clean Git base. A preceding completion claim never
+shortens the requested campaign. Resume an interrupted active campaign with
+`--resume`; use `--restart` only to replace a terminal saved campaign. Audit
+findings feed the next fresh plan, while findings in the final round block
+completion.
+
+`factory-environment.toml` is the credential-free declaration of available
+local tools and external runners. It initially declares none. Projects list
+required acceptance capabilities in `factory.toml`; absent capabilities remain
+audit findings rather than fabricated evidence. SSH aliases and credentials are
+configured outside the repository.
+
 ## Maintain one bug
 
 Portable canonical bug state lives in `open-bugs.md` and `closed-bugs.md`; GitHub and Forgejo issue URLs are optional manual references and may exist on either or both providers. No issue API, automatic sync, or credentials are used.

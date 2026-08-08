@@ -4,7 +4,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 
 ## Orient before acting
 
-1. Study `docs/SPEC.md`, `AGENTS.md`, the complete active `IMPLEMENTATION_PLAN.md`, and the latest scratchpad handoff before selecting work.
+1. Study `docs/SPEC.md`, `AGENTS.md`, `factory-environment.toml`, the complete active `IMPLEMENTATION_PLAN.md`, and the latest scratchpad handoff before selecting work. The environment declaration is exhaustive: never invent an undeclared tool, external runner, SSH target, hardware capability, credential, or result.
 2. Search the relevant source, tests, shared utilities, and call paths with read-only subagents. **Do not assume functionality is missing or complete** from names, TODOs, prior evidence, or object existence; confirm production behavior.
 3. Use `AGENTS.md` for exact build/run/validation commands. Keep the primary context as scheduler and keep build/test execution serialized.
 

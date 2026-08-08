@@ -51,6 +51,20 @@ PY
         ./scripts/check-installed-functional-evidence.sh
         echo "final-gate: implementation, specification, tests, and documentation accepted"
         ;;
+    --campaign-audit)
+        ./scripts/campaign-audit-scope-guard.sh
+        ./scripts/check-factory-environment.py
+        ./scripts/check-plan-freshness.sh
+        ./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md
+        [[ ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} =~ ^[1-9][0-9]*$ && ${FACTORY_CAMPAIGN_AUDIT_BASE:-} =~ ^[0-9a-f]{40}$ ]] || {
+            echo "final-gate: missing campaign-owned audit binding" >&2; exit 1;
+        }
+        ./scripts/check-scratchpad.sh AUDIT_COMPLETE
+        ./scripts/validate-campaign-audit.py complete CAMPAIGN_AUDIT.md \
+            --expected-round "$FACTORY_CAMPAIGN_AUDIT_ROUND" \
+            --expected-base "$FACTORY_CAMPAIGN_AUDIT_BASE"
+        echo "final-gate: independent campaign audit accepted"
+        ;;
     --maintenance)
         ./scripts/validate-maintenance-plan.py complete MAINTENANCE_PLAN.md >/dev/null
         ./scripts/check-maintenance-freshness.sh
@@ -107,7 +121,7 @@ PY
         echo "final-gate: maintenance implementation and audit accepted"
         ;;
     *)
-        echo "Usage: scripts/final-gate.sh --planning|--implementation|--maintenance-planning|--maintenance" >&2
+        echo "Usage: scripts/final-gate.sh --planning|--implementation|--campaign-audit|--maintenance-planning|--maintenance" >&2
         exit 2
         ;;
 esac

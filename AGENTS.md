@@ -5,6 +5,7 @@ Keep this file brief and operational. Progress, task status, and verification ev
 ## Sources of truth
 
 - Product contract: `docs/SPEC.md`
+- Declared factory capabilities: `factory-environment.toml` (never invent undeclared runners)
 - Active work and evidence: `IMPLEMENTATION_PLAN.md`
 - Ordinary defects: `open-bugs.md` and `closed-bugs.md`
 - Work only on `develop`; the human promotes to `main`.
@@ -32,6 +33,9 @@ Document required runtimes, dependency environments, and separate build variants
 
 # Ralph/factory policy and orchestration
 ./scripts/verify-boilerplate.sh
+
+# Finite fresh-plan/implementation/audit campaign
+./scripts/ralph-campaign.sh --rounds 3
 ```
 
 Run shared build/test commands serially. Do not dismiss an unrelated failure as pre-existing: determine its cause, fix it when safe, or append a remediation task with evidence.

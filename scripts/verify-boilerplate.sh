@@ -22,7 +22,12 @@ with open('factory.toml', 'rb') as stream:
 assert config['concurrency']['mutating_workers'] == 1
 assert config['concurrency']['integration_workers'] == 1
 assert config['git']['allow_worktrees'] is False
+assert isinstance(config.get('campaign', {}).get('required_capabilities'), list)
+assert all(isinstance(item, str) and item for item in config['campaign']['required_capabilities'])
 assert config['verification']['maintenance_command'] == ['./scripts/verify-project.sh']
+assert isinstance(config['verification']['campaign_command'], list)
+assert config['verification']['campaign_command']
+assert all(isinstance(arg, str) and arg for arg in config['verification']['campaign_command'])
 assert config['issues'] == {
     'schema': 'ralph-bug-ledger/v1',
     'open_ledger': 'open-bugs.md',
@@ -48,6 +53,13 @@ required = [
     'tests/test-plan-cycle.sh', 'tests/test-scratchpad-guard.sh',
     'tests/test-ralph-completion-recovery.sh',
     'tests/test-installed-functional-evidence.sh',
+    'factory-environment.toml', 'CAMPAIGN_AUDIT.md', 'ralph.audit.yml',
+    'prompts/AUDIT.md', 'scripts/check-factory-environment.py',
+    'scripts/ralph-campaign-state.py', 'scripts/initialize-campaign-audit.py',
+    'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
+    'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
+    'tests/test-factory-environment.sh', 'tests/test-campaign-audit.sh',
+    'tests/test-ralph-campaign.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -60,12 +72,12 @@ for path in pathlib.Path('.pi/agents').glob('*.md'):
         assert forbidden not in tools, f'{path}: read-only agent exposes {forbidden}'
 PY
 
-for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
+for config in ralph.yml ralph.plan.yml ralph.audit.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$config"
     grep -q -- '--allow-oversize' "$config"
     grep -q 'ralph-completion-gate.sh' "$config"
 done
-for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
+for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-audit.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
     grep -q 'ralph-supervision.sh' "$launcher"
     grep -q 'ralph_supervision_consume_rejection' "$launcher"
 done
@@ -82,6 +94,10 @@ grep -q 'PLAN_COMPLETE.*final non-empty line outside every event tag' prompts/PL
 grep -q 'LOOP_COMPLETE.*final non-empty line outside every event tag' PROMPT.md
 grep -q 'MAINTENANCE_PLAN_COMPLETE.*final non-empty line outside every event tag' prompts/MAINTENANCE_PLAN.md
 grep -q 'MAINTENANCE_COMPLETE.*final non-empty line outside every event tag' prompts/MAINTENANCE.md
+grep -q 'AUDIT_COMPLETE.*final non-empty line' prompts/AUDIT.md
+grep -q 'factory-environment.toml' prompts/PLAN.md
+grep -q 'factory-environment.toml' PROMPT.md
+./scripts/check-factory-environment.py
 cmp -s .github/ISSUE_TEMPLATE/bug_report.md .forgejo/ISSUE_TEMPLATE/bug_report.md
 ./scripts/bug-ledger.py validate
 
@@ -101,5 +117,8 @@ PY
 ./tests/test-scratchpad-guard.sh
 ./tests/test-ralph-completion-recovery.sh
 ./tests/test-installed-functional-evidence.sh "$PROJECT_ROOT"
+./tests/test-factory-environment.sh
+./tests/test-campaign-audit.sh
+./tests/test-ralph-campaign.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

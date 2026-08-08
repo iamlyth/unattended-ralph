@@ -23,6 +23,7 @@ cd -- "$PROJECT_ROOT"
 command -v "$RALPH_BIN" >/dev/null || { echo "ralph-plan: Ralph executable not found: $RALPH_BIN" >&2; exit 2; }
 command -v pi2 >/dev/null || { echo "ralph-plan: pi2 is not available in this shell" >&2; exit 2; }
 ./scripts/branch-guard.sh
+./scripts/check-factory-environment.py
 
 SPEC=$(python3 - <<'PY'
 import tomllib

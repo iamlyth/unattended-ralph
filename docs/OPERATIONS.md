@@ -34,6 +34,28 @@ FACTORY_ALLOW_TRIAL_BRANCH=1 ./scripts/ralph-plan.sh
 
 Do not carry this override into normal development.
 
+## Multi-round campaign
+
+```bash
+./scripts/ralph-campaign.sh --rounds 3
+```
+
+Each mandatory round starts a fresh specification plan at a new Git base, runs
+single-writer implementation and the configured campaign verifier, then starts
+an independent production-evidence audit. State is persisted atomically in
+`.factory-state/ralph-campaign.json`; prior plans and audits remain in Git.
+Resume an interrupted active campaign with matching options:
+
+```bash
+./scripts/ralph-campaign.sh --rounds 3 --resume
+```
+
+Use `--restart` only to replace a terminal saved campaign. Corrupt state,
+rewritten Git bindings, dirty phase boundaries, verifier changes, and final
+findings fail closed. `factory-environment.toml` declares tools and runners
+without endpoints or credentials. Required capabilities in `factory.toml` must
+be declared before an independent audit may pass.
+
 ## Quota states
 
 ### Allowed
@@ -85,6 +107,15 @@ If unfinished runtime tasks belong to multiple loop IDs, recovery refuses to gue
 ```bash
 ./scripts/ralph-recover.sh --loop-id primary-YYYYMMDD-HHMMSS
 ```
+
+Campaign audit recovery uses:
+
+```bash
+./scripts/ralph-recover.sh --mode campaign-audit
+```
+
+After leaf recovery completes, resume the campaign command so it records the
+audit result and continues the next configured phase.
 
 ## Bug maintenance
 

@@ -6,7 +6,7 @@ RALPH_COMPLETION_REJECTION_MARKER=${RALPH_COMPLETION_REJECTION_MARKER:-.factory-
 ralph_supervision_begin() {
     local mode=${1:?ralph_supervision_begin requires a lifecycle mode}
     case "$mode" in
-        implementation|planning|maintenance-planning|maintenance) ;;
+        implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
         *) echo "ralph-supervision: invalid lifecycle mode '$mode'" >&2; return 2 ;;
     esac
 

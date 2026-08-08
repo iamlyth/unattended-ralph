@@ -9,7 +9,7 @@ MARKER=${RALPH_COMPLETION_REJECTION_MARKER:-$PROJECT_ROOT/.factory-state/complet
 ATTEMPT_ID=${FACTORY_RALPH_ATTEMPT_ID:-}
 
 case "$MODE" in
-    implementation|planning|maintenance-planning|maintenance) ;;
+    implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
     *) echo "ralph-completion-gate: invalid lifecycle mode '$MODE'" >&2; exit 2 ;;
 esac
 [[ "$ATTEMPT_ID" =~ ^[0-9a-f]{64}$ ]] || {
