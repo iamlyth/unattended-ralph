@@ -78,6 +78,8 @@ for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md
              'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
              'scripts/validate-implementation-plan.py',
              'scripts/check-scratchpad.sh', 'tests/test-scratchpad-guard.sh',
+             'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
+             'tests/test-ralph-completion-recovery.sh',
              'scripts/ralph-maintenance-plan.sh',
              'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
@@ -85,6 +87,7 @@ PY
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$PROJECT_ROOT/$config"
     grep -q 'check-scratchpad.sh' "$PROJECT_ROOT/$config"
+    grep -q 'ralph-completion-gate.sh' "$PROJECT_ROOT/$config"
 done
 python3 - "$PROJECT_ROOT" <<'PY'
 import pathlib, sys
@@ -112,8 +115,15 @@ clean = maintenance.index('git status --porcelain')
 assert lock < clean < selection, 'maintenance selection/clean check is not serialized'
 recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
 assert "does not match recorded loop mode" in recover
+for name in ('ralph-run.sh', 'ralph-plan.sh', 'ralph-maintenance-run.sh', 'ralph-maintenance-plan.sh'):
+    launcher = (root / 'scripts' / name).read_text(encoding='utf-8')
+    assert 'ralph-supervision.sh' in launcher
+    assert 'ralph_supervision_begin' in launcher
+    assert 'ralph_supervision_consume_rejection' in launcher
+    assert '--loop-id "$rejected_loop_id"' in launcher
 PY
 "$PROJECT_ROOT/tests/test-bug-workflow.sh"
 "$PROJECT_ROOT/tests/test-plan-cycle.sh"
+"$PROJECT_ROOT/tests/test-ralph-completion-recovery.sh"
 
 echo "test: boilerplate integration checks passed"

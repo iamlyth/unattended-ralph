@@ -59,4 +59,4 @@ Headless and continuation options are `--no-tui` and `--resume`. Recovery modes 
 ./scripts/ralph-recover.sh --mode maintenance
 ```
 
-Recovery retains the same selected bug and uses the factory lock, checkpoint hooks, clean-tree checks, and quota waiting. If freshness reports changed intake/specification or a contract change, do not bypass it; return to human triage/specification workflow.
+Recovery retains the same selected bug and uses the factory lock, checkpoint hooks, clean-tree checks, and quota waiting. If either maintenance worker requests completion before its strict final gate passes, an attempt-bound one-shot rejection marker authorizes the supervisor to repair volatile Ralph state and continue that same lifecycle with `--continue`; arbitrary failures, stale markers, and mismatched modes do not trigger retries. If freshness reports changed intake/specification or a contract change, do not bypass it; return to human triage/specification workflow.

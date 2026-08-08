@@ -9,11 +9,17 @@ trap 'rm -f "$tmp"' EXIT
 export FACTORY_SCRATCHPAD_PATH=$tmp
 
 cat > "$tmp" <<'EOF'
-# Scratchpad
+# Current handoff
 
-## Current handoff
+## Work completed
 
 - One concise recovery fact.
+
+## Verification
+
+### Targeted tests
+
+- All targeted checks passed.
 EOF
 "$GUARD" PLAN_COMPLETE >/dev/null
 
@@ -30,19 +36,19 @@ if "$GUARD" PLAN_COMPLETE --allow-missing >/dev/null 2>&1; then
     exit 1
 fi
 
-printf '# Scratchpad\n\n## First\n\n## Second\n' > "$tmp"
+printf '# First handoff\n\n## Details\n\n# Second handoff\n' > "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
-    echo 'test-scratchpad-guard: appended handoffs were accepted' >&2
+    echo 'test-scratchpad-guard: appended handoff document was accepted' >&2
     exit 1
 fi
 
-printf '# Scratchpad\n\n### Historical iteration\n' > "$tmp"
+printf '## Missing document title\n\n- Detail\n' > "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
-    echo 'test-scratchpad-guard: historical subsection was accepted' >&2
+    echo 'test-scratchpad-guard: handoff without a level-one title was accepted' >&2
     exit 1
 fi
 
-printf '# Scratchpad\n\n## Current handoff\n\nPLAN_COMPLETE\n' > "$tmp"
+printf '# Current handoff\n\n## Status\n\nPLAN_COMPLETE\n' > "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
     echo 'test-scratchpad-guard: reserved completion token was accepted' >&2
     exit 1

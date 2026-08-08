@@ -59,7 +59,7 @@ hooks:
         on_error: block
     pre.loop.complete:
       - name: final-maintenance-gate
-        command: ["./scripts/final-gate.sh", "--maintenance"]
+        command: ["./scripts/ralph-completion-gate.sh", "maintenance"]
         timeout_seconds: 3600
         on_error: block
       - name: final-maintenance-checkpoint

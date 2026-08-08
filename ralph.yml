@@ -59,7 +59,7 @@ hooks:
         on_error: block
     pre.loop.complete:
       - name: final-implementation-gate
-        command: ["./scripts/final-gate.sh", "--implementation"]
+        command: ["./scripts/ralph-completion-gate.sh", "implementation"]
         timeout_seconds: 3600
         on_error: block
       - name: final-git-checkpoint

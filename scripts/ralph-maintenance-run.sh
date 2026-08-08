@@ -21,6 +21,8 @@ command -v pi2 >/dev/null || { echo "ralph-maintenance-run: pi2 is unavailable" 
 
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
+# shellcheck source=scripts/ralph-supervision.sh
+source "$SCRIPT_DIR/ralph-supervision.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 mkdir -p .factory-state
 ./scripts/check-maintenance-freshness.sh
@@ -45,6 +47,7 @@ fi
 printf '%s\n' maintenance > .factory-state/loop-mode
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
+    ralph_supervision_begin maintenance
     command=("$RALPH_BIN" -c ralph.maintenance.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
@@ -63,6 +66,19 @@ while true; do
     if (( rc == 130 || rc == 143 )); then
         echo "ralph-maintenance-run: interrupted; recover with --mode maintenance" >&2
         exit "$rc"
+    fi
+    set +e
+    rejected_loop_id=$(ralph_supervision_consume_rejection maintenance "$PROJECT_ROOT")
+    rejection_rc=$?
+    set -e
+    if (( rejection_rc == 0 )); then
+        echo "ralph-maintenance-run: final gate rejected premature completion; continuing maintenance" >&2
+        ./scripts/ralph-recover.sh --mode maintenance --loop-id "$rejected_loop_id" --prepare-only
+        RESUME=true
+        continue
+    elif (( rejection_rc != 1 )); then
+        echo "ralph-maintenance-run: invalid completion-rejection marker; refusing automatic recovery" >&2
+        exit 1
     fi
     set +e
     ./scripts/ollama-usage-guard.sh --check

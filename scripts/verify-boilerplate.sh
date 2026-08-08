@@ -39,11 +39,13 @@ required = [
     'prompts/MAINTENANCE.md', 'prompts/MAINTENANCE_PLAN.md',
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
     'scripts/validate-implementation-plan.py', 'scripts/check-scratchpad.sh',
+    'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
     'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
     'docs/BUG_WORKFLOW.md', 'tests/test-bug-workflow.sh',
     'tests/test-plan-cycle.sh', 'tests/test-scratchpad-guard.sh',
+    'tests/test-ralph-completion-recovery.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -58,6 +60,11 @@ PY
 
 for config in ralph.yml ralph.plan.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
     grep -q 'parallel: false' "$config"
+    grep -q 'ralph-completion-gate.sh' "$config"
+done
+for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
+    grep -q 'ralph-supervision.sh' "$launcher"
+    grep -q 'ralph_supervision_consume_rejection' "$launcher"
 done
 grep -q '^## Build' AGENTS.md
 grep -q '^## Immediate validation' AGENTS.md
@@ -89,5 +96,6 @@ for name in subprocess.check_output(['git', 'remote'], text=True).split():
 PY
 
 ./tests/test-scratchpad-guard.sh
+./tests/test-ralph-completion-recovery.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

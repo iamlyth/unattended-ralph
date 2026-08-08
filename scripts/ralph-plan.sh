@@ -42,6 +42,8 @@ fi
 
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
+# shellcheck source=scripts/ralph-supervision.sh
+source "$SCRIPT_DIR/ralph-supervision.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 ./scripts/branch-guard.sh
 mkdir -p .factory-state
@@ -82,6 +84,7 @@ finish_planning_cycle() {
 
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
+    ralph_supervision_begin planning
 
     command=("$RALPH_BIN" -c ralph.plan.yml run --exclusive)
     $RESUME && command+=(--continue)
@@ -98,6 +101,19 @@ while true; do
     if (( rc == 130 || rc == 143 )); then
         echo "ralph-plan: interrupted; resume with ./scripts/ralph-recover.sh --mode planning" >&2
         exit "$rc"
+    fi
+    set +e
+    rejected_loop_id=$(ralph_supervision_consume_rejection planning "$PROJECT_ROOT")
+    rejection_rc=$?
+    set -e
+    if (( rejection_rc == 0 )); then
+        echo "ralph-plan: final gate rejected premature completion; continuing planning" >&2
+        ./scripts/ralph-recover.sh --mode planning --loop-id "$rejected_loop_id" --prepare-only
+        RESUME=true
+        continue
+    elif (( rejection_rc != 1 )); then
+        echo "ralph-plan: invalid completion-rejection marker; refusing automatic recovery" >&2
+        exit 1
     fi
 
     set +e

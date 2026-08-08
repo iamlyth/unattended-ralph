@@ -33,12 +33,15 @@ fi
 
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
+# shellcheck source=scripts/ralph-supervision.sh
+source "$SCRIPT_DIR/ralph-supervision.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 mkdir -p .factory-state
 printf '%s\n' implementation > .factory-state/loop-mode
 
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
+    ralph_supervision_begin implementation
 
     command=("$RALPH_BIN" -c ralph.yml run --exclusive)
     $RESUME && command+=(--continue)
@@ -63,6 +66,19 @@ while true; do
     if (( rc == 130 || rc == 143 )); then
         echo "ralph-run: interrupted; resume later with ./scripts/ralph-recover.sh" >&2
         exit "$rc"
+    fi
+    set +e
+    rejected_loop_id=$(ralph_supervision_consume_rejection implementation "$PROJECT_ROOT")
+    rejection_rc=$?
+    set -e
+    if (( rejection_rc == 0 )); then
+        echo "ralph-run: final gate rejected premature completion; continuing the active cycle" >&2
+        ./scripts/ralph-recover.sh --mode implementation --loop-id "$rejected_loop_id" --prepare-only
+        RESUME=true
+        continue
+    elif (( rejection_rc != 1 )); then
+        echo "ralph-run: invalid completion-rejection marker; refusing automatic recovery" >&2
+        exit 1
     fi
 
     set +e

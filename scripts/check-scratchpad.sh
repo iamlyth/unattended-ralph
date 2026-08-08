@@ -48,15 +48,11 @@ bytes=$(wc -c < "$SCRATCHPAD")
     exit 1
 }
 
-subheadings=$(grep -Ec '^##[[:space:]]+' "$SCRATCHPAD" || true)
-(( subheadings <= 1 )) || {
-    echo "scratchpad-guard: scratchpad contains $subheadings handoff sections; replace rather than append" >&2
+documents=$(grep -Ec '^#[[:space:]]+' "$SCRATCHPAD" || true)
+(( documents == 1 )) || {
+    echo "scratchpad-guard: scratchpad must contain exactly one level-one handoff document; found $documents" >&2
     exit 1
 }
-if grep -Eq '^###[[:space:]]+' "$SCRATCHPAD"; then
-    echo "scratchpad-guard: historical sub-sections are forbidden; keep only the current handoff" >&2
-    exit 1
-fi
 if [[ -n "$TOKEN" ]] && grep -Fq -- "$TOKEN" "$SCRATCHPAD"; then
     echo "scratchpad-guard: reserved completion token '$TOKEN' must not appear in the scratchpad" >&2
     exit 1

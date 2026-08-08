@@ -59,7 +59,7 @@ hooks:
         on_error: block
     pre.loop.complete:
       - name: final-planning-gate
-        command: ["./scripts/final-gate.sh", "--planning"]
+        command: ["./scripts/ralph-completion-gate.sh", "planning"]
         on_error: block
       - name: final-planning-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--plan-only"]
