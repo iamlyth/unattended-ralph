@@ -40,6 +40,27 @@ cd -- "$PROJECT_ROOT"
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 
+# A campaign owns leaf-lifecycle recovery. Refuse a live Ralph owner, but remove
+# an abandoned exclusive lock before starting or reconciling the saved phase.
+if [[ -e .ralph/loop.lock ]]; then
+    [[ ! -L .ralph/loop.lock && -f .ralph/loop.lock ]] || { echo "ralph-campaign: unsafe Ralph loop lock" >&2; exit 1; }
+    lock_pid=$(python3 - <<'PY'
+import json
+try:
+    value=json.load(open('.ralph/loop.lock', encoding='utf-8')).get('pid')
+    print(value if isinstance(value, int) and value > 0 else '')
+except Exception:
+    print('')
+PY
+)
+    if [[ -n "$lock_pid" && -d "/proc/$lock_pid" ]]; then
+        lock_command=$(tr '\0' ' ' < "/proc/$lock_pid/cmdline" 2>/dev/null || true)
+        [[ "$lock_command" != *ralph* ]] || { echo "ralph-campaign: live Ralph process $lock_pid owns the loop lock" >&2; exit 1; }
+    fi
+    echo "ralph-campaign: removing abandoned Ralph loop lock${lock_pid:+ for PID $lock_pid}" >&2
+    rm -f -- .ralph/loop.lock
+fi
+
 [[ ! -L .factory-state && ( ! -e .factory-state || -d .factory-state ) ]] || {
     echo "ralph-campaign: unsafe .factory-state path" >&2; exit 1;
 }
