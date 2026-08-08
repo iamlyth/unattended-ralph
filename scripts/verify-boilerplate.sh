@@ -40,12 +40,14 @@ required = [
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
     'scripts/validate-implementation-plan.py', 'scripts/check-scratchpad.sh',
     'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
+    'scripts/check-installed-functional-evidence.sh',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
     'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
     'docs/BUG_WORKFLOW.md', 'tests/test-bug-workflow.sh',
     'tests/test-plan-cycle.sh', 'tests/test-scratchpad-guard.sh',
     'tests/test-ralph-completion-recovery.sh',
+    'tests/test-installed-functional-evidence.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -98,5 +100,6 @@ PY
 
 ./tests/test-scratchpad-guard.sh
 ./tests/test-ralph-completion-recovery.sh
+./tests/test-installed-functional-evidence.sh "$PROJECT_ROOT"
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

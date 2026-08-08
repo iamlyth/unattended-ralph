@@ -103,7 +103,7 @@ Each iteration:
 7. creates a Git checkpoint;
 8. exits so the next task receives fresh context.
 
-Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs before project verification.
+Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs and requires commit-bound, zero-skip `test_installed_functional` evidence before completion.
 
 Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff.
 
@@ -195,7 +195,7 @@ Recovery never resets Git or starts a second writer. See `docs/OPERATIONS.md` fo
 
 The verifier checks shell syntax, ShellCheck when available, TOML/JSON configuration, read-only agent tools, single-writer settings, quota behavior, plan freshness, branch policy, removed product artifacts, and secret tracking.
 
-Project implementation plans should add their own build, lint, test, and documentation commands to the final gate. Maintenance executes `[verification].maintenance_command` directly as argv and fails if its executable is absent. The generic boilerplate intentionally has no `scripts/verify-project.sh`; projects must supply it before running maintenance.
+Project implementation plans should add their own build, lint, test, and documentation commands to the final gate. The project-supplied `scripts/verify-project.sh` must run a non-skippable installed functional test and write `.factory-state/installed-functional-evidence.env` using the schema checked by `scripts/check-installed-functional-evidence.sh`; evidence is invalidated by later production or acceptance changes. Maintenance executes `[verification].maintenance_command` directly as argv and fails if its executable is absent. The generic boilerplate intentionally has no `scripts/verify-project.sh`; projects must supply it before implementation or maintenance can complete.
 
 ## Release
 
