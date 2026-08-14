@@ -46,13 +46,32 @@ case "$MODE" in
     implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
     *) die "invalid mode '$MODE'" ;;
 esac
-[[ -d "$RALPH_DIR" ]] || die "missing $RALPH_DIR"
+[[ -d "$RALPH_DIR" && ! -L "$RALPH_DIR" ]] || die "missing or unsafe $RALPH_DIR"
 
 # Serialize recovery with planning and implementation, and pass the inherited
 # lock descriptor into the resumed supervisor.
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
+python3 - "$RALPH_DIR" <<'PY' || die "unsafe Ralph recovery paths"
+import os
+import stat
+import sys
+from pathlib import Path
+
+root=Path(sys.argv[1])
+for directory in (root, root/'agent'):
+    try: info=os.lstat(directory)
+    except FileNotFoundError: raise SystemExit(f'ralph-recover: missing {directory}')
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise SystemExit(f'ralph-recover: unsafe directory {directory}')
+for path in (root/'agent/scratchpad.md', root/'agent/tasks.jsonl', root/'current-loop-id',
+             root/'current-events', root/'loop.lock'):
+    try: info=os.lstat(path)
+    except FileNotFoundError: continue
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit(f'ralph-recover: unsafe runtime file {path}')
+PY
 MODE_MARKER="$PROJECT_ROOT/.factory-state/loop-mode"
 if [[ -s "$MODE_MARKER" ]]; then
     recorded_mode=$(tr -d '[:space:]' < "$MODE_MARKER")
@@ -78,7 +97,24 @@ PY
     else
         warn "stale loop lock detected${lock_pid:+ for PID $lock_pid}"
     fi
-    $DRY_RUN || rm -f -- "$LOCK_FILE"
+    if [[ "$DRY_RUN" == false ]]; then
+        python3 - "$RALPH_DIR" <<'PY'
+import os
+import stat
+import sys
+root=sys.argv[1]
+fd=os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
+try:
+    try: info=os.stat('loop.lock', dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError: raise SystemExit(0)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit('ralph-recover: unsafe loop lock')
+    os.unlink('loop.lock', dir_fd=fd)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+    fi
 fi
 
 if [[ ! -s "$SCRATCHPAD" ]]; then
@@ -148,8 +184,44 @@ fi
 
 printf 'Ralph recovery plan\n  mode:   %s\n  loop:   %s\n  events: %s\n' "$MODE" "$loop_id" "$event_relative"
 $DRY_RUN && { echo "Dry run: no files changed."; exit 0; }
-printf '%s\n' "$loop_id" > "$LOOP_MARKER"
-printf '%s\n' "$event_relative" > "$EVENTS_MARKER"
+python3 - "$RALPH_DIR" "$loop_id" "$event_relative" <<'PY'
+import os
+import secrets
+import stat
+import sys
+
+root, loop_id, event_relative=sys.argv[1:]
+dir_fd=os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
+try:
+    for name, value in (('current-loop-id', loop_id), ('current-events', event_relative)):
+        try: existing=os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError: existing=None
+        if existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1 or existing.st_uid != os.getuid()):
+            raise SystemExit(f'ralph-recover: unsafe marker {name}')
+        temporary=f'.{name}.{secrets.token_hex(16)}'
+        out_fd=os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0),
+            0o600, dir_fd=dir_fd,
+        )
+        try:
+            data=(value+'\n').encode()
+            view=memoryview(data)
+            while view:
+                written=os.write(out_fd, view)
+                view=view[written:]
+            os.fsync(out_fd)
+        finally:
+            os.close(out_fd)
+        try:
+            os.rename(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try: os.unlink(temporary, dir_fd=dir_fd)
+            except FileNotFoundError: pass
+            raise
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
 $PREPARE_ONLY && exit 0
 
 case "$MODE" in

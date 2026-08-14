@@ -109,7 +109,7 @@ Iteration count is not completion evidence. If final acceptance discovers a gap,
 
 Ralph recognizes a completion promise only as the exact final non-empty line outside all event tags. Prompts forbid reserved tokens in event payloads and scratchpads. Before checkpointing, planning revalidates immutable launcher metadata and every mode runs `scripts/check-scratchpad.sh`. The guard requires one level-one handoff document and permits concise subsections. Iteration-boundary hooks use `--allow-missing` because Ralph intentionally removes the previous scratchpad before the first iteration of a fresh, non-resumed loop. They also use `--allow-oversize` so a worker that slightly exceeds the 80-line or 8-KiB handoff target receives a warning without deadlocking the next iteration. Checkpoints defer reserved-token rejection to the strict completion gate so the attempt-bound supervisor can recover automatically. Final gates remain strict and reject missing, malformed, oversized, or token-contaminated scratchpads.
 
-A `pre.loop.complete` gate runs through `scripts/ralph-completion-gate.sh`. When that strict gate rejects a premature completion request, it writes an atomic, one-shot marker bound to the current launcher nonce, lifecycle mode, loop ID, and canonical workspace. The supervisor consumes only a matching marker, repairs Ralph's volatile markers, and continues the same cycle with `--continue`, preserving the selected TUI mode. Stale, malformed, mismatched, or unsafe markers cannot authorize continuation, and arbitrary non-quota failures remain terminal. Quota exhaustion continues through its independent verified wait path. A cycle is accepted as complete only when the normal final gate passes.
+A `pre.loop.complete` gate runs through `scripts/ralph-completion-gate.sh`. When that strict gate rejects a premature completion request, it writes an atomic, one-shot marker bound to the current launcher nonce, lifecycle mode, loop ID, and canonical workspace. The supervisor consumes only a matching marker and continues with `--continue`; completion recovery is capped at eight attempts by default. A `loop_stale` result is accepted only from strict history appended during the current attempt, receives fixed strict-gate command feedback, and retries at most twice by default. Stale, malformed, mismatched, or unsafe state cannot authorize continuation, and arbitrary non-quota failures remain terminal. Quota exhaustion retains its independent verified wait path. A cycle is accepted as complete only when the normal final gate passes.
 
 ## Run a finite multi-round campaign
 
@@ -122,7 +122,9 @@ implementation, verification, and independent audit rounds with one command:
 
 Campaigns are headless by default so phase completion never waits for a TUI;
 use `--tui` only for attended diagnostics. Every round records a new clean Git
-base. A preceding completion claim never shortens the requested campaign. Resume an interrupted active campaign with
+base. Attempt-bound stale loops receive fixed strict-gate recovery instructions
+and bounded automatic continuation. A preceding completion claim never shortens
+the requested campaign. Resume an interrupted active campaign with
 `--resume`; use `--restart` only to replace a terminal saved campaign. Audit
 findings feed the next fresh plan, while findings in the final round block
 completion.

@@ -20,4 +20,6 @@ Non-negotiable rules:
 
 ## Completion protocol
 
+Before requesting completion, run `./scripts/final-gate.sh --maintenance`. Fix every reported deficiency; never rely on a prose review of the criteria or repeat a completion summary after the command fails.
+
 `MAINTENANCE_COMPLETE` is a reserved protocol token. Never write it into the maintenance plan, scratchpad, an event topic or payload, a summary, or explanatory prose. In scratchpad next-action prose, say “emit the completion token” without spelling or quoting the literal token. If any non-final task remains, finish the normal event and exit without emitting the token. Only after the final gate passes, publish any required `factory.maintenance.implement` summary without that token, close the event tag, and then output exactly `MAINTENANCE_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it. If the final gate rejects completion, the supervisor resumes the active cycle; repair the reported deficiency rather than repeating the completion request.

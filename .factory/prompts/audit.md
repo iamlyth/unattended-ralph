@@ -44,4 +44,6 @@ Replace rather than append to the scratchpad with one concise current handoff be
 
 ## Completion protocol
 
+Before requesting completion, run `./scripts/final-gate.sh --campaign-audit`. Fix every reported deficiency; never rely on a prose review of the criteria or repeat a completion summary after the command fails.
+
 `AUDIT_COMPLETE` is reserved protocol data. Never write it into the report, scratchpad, event content, summary, or explanatory prose; scratchpad next-action prose says only “emit the completion token.” If the audit needs another iteration, close the normal event and exit without it. When and only when the report is complete and valid, close every event tag and output exactly `AUDIT_COMPLETE` as the final non-empty line. If the final gate rejects it, repair the reported deficiency instead of repeating the request.

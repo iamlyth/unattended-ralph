@@ -65,6 +65,7 @@ required = [
     'scripts/factory-runner-server.py',
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
     'tests/test-campaign-audit.sh', 'tests/test-ralph-campaign.sh',
+    'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -93,6 +94,7 @@ done
 for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-audit.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
     grep -q 'ralph-supervision.sh' "$launcher"
     grep -q 'ralph_supervision_consume_rejection' "$launcher"
+    grep -q 'ralph_supervision_recover_stale' "$launcher"
 done
 grep -q '^## Build' AGENTS.md
 grep -q '^## Immediate validation' AGENTS.md
@@ -108,6 +110,11 @@ grep -q 'LOOP_COMPLETE.*final non-empty line outside every event tag' .factory/p
 grep -q 'MAINTENANCE_PLAN_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance-plan.md
 grep -q 'MAINTENANCE_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance.md
 grep -q 'AUDIT_COMPLETE.*final non-empty line' .factory/prompts/audit.md
+grep -q 'final-gate.sh --planning' .factory/prompts/plan.md
+grep -q 'final-gate.sh --implementation' .factory/prompts/implementation.md
+grep -q 'final-gate.sh --campaign-audit' .factory/prompts/audit.md
+grep -q 'final-gate.sh --maintenance-planning' .factory/prompts/maintenance-plan.md
+grep -q 'final-gate.sh --maintenance' .factory/prompts/maintenance.md
 for prompt in .factory/prompts/plan.md .factory/prompts/implementation.md \
         .factory/prompts/audit.md .factory/prompts/maintenance-plan.md \
         .factory/prompts/maintenance.md; do
@@ -153,5 +160,7 @@ PY
 ./tests/test-factory-runner.sh
 ./tests/test-campaign-audit.sh
 ./tests/test-ralph-campaign.sh
+./tests/test-ralph-stale-recovery.sh
+./tests/test-ralph-recover-safety.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

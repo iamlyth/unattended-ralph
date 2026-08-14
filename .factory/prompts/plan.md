@@ -74,4 +74,6 @@ Review the plan with read-only subagents. Challenge assumptions, priority, dupli
 
 ## Completion protocol
 
+Before requesting completion, run `./scripts/final-gate.sh --planning`. Fix every reported deficiency; never rely on a prose review of the criteria or repeat a completion summary after the command fails.
+
 `PLAN_COMPLETE` is a reserved protocol token. Never write it into `.factory/artifacts/implementation-plan.md`, the scratchpad, an event topic or payload, a summary, or explanatory prose. In scratchpad next-action prose, say “emit the completion token” without spelling or quoting the literal token. If planning still needs another iteration, finish the normal event and exit without emitting the token. When and only when planning is complete, publish any required `factory.plan` summary without that token, close the event tag, and then output exactly `PLAN_COMPLETE` as the final non-empty line outside every event tag. Do not add a colon, punctuation, Markdown fencing, or text after it. If the final gate rejects completion, the supervisor resumes the same draft; repair the reported deficiency rather than repeating the completion request.

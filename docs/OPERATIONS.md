@@ -55,7 +55,10 @@ Resume an interrupted active campaign with matching options:
 
 Use `--restart` only to replace a terminal saved campaign. Reserved-token
 mistakes in checkpoint handoffs flow through strict completion rejection and
-automatic continuation. Corrupt state, rewritten Git bindings, dirty phase
+automatic continuation. A `loop_stale` result is recoverable only from strict
+history appended during the current attempt; fixed command-only feedback directs
+the resumed agent to run the gate, with two stale retries by default. Corrupt
+history, exhausted retries, corrupt state, rewritten Git bindings, dirty phase
 boundaries, verifier changes, and final findings still fail closed. `.factory/environment.toml` declares tools and runners
 without endpoints or credentials. Campaign verification runs every declared
 runner and validates exact-commit evidence:

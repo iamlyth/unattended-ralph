@@ -40,6 +40,18 @@ factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
 mkdir -p .factory-state
 printf '%s\n' implementation > .factory-state/loop-mode
 
+finish_implementation_cycle() {
+    if ./scripts/final-gate.sh --implementation; then :; else return $?; fi
+    local payload
+    payload=$(printf '{"loop":{"workspace":"%s","id":"implementation-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
+    if printf '%s' "$payload" | ./scripts/git-commit-hook.sh; then :; else return $?; fi
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "ralph-run: completion left a dirty Git tree" >&2
+        return 1
+    }
+    echo "ralph-run: implementation loop completed"
+}
+
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin implementation
@@ -54,17 +66,10 @@ while true; do
     set -e
 
     if (( rc == 0 )); then
-        ./scripts/final-gate.sh --implementation
-        payload=$(printf '{"loop":{"workspace":"%s","id":"implementation-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
-        printf '%s' "$payload" | ./scripts/git-commit-hook.sh
-        [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
-            echo "ralph-run: completion left a dirty Git tree" >&2
-            exit 1
-        }
-        echo "ralph-run: implementation loop completed"
+        finish_implementation_cycle
         exit 0
     fi
-    if (( rc == 130 || rc == 143 )); then
+    if (( rc >= 128 )); then
         echo "ralph-run: interrupted; resume later with ./scripts/ralph-recover.sh" >&2
         exit "$rc"
     fi
@@ -73,6 +78,7 @@ while true; do
     rejection_rc=$?
     set -e
     if (( rejection_rc == 0 )); then
+        ralph_supervision_allow_completion_recovery || { recovery_rc=$?; exit "$recovery_rc"; }
         echo "ralph-run: final gate rejected premature completion; continuing the active cycle" >&2
         ./scripts/ralph-recover.sh --mode implementation --loop-id "$rejected_loop_id" --prepare-only
         RESUME=true
@@ -92,8 +98,47 @@ while true; do
         ./scripts/ralph-recover.sh --prepare-only
         RESUME=true
         continue
+    elif (( quota_rc != 0 )); then
+        echo "ralph-run: quota status check failed with status $quota_rc" >&2
+        exit "$quota_rc"
     fi
 
+    stale_diagnostics=$(mktemp)
+    set +e
+    ./scripts/final-gate.sh --implementation >"$stale_diagnostics" 2>&1
+    gate_rc=$?
+    set -e
+    if (( $(wc -c < "$stale_diagnostics") > 65536 )); then
+        rm -f -- "$stale_diagnostics"
+        echo "ralph-run: final-gate diagnostics exceeded the recovery limit" >&2
+        exit 1
+    fi
+    cat "$stale_diagnostics" >&2
+    if (( gate_rc == 0 )); then
+        rm -f -- "$stale_diagnostics"
+        if finish_implementation_cycle; then :; else final_rc=$?; echo "ralph-run: finalization failed after a passing gate" >&2; exit "$final_rc"; fi
+        echo "ralph-run: accepted valid implementation artifacts after Ralph exited with status $rc" >&2
+        exit 0
+    elif (( gate_rc >= 128 )); then
+        rm -f -- "$stale_diagnostics"
+        exit "$gate_rc"
+    elif (( gate_rc != 1 )); then
+        rm -f -- "$stale_diagnostics"
+        echo "ralph-run: final gate failed with infrastructure status $gate_rc" >&2
+        exit "$gate_rc"
+    fi
+    set +e
+    ralph_supervision_recover_stale implementation "$PROJECT_ROOT"
+    stale_rc=$?
+    set -e
+    if (( stale_rc == 0 )); then
+        rm -f -- "$stale_diagnostics"
+        ./scripts/ralph-recover.sh --mode implementation --prepare-only
+        RESUME=true
+        continue
+    fi
+    rm -f -- "$stale_diagnostics"
+    (( stale_rc == 1 )) || { echo "ralph-run: stale recovery was rejected" >&2; exit "$stale_rc"; }
     echo "ralph-run: Ralph exited with status $rc for a non-quota failure" >&2
     exit "$rc"
 done
