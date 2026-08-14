@@ -12,12 +12,12 @@ case "$MODE" in
         ./scripts/plan-scope-guard.sh
         ./scripts/check-plan-freshness.sh --planning
         ./scripts/check-scratchpad.sh PLAN_COMPLETE
-        ./scripts/validate-implementation-plan.py planning IMPLEMENTATION_PLAN.md
+        ./scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md
         echo "final-gate: planning completion accepted"
         ;;
     --maintenance-planning)
         ./scripts/maintenance-plan-scope-guard.sh
-        ./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null
+        ./scripts/validate-maintenance-plan.py planning .factory/artifacts/maintenance-plan.md >/dev/null
         ./scripts/check-maintenance-freshness.sh --planning
         ./scripts/check-scratchpad.sh MAINTENANCE_PLAN_COMPLETE
         echo "final-gate: maintenance planning completion accepted"
@@ -25,18 +25,18 @@ case "$MODE" in
     --implementation)
         ./scripts/check-plan-freshness.sh
         ./scripts/check-scratchpad.sh LOOP_COMPLETE
-        ./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md
-        if [[ -x scripts/bug-ledger.py && -f open-bugs.md ]]; then
+        ./scripts/validate-implementation-plan.py complete .factory/artifacts/implementation-plan.md
+        if [[ -x scripts/bug-ledger.py && -f .factory/bugs/open.md ]]; then
             ./scripts/bug-ledger.py validate
             python3 - <<'PY'
 import json
 import re
 from pathlib import Path
 
-text = Path('open-bugs.md').read_text(encoding='utf-8')
+text = Path('.factory/bugs/open.md').read_text(encoding='utf-8')
 match = re.search(r'```json\s*\n(.*?)\n```', text, re.S)
 if not match:
-    raise SystemExit('final-gate: open-bugs.md has no JSON ledger')
+    raise SystemExit('final-gate: .factory/bugs/open.md has no JSON ledger')
 records = json.loads(match.group(1))
 if records:
     ids = ', '.join(str(record.get('id', '<unknown>')) for record in records)
@@ -55,25 +55,28 @@ PY
         ./scripts/campaign-audit-scope-guard.sh
         ./scripts/check-factory-environment.py
         ./scripts/check-plan-freshness.sh
-        ./scripts/validate-implementation-plan.py complete IMPLEMENTATION_PLAN.md
-        [[ ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} =~ ^[1-9][0-9]*$ && ${FACTORY_CAMPAIGN_AUDIT_BASE:-} =~ ^[0-9a-f]{40}$ ]] || {
+        ./scripts/validate-implementation-plan.py complete .factory/artifacts/implementation-plan.md
+        [[ ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} =~ ^[1-9][0-9]*$ \
+            && ${FACTORY_CAMPAIGN_AUDIT_BASE:-} =~ ^[0-9a-f]{40}$ \
+            && ${FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || {
             echo "final-gate: missing campaign-owned audit binding" >&2; exit 1;
         }
         ./scripts/check-scratchpad.sh AUDIT_COMPLETE
-        ./scripts/validate-campaign-audit.py complete CAMPAIGN_AUDIT.md \
+        ./scripts/validate-campaign-audit.py complete .factory/artifacts/campaign-audit.md \
             --expected-round "$FACTORY_CAMPAIGN_AUDIT_ROUND" \
-            --expected-base "$FACTORY_CAMPAIGN_AUDIT_BASE"
+            --expected-base "$FACTORY_CAMPAIGN_AUDIT_BASE" \
+            --expected-runner-evidence-sha256 "$FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256"
         echo "final-gate: independent campaign audit accepted"
         ;;
     --maintenance)
-        ./scripts/validate-maintenance-plan.py complete MAINTENANCE_PLAN.md >/dev/null
+        ./scripts/validate-maintenance-plan.py complete .factory/artifacts/maintenance-plan.md >/dev/null
         ./scripts/check-maintenance-freshness.sh
         ./scripts/check-scratchpad.sh MAINTENANCE_COMPLETE
         ./scripts/bug-ledger.py validate
         python3 - <<'PY'
 import json, re, subprocess
 meta = json.loads(subprocess.check_output(
-    ['./scripts/validate-maintenance-plan.py', 'metadata', 'MAINTENANCE_PLAN.md'], text=True,
+    ['./scripts/validate-maintenance-plan.py', 'metadata', '.factory/artifacts/maintenance-plan.md'], text=True,
 ))
 bug_id, base = meta['bug_id'], meta['base_commit']
 shown = subprocess.check_output(['./scripts/bug-ledger.py', 'show', bug_id], text=True)
@@ -83,10 +86,10 @@ if record['status'] != 'closed' or not record['resolution'].strip() or not recor
 def records(text):
     return {r['id']: r for r in json.loads(re.search(r'```json\s*\n(.*?)\n```', text, re.S).group(1))}
 before = {}
-for ledger in ('open-bugs.md', 'closed-bugs.md'):
+for ledger in ('.factory/bugs/open.md', '.factory/bugs/closed.md'):
     before.update(records(subprocess.check_output(['git', 'show', f'{base}:{ledger}'], text=True)))
 after = {}
-for ledger in ('open-bugs.md', 'closed-bugs.md'):
+for ledger in ('.factory/bugs/open.md', '.factory/bugs/closed.md'):
     after.update(records(open(ledger, encoding='utf-8').read()))
 if set(before) != set(after) or bug_id not in before:
     raise SystemExit('final-gate: maintenance must not add or remove unrelated bug IDs')
@@ -97,7 +100,7 @@ PY
         ./scripts/verify-boilerplate.sh
         mapfile -d '' -t MAINTENANCE_COMMAND < <(python3 - <<'PY'
 import os, tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     command = tomllib.load(stream).get('verification', {}).get('maintenance_command')
 if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
     raise SystemExit('final-gate: verification.maintenance_command must be a non-empty argv array')

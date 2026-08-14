@@ -4,7 +4,7 @@ cli:
   command: "./scripts/pi2-ollama.sh"
 
 event_loop:
-  prompt_file: "PROMPT.md"
+  prompt_file: ".factory/prompts/implementation.md"
   completion_promise: "LOOP_COMPLETE"
   starting_event: "factory.implement"
   max_iterations: 1000
@@ -26,7 +26,7 @@ hats:
     publishes: ["factory.implement"]
     default_publishes: "factory.implement"
     instructions: |
-      Follow PROMPT.md exactly. Complete one bounded ready task per fresh context.
+      Follow .factory/prompts/implementation.md exactly. Complete one bounded ready task per fresh context.
       You are the sole repository writer; all Pi subagents must remain read-only.
       Never place LOOP_COMPLETE in an event payload; completion requires that exact
       token alone as the final line outside events.

@@ -5,12 +5,12 @@
 Durable, tracked state:
 
 - `docs/SPEC.md`: approved requirements
-- `IMPLEMENTATION_PLAN.md`: task status and verification evidence
-- `open-bugs.md` / `closed-bugs.md`: portable canonical defect state
-- `MAINTENANCE_PLAN.md`: one selected bug, fingerprint, tasks, and evidence
+- `.factory/artifacts/implementation-plan.md`: task status and verification evidence
+- `.factory/bugs/open.md` / `.factory/bugs/closed.md`: portable canonical defect state
+- `.factory/artifacts/maintenance-plan.md`: one selected bug, fingerprint, tasks, and evidence
 - `.ralph/agent/scratchpad.md`: concise crash handoff
 - source, tests, README, and operational documentation
-- `factory.toml`, Ralph configs, prompts, and project subagent definitions
+- `.factory/config.toml`, Ralph configs, prompts, and project subagent definitions
 
 Volatile, ignored state:
 
@@ -52,9 +52,18 @@ Resume an interrupted active campaign with matching options:
 
 Use `--restart` only to replace a terminal saved campaign. Corrupt state,
 rewritten Git bindings, dirty phase boundaries, verifier changes, and final
-findings fail closed. `factory-environment.toml` declares tools and runners
-without endpoints or credentials. Required capabilities in `factory.toml` must
-be declared before an independent audit may pass.
+findings fail closed. `.factory/environment.toml` declares tools and runners
+without endpoints or credentials. Campaign verification runs every declared
+runner and validates exact-commit evidence:
+
+```bash
+./scripts/run-factory-runners.py
+./scripts/check-factory-runner-evidence.py
+```
+
+Required capabilities in `.factory/config.toml` must be both declared and
+evidenced before an independent audit may pass. Runner provisioning remains
+outside the repository.
 
 ## Quota states
 

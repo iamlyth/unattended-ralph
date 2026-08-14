@@ -4,21 +4,27 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.ralph/agent" "$tmp/.factory-state"
+mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.ralph/agent" "$tmp/.factory-state" \
+    "$tmp/.factory/artifacts"
 cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/ralph-campaign-state.py" \
    "$PROJECT_ROOT/scripts/initialize-campaign-audit.py" \
-   "$PROJECT_ROOT/scripts/check-factory-environment.py" "$tmp/scripts/"
+   "$PROJECT_ROOT/scripts/check-factory-environment.py" \
+   "$PROJECT_ROOT/scripts/run-factory-runners.py" \
+   "$PROJECT_ROOT/scripts/check-factory-runner-evidence.py" "$tmp/scripts/"
 chmod +x "$tmp/scripts/"*
-cp "$PROJECT_ROOT/factory-environment.toml" "$tmp/"
+cat > "$tmp/.factory/environment.toml" <<'EOF'
+schema_version = 1
+EOF
 printf '# Spec\n' > "$tmp/docs/SPEC.md"
-printf '# Initial plan\n' > "$tmp/IMPLEMENTATION_PLAN.md"
-printf '# Campaign Audit\n' > "$tmp/CAMPAIGN_AUDIT.md"
+printf '# Initial plan\n' > "$tmp/.factory/artifacts/implementation-plan.md"
+printf '# Campaign Audit\n' > "$tmp/.factory/artifacts/campaign-audit.md"
 printf '# Initial scratchpad\n' > "$tmp/.ralph/agent/scratchpad.md"
-cat > "$tmp/factory.toml" <<'EOF'
+printf 'base\n' > "$tmp/product.txt"
+cat > "$tmp/.factory/config.toml" <<'EOF'
 [project]
 spec = "docs/SPEC.md"
-plan = "IMPLEMENTATION_PLAN.md"
+plan = ".factory/artifacts/implementation-plan.md"
 development_branch = "develop"
 [verification]
 campaign_command = ["./scripts/verify-project.sh"]
@@ -48,7 +54,7 @@ set -euo pipefail
 printf 'plan %s\n' "$*" >> .factory-state/calls
 base=$(git rev-parse HEAD)
 if [[ ${1:-} == --resume ]]; then base=$(cat .factory-state/planning-base-commit); else printf '%s\n' "$base" > .factory-state/planning-base-commit; fi
-cat > IMPLEMENTATION_PLAN.md <<PLAN
+cat > .factory/artifacts/implementation-plan.md <<PLAN
 ---
 spec_path: docs/SPEC.md
 spec_commit: $(git log -1 --format=%H -- docs/SPEC.md)
@@ -74,7 +80,7 @@ status: active
 - Documentation impact: none
 PLAN
 printf '# Planning handoff\n- complete\n' > .ralph/agent/scratchpad.md
-git add IMPLEMENTATION_PLAN.md .ralph/agent/scratchpad.md
+git add .factory/artifacts/implementation-plan.md .ralph/agent/scratchpad.md
 git commit -qm "fake plan"
 EOF
 cat > "$tmp/scripts/ralph-run.sh" <<'EOF'
@@ -83,11 +89,12 @@ set -euo pipefail
 printf 'implement %s\n' "$*" >> .factory-state/calls
 if [[ -n ${FAKE_FAIL_IMPL_ONCE:-} && ! -e .factory-state/failed-implementation ]]; then
     : > .factory-state/failed-implementation
+    [[ -z ${FAKE_DIRTY_IMPL:-} ]] || printf 'interrupted work\n' > product.txt
     exit 42
 fi
-sed -i 's/status: active/status: complete/; s/- Status: pending/- Status: complete/' IMPLEMENTATION_PLAN.md
+sed -i 's/status: active/status: complete/; s/- Status: pending/- Status: complete/' .factory/artifacts/implementation-plan.md
 printf '# Implementation handoff\n- complete\n' > .ralph/agent/scratchpad.md
-git add IMPLEMENTATION_PLAN.md .ralph/agent/scratchpad.md
+git add .factory/artifacts/implementation-plan.md .ralph/agent/scratchpad.md product.txt
 git commit -qm "fake implementation"
 EOF
 cat > "$tmp/scripts/ralph-audit.sh" <<'EOF'
@@ -96,7 +103,7 @@ set -euo pipefail
 printf 'audit %s\n' "$*" >> .factory-state/calls
 python3 - <<'PY'
 from pathlib import Path
-p=Path('CAMPAIGN_AUDIT.md')
+p=Path('.factory/artifacts/campaign-audit.md')
 s=p.read_text().replace('result: pending', 'result: findings' if __import__('os').environ.get('FAKE_AUDIT_FINDINGS') else 'result: pass')
 head=s.split('---\n',2)[:2]
 front='---\n'+head[1]+'---\n'
@@ -108,16 +115,16 @@ else:
 p.write_text(front+body)
 PY
 printf '# Audit handoff\n- complete\n' > .ralph/agent/scratchpad.md
-git add CAMPAIGN_AUDIT.md .ralph/agent/scratchpad.md
+git add .factory/artifacts/campaign-audit.md .ralph/agent/scratchpad.md
 git commit -qm "fake audit"
 EOF
 cat > "$tmp/scripts/final-gate.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case ${1:-} in
- --planning) grep -q '^status: active$' IMPLEMENTATION_PLAN.md ;;
- --implementation) grep -q '^status: complete$' IMPLEMENTATION_PLAN.md ;;
- --campaign-audit) grep -Eq '^result: (pass|findings)$' CAMPAIGN_AUDIT.md ;;
+ --planning) grep -q '^status: active$' .factory/artifacts/implementation-plan.md ;;
+ --implementation) grep -q '^status: complete$' .factory/artifacts/implementation-plan.md ;;
+ --campaign-audit) grep -Eq '^result: (pass|findings)$' .factory/artifacts/campaign-audit.md ;;
  *) exit 2 ;;
 esac
 EOF
@@ -153,7 +160,7 @@ assert all('--no-tui' in c for c in calls if c.startswith(('plan ','implement ',
 PY
 
 set +e
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
 fail_rc=$?
 set -e
 [[ $fail_rc -eq 42 ]]
@@ -162,7 +169,8 @@ set +e
 overwrite_rc=$?
 set -e
 [[ $overwrite_rc -eq 1 ]]
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+grep -q '^implement --resume --no-tui$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
 state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())
@@ -185,13 +193,13 @@ assert state['rounds'][-1]['audit_result']=='findings'
 PY
 
 # Invalid verification configuration must fail closed before any phase runs.
-cp "$tmp/factory.toml" "$tmp/factory.toml.good"
-sed -i '/campaign_command/d' "$tmp/factory.toml"
+cp "$tmp/.factory/config.toml" "$tmp/.factory/config.toml.good"
+sed -i '/campaign_command/d' "$tmp/.factory/config.toml"
 set +e
 (cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --no-tui >/dev/null 2>&1)
 config_rc=$?
 set -e
-mv "$tmp/factory.toml.good" "$tmp/factory.toml"
+mv "$tmp/.factory/config.toml.good" "$tmp/.factory/config.toml"
 [[ $config_rc -eq 1 ]]
 
 # The real inherited descriptor lock is re-entrant for children and excludes a

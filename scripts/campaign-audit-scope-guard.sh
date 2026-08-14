@@ -12,7 +12,7 @@ mapfile -t CHANGED < <({
 } | sort -u)
 for path in "${CHANGED[@]}"; do
     case "$path" in
-        CAMPAIGN_AUDIT.md|.ralph/agent/scratchpad.md) ;;
+        .factory/artifacts/campaign-audit.md|.ralph/agent/scratchpad.md) ;;
         *) echo "campaign-audit-scope: audit modified forbidden path: $path" >&2; exit 1 ;;
     esac
 done

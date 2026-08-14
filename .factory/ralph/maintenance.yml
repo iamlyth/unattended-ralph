@@ -4,7 +4,7 @@ cli:
   command: "./scripts/pi2-ollama.sh"
 
 event_loop:
-  prompt_file: "prompts/MAINTENANCE.md"
+  prompt_file: ".factory/prompts/maintenance.md"
   completion_promise: "MAINTENANCE_COMPLETE"
   starting_event: "factory.maintenance.implement"
   max_iterations: 1000
@@ -26,7 +26,7 @@ hats:
     publishes: ["factory.maintenance.implement"]
     default_publishes: "factory.maintenance.implement"
     instructions: |
-      Follow prompts/MAINTENANCE.md. Complete one bounded ready task per context.
+      Follow .factory/prompts/maintenance.md. Complete one bounded ready task per context.
       You are the sole writer; all Pi subagents remain read-only. Never place
       MAINTENANCE_COMPLETE in an event payload; completion requires that exact token
       alone as the final line outside events.

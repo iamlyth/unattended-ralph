@@ -72,7 +72,7 @@ verify_argv_file=$(mktemp "$PROJECT_ROOT/.factory-state/campaign-verify.XXXXXX")
 trap 'rm -f -- "$verify_argv_file"' EXIT
 if ! python3 - > "$verify_argv_file" <<'PY'
 import os, tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     command = tomllib.load(stream).get('verification', {}).get('campaign_command')
 if not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg and '\0' not in arg for arg in command):
     raise SystemExit('ralph-campaign: verification.campaign_command must be a non-empty argv array')
@@ -169,7 +169,7 @@ while [[ $(state_get status) == active ]]; do
             fi
             plan_base=$(python3 - <<'PY'
 import re
-text=open('IMPLEMENTATION_PLAN.md', encoding='utf-8').read()
+text=open('.factory/artifacts/implementation-plan.md', encoding='utf-8').read()
 match=re.search(r'^base_commit: ([0-9a-f]{40})$', text, re.M)
 print(match.group(1) if match else '')
 PY
@@ -193,10 +193,14 @@ PY
                 if [[ "$started" != true ]]; then
                     record_field implementation implementation_started true
                 fi
-                # Git checkpoints and the active plan are authoritative across a
-                # campaign-level interruption; start a fresh Ralph context rather
-                # than risking --continue against a stale leaf event stream.
-                "$SCRIPT_DIR/ralph-run.sh" "${launcher_args[@]}"
+                # Preserve legitimate uncommitted leaf work after interruption.
+                # A clean checkpoint starts a fresh context; a dirty interrupted
+                # lifecycle must use the launcher's validated recovery path.
+                if [[ "$started" == true && -n $(git status --porcelain --untracked-files=normal) ]]; then
+                    "$SCRIPT_DIR/ralph-run.sh" --resume "${launcher_args[@]}"
+                else
+                    "$SCRIPT_DIR/ralph-run.sh" "${launcher_args[@]}"
+                fi
             fi
             ./scripts/final-gate.sh --implementation
             implementation_commit=$(git rev-parse HEAD)
@@ -207,18 +211,25 @@ PY
             if [[ -x ./scripts/check-installed-functional-evidence.sh ]]; then
                 ./scripts/check-installed-functional-evidence.sh
             fi
+            ./scripts/run-factory-runners.py
+            runner_evidence_sha256=$(./scripts/check-factory-runner-evidence.py --print-digest)
             [[ -z $(git status --porcelain --untracked-files=normal) ]] || { echo "ralph-campaign: verification left a dirty tree" >&2; exit 1; }
             verification_commit=$(git rev-parse HEAD)
-            "$STATE_HELPER" update --expect-phase verification --phase audit --round-field "verification_commit=$(json_string "$verification_commit")"
+            "$STATE_HELPER" update --expect-phase verification --phase audit \
+                --round-field "verification_commit=$(json_string "$verification_commit")" \
+                --round-field "runner_evidence_sha256=$(json_string "$runner_evidence_sha256")"
             ;;
         audit)
             started=$(round_field audit_started)
             expected_audit_base=$(round_field verification_commit)
+            expected_runner_evidence=$(round_field runner_evidence_sha256)
             export FACTORY_CAMPAIGN_AUDIT_ROUND=$round
             export FACTORY_CAMPAIGN_AUDIT_BASE=$expected_audit_base
+            export FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256=$expected_runner_evidence
             if [[ "$started" != true ]]; then
                 [[ $(git rev-parse HEAD) == "$expected_audit_base" ]] || { echo "ralph-campaign: audit HEAD does not match verified implementation" >&2; exit 1; }
-                ./scripts/initialize-campaign-audit.py --round "$round" --base "$expected_audit_base"
+                ./scripts/initialize-campaign-audit.py --round "$round" --base "$expected_audit_base" \
+                    --runner-evidence-sha256 "$expected_runner_evidence"
                 record_field audit audit_started true
                 "$SCRIPT_DIR/ralph-audit.sh" "${launcher_args[@]}"
             else
@@ -235,7 +246,7 @@ PY
             ./scripts/final-gate.sh --campaign-audit
             audit_result=$(python3 - <<'PY'
 import re
-text=open('CAMPAIGN_AUDIT.md', encoding='utf-8').read()
+text=open('.factory/artifacts/campaign-audit.md', encoding='utf-8').read()
 match=re.search(r'^result: (pass|findings)$', text, re.M)
 print(match.group(1) if match else '')
 PY

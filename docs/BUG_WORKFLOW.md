@@ -2,13 +2,13 @@
 
 ## Canonical state and external references
 
-`open-bugs.md` and `closed-bugs.md` are the portable canonical workflow state. Each contains one JSON array under schema `ralph-bug-ledger/v1`. A bug may reference a GitHub issue, a Forgejo issue, both, or neither. External synchronization is manual: issue state never overrides the local ledgers.
+`.factory/bugs/open.md` and `.factory/bugs/closed.md` are the portable canonical workflow state. Each contains one JSON array under schema `ralph-bug-ledger/v1`. A bug may reference a GitHub issue, a Forgejo issue, both, or neither. External synchronization is manual: issue state never overrides the local ledgers.
 
 External references must be HTTPS issue URLs with a parsed hostname and valid optional port, without user information, query strings, or fragments. GitHub and root-hosted Forgejo links use `https://HOST/OWNER/REPO/issues/N` (the legacy singular `issue` route remains accepted). A Forgejo installation hosted below a URL path must expose/copy a canonical issue URL in that expected owner/repository route shape. Never put PATs, passwords, cookies, or other credentials in the repository or in issue URLs. This workflow makes no network calls and uses no provider API clients.
 
 ## Intake and states
 
-IDs are allocated monotonically as `BUG-0001+`. Open ticket states are `open`, `triaged`, `planned`, `in_progress`, and `blocked`; `closed` records live only in `closed-bugs.md`. Severity is `low`, `medium`, `high`, or `critical`.
+IDs are allocated monotonically as `BUG-0001+`. Open ticket states are `open`, `triaged`, `planned`, `in_progress`, and `blocked`; `closed` records live only in `.factory/bugs/closed.md`. Severity is `low`, `medium`, `high`, or `critical`.
 
 A defect restores behavior already required by the committed specification. If `contract_change` is true, expected behavior needs a product decision, or the fix would edit `docs/SPEC.md`, stop and use the human specification workflow: approve and commit the spec, then run the ordinary planning/implementation lifecycle. Maintenance must never decide or silently change the product contract.
 
@@ -44,7 +44,7 @@ Triage an ordinary defect, then start from a clean tree:
 
 ```bash
 ./scripts/ralph-maintenance-plan.sh BUG-0001
-# Review the committed MAINTENANCE_PLAN.md
+# Review the committed .factory/artifacts/maintenance-plan.md
 ./scripts/ralph-maintenance-run.sh
 ```
 

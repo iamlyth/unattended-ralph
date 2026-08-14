@@ -40,10 +40,10 @@ SCRATCHPAD=.ralph/agent/scratchpad.md
 git restore --staged -- .ralph 2>/dev/null || true
 
 case "$MODE" in
-    planning) git add -- IMPLEMENTATION_PLAN.md ;;
-    maintenance-planning) git add -- MAINTENANCE_PLAN.md ;;
-    campaign-audit) git add -- CAMPAIGN_AUDIT.md ;;
-    maintenance-ledger) git add -- open-bugs.md closed-bugs.md ;;
+    planning) git add -- .factory/artifacts/implementation-plan.md ;;
+    maintenance-planning) git add -- .factory/artifacts/maintenance-plan.md ;;
+    campaign-audit) git add -- .factory/artifacts/campaign-audit.md ;;
+    maintenance-ledger) git add -- .factory/bugs/open.md .factory/bugs/closed.md ;;
     implementation|maintenance) git add -A -- . ':(exclude).ralph/**' ;;
 esac
 if [[ "$MODE" != maintenance-ledger && -f "$SCRATCHPAD" ]]; then
@@ -53,10 +53,10 @@ fi
 mapfile -t STAGED < <(git diff --cached --name-only)
 for path in "${STAGED[@]}"; do
     case "$MODE:$path" in
-        planning:IMPLEMENTATION_PLAN.md|planning:.ralph/agent/scratchpad.md) ;;
-        maintenance-planning:MAINTENANCE_PLAN.md|maintenance-planning:.ralph/agent/scratchpad.md) ;;
-        campaign-audit:CAMPAIGN_AUDIT.md|campaign-audit:.ralph/agent/scratchpad.md) ;;
-        maintenance-ledger:open-bugs.md|maintenance-ledger:closed-bugs.md) ;;
+        planning:.factory/artifacts/implementation-plan.md|planning:.ralph/agent/scratchpad.md) ;;
+        maintenance-planning:.factory/artifacts/maintenance-plan.md|maintenance-planning:.ralph/agent/scratchpad.md) ;;
+        campaign-audit:.factory/artifacts/campaign-audit.md|campaign-audit:.ralph/agent/scratchpad.md) ;;
+        maintenance-ledger:.factory/bugs/open.md|maintenance-ledger:.factory/bugs/closed.md) ;;
         implementation:*|maintenance:*) ;;
         *) echo "ralph-checkpoint: $MODE checkpoint contains forbidden staged path: $path" >&2; exit 1 ;;
     esac

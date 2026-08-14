@@ -1,6 +1,6 @@
 # Maintenance Implementation Loop
 
-Implement exactly the bug selected in `.factory-state/maintenance-bug-id` according to `MAINTENANCE_PLAN.md`.
+Implement exactly the bug selected in `.factory-state/maintenance-bug-id` according to `.factory/artifacts/maintenance-plan.md`.
 
 Before selecting work, study `AGENTS.md`, the selected canonical bug record, the complete maintenance plan, the latest scratchpad handoff, and relevant source/tests. Search and trace the production path before changing code—do not assume the reported cause is correct or functionality is absent merely from names, TODOs, or prior evidence. Use `AGENTS.md` for serialized build/run/validation commands.
 
@@ -13,7 +13,7 @@ Non-negotiable rules:
 5. Fix the root cause completely; do not leave placeholders/stubs, weaken assertions, or bypass production behavior. Derive tests from the selected record's behavioral acceptance criteria and cover relevant failure/edge cases. Record exact commands and semantic outcomes.
 6. Mark tasks complete only after verification. Task status values are exact: `pending`, `in_progress`, `complete`, or `blocked`; write `- Status: complete`, never `done`. Never prune, renumber, replace, or recycle tasks during the active maintenance cycle. Keep the front status active until all tasks complete.
 7. Do not change intake fields of the bug. External URLs and workflow status are mutable and excluded from its fingerprint.
-8. Move the selected `in_progress` bug from `open-bugs.md` to `closed-bugs.md` only in the final task, using `bug-ledger.py close` with non-empty resolution and verification. Do not close any other bug.
+8. Move the selected `in_progress` bug from `.factory/bugs/open.md` to `.factory/bugs/closed.md` only in the final task, using `bug-ledger.py close` with non-empty resolution and verification. Do not close any other bug.
 9. The final task is exactly **Maintenance verification and documentation audit**. It runs boilerplate verification and the configured `[verification].maintenance_command`, audits docs and acceptance evidence, then sets front status complete. The configured argv must name an executable project verifier.
 10. Capture why a regression test or operational constraint matters in nearby documentation. If a durable build/run/validation fact is learned, update `AGENTS.md` but keep it concise and free of progress history.
 11. Commit one coherent checkpoint and replace rather than append to the recovery scratchpad with one short current handoff. Use one level-one title plus concise bullets for outcome, exact verification, commit, and next task; stay below 80 lines and 8 KiB, omit detailed change history, and never include the reserved completion token.

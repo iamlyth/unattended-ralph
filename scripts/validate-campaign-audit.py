@@ -38,7 +38,7 @@ def parse(path: Path) -> tuple[dict[str, str], str]:
         if key in meta:
             fail(f"duplicate metadata key: {key}")
         meta[key] = value
-    expected = ["schema", "round", "audit_base_commit", "plan_commit", "plan_blob", "environment_blob", "result"]
+    expected = ["schema", "round", "audit_base_commit", "plan_commit", "plan_blob", "environment_blob", "runner_evidence_sha256", "result"]
     if list(meta) != expected:
         fail(f"metadata keys/order must be exactly {expected}")
     return meta, match.group(2)
@@ -47,9 +47,10 @@ def parse(path: Path) -> tuple[dict[str, str], str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("metadata", "complete"))
-    parser.add_argument("path", nargs="?", default="CAMPAIGN_AUDIT.md")
+    parser.add_argument("path", nargs="?", default=".factory/artifacts/campaign-audit.md")
     parser.add_argument("--expected-round", type=int)
     parser.add_argument("--expected-base")
+    parser.add_argument("--expected-runner-evidence-sha256")
     args = parser.parse_args()
     meta, body = parse(ROOT / args.path)
     if meta["schema"] != "ralph-campaign-audit/v1":
@@ -63,14 +64,20 @@ def main() -> int:
     for key in ("audit_base_commit", "plan_commit", "plan_blob", "environment_blob"):
         if not re.fullmatch(SHA, meta[key]):
             fail(f"{key} must be a full object ID")
+    if not re.fullmatch(r"[0-9a-f]{64}", meta["runner_evidence_sha256"]):
+        fail("runner_evidence_sha256 must be a SHA-256 digest")
     if git("replace", "-l"):
         fail("Git replacement objects are forbidden during an audit")
     git("cat-file", "-e", f"{meta['audit_base_commit']}^{{commit}}")
     if args.mode == "complete":
-        if args.expected_round is None or not args.expected_base:
-            fail("completed validation requires supervisor-owned expected round and base")
-        if round_number != args.expected_round or meta["audit_base_commit"] != args.expected_base:
-            fail("report round/base does not match the supervisor-owned audit binding")
+        if args.expected_round is None or not args.expected_base or not args.expected_runner_evidence_sha256:
+            fail("completed validation requires supervisor-owned round, base, and runner evidence")
+        if (
+            round_number != args.expected_round
+            or meta["audit_base_commit"] != args.expected_base
+            or meta["runner_evidence_sha256"] != args.expected_runner_evidence_sha256
+        ):
+            fail("report binding does not match supervisor-owned campaign state")
         if not re.fullmatch(SHA, args.expected_base):
             fail("expected audit base is invalid")
     if subprocess.run(
@@ -78,19 +85,27 @@ def main() -> int:
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode:
         fail("audit base is not an ancestor of HEAD")
-    if git("rev-parse", f"{meta['audit_base_commit']}:IMPLEMENTATION_PLAN.md") != meta["plan_blob"]:
+    if git("rev-parse", f"{meta['audit_base_commit']}:.factory/artifacts/implementation-plan.md") != meta["plan_blob"]:
         fail("plan blob does not match audit base")
-    if git("log", "-1", "--format=%H", meta["audit_base_commit"], "--", "IMPLEMENTATION_PLAN.md") != meta["plan_commit"]:
+    if git("log", "-1", "--format=%H", meta["audit_base_commit"], "--", ".factory/artifacts/implementation-plan.md") != meta["plan_commit"]:
         fail("plan commit does not match audit base")
-    if git("rev-parse", f"{meta['audit_base_commit']}:factory-environment.toml") != meta["environment_blob"]:
+    if git("rev-parse", f"{meta['audit_base_commit']}:.factory/environment.toml") != meta["environment_blob"]:
         fail("environment blob does not match audit base")
+    if args.mode == "complete":
+        evidence_digest = subprocess.run(
+            [str(ROOT / "scripts/check-factory-runner-evidence.py"),
+             "--expected-commit", meta["audit_base_commit"], "--print-digest"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        if evidence_digest.returncode or evidence_digest.stdout.strip() != meta["runner_evidence_sha256"]:
+            fail("runner evidence digest does not match the verified campaign phase")
     changed: set[str] = set(filter(None, git("diff", "--name-only", f"{meta['audit_base_commit']}..HEAD").splitlines()))
     commits = git("rev-list", f"{meta['audit_base_commit']}..HEAD").splitlines()
     if git("rev-list", "--min-parents=2", f"{meta['audit_base_commit']}..HEAD"):
         fail("merge commits are forbidden during an independent audit")
     for commit in commits:
         changed.update(filter(None, git("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit).splitlines()))
-    forbidden = changed - {"CAMPAIGN_AUDIT.md", ".ralph/agent/scratchpad.md"}
+    forbidden = changed - {".factory/artifacts/campaign-audit.md", ".ralph/agent/scratchpad.md"}
     if forbidden:
         fail(f"audit commits changed forbidden paths: {sorted(forbidden)}")
     if args.mode == "metadata":
@@ -105,7 +120,7 @@ def main() -> int:
         "Specification": r"`docs/[^`]+`",
         "Production paths": r"`[^`]*[/][^`]+`",
         "Executable evidence": r"`[^`]+`.*\b(PASS|FAIL|BLOCKED)\b",
-        "Environment limits": r"`factory-environment\.toml`",
+        "Environment limits": r"`\.factory/environment\.toml`",
     }
     for field, detail_pattern in evidence_rules.items():
         match = re.search(rf"^- {field}:\s+(.+)$", evidence.group(1), re.M)
@@ -115,9 +130,9 @@ def main() -> int:
     if meta["result"] == "pass":
         if findings or not re.search(r"^## Findings\s*\n\s*None\.\s*$", body, re.M):
             fail("pass requires an explicit Findings section containing None.")
-        with (ROOT / "factory.toml").open("rb") as stream:
+        with (ROOT / ".factory/config.toml").open("rb") as stream:
             required_capabilities = tomllib.load(stream).get("campaign", {}).get("required_capabilities", [])
-        with (ROOT / "factory-environment.toml").open("rb") as stream:
+        with (ROOT / ".factory/environment.toml").open("rb") as stream:
             environment = tomllib.load(stream)
         if not isinstance(required_capabilities, list) or not all(isinstance(item, str) and item for item in required_capabilities):
             fail("campaign.required_capabilities must be a string array")
@@ -129,6 +144,18 @@ def main() -> int:
         missing = sorted(set(required_capabilities) - declared)
         if missing:
             fail(f"pass lacks declared required environment capabilities: {missing}")
+        if required_capabilities:
+            evidence = subprocess.run(
+                [str(ROOT / "scripts/check-factory-runner-evidence.py"),
+                 "--expected-commit", meta["audit_base_commit"], "--print-capabilities"],
+                cwd=ROOT, text=True, capture_output=True,
+            )
+            if evidence.returncode:
+                fail("pass lacks valid commit-bound runner evidence")
+            evidenced = set(filter(None, evidence.stdout.splitlines()))
+            unevidenced = sorted(set(required_capabilities) - evidenced)
+            if unevidenced:
+                fail(f"pass lacks executed runner evidence for required capabilities: {unevidenced}")
     else:
         if not findings:
             fail("findings result requires at least one numbered Finding section")

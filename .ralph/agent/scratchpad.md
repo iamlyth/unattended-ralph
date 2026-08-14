@@ -8,4 +8,4 @@ The current planning or implementation iteration should replace this text with a
 - unresolved blockers
 - exact next action
 
-Keep this file concise. Durable project truth belongs in `docs/SPEC.md` and `IMPLEMENTATION_PLAN.md`.
+Keep this file concise. Durable project truth belongs in `docs/SPEC.md` and `.factory/artifacts/implementation-plan.md`.

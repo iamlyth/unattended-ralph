@@ -1,12 +1,12 @@
 # Maintenance Planning Loop
 
-Plan one selected defect; do not implement it. The selected ID is in `.factory-state/maintenance-bug-id`. Canonical state is `open-bugs.md`; external GitHub/Forgejo issues are references only.
+Plan one selected defect; do not implement it. The selected ID is in `.factory-state/maintenance-bug-id`. Canonical state is `.factory/bugs/open.md`; external GitHub/Forgejo issues are references only.
 
-A new cycle intentionally starts from a minimal `MAINTENANCE_PLAN.md` skeleton. Do not retrieve, copy, summarize, or append tasks or evidence from an older maintenance plan in Git history. Plan only the selected bug from its current record and current repository state; Git history and `closed-bugs.md` archive prior cycles.
+A new cycle intentionally starts from a minimal `.factory/artifacts/maintenance-plan.md` skeleton. Do not retrieve, copy, summarize, or append tasks or evidence from an older maintenance plan in Git history. Plan only the selected bug from its current record and current repository state; Git history and `.factory/bugs/closed.md` archive prior cycles.
 
 Validate the ledgers and study `AGENTS.md` plus the selected `triaged` record with `scripts/bug-ledger.py`. A resumed planning run may already be `planned`. Search relevant production source, tests, shared utilities, TODOs, placeholders, skipped/flaky tests, and inconsistent patterns before accepting the reported diagnosis—do not assume functionality is missing or the stated cause is correct. Stop with the task blocked if the bug has `contract_change: true`, requires a product decision, or cannot be resolved without editing `docs/SPEC.md`; a human must use the specification workflow. Never edit the specification.
 
-You are the only writer. Read-only subagents may inspect code, tests, security, and documentation. Modify only `MAINTENANCE_PLAN.md` and `.ralph/agent/scratchpad.md`.
+You are the only writer. Read-only subagents may inspect code, tests, security, and documentation. Modify only `.factory/artifacts/maintenance-plan.md` and `.ralph/agent/scratchpad.md`.
 
 Preserve the launcher-provided front-matter values from the fresh skeleton throughout the cycle, especially the immutable `base_commit`; do not recompute it from planning-checkpoint `HEAD`. Replace the plan body while retaining this exact front-matter key set:
 

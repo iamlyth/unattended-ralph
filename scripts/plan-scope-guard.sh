@@ -13,7 +13,7 @@ mapfile -t CHANGED < <({
 
 for path in "${CHANGED[@]}"; do
     case "$path" in
-        IMPLEMENTATION_PLAN.md|.ralph/agent/scratchpad.md) ;;
+        .factory/artifacts/implementation-plan.md|.ralph/agent/scratchpad.md) ;;
         *)
             echo "plan-scope: planning loop modified forbidden path: $path" >&2
             exit 1

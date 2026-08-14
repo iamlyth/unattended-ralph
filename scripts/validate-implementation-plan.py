@@ -120,7 +120,7 @@ def validate_final_task(tasks: list[dict[str, object]]) -> None:
 
 def main() -> None:
     if len(sys.argv) != 3 or sys.argv[1] not in {"planning", "complete"}:
-        raise SystemExit("usage: validate-implementation-plan.py planning|complete IMPLEMENTATION_PLAN.md")
+        raise SystemExit("usage: validate-implementation-plan.py planning|complete .factory/artifacts/implementation-plan.md")
     mode, path = sys.argv[1], Path(sys.argv[2])
     text = path.read_text(encoding="utf-8")
     tasks = parse_tasks(text)

@@ -27,7 +27,7 @@ command -v pi2 >/dev/null || { echo "ralph-plan: pi2 is not available in this sh
 
 SPEC=$(python3 - <<'PY'
 import tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     print(tomllib.load(stream)['project']['spec'])
 PY
 )
@@ -66,7 +66,7 @@ else
     [[ $(cat .factory-state/loop-mode 2>/dev/null) == planning ]] || {
         echo "ralph-plan: saved lifecycle is not specification planning" >&2; exit 1;
     }
-    [[ -s IMPLEMENTATION_PLAN.md ]] || { echo "ralph-plan: missing planning draft for resume" >&2; exit 1; }
+    [[ -s .factory/artifacts/implementation-plan.md ]] || { echo "ralph-plan: missing planning draft for resume" >&2; exit 1; }
     FACTORY_PLANNING_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
 fi
 export FACTORY_PLANNING_BASE_COMMIT
@@ -87,7 +87,7 @@ while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin planning
 
-    command=("$RALPH_BIN" -c ralph.plan.yml run --exclusive)
+    command=("$RALPH_BIN" -c .factory/ralph/plan.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e

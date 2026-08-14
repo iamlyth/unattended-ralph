@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-PLAN=${FACTORY_PLAN_PATH:-$PROJECT_ROOT/IMPLEMENTATION_PLAN.md}
+PLAN=${FACTORY_PLAN_PATH:-$PROJECT_ROOT/.factory/artifacts/implementation-plan.md}
 PHASE=committed
 if [[ ${1:-} == --planning ]]; then
     PHASE=planning
@@ -12,7 +12,7 @@ fi
 (( $# == 0 )) || { echo "Usage: scripts/check-plan-freshness.sh [--planning]" >&2; exit 2; }
 cd -- "$PROJECT_ROOT"
 
-[[ -s "$PLAN" ]] || { echo "plan-freshness: missing IMPLEMENTATION_PLAN.md; run ./scripts/ralph-plan.sh" >&2; exit 1; }
+[[ -s "$PLAN" ]] || { echo "plan-freshness: missing .factory/artifacts/implementation-plan.md; run ./scripts/ralph-plan.sh" >&2; exit 1; }
 
 mapfile -t META < <(python3 - "$PLAN" <<'PY'
 import sys
@@ -40,7 +40,7 @@ BASE_COMMIT=${META[3]}
 STATUS=${META[4]}
 CANONICAL_SPEC=$(python3 - <<'PY'
 import tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     print(tomllib.load(stream)['project']['spec'])
 PY
 )

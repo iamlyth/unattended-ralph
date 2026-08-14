@@ -4,7 +4,7 @@ cli:
   command: "./scripts/pi2-ollama.sh"
 
 event_loop:
-  prompt_file: "prompts/AUDIT.md"
+  prompt_file: ".factory/prompts/audit.md"
   completion_promise: "AUDIT_COMPLETE"
   starting_event: "factory.audit"
   max_iterations: 20
@@ -26,8 +26,8 @@ hats:
     publishes: ["factory.audit"]
     default_publishes: "factory.audit"
     instructions: |
-      Follow prompts/AUDIT.md exactly. Coordinate only read-only Pi subagents.
-      Write only CAMPAIGN_AUDIT.md and the recovery scratchpad. Never place
+      Follow .factory/prompts/audit.md exactly. Coordinate only read-only Pi subagents.
+      Write only .factory/artifacts/campaign-audit.md and the recovery scratchpad. Never place
       AUDIT_COMPLETE in an event payload; completion requires that exact token
       alone as the final line outside events.
 

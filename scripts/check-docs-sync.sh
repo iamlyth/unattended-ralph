@@ -6,7 +6,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd -- "$PROJECT_ROOT"
 
 BASE=$(python3 - <<'PY'
-lines = open('IMPLEMENTATION_PLAN.md', encoding='utf-8').read().splitlines()
+lines = open('.factory/artifacts/implementation-plan.md', encoding='utf-8').read().splitlines()
 for line in lines:
     if line.startswith('base_commit:'):
         print(line.split(':', 1)[1].strip().strip('"\''))
@@ -25,7 +25,7 @@ docs_changed=false
 for path in "${CHANGED[@]}"; do
     case "$path" in
         README.md|docs/*) docs_changed=true ;;
-        IMPLEMENTATION_PLAN.md|.ralph/*|.pi/*) ;;
+        .factory/artifacts/implementation-plan.md|.ralph/*|.pi/*) ;;
         *) product_changed=true ;;
     esac
 done

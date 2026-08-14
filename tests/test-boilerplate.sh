@@ -23,10 +23,10 @@ set -e
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/scripts" "$tmp/docs"
+mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory/artifacts"
 cp "$PROJECT_ROOT/scripts/check-plan-freshness.sh" "$tmp/scripts/"
 printf '# Trial specification\n' > "$tmp/docs/SPEC.md"
-cat > "$tmp/factory.toml" <<'EOF'
+cat > "$tmp/.factory/config.toml" <<'EOF'
 [project]
 spec = "docs/SPEC.md"
 EOF
@@ -37,7 +37,7 @@ git -C "$tmp" add docs/SPEC.md
 git -C "$tmp" commit -qm spec
 spec_commit=$(git -C "$tmp" rev-parse HEAD)
 spec_blob=$(git -C "$tmp" rev-parse HEAD:docs/SPEC.md)
-cat > "$tmp/IMPLEMENTATION_PLAN.md" <<EOF
+cat > "$tmp/.factory/artifacts/implementation-plan.md" <<EOF
 ---
 spec_path: docs/SPEC.md
 spec_commit: $spec_commit
@@ -47,7 +47,7 @@ status: active
 ---
 # Plan
 EOF
-git -C "$tmp" add IMPLEMENTATION_PLAN.md factory.toml scripts/check-plan-freshness.sh
+git -C "$tmp" add .factory/artifacts/implementation-plan.md .factory/config.toml scripts/check-plan-freshness.sh
 git -C "$tmp" commit -qm plan
 "$tmp/scripts/check-plan-freshness.sh" >/dev/null
 printf '\nchanged\n' >> "$tmp/docs/SPEC.md"
@@ -64,7 +64,7 @@ cmp -s "$PROJECT_ROOT/.github/ISSUE_TEMPLATE/bug_report.md" "$PROJECT_ROOT/.forg
 python3 - "$PROJECT_ROOT" <<'PY'
 import pathlib, sys, tomllib
 root = pathlib.Path(sys.argv[1])
-with (root / 'factory.toml').open('rb') as stream:
+with (root / '.factory/config.toml').open('rb') as stream:
     config = tomllib.load(stream)
 assert config['concurrency']['mutating_workers'] == 1
 assert config['concurrency']['integration_workers'] == 1
@@ -78,8 +78,8 @@ assert all(isinstance(arg, str) and arg for arg in config['verification']['campa
 assert config['issues']['providers'] == ['github', 'forgejo']
 assert config['issues']['external_sync'] == 'manual'
 assert config['issues']['credentials'] is False
-for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md',
-             'ralph.maintenance.yml', 'ralph.maintenance-plan.yml',
+for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.factory/artifacts/maintenance-plan.md',
+             '.factory/ralph/maintenance.yml', '.factory/ralph/maintenance-plan.yml',
              'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
              'scripts/validate-implementation-plan.py',
              'scripts/check-scratchpad.sh', 'tests/test-scratchpad-guard.sh',
@@ -87,8 +87,8 @@ for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md
              'tests/test-ralph-completion-recovery.sh',
              'scripts/ralph-maintenance-plan.sh',
              'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md',
-             'factory-environment.toml', 'CAMPAIGN_AUDIT.md', 'ralph.audit.yml',
-             'prompts/AUDIT.md', 'scripts/check-factory-environment.py',
+             '.factory/environment.toml', '.factory/artifacts/campaign-audit.md', '.factory/ralph/audit.yml',
+             '.factory/prompts/audit.md', 'scripts/check-factory-environment.py',
              'scripts/ralph-campaign-state.py', 'scripts/initialize-campaign-audit.py',
              'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
              'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
@@ -96,7 +96,7 @@ for path in ('AGENTS.md', 'open-bugs.md', 'closed-bugs.md', 'MAINTENANCE_PLAN.md
              'tests/test-ralph-campaign.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
 PY
-for config in ralph.yml ralph.plan.yml ralph.audit.yml ralph.maintenance.yml ralph.maintenance-plan.yml; do
+for config in .factory/ralph/implementation.yml .factory/ralph/plan.yml .factory/ralph/audit.yml .factory/ralph/maintenance.yml .factory/ralph/maintenance-plan.yml; do
     grep -q 'parallel: false' "$PROJECT_ROOT/$config"
     grep -q 'check-scratchpad.sh' "$PROJECT_ROOT/$config"
     grep -q -- '--allow-oversize' "$PROJECT_ROOT/$config"
@@ -115,13 +115,13 @@ for name, mode in {
     lock = text.index('factory_lock_acquire')
     marker = text.index(f"printf '%s\\n' {mode} > .factory-state/loop-mode")
     assert marker > lock, f'{name}: loop-mode marker is not under factory lock'
-for name in ('ralph.yml', 'ralph.plan.yml', 'ralph.audit.yml', 'ralph.maintenance.yml', 'ralph.maintenance-plan.yml'):
+for name in ('.factory/ralph/implementation.yml', '.factory/ralph/plan.yml', '.factory/ralph/audit.yml', '.factory/ralph/maintenance.yml', '.factory/ralph/maintenance-plan.yml'):
     text = (root / name).read_text(encoding='utf-8')
     assert text.index('check-scratchpad.sh') < text.index('git-commit-hook.sh'), \
         f'{name}: scratchpad guard must run before checkpoint'
-planning = (root / 'ralph.plan.yml').read_text(encoding='utf-8')
+planning = (root / '.factory/ralph/plan.yml').read_text(encoding='utf-8')
 assert planning.index('check-plan-freshness.sh", "--planning') < planning.index('git-commit-hook.sh'), \
-    'ralph.plan.yml: immutable planning metadata must be checked before checkpoint'
+    '.factory/ralph/plan.yml: immutable planning metadata must be checked before checkpoint'
 maintenance = (root / 'scripts/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
 lock = maintenance.index('factory_lock_acquire')
 selection = maintenance.index('> .factory-state/maintenance-bug-id')

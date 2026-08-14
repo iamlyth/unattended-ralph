@@ -21,7 +21,7 @@ PHASES = {"planning", "implementation", "verification", "audit", "complete", "bl
 ROUND_KEYS = {
     "number", "base_commit", "planning_started", "plan_commit",
     "implementation_started", "implementation_commit", "verification_commit",
-    "audit_started", "audit_commit", "audit_result",
+    "runner_evidence_sha256", "audit_started", "audit_commit", "audit_result",
 }
 
 
@@ -56,6 +56,7 @@ def empty_round(number: int) -> dict:
         "number": number, "base_commit": None, "planning_started": False,
         "plan_commit": None, "implementation_started": False,
         "implementation_commit": None, "verification_commit": None,
+        "runner_evidence_sha256": None,
         "audit_started": False, "audit_commit": None, "audit_result": None,
     }
 
@@ -64,7 +65,7 @@ def complete_record(record: dict) -> bool:
     return (
         all(record[key] is not None for key in (
             "base_commit", "plan_commit", "implementation_commit",
-            "verification_commit", "audit_commit", "audit_result"))
+            "verification_commit", "runner_evidence_sha256", "audit_commit", "audit_result"))
         and record["planning_started"] and record["implementation_started"]
         and record["audit_started"]
     )
@@ -79,7 +80,7 @@ def validate(data: object) -> dict:
     }
     if not isinstance(data, dict) or set(data) != required:
         fail("state has unexpected fields")
-    if data["schema"] != "ralph-campaign/v1" or data["status"] not in {"active", "complete", "blocked"}:
+    if data["schema"] != "ralph-campaign/v2" or data["status"] not in {"active", "complete", "blocked"}:
         fail("state schema or status is invalid")
     if not isinstance(data["rounds_requested"], int) or data["rounds_requested"] < 1:
         fail("rounds_requested is invalid")
@@ -102,6 +103,9 @@ def validate(data: object) -> dict:
                 if not isinstance(value, str) or not SHA.fullmatch(value):
                     fail(f"round {number} {key} is invalid")
                 git("cat-file", "-e", f"{value}^{{commit}}")
+        evidence_digest = record["runner_evidence_sha256"]
+        if evidence_digest is not None and (not isinstance(evidence_digest, str) or not DIGEST.fullmatch(evidence_digest)):
+            fail(f"round {number} runner evidence digest is invalid")
         for key in ("planning_started", "implementation_started", "audit_started"):
             if not isinstance(record[key], bool):
                 fail(f"round {number} {key} is invalid")
@@ -132,8 +136,10 @@ def validate(data: object) -> dict:
     if phase in {"verification", "audit", "complete", "blocked-findings"}:
         if not current["implementation_started"] or not current["implementation_commit"]:
             fail(f"phase {phase} lacks completed implementation state")
-    if phase in {"audit", "complete", "blocked-findings"} and not current["verification_commit"]:
-        fail(f"phase {phase} lacks verification binding")
+    if phase in {"audit", "complete", "blocked-findings"} and (
+        not current["verification_commit"] or not current["runner_evidence_sha256"]
+    ):
+        fail(f"phase {phase} lacks verification or runner-evidence binding")
     if phase in {"complete", "blocked-findings"} and not complete_record(current):
         fail(f"phase {phase} lacks a completed audit")
     if data["status"] == "active" and phase not in {"planning", "implementation", "verification", "audit"}:
@@ -229,7 +235,7 @@ def main() -> int:
         record = empty_round(1)
         record["base_commit"] = args.base
         atomic_write({
-            "schema": "ralph-campaign/v1", "status": "active",
+            "schema": "ralph-campaign/v2", "status": "active",
             "rounds_requested": args.rounds, "round": 1, "phase": "planning",
             "tui": args.tui == "true", "verification_command_sha256": args.verification_digest,
             "rounds": [record],
@@ -248,7 +254,7 @@ def main() -> int:
         allowed_fields = {
             "planning": {"base_commit", "planning_started", "plan_commit"},
             "implementation": {"implementation_started", "implementation_commit"},
-            "verification": {"verification_commit"},
+            "verification": {"verification_commit", "runner_evidence_sha256"},
             "audit": {"audit_started", "audit_commit", "audit_result"},
         }[args.expect_phase]
         record = data["rounds"][-1]
@@ -256,7 +262,15 @@ def main() -> int:
             if "=" not in assignment: fail("--round-field requires key=JSON")
             key, raw = assignment.split("=", 1)
             if key not in allowed_fields: fail(f"field {key} is not writable in {args.expect_phase}")
-            record[key] = parse_value(raw)
+            value = parse_value(raw)
+            current = record[key]
+            if current not in (None, False) and current != value:
+                fail(f"field {key} is write-once")
+            if current is False and value is not True:
+                fail(f"phase marker {key} may only transition false to true")
+            if current is None and value is None:
+                fail(f"field {key} cannot be recorded as null")
+            record[key] = value
         if args.phase:
             expected_next = {"planning": "implementation", "implementation": "verification", "verification": "audit"}.get(args.expect_phase)
             if args.phase != expected_next:

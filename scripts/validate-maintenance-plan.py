@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strictly parse and validate MAINTENANCE_PLAN.md (stdlib only)."""
+"""Strictly parse and validate .factory/artifacts/maintenance-plan.md (stdlib only)."""
 from __future__ import annotations
 
 import argparse
@@ -110,7 +110,7 @@ def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("planning", "complete", "current", "metadata"))
-    parser.add_argument("path", nargs="?", default="MAINTENANCE_PLAN.md")
+    parser.add_argument("path", nargs="?", default=".factory/artifacts/maintenance-plan.md")
     args = parser.parse_args()
     text = pathlib.Path(args.path).read_text(encoding="utf-8")
     metadata, tasks = parse(text)

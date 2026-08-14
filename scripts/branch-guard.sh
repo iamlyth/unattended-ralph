@@ -7,7 +7,7 @@ cd -- "$PROJECT_ROOT"
 
 EXPECTED_BRANCH=${FACTORY_DEVELOPMENT_BRANCH:-$(python3 - <<'PY'
 import tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     print(tomllib.load(stream)['project']['development_branch'])
 PY
 )}

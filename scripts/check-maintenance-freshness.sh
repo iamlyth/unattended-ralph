@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-PLAN=${FACTORY_MAINTENANCE_PLAN_PATH:-$PROJECT_ROOT/MAINTENANCE_PLAN.md}
+PLAN=${FACTORY_MAINTENANCE_PLAN_PATH:-$PROJECT_ROOT/.factory/artifacts/maintenance-plan.md}
 SELECTION="$PROJECT_ROOT/.factory-state/maintenance-bug-id"
 PHASE=committed
 if [[ ${1:-} == --planning ]]; then
@@ -16,7 +16,7 @@ cd -- "$PROJECT_ROOT"
 [[ -s "$SELECTION" ]] || { echo "maintenance-freshness: no selected bug; run ralph-maintenance-plan.sh BUG-ID" >&2; exit 1; }
 BUG_ID=$(tr -d '[:space:]' < "$SELECTION")
 [[ "$BUG_ID" =~ ^BUG-[0-9]{4,}$ ]] || { echo "maintenance-freshness: invalid selected bug ID" >&2; exit 1; }
-[[ -s "$PLAN" ]] || { echo "maintenance-freshness: missing MAINTENANCE_PLAN.md" >&2; exit 1; }
+[[ -s "$PLAN" ]] || { echo "maintenance-freshness: missing .factory/artifacts/maintenance-plan.md" >&2; exit 1; }
 ./scripts/bug-ledger.py validate >/dev/null
 ./scripts/validate-maintenance-plan.py current "$PLAN" >/dev/null
 
@@ -45,13 +45,13 @@ if phase == 'planning':
         raise SystemExit('maintenance-freshness: selected cycle base is not a commit')
 else:
     checkpoint_meta = None
-    for commit in git('log', '--format=%H', '--', 'MAINTENANCE_PLAN.md').splitlines():
+    for commit in git('log', '--format=%H', '--', '.factory/artifacts/maintenance-plan.md').splitlines():
         body = git('show', '-s', '--format=%B', commit)
         if not any(line == 'Mode: maintenance-planning' for line in body.splitlines()):
             continue
         try:
             checkpoint_text = subprocess.check_output(
-                ['git', 'show', f'{commit}:MAINTENANCE_PLAN.md'], text=True,
+                ['git', 'show', f'{commit}:.factory/artifacts/maintenance-plan.md'], text=True,
                 stderr=subprocess.DEVNULL,
             )
             checkpoint_meta, _ = module.parse(checkpoint_text)
@@ -74,7 +74,7 @@ PY
 
 CANONICAL_SPEC=$(python3 - <<'PY'
 import tomllib
-with open('factory.toml', 'rb') as stream:
+with open('.factory/config.toml', 'rb') as stream:
     print(tomllib.load(stream)['project']['spec'])
 PY
 )
@@ -95,7 +95,7 @@ ACTUAL_BLOB=$(git rev-parse "HEAD:$CANONICAL_SPEC")
 mapfile -t BUG_META < <(python3 - "$BUG_ID" <<'PY'
 import json, re, sys
 bug_id = sys.argv[1]
-for path in ('open-bugs.md', 'closed-bugs.md'):
+for path in ('.factory/bugs/open.md', '.factory/bugs/closed.md'):
     text = open(path, encoding='utf-8').read()
     data = json.loads(re.search(r'```json\s*\n(.*?)\n```', text, re.S).group(1))
     for record in data:
@@ -111,7 +111,7 @@ PY
 ACTUAL_FINGERPRINT=$(./scripts/bug-ledger.py fingerprint "$BUG_ID")
 [[ "$ACTUAL_FINGERPRINT" == "${META[1]}" ]] || { echo "maintenance-freshness: immutable bug intake changed after planning" >&2; exit 1; }
 
-if [[ "${BUG_META[0]}" == closed-bugs.md ]]; then
+if [[ "${BUG_META[0]}" == .factory/bugs/closed.md ]]; then
     ./scripts/validate-maintenance-plan.py complete "$PLAN" >/dev/null || {
         echo "maintenance-freshness: selected bug may close only during a completed maintenance plan" >&2
         exit 1

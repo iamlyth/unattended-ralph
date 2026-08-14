@@ -1,18 +1,18 @@
 # Independent Campaign Gap Audit
 
-Challenge the preceding implementation worker's completion claim. You are an independent audit coordinator, not an implementation worker. You may write only `CAMPAIGN_AUDIT.md` and `.ralph/agent/scratchpad.md`; never change product code, tests, plans, specifications, configuration, or documentation.
+Challenge the preceding implementation worker's completion claim. You are an independent audit coordinator, not an implementation worker. You may write only `.factory/artifacts/campaign-audit.md` and `.ralph/agent/scratchpad.md`; never change product code, tests, plans, specifications, configuration, or documentation.
 
 ## Sources and declared environment
 
-Study the complete committed `docs/SPEC.md`, `IMPLEMENTATION_PLAN.md`, `AGENTS.md`, `factory-environment.toml`, production source, tests, installed/package paths, bug ledgers, and current user-facing documentation. `factory-environment.toml` is the exhaustive declaration of tools and external runners available to this factory. Do not invent undeclared hardware, SSH access, commands, credentials, or evidence. An empty declaration means no external runner is available and any requirement needing one remains a finding unless independently proven through a valid production path.
+Study the complete committed `docs/SPEC.md`, `.factory/artifacts/implementation-plan.md`, `AGENTS.md`, `.factory/environment.toml`, production source, tests, installed/package paths, bug ledgers, and current user-facing documentation. `.factory/environment.toml` is the exhaustive declaration of tools and external runners available to this factory. Do not invent undeclared hardware, SSH access, commands, credentials, or evidence. A declaration alone proves nothing: require `scripts/check-factory-runner-evidence.py` to accept exact-commit runner evidence. An empty declaration means no external runner is available and any requirement needing one remains a finding unless independently proven through a valid production path.
 
-Preserve every front-matter value already seeded in `CAMPAIGN_AUDIT.md` except `result`. Set it to exactly `pass` or `findings` only after the report is complete.
+Preserve every front-matter value already seeded in `.factory/artifacts/campaign-audit.md` except `result`. Set it to exactly `pass` or `findings` only after the report is complete.
 
 ## Audit method
 
 Use fresh read-only subagents adaptively for independent correctness, security, test-quality, documentation, interaction, packaging, and production-runtime reviews. Trace real initialization, controller/pointer dispatch, native backend communication, persistence, rendering, installed entry points, recovery, and shutdown. Attempt to falsify tests: distinguish private fixtures, process-local SDL virtual devices, mocks, callback invocation, pixels, keyboard proxies, DBus object state, and staged libraries from a genuinely installed and routable product.
 
-Verify claimed environment evidence using only declared capabilities. Missing backend, GPU, compositor, physical or kernel-backed controller, target consumer, package installation, systemd session, or hardware runner is not a skip and must not be inferred from synthetic evidence.
+Verify claimed environment evidence using only declared and mechanically evidenced capabilities. Missing backend, GPU, compositor, physical or kernel-backed controller, target consumer, package installation, systemd session, or hardware runner is not a skip and must not be inferred from synthetic evidence.
 
 ## Report format
 
@@ -23,7 +23,7 @@ After the immutable front matter and level-one title, include:
 - Specification: `<docs path and section>` <requirements challenged>
 - Production paths: `<source path:line>` <initialization, dispatch, backend, persistence, rendering, and shutdown traces>
 - Executable evidence: `<exact command>` <PASS, FAIL, or BLOCKED plus artifact/commit and semantic outcome; distinguish synthetic evidence>
-- Environment limits: `factory-environment.toml` <declared capabilities used and unavailable production evidence>
+- Environment limits: `.factory/environment.toml` <declared capabilities used and unavailable production evidence>
 
 ## Findings
 None.

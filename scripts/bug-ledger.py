@@ -17,8 +17,8 @@ import tempfile
 import urllib.parse
 
 SCHEMA = "ralph-bug-ledger/v1"
-OPEN_PATH = pathlib.Path("open-bugs.md")
-CLOSED_PATH = pathlib.Path("closed-bugs.md")
+OPEN_PATH = pathlib.Path(".factory/bugs/open.md")
+CLOSED_PATH = pathlib.Path(".factory/bugs/closed.md")
 LOCK_PATH = pathlib.Path(".bug-ledger.lock")
 OPEN_STATUSES = {"open", "triaged", "planned", "in_progress", "blocked"}
 SEVERITIES = {"low", "medium", "high", "critical"}

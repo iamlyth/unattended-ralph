@@ -50,7 +50,7 @@ else
     [[ $(cat .factory-state/maintenance-bug-id 2>/dev/null) == "$BUG_ID" ]] || {
         echo "ralph-maintenance-plan: saved maintenance selection does not match $BUG_ID" >&2; exit 1;
     }
-    [[ -s MAINTENANCE_PLAN.md ]] || {
+    [[ -s .factory/artifacts/maintenance-plan.md ]] || {
         echo "ralph-maintenance-plan: missing maintenance draft for resume" >&2; exit 1;
     }
 fi
@@ -75,7 +75,7 @@ PY
 )
 SPEC=$(python3 - <<'PY'
 import tomllib
-with open('factory.toml', 'rb') as stream: print(tomllib.load(stream)['project']['spec'])
+with open('.factory/config.toml', 'rb') as stream: print(tomllib.load(stream)['project']['spec'])
 PY
 )
 [[ -f "$SPEC" ]] || { echo "ralph-maintenance-plan: missing specification '$SPEC'" >&2; exit 1; }
@@ -136,7 +136,7 @@ finish_maintenance_planning_cycle() {
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin maintenance-planning
-    command=("$RALPH_BIN" -c ralph.maintenance-plan.yml run --exclusive)
+    command=("$RALPH_BIN" -c .factory/ralph/maintenance-plan.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e

@@ -48,7 +48,7 @@ printf '%s\n' campaign-audit > .factory-state/loop-mode
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin campaign-audit
-    command=("$RALPH_BIN" -c ralph.audit.yml run --exclusive)
+    command=("$RALPH_BIN" -c .factory/ralph/audit.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e

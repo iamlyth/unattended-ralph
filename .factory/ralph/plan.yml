@@ -1,10 +1,10 @@
-# Planning-only loop. It may update IMPLEMENTATION_PLAN.md, never product code.
+# Planning-only loop. It may update .factory/artifacts/implementation-plan.md, never product code.
 cli:
   backend: "pi"
   command: "./scripts/pi2-ollama.sh"
 
 event_loop:
-  prompt_file: "prompts/PLAN.md"
+  prompt_file: ".factory/prompts/plan.md"
   completion_promise: "PLAN_COMPLETE"
   starting_event: "factory.plan"
   max_iterations: 20
@@ -26,8 +26,8 @@ hats:
     publishes: ["factory.plan"]
     default_publishes: "factory.plan"
     instructions: |
-      Follow prompts/PLAN.md exactly. Coordinate read-only Pi subagents, write only
-      IMPLEMENTATION_PLAN.md and the recovery scratchpad, and never implement code.
+      Follow .factory/prompts/plan.md exactly. Coordinate read-only Pi subagents, write only
+      .factory/artifacts/implementation-plan.md and the recovery scratchpad, and never implement code.
       Preserve launcher metadata. Never place PLAN_COMPLETE in an event payload;
       completion requires that exact token alone as the final line outside events.
 

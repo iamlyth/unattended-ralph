@@ -48,7 +48,7 @@ printf '%s\n' maintenance > .factory-state/loop-mode
 while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin maintenance
-    command=("$RALPH_BIN" -c ralph.maintenance.yml run --exclusive)
+    command=("$RALPH_BIN" -c .factory/ralph/maintenance.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e

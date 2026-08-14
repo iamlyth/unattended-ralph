@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+import ipaddress
+from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from urllib.parse import urlsplit
@@ -15,6 +16,7 @@ FORBIDDEN_KEYS = {
 }
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 CAP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+RUNNER_WORKDIR_RE = re.compile(r"^/srv/dev-runner/workspaces/[a-z0-9][a-z0-9._-]*$")
 
 
 def fail(message: str) -> None:
@@ -95,18 +97,34 @@ def validate(path: Path, require_empty: bool) -> None:
         alias = runner["ssh_config_alias"]
         if not isinstance(alias, str) or not NAME_RE.fullmatch(alias):
             fail(f"runners[{index}].ssh_config_alias must be a credential-free SSH config alias")
+        try:
+            ipaddress.ip_address(alias)
+        except ValueError:
+            pass
+        else:
+            fail(f"runners[{index}].ssh_config_alias must not be an IP endpoint")
         workdir = runner["working_directory"]
-        if not isinstance(workdir, str) or not workdir.startswith("/") or any(ord(char) < 32 for char in workdir):
-            fail(f"runners[{index}].working_directory must be an absolute path without control characters")
+        if (
+            not isinstance(workdir, str)
+            or not RUNNER_WORKDIR_RE.fullmatch(workdir)
+            or ".." in PurePosixPath(workdir).parts
+        ):
+            fail(f"runners[{index}].working_directory must be a direct project path under /srv/dev-runner/workspaces")
         capabilities = string_list(runner["capabilities"], f"runners[{index}].capabilities")
         argv = string_list(runner["verify_argv"], f"runners[{index}].verify_argv")
-        if not capabilities or not all(CAP_RE.fullmatch(item) for item in capabilities):
-            fail(f"runners[{index}] requires valid capabilities")
+        if not capabilities or len(capabilities) != len(set(capabilities)) or not all(CAP_RE.fullmatch(item) for item in capabilities):
+            fail(f"runners[{index}] requires unique valid capabilities")
         sensitive_flags = {"-i", "--identity-file", "--password", "--private-key", "--token", "--secret", "--user", "-l", "--header", "-H"}
-        if not argv or any(any(ord(char) < 32 for char in item) for item in argv):
-            fail(f"runners[{index}].verify_argv must be a non-empty control-character-free argv array")
-        if any(item.lower() in sensitive_flags or re.search(r"(?i)(authorization|bearer|password|private[-_]?key|token|secret)", item) for item in argv):
-            fail(f"runners[{index}].verify_argv contains a credential-bearing option")
+        if argv != ["./scripts/verify-project.sh"]:
+            fail(f"runners[{index}].verify_argv must be the approved project verifier argv")
+        if any(any(ord(char) < 32 for char in item) for item in argv):
+            fail(f"runners[{index}].verify_argv must be control-character-free")
+        if any(
+            item.lower() in sensitive_flags
+            or re.search(r"(?i)(authorization|bearer|password|private[-_]?key|token|secret|[a-z][a-z0-9+.-]*://)", item)
+            for item in argv
+        ):
+            fail(f"runners[{index}].verify_argv contains a credential or endpoint option")
         names.add(name)
 
     print(f"factory-environment: valid ({len(tools)} tools, {len(runners)} runners)")
@@ -114,7 +132,7 @@ def validate(path: Path, require_empty: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", nargs="?", default="factory-environment.toml")
+    parser.add_argument("path", nargs="?", default=".factory/environment.toml")
     parser.add_argument("--require-empty", action="store_true")
     args = parser.parse_args()
     validate(Path(args.path), args.require_empty)

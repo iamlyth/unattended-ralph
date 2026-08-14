@@ -5,7 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory-state" "$tmp/.ralph/agent"
+mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory-state" "$tmp/.ralph/agent" \
+    "$tmp/.factory/bugs" "$tmp/.factory/artifacts"
 cp "$PROJECT_ROOT/scripts/bug-ledger.py" "$PROJECT_ROOT/scripts/check-maintenance-freshness.sh" \
     "$PROJECT_ROOT/scripts/check-scratchpad.sh" \
     "$PROJECT_ROOT/scripts/validate-maintenance-plan.py" "$PROJECT_ROOT/scripts/final-gate.sh" "$tmp/scripts/"
@@ -14,7 +15,7 @@ chmod +x "$tmp/scripts/"*
 cd "$tmp"
 
 reset_ledgers() {
-    cat > open-bugs.md <<'EOF'
+    cat > .factory/bugs/open.md <<'EOF'
 # Open Bugs
 
 Canonical queue of defects awaiting maintenance.
@@ -25,7 +26,7 @@ Schema: `ralph-bug-ledger/v1`
 []
 ```
 EOF
-    cat > closed-bugs.md <<'EOF'
+    cat > .factory/bugs/closed.md <<'EOF'
 # Closed Bugs
 
 Completed defects and their verification evidence.
@@ -52,7 +53,7 @@ add_bug "Dual bug" --external github=https://github.com/example/project/issues/3
 [[ $(./scripts/bug-ledger.py list | wc -l) -eq 3 ]]
 
 # Deterministic add and transitions; closure requires evidence and moves the record.
-cp open-bugs.md snapshot.md
+cp .factory/bugs/open.md snapshot.md
 ./scripts/bug-ledger.py set-status BUG-0001 triaged
 ./scripts/bug-ledger.py set-status BUG-0001 planned
 set +e
@@ -87,7 +88,7 @@ after_external=$(./scripts/bug-ledger.py fingerprint BUG-0002)
 [[ "$before" == "$after_status" && "$before" == "$after_external" ]]
 python3 - <<'PY'
 import json, re
-path = 'open-bugs.md'; text = open(path, encoding='utf-8').read()
+path = '.factory/bugs/open.md'; text = open(path, encoding='utf-8').read()
 data = json.loads(re.search(r'```json\n(.*?)\n```', text, re.S).group(1))
 data[0]['title'] += ' changed'
 payload = json.dumps(data, indent=2, ensure_ascii=False) + '\n'
@@ -96,12 +97,12 @@ PY
 [[ "$before" != "$(./scripts/bug-ledger.py fingerprint BUG-0002)" ]]
 
 # Reject malformed JSON, duplicate IDs, invalid states, and unsafe/non-issue URLs.
-cp open-bugs.md valid-open.md
+cp .factory/bugs/open.md valid-open.md
 reject_mutation() {
-    cp valid-open.md open-bugs.md
+    cp valid-open.md .factory/bugs/open.md
     python3 - "$1" <<'PY'
 import json, re, sys
-path='open-bugs.md'; text=open(path, encoding='utf-8').read(); mode=sys.argv[1]
+path='.factory/bugs/open.md'; text=open(path, encoding='utf-8').read(); mode=sys.argv[1]
 data=json.loads(re.search(r'```json\n(.*?)\n```', text, re.S).group(1))
 if mode == 'duplicate': data.append(dict(data[0]))
 elif mode == 'state': data[0]['status']='closed'
@@ -119,9 +120,9 @@ PY
     [[ $rc -eq 1 ]] || { echo "test: accepted invalid ledger mutation $1" >&2; exit 1; }
 }
 for mutation in duplicate state credential query badport badhost; do reject_mutation "$mutation"; done
-cp valid-open.md open-bugs.md
+cp valid-open.md .factory/bugs/open.md
 python3 - <<'PY'
-p = 'open-bugs.md'
+p = '.factory/bugs/open.md'
 text = open(p, encoding='utf-8').read()
 start = text.index('```json\n') + len('```json\n')
 end = text.index('\n```', start)
@@ -134,7 +135,7 @@ set -e
 [[ $malformed_rc -eq 1 ]]
 
 # Concurrent adds serialize and allocate distinct IDs.
-cp valid-open.md open-bugs.md
+cp valid-open.md .factory/bugs/open.md
 add_bug "Concurrent one" > add-one.out & first_pid=$!
 add_bug "Concurrent two" > add-two.out & second_pid=$!
 wait "$first_pid" "$second_pid"
@@ -144,7 +145,7 @@ wait "$first_pid" "$second_pid"
 # Numeric ordering remains correct when canonical IDs exceed four digits.
 python3 - <<'PY'
 import json, re
-path='open-bugs.md'; text=open(path, encoding='utf-8').read()
+path='.factory/bugs/open.md'; text=open(path, encoding='utf-8').read()
 data=json.loads(re.search(r'```json\n(.*?)\n```', text, re.S).group(1))
 data[-1]['id']='BUG-9999'
 data=sorted(data, key=lambda item: int(item['id'][4:]))
@@ -158,16 +159,16 @@ PY
 ./scripts/bug-ledger.py set-status BUG-0003 triaged
 ./scripts/bug-ledger.py set-status BUG-0003 planned
 ./scripts/bug-ledger.py set-status BUG-0003 in_progress
-cp open-bugs.md before-close.md
+cp .factory/bugs/open.md before-close.md
 ./scripts/bug-ledger.py close BUG-0003 --resolution fixed --verification tested --closed 2026-08-07
 python3 - <<'PY'
 import json, re
-old=open('before-close.md', encoding='utf-8').read(); current=open('open-bugs.md', encoding='utf-8').read()
+old=open('before-close.md', encoding='utf-8').read(); current=open('.factory/bugs/open.md', encoding='utf-8').read()
 def records(text): return json.loads(re.search(r'```json\n(.*?)\n```', text, re.S).group(1))
 data=records(current); data.append(next(r for r in records(old) if r['id']=='BUG-0003'))
 data.sort(key=lambda r:int(r['id'][4:]))
 payload=json.dumps(data, indent=2, ensure_ascii=False)+'\n'
-open('open-bugs.md','w',encoding='utf-8').write(re.sub(r'```json\n.*?\n```','```json\n'+payload+'```',current,flags=re.S))
+open('.factory/bugs/open.md','w',encoding='utf-8').write(re.sub(r'```json\n.*?\n```','```json\n'+payload+'```',current,flags=re.S))
 PY
 set +e; ./scripts/bug-ledger.py validate >/dev/null 2>&1; interrupted_rc=$?; set -e
 [[ $interrupted_rc -eq 1 ]]
@@ -178,7 +179,7 @@ set +e; ./scripts/bug-ledger.py validate >/dev/null 2>&1; interrupted_rc=$?; set
 reset_ledgers
 add_bug "Freshness bug" >/dev/null
 printf '# Trial spec\n' > docs/SPEC.md
-cat > factory.toml <<'EOF'
+cat > .factory/config.toml <<'EOF'
 [project]
 spec = "docs/SPEC.md"
 [verification]
@@ -194,7 +195,7 @@ spec_commit=$(git log -1 --format=%H -- docs/SPEC.md)
 spec_blob=$(git rev-parse HEAD:docs/SPEC.md)
 fingerprint=$(./scripts/bug-ledger.py fingerprint BUG-0001)
 printf 'BUG-0001\n' > .factory-state/maintenance-bug-id
-cat > MAINTENANCE_PLAN.md <<EOF
+cat > .factory/artifacts/maintenance-plan.md <<EOF
 ---
 bug_id: BUG-0001
 bug_fingerprint: $fingerprint
@@ -213,23 +214,23 @@ status: active
 - Verification: run project checks
 - Documentation impact: none
 EOF
-./scripts/validate-maintenance-plan.py planning MAINTENANCE_PLAN.md >/dev/null
+./scripts/validate-maintenance-plan.py planning .factory/artifacts/maintenance-plan.md >/dev/null
 printf '%s\n' "$base" > .factory-state/maintenance-base-commit
 ./scripts/check-maintenance-freshness.sh --planning >/dev/null
 # A malformed draft lifecycle checkpoint must not deadlock a corrected plan.
-cp MAINTENANCE_PLAN.md valid-planning-plan.md
-printf '\n## Tasks\n' >> MAINTENANCE_PLAN.md
-git add MAINTENANCE_PLAN.md
+cp .factory/artifacts/maintenance-plan.md valid-planning-plan.md
+printf '\n## Tasks\n' >> .factory/artifacts/maintenance-plan.md
+git add .factory/artifacts/maintenance-plan.md
 git commit -qm draft-plan -m 'Mode: maintenance-planning'
-cp valid-planning-plan.md MAINTENANCE_PLAN.md
+cp valid-planning-plan.md .factory/artifacts/maintenance-plan.md
 ./scripts/check-maintenance-freshness.sh --planning >/dev/null
-git add MAINTENANCE_PLAN.md
+git add .factory/artifacts/maintenance-plan.md
 git commit -qm plan -m 'Mode: maintenance-planning'
 ./scripts/check-maintenance-freshness.sh >/dev/null
 # A prose lookalike cannot override strictly parsed front metadata.
-printf '\nbase_commit: not-a-front-matter-override\n' >> MAINTENANCE_PLAN.md
+printf '\nbase_commit: not-a-front-matter-override\n' >> .factory/artifacts/maintenance-plan.md
 ./scripts/check-maintenance-freshness.sh >/dev/null
-git restore -- MAINTENANCE_PLAN.md
+git restore -- .factory/artifacts/maintenance-plan.md
 printf '\ndirty contract\n' >> docs/SPEC.md
 set +e
 ./scripts/check-maintenance-freshness.sh >/dev/null 2>&1
@@ -247,49 +248,49 @@ premature_rc=$?
 set -e
 [[ $premature_rc -eq 1 ]]
 python3 - <<'PY'
-p='MAINTENANCE_PLAN.md'; text=open(p,encoding='utf-8').read()
+p='.factory/artifacts/maintenance-plan.md'; text=open(p,encoding='utf-8').read()
 text=text.replace('status: active','status: complete').replace('- Status: pending','- Status: complete')
 open(p,'w',encoding='utf-8').write(text)
 PY
 ./scripts/check-maintenance-freshness.sh >/dev/null
 
 # Strict parser rejects status and metadata bypasses.
-cp MAINTENANCE_PLAN.md valid-plan.md
+cp .factory/artifacts/maintenance-plan.md valid-plan.md
 reject_plan() {
-    cp valid-plan.md MAINTENANCE_PLAN.md
+    cp valid-plan.md .factory/artifacts/maintenance-plan.md
     python3 - "$1" <<'PY'
 import sys
-p='MAINTENANCE_PLAN.md'; text=open(p, encoding='utf-8').read(); mode=sys.argv[1]
+p='.factory/artifacts/maintenance-plan.md'; text=open(p, encoding='utf-8').read(); mode=sys.argv[1]
 if mode == 'missing-status': text=text.replace('- Status: complete\n', '')
 elif mode == 'duplicate-status': text=text.replace('- Status: complete\n', '- Status: complete\n- Status: complete\n')
 elif mode == 'duplicate-meta': text=text.replace('bug_id: BUG-0001\n', 'bug_id: BUG-0001\nbug_id: BUG-0001\n')
 elif mode == 'unknown-meta': text=text.replace('status: complete\n', 'status: complete\nextra: value\n')
 open(p, 'w', encoding='utf-8').write(text)
 PY
-    set +e; ./scripts/validate-maintenance-plan.py complete MAINTENANCE_PLAN.md >/dev/null 2>&1; rc=$?; set -e
+    set +e; ./scripts/validate-maintenance-plan.py complete .factory/artifacts/maintenance-plan.md >/dev/null 2>&1; rc=$?; set -e
     [[ $rc -eq 1 ]] || { echo "test: strict parser accepted $1" >&2; exit 1; }
 }
 for mutation in missing-status duplicate-status duplicate-meta unknown-meta; do reject_plan "$mutation"; done
-cp valid-plan.md MAINTENANCE_PLAN.md
+cp valid-plan.md .factory/artifacts/maintenance-plan.md
 
 # Immutable metadata remains bound after task evidence/status edits.
 python3 - <<'PY'
-p='MAINTENANCE_PLAN.md'; text=open(p, encoding='utf-8').read()
+p='.factory/artifacts/maintenance-plan.md'; text=open(p, encoding='utf-8').read()
 text=text.replace('- Verification: run project checks', '- Verification: run project checks; evidence recorded')
 open(p, 'w', encoding='utf-8').write(text)
 PY
 ./scripts/check-maintenance-freshness.sh >/dev/null
-cp MAINTENANCE_PLAN.md bound-plan.md
+cp .factory/artifacts/maintenance-plan.md bound-plan.md
 wrong_base=$(git rev-parse HEAD)
 python3 - "$wrong_base" <<'PY'
 import re, sys
-p='MAINTENANCE_PLAN.md'; text=open(p, encoding='utf-8').read()
+p='.factory/artifacts/maintenance-plan.md'; text=open(p, encoding='utf-8').read()
 text=re.sub(r'^base_commit: .*$', 'base_commit: '+sys.argv[1], text, flags=re.M)
 open(p, 'w', encoding='utf-8').write(text)
 PY
 set +e; ./scripts/check-maintenance-freshness.sh >/dev/null 2>&1; base_binding_rc=$?; set -e
 [[ $base_binding_rc -eq 1 ]]
-cp bound-plan.md MAINTENANCE_PLAN.md
+cp bound-plan.md .factory/artifacts/maintenance-plan.md
 
 # The configured verifier fails closed when its executable is absent.
 printf '#!/usr/bin/env bash\nexit 0\n' > scripts/verify-boilerplate.sh
@@ -299,5 +300,5 @@ set +e; ./scripts/final-gate.sh --maintenance > verifier.out 2>&1; verifier_rc=$
 grep -q 'configured maintenance verifier is missing or not executable' verifier.out
 
 cmp -s "$PROJECT_ROOT/.github/ISSUE_TEMPLATE/bug_report.md" "$PROJECT_ROOT/.forgejo/ISSUE_TEMPLATE/bug_report.md"
-grep -Fq -- "write \`- Status: complete\`, never \`done\`" "$PROJECT_ROOT/prompts/MAINTENANCE.md"
+grep -Fq -- "write \`- Status: complete\`, never \`done\`" "$PROJECT_ROOT/.factory/prompts/maintenance.md"
 echo "test: provider-neutral bug workflow checks passed"

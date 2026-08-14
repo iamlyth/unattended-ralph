@@ -44,7 +44,7 @@ while true; do
     ./scripts/ollama-usage-guard.sh --wait
     ralph_supervision_begin implementation
 
-    command=("$RALPH_BIN" -c ralph.yml run --exclusive)
+    command=("$RALPH_BIN" -c .factory/ralph/implementation.yml run --exclusive)
     $RESUME && command+=(--continue)
     $TUI || command+=(--no-tui)
 

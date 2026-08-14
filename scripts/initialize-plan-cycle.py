@@ -36,7 +36,7 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def config() -> dict:
-    with (ROOT / "factory.toml").open("rb") as stream:
+    with (ROOT / ".factory/config.toml").open("rb") as stream:
         return tomllib.load(stream)
 
 
@@ -73,7 +73,7 @@ def main() -> int:
     if args.mode == "specification":
         if args.bug_id:
             parser.error("--bug-id is valid only in maintenance mode")
-        plan_path = ROOT / config()["project"].get("plan", "IMPLEMENTATION_PLAN.md")
+        plan_path = ROOT / config()["project"].get("plan", ".factory/artifacts/implementation-plan.md")
         plan = f"""---
 spec_path: {spec_path}
 spec_commit: {spec_commit}
@@ -97,7 +97,7 @@ The previous plan remains available only through Git history.
         if not args.bug_id:
             parser.error("maintenance mode requires --bug-id")
         record, fingerprint = bug_record(args.bug_id)
-        plan_path = ROOT / config()["issues"].get("maintenance_plan", "MAINTENANCE_PLAN.md")
+        plan_path = ROOT / config()["issues"].get("maintenance_plan", ".factory/artifacts/maintenance-plan.md")
         plan = f"""---
 bug_id: {args.bug_id}
 bug_fingerprint: {fingerprint}

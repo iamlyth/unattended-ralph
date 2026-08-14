@@ -4,7 +4,7 @@ cli:
   command: "./scripts/pi2-ollama.sh"
 
 event_loop:
-  prompt_file: "prompts/MAINTENANCE_PLAN.md"
+  prompt_file: ".factory/prompts/maintenance-plan.md"
   completion_promise: "MAINTENANCE_PLAN_COMPLETE"
   starting_event: "factory.maintenance.plan"
   max_iterations: 20
@@ -26,8 +26,8 @@ hats:
     publishes: ["factory.maintenance.plan"]
     default_publishes: "factory.maintenance.plan"
     instructions: |
-      Follow prompts/MAINTENANCE_PLAN.md. You are the sole writer; subagents are
-      read-only. Write only MAINTENANCE_PLAN.md and the recovery scratchpad.
+      Follow .factory/prompts/maintenance-plan.md. You are the sole writer; subagents are
+      read-only. Write only .factory/artifacts/maintenance-plan.md and the recovery scratchpad.
       Preserve launcher metadata. Never place MAINTENANCE_PLAN_COMPLETE in an event
       payload; completion requires that exact token alone as the final line outside events.
 

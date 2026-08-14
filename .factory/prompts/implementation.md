@@ -1,10 +1,10 @@
 # Implementation Loop
 
-Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTATION_PLAN.md` on the autonomous `develop` branch.
+Implement the committed specification in `docs/SPEC.md` by following `.factory/artifacts/implementation-plan.md` on the autonomous `develop` branch.
 
 ## Orient before acting
 
-1. Study `docs/SPEC.md`, `AGENTS.md`, `factory-environment.toml`, the complete active `IMPLEMENTATION_PLAN.md`, and the latest scratchpad handoff before selecting work. The environment declaration is exhaustive: never invent an undeclared tool, external runner, SSH target, hardware capability, credential, or result.
+1. Study `docs/SPEC.md`, `AGENTS.md`, `.factory/environment.toml`, the complete active `.factory/artifacts/implementation-plan.md`, and the latest scratchpad handoff before selecting work. The environment declaration is exhaustive: never invent an undeclared tool, external runner, SSH target, hardware capability, credential, or result. A declared runner capability counts only when `scripts/check-factory-runner-evidence.py` accepts evidence for the exact implementation commit.
 2. Search the relevant source, tests, shared utilities, and call paths with read-only subagents. **Do not assume functionality is missing or complete** from names, TODOs, prior evidence, or object existence; confirm production behavior.
 3. Use `AGENTS.md` for exact build/run/validation commands. Keep the primary context as scheduler and keep build/test execution serialized.
 
@@ -13,7 +13,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 1. `docs/SPEC.md` is the source of truth. Never change it during implementation. A spec change requires a separate human commit and a new planning loop.
 2. Validate plan freshness with `scripts/check-plan-freshness.sh` before work.
 3. Select exactly one highest-priority `pending` task whose dependencies are complete. Mark it `in_progress`.
-4. Keep the primary context focused. Adaptively launch read-only subagents in parallel for source study, research, security, tests, and documentation. Respect `factory.toml` ceilings.
+4. Keep the primary context focused. Adaptively launch read-only subagents in parallel for source study, research, security, tests, and documentation. Respect `.factory/config.toml` ceilings.
 5. You are the only repository writer. Subagents report findings and must not edit, write, commit, or run mutating commands.
 6. Implement only the selected task, completely. Fix root causes rather than masking symptoms; do not leave placeholders/stubs, weaken assertions, bypass production paths, or substitute direct callbacks for user-visible interaction. Derive tests from specification acceptance outcomes—behavior, performance, and edge cases—without prescribing implementation details. Run targeted backpressure first, then relevant regression tests.
 7. Update nearby documentation as behavior changes and capture why the implementation and tests matter. Record concise evidence in the plan, including the exact command, result, production path exercised, and semantic outcome—not merely compilation or event consumption. If any test fails, including one apparently unrelated to the task, investigate it; fix it when safe or append a remediation task rather than dismissing it.
@@ -30,7 +30,7 @@ Implement the committed specification in `docs/SPEC.md` by following `IMPLEMENTA
 - `security-reviewer`: use for trust boundaries, credentials, parsing, process execution, or network behavior.
 - `docs-reviewer`: use for public behavior, setup, configuration, operations, and final documentation audit.
 
-Use only the agents needed for the task. Launch independent read-only investigations together. The global model-request ceiling is configured in `.pi/subagents.json` and `factory.toml`.
+Use only the agents needed for the task. Launch independent read-only investigations together. The global model-request ceiling is configured in `.pi/subagents.json` and `.factory/config.toml`.
 
 ## Final documentation and verification gate
 

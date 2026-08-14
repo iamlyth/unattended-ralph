@@ -9,7 +9,7 @@ A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum deve
 - `main` is the human-controlled release branch.
 - `develop` is the autonomous implementation branch.
 - One committed `docs/SPEC.md` is the source of truth; Git versions it.
-- A planning-only Ralph loop creates `IMPLEMENTATION_PLAN.md` for the exact spec commit.
+- A planning-only Ralph loop creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
 - Each implementation iteration selects one bounded task and starts with fresh model context.
 - Pi subagents perform parallel read-only planning, research, review, security, and documentation analysis.
 - Exactly one primary worker may edit, stage, or commit repository files.
@@ -65,7 +65,7 @@ Run the planning-only fresh-context loop:
 ./scripts/ralph-plan.sh
 ```
 
-The planner may only modify `IMPLEMENTATION_PLAN.md` and the recovery scratchpad. A fresh invocation atomically replaces both with minimal cycle state before Ralph starts, so completed tasks are not carried into every future prompt. Previous plans remain available through Git history. `--resume` preserves the current draft byte-for-byte. The generated plan records:
+The planner may only modify `.factory/artifacts/implementation-plan.md` and the recovery scratchpad. A fresh invocation atomically replaces both with minimal cycle state before Ralph starts, so completed tasks are not carried into every future prompt. Previous plans remain available through Git history. `--resume` preserves the current draft byte-for-byte. The generated plan records:
 
 - the spec path;
 - the latest commit that changed the spec;
@@ -126,15 +126,16 @@ shortens the requested campaign. Resume an interrupted active campaign with
 findings feed the next fresh plan, while findings in the final round block
 completion.
 
-`factory-environment.toml` is the credential-free declaration of available
-local tools and external runners. It initially declares none. Projects list
-required acceptance capabilities in `factory.toml`; absent capabilities remain
-audit findings rather than fabricated evidence. SSH aliases and credentials are
-configured outside the repository.
+`.factory/environment.toml` is the credential-free declaration of available
+local tools and external runners. It initially declares none. Campaign
+verification validates exact-commit runner receipts before capabilities count.
+Projects list required acceptance capabilities in `.factory/config.toml`; absent
+capabilities remain audit findings rather than fabricated evidence. SSH aliases,
+provisioning, and credentials are configured outside the repository.
 
 ## Maintain one bug
 
-Portable canonical bug state lives in `open-bugs.md` and `closed-bugs.md`; GitHub and Forgejo issue URLs are optional manual references and may exist on either or both providers. No issue API, automatic sync, or credentials are used.
+Portable canonical bug state lives in `.factory/bugs/open.md` and `.factory/bugs/closed.md`; GitHub and Forgejo issue URLs are optional manual references and may exist on either or both providers. No issue API, automatic sync, or credentials are used.
 
 ```bash
 ./scripts/bug-ledger.py validate
@@ -143,11 +144,11 @@ Portable canonical bug state lives in `open-bugs.md` and `closed-bugs.md`; GitHu
 ./scripts/ralph-maintenance-run.sh
 ```
 
-A maintenance cycle selects exactly one triaged ordinary defect. A fresh planning invocation replaces the prior maintenance plan and scratchpad with a minimal selected-bug skeleton; Git and `closed-bugs.md` retain prior evidence, while `--resume` preserves the active draft. All newly planned tasks must be `pending`. Planning commits the strictly parsed plan and then marks the defect `planned`; implementation marks it `in_progress` before product changes, and only an `in_progress` defect may close. Contract changes or product decisions are blocked and returned to the human specification workflow; maintenance never edits `docs/SPEC.md`. Ignored runtime state binds the selected ID and loop mode, while immutable `MAINTENANCE_PLAN.md` metadata binds the planning checkpoint parent, bug fingerprint, and committed spec. Ledger writes serialize and interrupted closure has a narrowly safe `recover` command. See `docs/BUG_WORKFLOW.md` for intake, ticket states, link/unlink commands, GitHub/Forgejo URL expectations, closure evidence, and recovery.
+A maintenance cycle selects exactly one triaged ordinary defect. A fresh planning invocation replaces the prior maintenance plan and scratchpad with a minimal selected-bug skeleton; Git and `.factory/bugs/closed.md` retain prior evidence, while `--resume` preserves the active draft. All newly planned tasks must be `pending`. Planning commits the strictly parsed plan and then marks the defect `planned`; implementation marks it `in_progress` before product changes, and only an `in_progress` defect may close. Contract changes or product decisions are blocked and returned to the human specification workflow; maintenance never edits `docs/SPEC.md`. Ignored runtime state binds the selected ID and loop mode, while immutable `.factory/artifacts/maintenance-plan.md` metadata binds the planning checkpoint parent, bug fingerprint, and committed spec. Ledger writes serialize and interrupted closure has a narrowly safe `recover` command. See `docs/BUG_WORKFLOW.md` for intake, ticket states, link/unlink commands, GitHub/Forgejo URL expectations, closure evidence, and recovery.
 
 ## Adaptive concurrency
 
-Configured ceilings live in `factory.toml`:
+Configured ceilings live in `.factory/config.toml`:
 
 ```toml
 [concurrency]
