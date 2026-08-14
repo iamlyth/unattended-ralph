@@ -8,14 +8,16 @@ STATE_HELPER="$SCRIPT_DIR/ralph-campaign-state.py"
 ROUNDS=""
 RESUME=false
 RESTART=false
-TUI=true
+TUI=false
 TUI_EXPLICIT=false
+TUI_OPTION=
 
 usage() {
     cat <<'EOF'
-Usage: scripts/ralph-campaign.sh --rounds N [--resume|--restart] [--no-tui]
+Usage: scripts/ralph-campaign.sh --rounds N [--resume|--restart] [--tui|--no-tui]
 
-A new campaign requires a clean develop branch. --resume continues the exact
+A new campaign requires a clean develop branch and runs unattended by default.
+--tui opts into an attended diagnostic display. --resume continues the exact
 saved round and phase; --restart explicitly replaces only a terminal saved
 campaign. Rounds and TUI mode must match when resuming.
 EOF
@@ -25,7 +27,18 @@ while (( $# > 0 )); do
         --rounds) (( $# >= 2 )) || { echo "ralph-campaign: --rounds requires a value" >&2; exit 2; }; ROUNDS=$2; shift 2 ;;
         --resume) RESUME=true; shift ;;
         --restart) RESTART=true; shift ;;
-        --no-tui) TUI=false; TUI_EXPLICIT=true; shift ;;
+        --tui)
+            [[ -z "$TUI_OPTION" || "$TUI_OPTION" == tui ]] || {
+                echo "ralph-campaign: --tui and --no-tui are mutually exclusive" >&2; exit 2;
+            }
+            TUI=true; TUI_EXPLICIT=true; TUI_OPTION=tui; shift
+            ;;
+        --no-tui)
+            [[ -z "$TUI_OPTION" || "$TUI_OPTION" == no-tui ]] || {
+                echo "ralph-campaign: --tui and --no-tui are mutually exclusive" >&2; exit 2;
+            }
+            TUI=false; TUI_EXPLICIT=true; TUI_OPTION=no-tui; shift
+            ;;
         -h|--help) usage; exit 0 ;;
         *) echo "ralph-campaign: unknown option '$1'" >&2; exit 2 ;;
     esac
@@ -106,7 +119,8 @@ if $RESUME; then
     saved_digest=$($STATE_HELPER get verification_command_sha256)
     [[ "$saved_rounds" == "$ROUNDS" ]] || { echo "ralph-campaign: requested rounds do not match saved campaign ($saved_rounds)" >&2; exit 1; }
     [[ "$saved_digest" == "$verification_digest" ]] || { echo "ralph-campaign: verification command changed during the campaign" >&2; exit 1; }
-    if $TUI_EXPLICIT && [[ "$saved_tui" != false ]]; then
+    requested_tui=$($TUI && echo true || echo false)
+    if $TUI_EXPLICIT && [[ "$saved_tui" != "$requested_tui" ]]; then
         echo "ralph-campaign: requested TUI mode does not match saved campaign" >&2; exit 1
     fi
     [[ "$saved_tui" == true ]] && TUI=true || TUI=false

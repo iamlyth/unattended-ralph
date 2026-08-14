@@ -50,9 +50,13 @@ fi
 
 printf '# Current handoff\n\n## Status\n\nPLAN_COMPLETE\n' > "$tmp"
 if "$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1; then
-    echo 'test-scratchpad-guard: reserved completion token was accepted' >&2
+    echo 'test-scratchpad-guard: reserved completion token was accepted by the final protocol check' >&2
     exit 1
 fi
+# Iteration checkpoints validate the handoff structure without turning a model
+# protocol mistake into a terminal child failure. The strict completion gate
+# above remains responsible for rejecting it and authorizing automatic recovery.
+"$GUARD" --allow-oversize >/dev/null
 
 {
     printf '# Scratchpad\n'

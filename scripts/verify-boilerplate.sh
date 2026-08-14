@@ -108,6 +108,22 @@ grep -q 'LOOP_COMPLETE.*final non-empty line outside every event tag' .factory/p
 grep -q 'MAINTENANCE_PLAN_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance-plan.md
 grep -q 'MAINTENANCE_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance.md
 grep -q 'AUDIT_COMPLETE.*final non-empty line' .factory/prompts/audit.md
+for prompt in .factory/prompts/plan.md .factory/prompts/implementation.md \
+        .factory/prompts/audit.md .factory/prompts/maintenance-plan.md \
+        .factory/prompts/maintenance.md; do
+    grep -q 'emit the completion token' "$prompt"
+done
+grep -q '^TUI=false$' scripts/ralph-campaign.sh
+grep -q -- '--tui)' scripts/ralph-campaign.sh
+for config in .factory/ralph/plan.yml .factory/ralph/implementation.yml \
+        .factory/ralph/audit.yml .factory/ralph/maintenance-plan.yml \
+        .factory/ralph/maintenance.yml; do
+    checkpoint=$(grep 'command: \["./scripts/check-scratchpad.sh"' "$config")
+    [[ $checkpoint != *'_COMPLETE"'* ]] || {
+        echo "verify: iteration scratchpad hook must defer token rejection to the completion gate: $config" >&2
+        exit 1
+    }
+done
 grep -q '.factory/environment.toml' .factory/prompts/plan.md
 grep -q '.factory/environment.toml' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/plan.md

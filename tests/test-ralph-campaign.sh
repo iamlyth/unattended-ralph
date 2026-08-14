@@ -89,7 +89,7 @@ set -euo pipefail
 printf 'implement %s\n' "$*" >> .factory-state/calls
 if [[ -n ${FAKE_FAIL_IMPL_ONCE:-} && ! -e .factory-state/failed-implementation ]]; then
     : > .factory-state/failed-implementation
-    [[ -z ${FAKE_DIRTY_IMPL:-} ]] || printf 'interrupted work\n' > product.txt
+    [[ -z ${FAKE_DIRTY_IMPL:-} ]] || printf '%s\n' "${FAKE_DIRTY_CONTENT:-interrupted work}" > product.txt
     exit 42
 fi
 sed -i 's/status: active/status: complete/; s/- Status: pending/- Status: complete/' .factory/artifacts/implementation-plan.md
@@ -145,12 +145,14 @@ git -C "$tmp" config user.email test@example.invalid
 git -C "$tmp" add .
 git -C "$tmp" commit -qm initial
 
-(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 3 --no-tui >/dev/null)
+# Finite campaigns are unattended by default.
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 3 >/dev/null)
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
 root=pathlib.Path(sys.argv[1])
 state=json.loads((root/'.factory-state/ralph-campaign.json').read_text())
 assert state['status']=='complete' and state['round']==3
+assert state['tui'] is False
 bases=[r['base_commit'] for r in state['rounds']]
 assert len(set(bases))==3, bases
 assert all(r['audit_result']=='pass' for r in state['rounds'])
@@ -159,8 +161,21 @@ assert [c.split()[0] for c in calls] == ['plan','implement','verify','audit']*3,
 assert all('--no-tui' in c for c in calls if c.startswith(('plan ','implement ','audit ')))
 PY
 
+# An attended diagnostic campaign remains an explicit opt-in.
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+state=json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+assert state['status']=='complete' and state['tui'] is True
+calls=(root/'.factory-state/calls').read_text().splitlines()
+latest=calls[-4:]
+assert [c.split()[0] for c in latest] == ['plan','implement','verify','audit'], latest
+assert all('--no-tui' not in c for c in latest), latest
+PY
+
 set +e
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
 fail_rc=$?
 set -e
 [[ $fail_rc -eq 42 ]]
@@ -169,7 +184,12 @@ set +e
 overwrite_rc=$?
 set -e
 [[ $overwrite_rc -eq 1 ]]
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --tui >/dev/null 2>&1)
+mode_mismatch_rc=$?
+set -e
+[[ $mode_mismatch_rc -eq 1 ]]
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null)
 grep -q '^implement --resume --no-tui$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
@@ -177,14 +197,39 @@ state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json'
 assert state['status']=='complete'
 PY
 
+# Resume without an explicit mode adopts an attended campaign's saved mode;
+# explicitly requesting the opposite mode fails closed.
+rm -f "$tmp/.factory-state/failed-implementation"
+set +e
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 FAKE_DIRTY_CONTENT='attended interrupted work' ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null 2>&1)
+attended_fail_rc=$?
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null 2>&1)
+attended_mismatch_rc=$?
+set -e
+[[ $attended_fail_rc -eq 42 ]]
+[[ $attended_mismatch_rc -eq 1 ]]
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null)
+grep -q '^implement --resume$' "$tmp/.factory-state/calls"
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())
+assert state['status']=='complete' and state['tui'] is True
+PY
+
 set +e
 (cd "$tmp" && FAKE_AUDIT_FINDINGS=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
 findings_rc=$?
 (cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 0 >/dev/null 2>&1)
 invalid_rc=$?
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --tui --no-tui >/dev/null 2>&1)
+contradictory_a_rc=$?
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --no-tui --tui >/dev/null 2>&1)
+contradictory_b_rc=$?
 set -e
 [[ $findings_rc -eq 1 ]]
 [[ $invalid_rc -eq 2 ]]
+[[ $contradictory_a_rc -eq 2 ]]
+[[ $contradictory_b_rc -eq 2 ]]
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
 state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())

@@ -44,4 +44,4 @@ Replace rather than append to the scratchpad with one concise current handoff be
 
 ## Completion protocol
 
-`AUDIT_COMPLETE` is reserved protocol data. If the audit needs another iteration, close the normal event and exit without it. When and only when the report is complete and valid, close every event tag and output exactly `AUDIT_COMPLETE` as the final non-empty line. If the final gate rejects it, repair the reported deficiency instead of repeating the request.
+`AUDIT_COMPLETE` is reserved protocol data. Never write it into the report, scratchpad, event content, summary, or explanatory prose; scratchpad next-action prose says only “emit the completion token.” If the audit needs another iteration, close the normal event and exit without it. When and only when the report is complete and valid, close every event tag and output exactly `AUDIT_COMPLETE` as the final non-empty line. If the final gate rejects it, repair the reported deficiency instead of repeating the request.

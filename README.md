@@ -107,21 +107,22 @@ Only the final documentation and specification audit may produce `LOOP_COMPLETE`
 
 Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff.
 
-Ralph recognizes a completion promise only as the exact final non-empty line outside all event tags. Prompts forbid reserved tokens in event payloads and scratchpads. Before checkpointing, planning revalidates immutable launcher metadata and every mode runs `scripts/check-scratchpad.sh`. The guard requires one level-one handoff document, permits concise subsections, and rejects appended documents or completion tokens. Iteration-boundary hooks use `--allow-missing` because Ralph intentionally removes the previous scratchpad before the first iteration of a fresh, non-resumed loop. They also use `--allow-oversize` so a worker that slightly exceeds the 80-line or 8-KiB handoff target receives a warning without deadlocking the next iteration; structural and protocol violations still block. Final gates remain strict and reject missing, malformed, or oversized scratchpads.
+Ralph recognizes a completion promise only as the exact final non-empty line outside all event tags. Prompts forbid reserved tokens in event payloads and scratchpads. Before checkpointing, planning revalidates immutable launcher metadata and every mode runs `scripts/check-scratchpad.sh`. The guard requires one level-one handoff document and permits concise subsections. Iteration-boundary hooks use `--allow-missing` because Ralph intentionally removes the previous scratchpad before the first iteration of a fresh, non-resumed loop. They also use `--allow-oversize` so a worker that slightly exceeds the 80-line or 8-KiB handoff target receives a warning without deadlocking the next iteration. Checkpoints defer reserved-token rejection to the strict completion gate so the attempt-bound supervisor can recover automatically. Final gates remain strict and reject missing, malformed, oversized, or token-contaminated scratchpads.
 
 A `pre.loop.complete` gate runs through `scripts/ralph-completion-gate.sh`. When that strict gate rejects a premature completion request, it writes an atomic, one-shot marker bound to the current launcher nonce, lifecycle mode, loop ID, and canonical workspace. The supervisor consumes only a matching marker, repairs Ralph's volatile markers, and continues the same cycle with `--continue`, preserving the selected TUI mode. Stale, malformed, mismatched, or unsafe markers cannot authorize continuation, and arbitrary non-quota failures remain terminal. Quota exhaustion continues through its independent verified wait path. A cycle is accepted as complete only when the normal final gate passes.
 
 ## Run a finite multi-round campaign
 
-Run a predetermined sequence of fresh adversarial planning, implementation,
-verification, and independent audit rounds with one command:
+Run a predetermined unattended sequence of fresh adversarial planning,
+implementation, verification, and independent audit rounds with one command:
 
 ```bash
 ./scripts/ralph-campaign.sh --rounds 3
 ```
 
-Every round records a new clean Git base. A preceding completion claim never
-shortens the requested campaign. Resume an interrupted active campaign with
+Campaigns are headless by default so phase completion never waits for a TUI;
+use `--tui` only for attended diagnostics. Every round records a new clean Git
+base. A preceding completion claim never shortens the requested campaign. Resume an interrupted active campaign with
 `--resume`; use `--restart` only to replace a terminal saved campaign. Audit
 findings feed the next fresh plan, while findings in the final round block
 completion.

@@ -48,7 +48,7 @@ hooks:
         command: ["./scripts/check-plan-freshness.sh", "--planning"]
         on_error: block
       - name: planning-scratchpad
-        command: ["./scripts/check-scratchpad.sh", "PLAN_COMPLETE", "--allow-missing", "--allow-oversize"]
+        command: ["./scripts/check-scratchpad.sh", "--allow-missing", "--allow-oversize"]
         on_error: block
       - name: planning-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--plan-only"]

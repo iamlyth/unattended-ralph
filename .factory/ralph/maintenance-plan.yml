@@ -48,7 +48,7 @@ hooks:
         command: ["./scripts/check-maintenance-freshness.sh", "--planning"]
         on_error: block
       - name: maintenance-planning-scratchpad
-        command: ["./scripts/check-scratchpad.sh", "MAINTENANCE_PLAN_COMPLETE", "--allow-missing", "--allow-oversize"]
+        command: ["./scripts/check-scratchpad.sh", "--allow-missing", "--allow-oversize"]
         on_error: block
       - name: maintenance-planning-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--maintenance-plan"]

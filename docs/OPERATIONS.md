@@ -36,6 +36,9 @@ Do not carry this override into normal development.
 
 ## Multi-round campaign
 
+Campaigns are unattended and headless by default; use `--tui` only for an
+attended diagnostic display.
+
 ```bash
 ./scripts/ralph-campaign.sh --rounds 3
 ```
@@ -50,9 +53,10 @@ Resume an interrupted active campaign with matching options:
 ./scripts/ralph-campaign.sh --rounds 3 --resume
 ```
 
-Use `--restart` only to replace a terminal saved campaign. Corrupt state,
-rewritten Git bindings, dirty phase boundaries, verifier changes, and final
-findings fail closed. `.factory/environment.toml` declares tools and runners
+Use `--restart` only to replace a terminal saved campaign. Reserved-token
+mistakes in checkpoint handoffs flow through strict completion rejection and
+automatic continuation. Corrupt state, rewritten Git bindings, dirty phase
+boundaries, verifier changes, and final findings still fail closed. `.factory/environment.toml` declares tools and runners
 without endpoints or credentials. Campaign verification runs every declared
 runner and validates exact-commit evidence:
 
