@@ -252,7 +252,7 @@ mv "$tmp/.factory/config.toml.good" "$tmp/.factory/config.toml"
 if command -v flock >/dev/null; then
     lock_tmp=$(mktemp -d)
     cp "$PROJECT_ROOT/scripts/factory-lock.sh" "$lock_tmp/"
-    bash -c 'source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"; bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; if env -u FACTORY_LOCK_HELD bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; then exit 1; fi' _ "$lock_tmp"
+    bash -c 'unset FACTORY_LOCK_HELD; exec 9>&-; source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"; bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; if env -u FACTORY_LOCK_HELD bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; then exit 1; fi' _ "$lock_tmp"
     rm -rf "$lock_tmp"
 fi
 
