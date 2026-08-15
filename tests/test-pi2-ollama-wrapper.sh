@@ -246,8 +246,8 @@ if [[ -n "$REAL_RALPH" && $($REAL_RALPH --version) == 'ralph 2.10.1' ]]; then
         tail -40 "$tmp/ralph-out" "$tmp/ralph-err" >&2
         exit 1
     }
-    grep -Fq 'reason=max_iterations' "$tmp/ralph-out"
-    grep -Fq 'finished naturally' "$tmp/ralph-out"
+    sed 's/\x1b\[[0-9;]*m//g' "$tmp/ralph-out" | grep -Fq 'reason=max_iterations'
+    sed 's/\x1b\[[0-9;]*m//g' "$tmp/ralph-out" | grep -Fq 'finished naturally'
     assert_absent 'Event emitted:' "$tmp/ralph-out"
     assert_absent 'consecutive_failures' "$tmp/ralph-out"
     [[ $(<"$tmp/probe-count") == 2 ]]
