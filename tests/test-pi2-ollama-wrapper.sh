@@ -13,6 +13,11 @@ assert_absent() {
         exit 1
     fi
 }
+if ! command -v node >/dev/null 2>&1; then
+    echo "test-pi2-ollama-wrapper: node unavailable — skipping wrapper extension checks" >&2
+    exit 0
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/.ralph"

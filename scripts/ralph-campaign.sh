@@ -215,11 +215,23 @@ PY
             started=$(round_field implementation_started)
             implementation_ok=false
             if [[ "$started" == true ]]; then
-                set +e
-                ./scripts/final-gate.sh --implementation >/dev/null 2>&1
-                gate_rc=$?
-                set -e
-                (( gate_rc == 0 )) && [[ -z $(git status --porcelain --untracked-files=normal) ]] && implementation_ok=true
+                for precheck_attempt in 1 2 3; do
+                    set +e
+                    ./scripts/final-gate.sh --implementation >/dev/null 2>&1
+                    gate_rc=$?
+                    set -e
+                    if (( gate_rc == 0 )); then
+                        [[ -z $(git status --porcelain --untracked-files=normal) ]] && implementation_ok=true
+                        break
+                    elif (( gate_rc >= 128 )); then
+                        echo "ralph-campaign: implementation pre-check interrupted (rc=$gate_rc); retrying ($precheck_attempt/3)" >&2
+                        rm -f "$PROJECT_ROOT/.factory-lock"
+                        sleep "${CAMPAIGN_RETRY_DELAY:-30}"
+                        continue
+                    else
+                        break  # real failure — let Ralph attempt recovery
+                    fi
+                done
             fi
             if ! $implementation_ok; then
                 if [[ "$started" != true ]]; then
@@ -233,8 +245,8 @@ PY
                 else
                     run_phase "implementation" "$SCRIPT_DIR/ralph-run.sh" "${launcher_args[@]}" || continue
                 fi
+                run_phase "implementation-gate" ./scripts/final-gate.sh --implementation || continue
             fi
-            ./scripts/final-gate.sh --implementation
             implementation_commit=$(git rev-parse HEAD)
             "$STATE_HELPER" update --expect-phase implementation --phase verification --round-field "implementation_commit=$(json_string "$implementation_commit")"
             ;;
