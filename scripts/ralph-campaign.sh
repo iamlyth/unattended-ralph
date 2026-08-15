@@ -147,6 +147,24 @@ record_field() {
 launcher_args=()
 $TUI || launcher_args+=(--no-tui)
 
+# Run a phase script (ralph-plan/run/audit) with campaign-level resilience.
+# If the script exits non-zero (e.g. infrastructure failure), clean up the
+# factory lock and signal the caller to retry via the while loop.
+run_phase() {
+    local label=$1; shift
+    set +e
+    "$@"
+    local rc=$?
+    set -e
+    if (( rc != 0 )); then
+        rm -f "$PROJECT_ROOT/.factory-lock"
+        echo "ralph-campaign: $label exited with status $rc; retrying in ${CAMPAIGN_RETRY_DELAY:-30}s" >&2
+        sleep "${CAMPAIGN_RETRY_DELAY:-30}"
+        return 1
+    fi
+    return 0
+}
+
 while [[ $(state_get status) == active ]]; do
     round=$(state_get round)
     phase=$(state_get phase)
@@ -173,9 +191,9 @@ while [[ $(state_get status) == active ]]; do
                     record_field planning planning_started true
                 fi
                 if [[ -s .factory-state/planning-base-commit ]] && [[ $(tr -d '[:space:]' < .factory-state/planning-base-commit) == "$base" ]]; then
-                    "$SCRIPT_DIR/ralph-plan.sh" --resume "${launcher_args[@]}"
+                    run_phase "planning" "$SCRIPT_DIR/ralph-plan.sh" --resume "${launcher_args[@]}" || continue
                 elif [[ $(git rev-parse HEAD) == "$base" ]] && [[ -z $(git status --porcelain --untracked-files=normal) ]]; then
-                    "$SCRIPT_DIR/ralph-plan.sh" "${launcher_args[@]}"
+                    run_phase "planning" "$SCRIPT_DIR/ralph-plan.sh" "${launcher_args[@]}" || continue
                 else
                     echo "ralph-campaign: planning state cannot be reconciled safely" >&2
                     exit 1
@@ -211,9 +229,9 @@ PY
                 # A clean checkpoint starts a fresh context; a dirty interrupted
                 # lifecycle must use the launcher's validated recovery path.
                 if [[ "$started" == true && -n $(git status --porcelain --untracked-files=normal) ]]; then
-                    "$SCRIPT_DIR/ralph-run.sh" --resume "${launcher_args[@]}"
+                    run_phase "implementation" "$SCRIPT_DIR/ralph-run.sh" --resume "${launcher_args[@]}" || continue
                 else
-                    "$SCRIPT_DIR/ralph-run.sh" "${launcher_args[@]}"
+                    run_phase "implementation" "$SCRIPT_DIR/ralph-run.sh" "${launcher_args[@]}" || continue
                 fi
             fi
             ./scripts/final-gate.sh --implementation
@@ -245,7 +263,7 @@ PY
                 ./scripts/initialize-campaign-audit.py --round "$round" --base "$expected_audit_base" \
                     --runner-evidence-sha256 "$expected_runner_evidence"
                 record_field audit audit_started true
-                "$SCRIPT_DIR/ralph-audit.sh" "${launcher_args[@]}"
+                run_phase "audit" "$SCRIPT_DIR/ralph-audit.sh" "${launcher_args[@]}" || continue
             else
                 set +e
                 ./scripts/final-gate.sh --campaign-audit >/dev/null 2>&1
@@ -254,7 +272,7 @@ PY
                 if (( audit_gate_rc != 0 )); then
                     # The report and Git binding persist; use a fresh audit context
                     # instead of continuing an unrelated volatile event stream.
-                    "$SCRIPT_DIR/ralph-audit.sh" "${launcher_args[@]}"
+                    run_phase "audit" "$SCRIPT_DIR/ralph-audit.sh" "${launcher_args[@]}" || continue
                 fi
             fi
             ./scripts/final-gate.sh --campaign-audit

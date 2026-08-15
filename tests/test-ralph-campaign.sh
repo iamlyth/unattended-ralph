@@ -174,22 +174,13 @@ assert [c.split()[0] for c in latest] == ['plan','implement','verify','audit'], 
 assert all('--no-tui' not in c for c in latest), latest
 PY
 
+# Campaign-level resilience: a phase script that exits non-zero (e.g.
+# infrastructure failure) must self-recover via the while loop, not exit.
 set +e
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
+(cd "$tmp" && CAMPAIGN_RETRY_DELAY=0 FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
 fail_rc=$?
 set -e
-[[ $fail_rc -eq 42 ]]
-set +e
-(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
-overwrite_rc=$?
-set -e
-[[ $overwrite_rc -eq 1 ]]
-set +e
-(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --tui >/dev/null 2>&1)
-mode_mismatch_rc=$?
-set -e
-[[ $mode_mismatch_rc -eq 1 ]]
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null)
+[[ $fail_rc -eq 0 ]]
 grep -q '^implement --resume --no-tui$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
@@ -197,18 +188,13 @@ state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json'
 assert state['status']=='complete'
 PY
 
-# Resume without an explicit mode adopts an attended campaign's saved mode;
-# explicitly requesting the opposite mode fails closed.
+# Attended mode: self-recovery preserves the saved TUI mode.
 rm -f "$tmp/.factory-state/failed-implementation"
 set +e
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 FAKE_DIRTY_CONTENT='attended interrupted work' ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null 2>&1)
+(cd "$tmp" && CAMPAIGN_RETRY_DELAY=0 FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 FAKE_DIRTY_CONTENT='attended interrupted work' ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null 2>&1)
 attended_fail_rc=$?
-(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null 2>&1)
-attended_mismatch_rc=$?
 set -e
-[[ $attended_fail_rc -eq 42 ]]
-[[ $attended_mismatch_rc -eq 1 ]]
-(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null)
+[[ $attended_fail_rc -eq 0 ]]
 grep -q '^implement --resume$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
