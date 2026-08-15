@@ -53,6 +53,15 @@ Resume an interrupted active campaign with matching options:
 ./scripts/ralph-campaign.sh --rounds 3 --resume
 ```
 
+Ralph 2.10.1 misclassifies its five-second post-`ralph emit` SIGTERM as a
+failed iteration. The Pi2 wrapper explicitly loads a tool-call extension that
+routes only a direct final emit through `scripts/pi-cli-shims/ralph`; the shim
+preserves the real command's status and stderr while changing its exact
+acknowledgement. Arbitrary identical output remains fail-closed. The bounded
+no-follow prompt bridge and wrapper retain exec-style signal propagation. Remove
+this compatibility path only after the pinned Ralph integration probe passes
+without it.
+
 Use `--restart` only to replace a terminal saved campaign. Reserved-token
 mistakes in checkpoint handoffs flow through strict completion rejection and
 automatic continuation. A `loop_stale` result is recoverable only from strict

@@ -62,10 +62,12 @@ required = [
     'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
     'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
     'scripts/run-factory-runners.py', 'scripts/check-factory-runner-evidence.py',
-    'scripts/factory-runner-server.py',
+    'scripts/factory-runner-server.py', 'scripts/pi2-secure-exec.py',
+    'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
     'tests/test-campaign-audit.sh', 'tests/test-ralph-campaign.sh',
     'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
+    'tests/test-pi2-ollama-wrapper.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -162,5 +164,6 @@ PY
 ./tests/test-ralph-campaign.sh
 ./tests/test-ralph-stale-recovery.sh
 ./tests/test-ralph-recover-safety.sh
+./tests/test-pi2-ollama-wrapper.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

@@ -93,7 +93,9 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
              'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
              'tests/test-factory-environment.sh', 'tests/test-campaign-audit.sh',
-             'tests/test-ralph-campaign.sh'):
+             'tests/test-ralph-campaign.sh', 'scripts/pi2-secure-exec.py',
+             'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
+             'tests/test-pi2-ollama-wrapper.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
 PY
 for config in .factory/ralph/implementation.yml .factory/ralph/plan.yml .factory/ralph/audit.yml .factory/ralph/maintenance.yml .factory/ralph/maintenance-plan.yml; do
@@ -129,6 +131,12 @@ clean = maintenance.index('git status --porcelain')
 assert lock < clean < selection, 'maintenance selection/clean check is not serialized'
 recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
 assert "does not match recorded loop mode" in recover
+pi2_wrapper = (root / 'scripts/pi2-ollama.sh').read_text(encoding='utf-8')
+assert 'pi2-secure-exec.py' in pi2_wrapper
+assert 'pi-ralph-emit-extension.mjs' in pi2_wrapper
+pi2_shim = (root / 'scripts/pi-cli-shims/ralph').read_text(encoding='utf-8')
+assert "${1:-} != emit" in pi2_shim
+assert "s/^Event emitted:/Event published:/" in pi2_shim
 for name in ('ralph-run.sh', 'ralph-plan.sh', 'ralph-audit.sh', 'ralph-maintenance-run.sh', 'ralph-maintenance-plan.sh'):
     launcher = (root / 'scripts' / name).read_text(encoding='utf-8')
     assert 'ralph-supervision.sh' in launcher

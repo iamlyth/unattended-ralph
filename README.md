@@ -103,6 +103,18 @@ Each iteration:
 7. creates a Git checkpoint;
 8. exits so the next task receives fresh context.
 
+Ralph 2.10.1 otherwise interprets the real `ralph emit` acknowledgement as a
+five-second deadline, kills Pi while it finishes the tool turn, and counts that
+kill as an iteration failure. `scripts/pi2-ollama.sh` explicitly loads a Pi
+tool-call extension that rewrites only a direct final `ralph emit` command to
+`scripts/pi-cli-shims/ralph`. The shim resolves real Ralph from the jail's
+trusted PATH, preserves its status and stderr, and changes only that command's
+acknowledgement. Arbitrary identical output stays fail-closed, while
+`scripts/pi2-secure-exec.py` preserves exec-style signals and snapshots bridged
+host prompts with bounded no-follow checks. Pi may use a short final model turn
+after publication; a genuine silent hang remains bounded by Ralph's normal
+five-minute inactivity timeout.
+
 Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs and requires commit-bound, zero-skip `test_installed_functional` evidence before completion.
 
 Iteration count is not completion evidence. If final acceptance discovers a gap, the worker preserves the ledger, appends a uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured 1000-iteration and one-year runtime values are safety ceilings, not targets; reaching them or an external session limit leaves the cycle incomplete with a recovery handoff.

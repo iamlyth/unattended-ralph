@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROVIDER=${OLLAMA_PROVIDER:-ollama}
 MODEL=${OLLAMA_MODEL:-glm-5.2}
 args=("$@")
 prompt_prefix="Please read and execute the task in "
 
-# Ralph may place a large prompt in host /tmp. Open it before Pi2 enters its
-# private bubblewrap /tmp and stream it through stdin.
+# This explicit extension runs inside Pi's jail and rewrites only a direct
+# `ralph emit` bash tool call to the repository shim. The real Ralph binary
+# remains the one resolved by the jail's trusted PATH.
+args=(--extension ./scripts/pi-ralph-emit-extension.mjs "${args[@]}")
+
+launcher=(python3 "$SCRIPT_DIR/pi2-secure-exec.py")
 if (( ${#args[@]} > 0 )); then
     last_index=$(( ${#args[@]} - 1 ))
     prompt_arg=${args[$last_index]}
     if [[ "$prompt_arg" == "$prompt_prefix"* ]]; then
         prompt_file=${prompt_arg#"$prompt_prefix"}
-        if [[ -r "$prompt_file" ]]; then
-            unset "args[$last_index]"
-            exec pi2 --provider "$PROVIDER" --model "$MODEL" "${args[@]}" < "$prompt_file"
-        fi
+        unset "args[$last_index]"
+        launcher+=(--prompt-file "$prompt_file")
     fi
 fi
 
-exec pi2 --provider "$PROVIDER" --model "$MODEL" "${args[@]}"
+exec "${launcher[@]}" -- pi2 --provider "$PROVIDER" --model "$MODEL" "${args[@]}"

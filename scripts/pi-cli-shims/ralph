@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pi-only Ralph shim: avoid Ralph 2.10.1 misclassifying its post-event SIGTERM.
+set -euo pipefail
+
+REAL_RALPH=$(command -v ralph)
+[[ "$REAL_RALPH" == /* && -x "$REAL_RALPH" ]] || {
+    echo 'ralph-shim: cannot resolve the real Ralph executable' >&2
+    exit 2
+}
+
+if [[ ${1:-} != emit ]]; then
+    exec "$REAL_RALPH" "$@"
+fi
+
+# `ralph emit` writes the authoritative JSONL record before printing this single
+# acknowledgement. Rewrite only that trusted command's exact line; preserve its
+# stderr and original status so failed emissions remain failed tool calls.
+set +e
+"$REAL_RALPH" "$@" | sed -u 's/^Event emitted:/Event published:/'
+statuses=("${PIPESTATUS[@]}")
+set -e
+(( statuses[0] != 0 )) && exit "${statuses[0]}"
+exit "${statuses[1]}"
