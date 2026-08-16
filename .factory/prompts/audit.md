@@ -14,6 +14,14 @@ Use fresh read-only subagents adaptively for independent correctness, security, 
 
 Verify claimed environment evidence using only declared and mechanically evidenced capabilities. Missing backend, GPU, compositor, physical or kernel-backed controller, target consumer, package installation, systemd session, or hardware runner is not a skip and must not be inferred from synthetic evidence.
 
+## Visual rendering verification
+
+For each visual acceptance requirement in the specification, verify that production rendering produces the expected visual features, not just non-blank output. A widget that renders without crashing but omits a specified visual element (diagram outline, icon image, shape, or texture) is a finding.
+
+- **Resource loading**: When a widget or component loads an external resource (image, SVG, font, texture), trace the production code path and verify the resource path is non-NULL and points to an existing file. A NULL resource path that silently produces a widget without its expected visual content is a defect even if the widget does not crash and the region has some non-background pixels from labels or highlights.
+- **Golden baseline integrity**: Review golden baseline images against the specification's visual requirements. A baseline captured from broken rendering (e.g., missing diagram outline, absent icon, blank image area) is a false positive that masks defects. If a baseline shows only sparse label or highlight pixels in a region expected to show a full visual feature, flag it as a finding.
+- **Content density**: For regions verified by framebuffer assertions (e.g., fb_region_has_content or equivalent), verify that the content density and spatial distribution match the expected visual feature. Sparse non-background pixels concentrated in a few rows (e.g., button labels without the controller outline they label) indicate a rendering failure, not success. "Some pixels were drawn" is necessary but not sufficient — the specification requires meaningful non-background framebuffer output, and a test that checks only "render did not crash" does not satisfy this requirement.
+
 ## Report format
 
 After the immutable front matter and level-one title, include:
