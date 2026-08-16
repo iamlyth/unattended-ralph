@@ -175,6 +175,26 @@ def load() -> dict:
         fail(f"invalid state: {exc}")
 
 
+def load_status_lenient() -> str:
+    """Read only the status field, skipping full validation.
+
+    Used by `start --replace-terminal`: replacing a terminal campaign must
+    work even when HEAD has moved past the terminal audit commit (which
+    would make strict `load()` fail). We only need to confirm the saved
+    campaign is not active before overwriting it.
+    """
+    path = state_path()
+    if path.is_symlink() or not path.is_file():
+        fail(f"missing or unsafe state file: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid state: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("status"), str):
+        fail("invalid state: missing status")
+    return data["status"]
+
+
 def atomic_write(data: dict) -> None:
     validate(data)
     path = state_path()
@@ -229,9 +249,16 @@ def main() -> int:
         git("cat-file", "-e", f"{args.base}^{{commit}}")
         path = state_path()
         if path.exists():
-            existing = load()
-            if existing["status"] == "active" or not args.replace_terminal:
-                fail("saved campaign exists; resume it or explicitly replace a terminal campaign")
+            if args.replace_terminal:
+                # Lenient: only need the status to confirm it is terminal (not active).
+                # Strict load() would fail here if HEAD moved past the terminal
+                # audit commit, which must not block replacing a finished campaign.
+                if load_status_lenient() == "active":
+                    fail("saved campaign is active; cannot replace it")
+            else:
+                existing = load()
+                if existing["status"] == "active":
+                    fail("saved campaign exists; resume it or explicitly replace a terminal campaign")
         record = empty_round(1)
         record["base_commit"] = args.base
         atomic_write({
