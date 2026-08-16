@@ -67,7 +67,7 @@ required = [
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
     'tests/test-campaign-audit.sh', 'tests/test-ralph-campaign.sh',
     'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
-    'tests/test-pi2-ollama-wrapper.sh',
+    'tests/test-pi2-ollama-wrapper.sh', 'tests/test-production-path-bypass.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -165,5 +165,6 @@ PY
 ./tests/test-ralph-stale-recovery.sh
 ./tests/test-ralph-recover-safety.sh
 ./tests/test-pi2-ollama-wrapper.sh
+./tests/test-production-path-bypass.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"
