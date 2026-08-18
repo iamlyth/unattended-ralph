@@ -117,6 +117,8 @@ def remove_workspace(work: Path) -> None:
 
 
 def main() -> int:
+    if os.getuid() == 0 or os.geteuid() == 0 or os.getuid() != os.geteuid():
+        fail("server requires a dedicated unprivileged runner identity")
     if os.environ.get("SSH_ORIGINAL_COMMAND") != "factory-runner-v1":
         fail("server must be invoked by the fixed SSH protocol command")
     line = sys.stdin.buffer.readline(65_537)

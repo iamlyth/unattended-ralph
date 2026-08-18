@@ -72,6 +72,19 @@ git -C "$tmp/repo" commit -qm unrelated-environment
 (cd "$tmp/repo" && ./scripts/check-factory-runner-evidence.py --expected-commit "$base" >/dev/null)
 git -C "$tmp/repo" reset -q --hard "$base"
 
+# A resource name is not evidence: unsupported hardware claims fail before the
+# generic verifier can turn them into a passing receipt.
+sed -i 's/\["remote-project-gate"\]/["remote-project-gate", "physical-controller"]/' \
+    "$tmp/repo/.factory/environment.toml"
+git -C "$tmp/repo" add .factory/environment.toml
+git -C "$tmp/repo" commit -qm unsupported-physical-controller
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+unsupported_capability_rc=$?
+set -e
+[[ $unsupported_capability_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+
 # Self-consistent local hashes cannot conceal a false archive binding.
 python3 - "$tmp/repo" "$base" <<'PY'
 import hashlib, json, pathlib, sys
