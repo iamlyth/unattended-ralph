@@ -93,6 +93,12 @@ required = [
     'tests/test-maintenance-planning-completion.sh',
     'tests/test-boilerplate-env-isolation.sh',
     'tests/test-pi2-ollama-wrapper.sh', 'tests/test-production-path-bypass.sh',
+    '.factory/schemas/conformance.schema.json', '.factory/capability-contracts.json',
+    'scripts/validate-conformance.py', 'scripts/check-capability-contracts.py',
+    'scripts/check-capability-evidence.py', 'scripts/machine-receipt.py',
+    'scripts/check-audit-receipts.py',
+    'tests/test-conformance.sh', 'tests/test-capability-contracts.sh',
+    'tests/test-audit-receipts.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -128,8 +134,23 @@ grep -q '^## Build' AGENTS.md
 grep -q '^## Immediate validation' AGENTS.md
 (( $(wc -l < AGENTS.md) <= 100 )) || { echo 'verify: AGENTS.md must remain concise (100 lines maximum)' >&2; exit 1; }
 grep -q 'Do not assume functionality is missing or complete' .factory/prompts/implementation.md
+# False-positive-acceptance redesign: prompts must distinguish real acceptance
+# from proxy evidence and require machine-readable conformance evidence.
+grep -q 'Pixel/offscreen framebuffer checks are not real visual acceptance' .factory/prompts/implementation.md
+grep -q 'not the real system service' .factory/prompts/implementation.md
+grep -q 'synthetic producer' .factory/prompts/implementation.md
+grep -q 'declaring or asserting evidence is not evidence' .factory/prompts/implementation.md
+grep -q 'conformance.json' .factory/prompts/implementation.md
+grep -q 'machine-receipt.py --tag' .factory/prompts/implementation.md
+for role in visual-reviewer runner-reviewer evidence-reviewer spec-reviewer; do
+    grep -q 'no runtime-certification authority' ".pi/agents/$role.md"
+done
 grep -q 'Final documentation and specification audit' .factory/prompts/plan.md
 grep -q 'Specification conformance matrix' .factory/prompts/plan.md
+grep -q 'conformance.json' .factory/prompts/plan.md
+grep -q 'evidence tier' .factory/prompts/plan.md
+grep -q 'Pixel/offscreen framebuffer checks are not real visual acceptance' .factory/prompts/plan.md
+grep -q 'capability-contracts.json' .factory/prompts/plan.md
 grep -q 'Interaction acceptance inventory' .factory/prompts/plan.md
 grep -q 'definition of done' .factory/prompts/implementation.md
 grep -q 'Maintenance verification and documentation audit' .factory/prompts/maintenance-plan.md
@@ -138,6 +159,11 @@ grep -q 'LOOP_COMPLETE.*final non-empty line outside every event tag' .factory/p
 grep -q 'MAINTENANCE_PLAN_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance-plan.md
 grep -q 'MAINTENANCE_COMPLETE.*final non-empty line outside every event tag' .factory/prompts/maintenance.md
 grep -q 'AUDIT_COMPLETE.*final non-empty line' .factory/prompts/audit.md
+grep -q 'machine-receipt.py --tag' .factory/prompts/audit.md
+grep -q '\[receipt:' .factory/prompts/audit.md
+grep -q 'BLOCKED evidence forces' .factory/prompts/audit.md
+grep -q 'Pixel/offscreen framebuffer checks are not real visual acceptance' .factory/prompts/audit.md
+grep -q 'conformance.json' .factory/prompts/audit.md
 grep -q 'final-gate.sh --planning' .factory/prompts/plan.md
 grep -q 'final-gate.sh --implementation' .factory/prompts/implementation.md
 grep -q 'final-gate.sh --campaign-audit' .factory/prompts/audit.md
@@ -177,6 +203,7 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/plan.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 ./scripts/check-factory-environment.py
+./scripts/check-capability-contracts.py
 cmp -s .github/ISSUE_TEMPLATE/bug_report.md .forgejo/ISSUE_TEMPLATE/bug_report.md
 ./scripts/bug-ledger.py validate
 
@@ -210,5 +237,8 @@ PY
 ./tests/test-ralph-recover-safety.sh
 ./tests/test-pi2-ollama-wrapper.sh
 ./tests/test-production-path-bypass.sh
+./tests/test-conformance.sh
+./tests/test-capability-contracts.sh
+./tests/test-audit-receipts.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

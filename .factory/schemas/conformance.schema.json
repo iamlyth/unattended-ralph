@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ralph-conformance/v1",
+  "title": "Ralph machine-readable conformance sidecar",
+  "description": "Machine-readable declaration of specification conformance. Every requirement row in the implementation-plan specification conformance matrix must have an entry here. The sidecar is authoritative for classification, evidence tier, required capabilities, exact evidence commit, and receipt/artifact refs; free-text plan cells alone never prove acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "requirements"],
+  "properties": {
+    "schema": {
+      "const": "ralph-conformance/v1"
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/requirement" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+$"
+    },
+    "spec_section": {
+      "type": "string",
+      "minLength": 1
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["verified", "partial", "missing", "ambiguous", "blocked", "not_applicable"]
+    },
+    "evidence_tier": {
+      "type": "string",
+      "enum": ["unit", "simulated", "private_integration", "installed", "real_system", "human"]
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "repo_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "spec_sections",
+        "classification",
+        "evidence_tier",
+        "required_tier",
+        "required_capabilities",
+        "evidence_commit",
+        "receipts",
+        "artifacts",
+        "reason"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "spec_sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/spec_section" }
+        },
+        "classification": { "$ref": "#/$defs/classification" },
+        "evidence_tier": { "$ref": "#/$defs/evidence_tier" },
+        "required_tier": { "$ref": "#/$defs/evidence_tier" },
+        "required_capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "evidence_commit": { "$ref": "#/$defs/commit" },
+        "receipts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/repo_path" }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/repo_path" }
+        },
+        "reason": {
+          "type": "string",
+          "description": "Required for blocked and not_applicable rows. not_applicable reason must reference the spec-scoped exclusion (a section marker or docs/SPEC.md)."
+        }
+      }
+    }
+  }
+}

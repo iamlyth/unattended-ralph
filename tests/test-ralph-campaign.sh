@@ -16,7 +16,9 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
    "$PROJECT_ROOT/scripts/factory_lock.py" \
    "$PROJECT_ROOT/scripts/factory_state_io.py" \
-   "$PROJECT_ROOT/scripts/campaign-verifier-binding.py" "$tmp/scripts/"
+   "$PROJECT_ROOT/scripts/campaign-verifier-binding.py" \
+   "$PROJECT_ROOT/scripts/check-capability-contracts.py" \
+   "$PROJECT_ROOT/scripts/check-capability-evidence.py" "$tmp/scripts/"
 cat > "$tmp/scripts/assert-no-factory-lock.py" <<'PY'
 #!/usr/bin/env python3
 import os
@@ -29,7 +31,8 @@ for item in Path('/proc/self/fd').iterdir():
     except OSError: continue
     assert (info.st_dev, info.st_ino) != (root.st_dev, root.st_ino)
 PY
-for helper in check-factory-environment.py run-factory-runners.py check-factory-runner-evidence.py; do
+for helper in check-factory-environment.py run-factory-runners.py check-factory-runner-evidence.py \
+    check-capability-contracts.py check-capability-evidence.py; do
     mv "$tmp/scripts/$helper" "$tmp/scripts/$helper.real"
     cat > "$tmp/scripts/$helper" <<EOF
 #!/usr/bin/env bash
@@ -42,6 +45,12 @@ chmod +x "$tmp/scripts/"*
 chmod 700 "$tmp/.factory-state"
 cat > "$tmp/.factory/environment.toml" <<'EOF'
 schema_version = 1
+EOF
+cat > "$tmp/.factory/capability-contracts.json" <<'EOF'
+{
+  "schema": "ralph-capability-contract/v1",
+  "capabilities": []
+}
 EOF
 printf '# Spec\n' > "$tmp/docs/SPEC.md"
 printf '# Initial plan\n' > "$tmp/.factory/artifacts/implementation-plan.md"

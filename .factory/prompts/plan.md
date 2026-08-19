@@ -25,6 +25,7 @@ Keep the primary context as a scheduler. Adaptively launch read-only project sub
 - `reviewer` to challenge decomposition and acceptance criteria
 - `security-reviewer` for trust boundaries or sensitive behavior
 - `docs-reviewer` for user-facing and operational documentation impact
+- `visual-reviewer`, `runner-reviewer`, `evidence-reviewer`, and `spec-reviewer` for read-only review of rendered acceptance, declared capability probes, evidence receipts/tiers, and specification mapping — none has runtime-certification authority
 
 Respect the ceilings in `.factory/config.toml`. Start with the smallest useful fan-out and increase only when work is genuinely independent. Subagents must only report findings; you are the sole writer.
 
@@ -46,7 +47,7 @@ The launcher has already written all five metadata values into the fresh skeleto
 
 1. Goal and non-goals.
 2. Architecture and constraints inferred from the approved specification.
-3. A section titled **Specification conformance matrix**. Give every independently testable normative requirement a stable requirement ID, its specification section, classification (`verified`, `partial`, `missing`, or `ambiguous`), exact current source/test evidence, and the task that closes any non-verified classification. `verified` requires production-path evidence; existence of structs, callbacks, geometry, output snapshots, or unit tests that bypass dispatch is insufficient. Inspect `.factory/bugs/open.md` and review findings and map every release-impacting defect to a task.
+3. A section titled **Specification conformance matrix**. Give every independently testable normative requirement a stable requirement ID, its specification section, classification (`verified`, `partial`, `missing`, `ambiguous`, `blocked`, or `not_applicable`), exact current source/test evidence, and the task that closes any non-verified classification. `verified` requires production-path evidence at the required evidence tier; existence of structs, callbacks, geometry, output snapshots, or unit tests that bypass dispatch is insufficient. Pixel/offscreen framebuffer checks are not real visual acceptance, a private/session-scoped service instance is not the real system service, a synthetic producer is not the target consumer, and declaring evidence is not evidence. Every `verified` row must eventually have a matching machine-readable entry in `.factory/artifacts/conformance.json` (evidence tier, required capabilities from `.factory/capability-contracts.json`, exact evidence commit, receipt/artifact refs); `not_applicable` needs a spec-scoped reason and `blocked` rows fail implementation completion. Inspect `.factory/bugs/open.md` and review findings and map every release-impacting defect to a task.
 4. A section titled **Interaction acceptance inventory** covering every user-visible UI control, CLI operation, API operation, event, and workflow required by the canonical specification. Record each required input path, expected semantic outcome, production dispatch path, and planned executable evidence. Do not sample only representative operations.
 5. A numbered task list ordered by dependencies and value. Every task must use this machine-checkable shape:
 

@@ -431,6 +431,16 @@ Every implementation plan ends with **Final documentation and specification audi
 
 Read-only reviewers compare source, tests, configuration, README, operations, and the specification, specifically looking for tests that bypass production initialization/event dispatch or assert pixels without semantic behavior. The sole writer corrects documentation and runs final verification. If review finds a gap, Ralph appends remediation and continues; `LOOP_COMPLETE` is forbidden until the complete definition of done passes.
 
+## Machine-readable acceptance evidence
+
+Proxy evidence must not be promoted to production verification. Three tracked artifacts make acceptance machine-checked:
+
+- `.factory/artifacts/conformance.json` (schema `ralph-conformance/v1`) is the only authority for `verified` claims. Each requirement row declares classification (`verified`/`partial`/`missing`/`ambiguous`/`blocked`/`not_applicable`), evidence tier (`unit`/`simulated`/`private_integration`/`installed`/`real_system`/`human`), required capabilities, the exact evidence commit, and receipt/artifact refs. `scripts/validate-conformance.py planning|complete` checks the schema, cross-checks the plan matrix, and rejects `verified` rows that are below the normative required tier, unevidenced, or backed by an undeclared capability. `blocked` and `partial` rows always fail implementation completion; `not_applicable` requires a spec-scoped reason.
+- `.factory/capability-contracts.json` (schema `ralph-capability-contract/v1`) defines one probe per declared/required capability: probe argv, must-execute marker, must-not-skip tokens, and deny-simulated markers. `scripts/check-capability-contracts.py` rejects contracts for undeclared capabilities and declared capabilities without contracts; `scripts/check-capability-evidence.py` requires a fresh exact-commit runner receipt whose probe section executed (no skip) and shows no simulated marker. Missing contract, probe, or receipt is unevidenced and never auto-reclassified. The generic repository keeps an empty contract instance; per-product contracts belong in the product repository.
+- Audit reports must cite machine receipts: coordinator-executed commands are wrapped by `scripts/machine-receipt.py --tag <tag> -- <argv...>` and recorded under `.factory-state/audit-receipts/`. `scripts/check-audit-receipts.py` requires every executable-evidence line to carry PASS/FAIL/BLOCKED plus a `[receipt: ...]`/`[manifest: ...]` reference, PASS requires exit 0, and any BLOCKED evidence forces `result: findings`. Subagent prose cannot certify runtime.
+
+Pixel/offscreen framebuffer checks are not real visual acceptance, private/session-scoped service instances are not the real system service, a synthetic test producer is not the target consumer, and an evidence declaration is not evidence. `final-gate.sh` `--implementation` and `--campaign-audit` run all three layers; `--planning` validates an existing sidecar so a fresh cycle stays pendable before migration.
+
 ## Verify
 
 ```bash

@@ -318,6 +318,11 @@ PY
             factory_lock_run_untrusted ./scripts/run-factory-runners.py
             runner_evidence_sha256=$(factory_lock_run_untrusted \
                 ./scripts/check-factory-runner-evidence.py --print-digest)
+            # Capability evidence is only valid when every declared capability
+            # has a tracked contract and a fresh exact-commit receipt with no
+            # skipped or simulated probe output.
+            factory_lock_run_untrusted ./scripts/check-capability-contracts.py
+            factory_lock_run_untrusted ./scripts/check-capability-evidence.py
             [[ -z $(git status --porcelain --untracked-files=normal) ]] || { echo "ralph-campaign: verification left a dirty tree" >&2; exit 1; }
             verification_commit=$(git rev-parse HEAD)
             "$STATE_HELPER" update --expect-phase verification --phase audit \

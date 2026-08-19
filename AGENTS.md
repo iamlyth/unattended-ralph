@@ -63,3 +63,13 @@ List exact artifact paths and inspection commands needed for immediate loopback.
 - Golden/baseline updates, if used, must be explicit and reviewed rather than automatic test side effects.
 - A runner declaration is not evidence; accept only exact-commit receipts validated by the runner evidence checker.
 - Documentation records why a constraint or test matters, not iteration history.
+
+- A runner declaration is not evidence; accept only exact-commit receipts validated by the runner evidence checker.
+- Documentation records why a constraint or test matters, not iteration history.
+
+## Acceptance evidence (BUG-0016 machinery)
+
+- Conformance rows are machine-checked from `.factory/artifacts/conformance.json` (`ralph-conformance/v1`) by `scripts/validate-conformance.py`; free-text matrix cells cannot prove acceptance, and `blocked`/`partial`/`not_applicable` rows fail implementation completion unless re-classified with evidence.
+- Capability contracts live in `.factory/capability-contracts.json` (declared capabilities only; never claim undeclared/unavailable ones) and are checked by `scripts/check-capability-contracts.py`; `scripts/check-capability-evidence.py` requires a fresh exact-commit receipt with the probe executed, not skipped, and no simulated markers.
+- Coordinator commands are recorded by `scripts/machine-receipt.py --tag <tag> -- <argv...>` under `.factory-state/audit-receipts/`; audits must cite `[receipt: ...]`/`[manifest: ...]`, PASS requires exit 0, and any BLOCKED evidence forces `result: findings`.
+- Pixel/offscreen checks are not real visual acceptance, private/session-scoped services are not the real system service, a synthetic producer is not the target consumer, and declaring evidence is not evidence. The conformance sidecar is the only authority for verified claims.

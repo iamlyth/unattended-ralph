@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# Adversarial conformance-sidecar validation (BUG-0016): free-text verified
+# rows, lower-tier evidence for normative real-system/visual/hardware rows,
+# skipped probes, missing receipts, and not_applicable misuse must all fail.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+VALIDATOR="$PROJECT_ROOT/scripts/validate-conformance.py"
+EVIDENCE_CHECKER="$PROJECT_ROOT/scripts/check-capability-evidence.py"
+CONTRACT_CHECKER="$PROJECT_ROOT/scripts/check-capability-contracts.py"
+
+setup_repo() {
+    local dir=$1
+    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory-state/runner-evidence/probe-runner" \
+        "$dir/tests" "$dir/docs"
+    cp "$VALIDATOR" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$dir/scripts/"
+    chmod +x "$dir/scripts/"*.py
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-project.sh"
+    chmod +x "$dir/scripts/verify-project.sh"
+    cat > "$dir/.factory/environment.toml" <<'EOF'
+schema_version = 1
+[[runners]]
+name = "probe-runner"
+transport = "ssh"
+ssh_config_alias = "probe-runner"
+working_directory = "/srv/dev-runner/workspaces/probe"
+capabilities = ["probe-capability"]
+verify_argv = ["./scripts/verify-project.sh"]
+EOF
+    cat > "$dir/.factory/capability-contracts.json" <<'CONTRACT'
+{
+  "schema": "ralph-capability-contract/v1",
+  "capabilities": [
+    {
+      "name": "probe-capability",
+      "probe_argv": ["./scripts/verify-project.sh"],
+      "probe_marker": "--- probe-capability contract ---",
+      "must_execute": true,
+      "must_not_skip": ["Skipped", "Not Run", "skip"],
+      "deny_simulated_markers": ["mock", "private service", "simulated"]
+    }
+  ]
+}
+CONTRACT
+    printf '# Spec\n' > "$dir/docs/SPEC.md"
+    printf '# Plan\n' > "$dir/.factory/artifacts/implementation-plan.md"
+    printf '%s\n' ".factory-state/" > "$dir/.gitignore"
+    git -C "$dir" init -q -b develop
+    git -C "$dir" config user.name test
+    git -C "$dir" config user.email test@example.invalid
+    git -C "$dir" add .
+    git -C "$dir" commit -qm base
+    printf 'int probe(void){return 0;}\n' > "$dir/tests/probe.c"
+    git -C "$dir" add tests/probe.c
+    git -C "$dir" commit -qm fixture
+    local head
+    head=$(git -C "$dir" rev-parse HEAD)
+    mkdir -p "$dir/.factory-state/runner-evidence/probe-runner/$head"
+    printf '%s\n' '{"schema":"factory-runner-receipt/v1","result":"pass","exit_code":0}' > \
+        "$dir/.factory-state/runner-evidence/probe-runner/$head/manifest.json"
+    cat > "$dir/.factory-state/runner-evidence/probe-runner/$head/stdout.log" <<'LOG'
+--- probe-capability contract ---
+100% tests passed, 0 tests failed out of 1
+LOG
+    : > "$dir/.factory-state/runner-evidence/probe-runner/$head/stderr.log"
+    cat > "$dir/.factory-state/runner-evidence.json" <<AG
+{
+  "schema": "factory-runner-aggregate/v1",
+  "commit": "$head",
+  "runners": [
+    {"name": "probe-runner", "manifest": ".factory-state/runner-evidence/probe-runner/$head/manifest.json", "capabilities": ["probe-capability"]}
+  ]
+}
+AG
+}
+
+write_plan() {
+    local dir=$1
+    cat > "$dir/.factory/artifacts/implementation-plan.md" <<'PLAN'
+---
+status: active
+---
+# Implementation Plan
+## Specification conformance matrix
+| ID | Spec § | Classification | Evidence | Task |
+|----|--------|--------------|----------|------|
+| REQ-01 | §2 | verified | probe evidence | Task 1 |
+| REQ-02 | §2 | partial | probe evidence | Task 1 |
+| REQ-03 | §3 | partial | probe evidence | Task 1 |
+PLAN
+}
+
+write_sidecar() {
+    local dir=$1 head=$2
+    cat > "$dir/.factory/artifacts/conformance.json" <<JSON
+{
+  "schema": "ralph-conformance/v1",
+  "requirements": [
+    {
+      "id": "REQ-01",
+      "spec_sections": ["§1"],
+      "classification": "verified",
+      "evidence_tier": "unit",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "$head",
+      "receipts": [".factory-state/runner-evidence/probe-runner/$head/manifest.json"],
+      "artifacts": ["tests/probe.c"],
+      "reason": ""
+    },
+    {
+      "id": "REQ-02",
+      "spec_sections": ["§2"],
+      "classification": "partial",
+      "evidence_tier": "unit",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "$head",
+      "receipts": [],
+      "artifacts": [],
+      "reason": "pending task"
+    },
+    {
+      "id": "REQ-03",
+      "spec_sections": ["§3"],
+      "classification": "blocked",
+      "evidence_tier": "private_integration",
+      "required_tier": "real_system",
+      "required_capabilities": ["probe-capability"],
+      "evidence_commit": "$head",
+      "receipts": [],
+      "artifacts": [],
+      "reason": "capability is not real-system evidenced"
+    }
+  ]
+}
+JSON
+}
+
+# mutate <src> <dst> <mode>: copy the blessed repo and reclassify every
+# requirement to verified with baseline refs, then apply the adversarial mode.
+mutate() {
+    local src=$1 dst=$2 mode=$3
+    cp -a "$src" "$dst"
+    local head
+    head=$(git -C "$dst" rev-parse HEAD)
+    python3 - "$dst/.factory/artifacts/conformance.json" "$head" "$mode" <<'PY'
+import json, sys
+path, head, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.load(open(path))
+for req in data['requirements']:
+    req['classification'] = 'verified'
+    req['evidence_tier'] = 'unit'
+    req['required_tier'] = 'unit'
+    req['required_capabilities'] = []
+    req['receipts'] = [f".factory-state/runner-evidence/probe-runner/{head}/manifest.json"]
+    req['artifacts'] = ["tests/probe.c"]
+    req['reason'] = ''
+if mode == 'free-text':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-02':
+            req['receipts'] = []
+            req['artifacts'] = []
+elif mode == 'private-dbus':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['evidence_tier'] = 'private_integration'
+            req['required_tier'] = 'real_system'
+            req['required_capabilities'] = ['probe-capability']
+elif mode == 'skipped-probe':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-03':
+            req['evidence_tier'] = 'real_system'
+            req['required_tier'] = 'real_system'
+            req['required_capabilities'] = ['probe-capability']
+            req['receipts'] = []
+elif mode == 'missing-receipt':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['receipts'] = ['.factory-state/runner-evidence/probe-runner/missing-receipt.json']
+open(path, 'w').write(json.dumps(data))
+PY
+    sed -i -e 's/| REQ-02 | §2 | partial |/| REQ-02 | §2 | verified |/' \
+           -e 's/| REQ-03 | §3 | partial |/| REQ-03 | §3 | verified |/' \
+        "$dst/.factory/artifacts/implementation-plan.md"
+}
+
+expect_fail() {
+    local dir=$1 label=$2
+    set +e
+    (cd "$dir" && ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json >/dev/null 2>&1)
+    local rc=$?
+    set -e
+    [[ $rc -eq 1 ]] || { echo "test: conformance accepted $label (rc=$rc)" >&2; exit 1; }
+}
+
+# Blessed repo: planning valid, contract/receipt checkers pass.
+setup_repo "$tmp/blessed"
+head=$(git -C "$tmp/blessed" rev-parse HEAD)
+write_plan "$tmp/blessed"
+write_sidecar "$tmp/blessed" "$head"
+(cd "$tmp/blessed" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null)
+(cd "$tmp/blessed" && ./scripts/check-capability-contracts.py >/dev/null)
+(cd "$tmp/blessed" && ./scripts/check-capability-evidence.py >/dev/null)
+
+# A complete state with a non-verified row must fail (blocked fails
+# implementation completion).
+sed -i 's/^status: active$/status: complete/' "$tmp/blessed/.factory/artifacts/implementation-plan.md"
+set +e
+(cd "$tmp/blessed" && ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json >/dev/null 2>&1)
+blocked_complete_rc=$?
+set -e
+[[ $blocked_complete_rc -eq 1 ]]
+
+# Free-text verified row: verified with no receipt/artifact refs is rejected.
+mutate "$tmp/blessed" "$tmp/free-text" free-text
+expect_fail "$tmp/free-text" "a free-text verified row"
+
+# Private/session DBus for a system capability: real-system required tier
+# cannot be satisfied by private-integration evidence.
+mutate "$tmp/blessed" "$tmp/private-dbus" private-dbus
+expect_fail "$tmp/private-dbus" "private DBus evidence for a system capability"
+
+# Skipped probe evidence: a receipt whose probe section shows a skip must make
+# the capability unevidenced.
+mutate "$tmp/blessed" "$tmp/skipped-probe" skipped-probe
+head2=$(git -C "$tmp/skipped-probe" rev-parse HEAD)
+cat > "$tmp/skipped-probe/.factory-state/runner-evidence/probe-runner/$head2/stdout.log" <<'LOG'
+--- probe-capability contract ---
+100% tests passed, 0 tests failed out of 1
+Test #1: kernel_probe ...................***Skipped   0.01 sec
+LOG
+expect_fail "$tmp/skipped-probe" "a skipped probe in the receipt"
+
+# Missing receipt: a verified row that references a receipt that does not exist.
+mutate "$tmp/blessed" "$tmp/missing-receipt" missing-receipt
+expect_fail "$tmp/missing-receipt" "a missing receipt"
+
+# not_applicable misuse: without a spec-scoped reason the sidecar is invalid in
+# planning mode; with a scoped reason planning accepts it but completion fails.
+cp -a "$tmp/blessed" "$tmp/na-misuse"
+python3 - "$tmp/na-misuse/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-02':
+        req['classification'] = 'not_applicable'
+        req['reason'] = 'convenience'
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/na-misuse" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+na_bad_rc=$?
+set -e
+[[ $na_bad_rc -eq 1 ]] || { echo "test: not_applicable without a spec-scoped reason was accepted" >&2; exit 1; }
+python3 - "$tmp/na-misuse/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-02':
+        req['reason'] = 'excluded by §12 out-of-scope boundary'
+open(path, 'w').write(json.dumps(data))
+PY
+(cd "$tmp/na-misuse" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null)
+
+# The sidecar and the plan matrix must agree on requirement IDs and claims.
+cp -a "$tmp/blessed" "$tmp/mismatch"
+python3 - "$tmp/mismatch/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirements'].append(dict(data['requirements'][0], id='REQ-99'))
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/mismatch" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+mismatch_rc=$?
+set -e
+[[ $mismatch_rc -eq 1 ]] || { echo "test: sidecar/plan ID mismatch was accepted" >&2; exit 1; }
+
+echo "test: conformance validator adversarial checks passed"

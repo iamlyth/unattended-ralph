@@ -23,6 +23,9 @@ case "$MODE" in
         ./scripts/check-plan-freshness.sh --planning
         ./scripts/check-scratchpad.sh PLAN_COMPLETE
         ./scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md
+        if [[ -f .factory/artifacts/conformance.json ]]; then
+            ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json
+        fi
         echo "final-gate: planning completion accepted"
         ;;
     --maintenance-planning)
@@ -53,6 +56,12 @@ if records:
     raise SystemExit(f'final-gate: autonomous definition of done rejects unresolved open bugs: {ids}')
 PY
         fi
+        # The machine-readable conformance sidecar is the only authority for
+        # verified claims: free-text matrix cells cannot prove acceptance.
+        # Blocked/unevidenced requirements fail implementation completion.
+        ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json
+        ./scripts/check-capability-contracts.py
+        ./scripts/check-capability-evidence.py
         ./scripts/check-docs-sync.sh
         ./scripts/verify-boilerplate.sh
         if [[ -x scripts/verify-project.sh ]]; then
@@ -64,8 +73,16 @@ PY
     --campaign-audit)
         ./scripts/campaign-audit-scope-guard.sh
         ./scripts/check-factory-environment.py
+        ./scripts/check-capability-contracts.py
+        ./scripts/check-capability-evidence.py
         ./scripts/check-plan-freshness.sh
         ./scripts/validate-implementation-plan.py complete .factory/artifacts/implementation-plan.md
+        if [[ -f .factory/artifacts/conformance.json ]]; then
+            ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json
+        fi
+        # Coordinator-executed commands are only runtime evidence when a machine
+        # receipt matches; BLOCKED evidence forces result: findings.
+        ./scripts/check-audit-receipts.py
         [[ ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} =~ ^[1-9][0-9]*$ \
             && ${FACTORY_CAMPAIGN_AUDIT_BASE:-} =~ ^[0-9a-f]{40}$ \
             && ${FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || {
