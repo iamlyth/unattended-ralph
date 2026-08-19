@@ -1,30 +1,56 @@
 #!/usr/bin/env bash
 # Source-only helper for the cross-process single-writer lock.
 
-factory_lock_acquire() {
-    local lock_path=${1:?factory lock path required}
+FACTORY_LOCK_HELPER_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+FACTORY_LOCK_ROOT=
+
+factory_lock_bootstrap() {
+    local root=${1:?repository root required}
+    shift
+    (( $# > 0 )) || { echo "factory-lock: lifecycle command required" >&2; return 2; }
+    FACTORY_LOCK_ROOT=$root
 
     if [[ ${FACTORY_LOCK_HELD:-0} == 1 ]]; then
-        if { : >&9; } 2>/dev/null; then
-            return 0
-        fi
-        unset FACTORY_LOCK_HELD
+        python3 "$FACTORY_LOCK_HELPER_DIR/factory-lock-exec.py" "$root" --check
+        return $?
     fi
+    exec python3 "$FACTORY_LOCK_HELPER_DIR/factory-lock-exec.py" "$root" -- "$@"
+}
 
-    if [[ -L "$lock_path" || ( -e "$lock_path" && ! -f "$lock_path" ) ]]; then
-        echo "factory-lock: unsafe lock path" >&2
+factory_lock_acquire() {
+    local root=${1:-${FACTORY_LOCK_ROOT:?repository root required}}
+    if [[ ${FACTORY_LOCK_HELD:-0} != 1 ]]; then
+        echo "factory-lock: lifecycle did not bootstrap the factory lock" >&2
         return 1
     fi
-    if [[ -e "$lock_path" && $(stat -c '%u' -- "$lock_path" 2>/dev/null) != "$(id -u)" ]]; then
-        echo "factory-lock: lock is not owned by the current user" >&2
+    python3 "$FACTORY_LOCK_HELPER_DIR/factory-lock-exec.py" "$root" --check
+}
+
+factory_lock_assert_held() {
+    local root=${1:?repository root required}
+    if [[ ${FACTORY_LOCK_HELD:-0} != 1 ]]; then
+        echo "factory-lock: trusted transition did not inherit the lifecycle lock" >&2
         return 1
     fi
-    # Append mode avoids truncating an existing file if the path changes after
-    # validation; the regular-file checks also reject the common symlink attack.
-    exec 9>> "$lock_path"
-    if ! flock -n 9; then
-        echo "factory-lock: another planner, worker, or recovery process is active" >&2
-        return 1
-    fi
-    export FACTORY_LOCK_HELD=1
+    python3 "$FACTORY_LOCK_HELPER_DIR/factory-lock-exec.py" "$root" --check
+}
+
+# Run an untrusted leaf without any descriptor referring to the lock inode and
+# without lock metadata in its environment. This is already-loaded shell logic:
+# a subshell closes the dynamic repository-root lock descriptor and unsets all
+# lock metadata BEFORE any mutable workspace executable runs, so a workspace
+# helper is never executed while authority is live and background descendants
+# of the untrusted command can retain, unlock, or claim nothing. The trusted
+# caller retains its own descriptor outside the subshell.
+factory_lock_run_untrusted() {
+    local root=${FACTORY_LOCK_ROOT:?factory_lock_bootstrap must run first}
+    (( $# > 0 )) || { echo "factory-lock: untrusted command required" >&2; return 2; }
+    local fd=${FACTORY_LOCK_FD:-}
+    (
+        if [[ ${FACTORY_LOCK_HELD:-0} == 1 && "$fd" =~ ^[0-9]+$ && $fd -ge 3 ]]; then
+            eval "exec $fd>&-"
+        fi
+        unset FACTORY_LOCK_HELD FACTORY_LOCK_FD FACTORY_LOCK_ID FACTORY_LOCK_ROOT
+        exec "$@"
+    )
 }

@@ -10,6 +10,12 @@ from pathlib import Path
 ALLOWED_CLASSIFICATIONS = {"verified", "partial", "missing", "ambiguous"}
 ALLOWED_STATUSES = {"pending", "in_progress", "complete", "blocked"}
 FINAL_TITLE = "Final documentation and specification audit"
+SHA = re.compile(r"^[0-9a-f]{40}$")
+MATRIX_ID = re.compile(r"^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+$")
+REQUIRED_TASK_FIELDS = (
+    "Status", "Dependencies", "Scope", "Acceptance criteria", "Verification",
+    "Documentation impact",
+)
 
 
 def fail(message: str) -> None:
@@ -17,82 +23,166 @@ def fail(message: str) -> None:
 
 
 def section(text: str, title: str) -> str:
-    match = re.search(
+    matches = list(re.finditer(
         rf"^## {re.escape(title)}\s*$\n(.*?)(?=^##\s|\Z)", text, re.M | re.S
-    )
-    if not match:
-        fail(f"missing required `## {title}` section")
-    return match.group(1)
+    ))
+    if len(matches) != 1:
+        fail(f"requires exactly one `## {title}` section")
+    return matches[0].group(1)
+
+
+def parse_dependencies(value: str, task_number: int) -> list[int]:
+    value = value.strip()
+    if value.lower() == "none":
+        return []
+    if not value:
+        fail(f"Task {task_number} has an empty dependency list")
+    result: list[int] = []
+    for item in (part.strip() for part in value.split(",")):
+        match = re.fullmatch(r"Tasks?\s+(\d+)(?:\s*[-–—]\s*(\d+))?", item, re.I)
+        if not match:
+            fail(f"Task {task_number} has malformed dependencies: {value}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            fail(f"Task {task_number} has a descending dependency range: {item}")
+        result.extend(range(start, end + 1))
+    if len(result) != len(set(result)):
+        fail(f"Task {task_number} repeats a dependency")
+    return result
 
 
 def parse_tasks(text: str) -> list[dict[str, object]]:
+    malformed = [
+        line for line in text.splitlines()
+        if line.startswith("## Task") and not re.fullmatch(r"## Task\s+\d+:\s*\S.*", line)
+    ]
+    if malformed:
+        fail(f"malformed task heading: {malformed[0]}")
     headings = list(re.finditer(r"^## Task\s+(\d+):\s*(.+?)\s*$", text, re.M))
     if not headings:
         fail("plan has no numbered tasks")
 
     tasks: list[dict[str, object]] = []
-    seen: set[int] = set()
+    seen_titles: set[str] = set()
     for index, heading in enumerate(headings):
         number = int(heading.group(1))
-        if number in seen:
-            fail(f"duplicate Task {number}")
-        seen.add(number)
+        expected = index + 1
+        if number != expected:
+            fail(f"task numbers must be unique and contiguous (expected Task {expected}, found Task {number})")
+        title = heading.group(2).strip()
+        if title in seen_titles:
+            fail(f"duplicate task title: {title}")
+        seen_titles.add(title)
         end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
         body = text[heading.end():end]
-        statuses = re.findall(r"^- Status:\s*(\S+)\s*$", body, re.M)
-        if len(statuses) != 1 or statuses[0] not in ALLOWED_STATUSES:
-            fail(f"Task {number} requires exactly one canonical `- Status:` field")
-        dependency_match = re.search(r"^- Dependencies:\s*(.+?)\s*$", body, re.M)
-        if not dependency_match:
-            fail(f"Task {number} requires `- Dependencies:`")
-        tasks.append(
-            {
-                "number": number,
-                "title": heading.group(2).strip(),
-                "status": statuses[0],
-                "dependencies": dependency_match.group(1).strip(),
-                "body": body,
-            }
-        )
+        fields: dict[str, str] = {}
+        for field in REQUIRED_TASK_FIELDS:
+            values = re.findall(rf"^- {re.escape(field)}:\s*(.*?)\s*$", body, re.M)
+            if len(values) != 1:
+                fail(f"Task {number} requires exactly one canonical `- {field}:` field")
+            if field not in {"Documentation impact"} and not values[0].strip():
+                fail(f"Task {number} has an empty `- {field}:` field")
+            fields[field] = values[0].strip()
+        status = fields["Status"]
+        if status not in ALLOWED_STATUSES:
+            fail(f"Task {number} has invalid status `{status}`")
+        dependencies = parse_dependencies(fields["Dependencies"], number)
+        tasks.append({
+            "number": number,
+            "title": title,
+            "status": status,
+            "dependencies": dependencies,
+            "body": body,
+        })
+
+    numbers = {int(task["number"]) for task in tasks}
+    graph: dict[int, list[int]] = {}
+    for task in tasks:
+        number = int(task["number"])
+        dependencies = list(task["dependencies"])
+        unknown = sorted(set(dependencies) - numbers)
+        if unknown:
+            fail(f"Task {number} references unknown dependencies: {unknown}")
+        if number in dependencies:
+            fail(f"Task {number} cannot depend on itself")
+        if any(dependency > number for dependency in dependencies):
+            fail(f"Task {number} dependencies must refer to earlier tasks")
+        graph[number] = dependencies
+
+    visiting: set[int] = set()
+    visited: set[int] = set()
+
+    def visit(number: int) -> None:
+        if number in visiting:
+            fail("task dependency graph contains a cycle")
+        if number in visited:
+            return
+        visiting.add(number)
+        for dependency in graph[number]:
+            visit(dependency)
+        visiting.remove(number)
+        visited.add(number)
+
+    for number in graph:
+        visit(number)
     return tasks
 
 
-def task_references(cell: str) -> set[int]:
-    """Parse explicit `Task N` references and inclusive `Tasks N-M` ranges."""
-    refs = {int(value) for value in re.findall(r"\bTasks?\s+(\d+)\b", cell, re.I)}
-    for start_text, end_text in re.findall(
-        r"\bTasks?\s+(\d+)\s*[-–—]\s*(\d+)\b", cell, re.I
-    ):
-        start, end = int(start_text), int(end_text)
-        if end < start:
-            fail(f"descending task range is invalid: {start_text}-{end_text}")
-        refs.update(range(start, end + 1))
-    return refs
+def parse_task_references(cell: str, *, context: str) -> set[int]:
+    if not cell.strip():
+        return set()
+    refs = parse_dependencies(cell, 0)
+    return set(refs)
+
+
+def table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
     matrix = section(text, "Specification conformance matrix")
-    rows: list[tuple[str, str, str]] = []
-    for line in matrix.splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        classification = next(
-            (cell.lower() for cell in cells if cell.lower() in ALLOWED_CLASSIFICATIONS),
-            None,
-        )
-        if classification:
-            rows.append((classification, " | ".join(cells), cells[-1]))
-    if not rows:
+    lines = [line.strip() for line in matrix.splitlines() if line.strip()]
+    table_lines = [line for line in lines if line.startswith("|")]
+    if len(table_lines) < 3:
         fail("conformance matrix has no machine-checkable requirement rows")
+    header = table_cells(table_lines[0])
+    if header != ["ID", "Spec §", "Classification", "Evidence", "Task"]:
+        fail("conformance matrix header must be exactly `ID | Spec § | Classification | Evidence | Task`")
+    separator = table_cells(table_lines[1])
+    if len(separator) != 5 or any(not re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+        fail("conformance matrix separator is malformed")
 
-    for classification, row, task_cell in rows:
+    seen_ids: set[str] = set()
+    for line in table_lines[2:]:
+        cells = table_cells(line)
+        if len(cells) != 5:
+            fail(f"conformance row must have exactly five cells: {line}")
+        requirement_id, spec_section, classification, evidence, task_cell = cells
+        if not MATRIX_ID.fullmatch(requirement_id):
+            fail(f"invalid conformance requirement ID: {requirement_id}")
+        if requirement_id in seen_ids:
+            fail(f"duplicate conformance requirement ID: {requirement_id}")
+        seen_ids.add(requirement_id)
+        if not spec_section or not evidence:
+            fail(f"conformance row {requirement_id} requires spec and evidence cells")
+        if classification not in ALLOWED_CLASSIFICATIONS:
+            fail(f"conformance row {requirement_id} has invalid classification `{classification}`")
+        task_refs = parse_task_references(task_cell, context=requirement_id)
+        if not task_refs.issubset(task_numbers):
+            fail(f"conformance row {requirement_id} references an unknown task")
+        if classification != "verified" and not task_refs:
+            fail(f"non-verified conformance row {requirement_id} must reference an existing task")
         if complete and classification != "verified":
-            fail(f"completion rejected while conformance row is `{classification}`: {row}")
-        if classification != "verified":
-            task_refs = task_references(task_cell)
-            if not task_refs or not task_refs.issubset(task_numbers):
-                fail(f"non-verified conformance row must reference an existing task: {row}")
+            fail(f"completion rejected while conformance row {requirement_id} is `{classification}`")
+        if complete and re.search(
+            r"\b(defer(?:red|ral)?|unavailable|unevidenced|blocked|pending|skip(?:ped)?)\b",
+            evidence,
+            re.I,
+        ):
+            fail(f"completion rejected while verified row {requirement_id} describes a blocker")
+    if not seen_ids:
+        fail("conformance matrix has no requirement rows")
 
 
 def validate_interactions(text: str) -> None:
@@ -107,15 +197,41 @@ def validate_final_task(tasks: list[dict[str, object]]) -> None:
     if len(finals) != 1:
         fail(f"plan requires exactly one task titled `{FINAL_TITLE}`")
     final = finals[0]
+    if final is not tasks[-1]:
+        fail("final documentation and specification audit must be the last task")
     all_other = {int(task["number"]) for task in tasks if task is not final}
-    dependencies = {int(value) for value in re.findall(r"\d+", str(final["dependencies"]))}
-    missing = sorted(all_other - dependencies)
-    if missing:
-        fail(f"final audit must depend on every other task (missing: {missing})")
+    dependencies = set(int(value) for value in final["dependencies"])
+    if dependencies != all_other:
+        fail("final audit must depend on every other task and no others")
     body = str(final["body"]).lower()
     for term in ("definition of done", "conformance", "interaction", "open", "review", "clean"):
         if term not in body:
             fail(f"final audit task must explicitly cover `{term}`")
+
+
+def validate_front_matter(text: str, mode: str) -> None:
+    front = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", text, re.S)
+    if not front:
+        fail("front matter must start on the first line and be terminated")
+    fields: dict[str, str] = {}
+    for line in front.group(1).splitlines():
+        match = re.fullmatch(r"([a-z_]+):\s*(\S.*?)\s*", line)
+        if not match or match.group(1) in fields:
+            fail("front matter has malformed or duplicate fields")
+        fields[match.group(1)] = match.group(2)
+    expected = {"spec_path", "spec_commit", "spec_blob", "base_commit", "status"}
+    if set(fields) != expected:
+        fail("front matter fields do not match the implementation-plan schema")
+    if not fields["spec_path"] or Path(fields["spec_path"]).is_absolute():
+        fail("front matter spec_path must be repository-relative")
+    for field in ("spec_commit", "spec_blob", "base_commit"):
+        if not SHA.fullmatch(fields[field]):
+            fail(f"front matter {field} must be a 40-character Git object ID")
+    expected_status = "active" if mode == "planning" else "complete"
+    if fields["status"] != expected_status:
+        fail(f"front matter must have exactly `status: {expected_status}`")
+    if len(re.findall(r"^# Implementation Plan\s*$", text, re.M)) != 1:
+        fail("plan requires exactly one `# Implementation Plan` title")
 
 
 def main() -> None:
@@ -123,16 +239,12 @@ def main() -> None:
         raise SystemExit("usage: validate-implementation-plan.py planning|complete .factory/artifacts/implementation-plan.md")
     mode, path = sys.argv[1], Path(sys.argv[2])
     text = path.read_text(encoding="utf-8")
+    validate_front_matter(text, mode)
     tasks = parse_tasks(text)
     task_numbers = {int(task["number"]) for task in tasks}
-
     validate_matrix(text, task_numbers, complete=mode == "complete")
     validate_interactions(text)
     validate_final_task(tasks)
-
-    expected_front_status = "active" if mode == "planning" else "complete"
-    if not re.search(rf"^status:\s*{expected_front_status}\s*$", text, re.M):
-        fail(f"front matter must have `status: {expected_front_status}`")
 
     if mode == "planning":
         non_pending = [task for task in tasks if task["status"] != "pending"]
@@ -141,7 +253,10 @@ def main() -> None:
     else:
         unfinished = [task for task in tasks if task["status"] != "complete"]
         if unfinished:
-            fail(f"{len(unfinished)} task(s) are not complete")
+            details = ", ".join(
+                f"Task {task['number']}={task['status']}" for task in unfinished
+            )
+            fail(f"completion requires every task complete ({details})")
 
 
 if __name__ == "__main__":

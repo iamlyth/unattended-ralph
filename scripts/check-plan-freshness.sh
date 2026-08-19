@@ -73,8 +73,8 @@ git merge-base --is-ancestor "$BASE_COMMIT" HEAD || {
 }
 if [[ "$PHASE" == planning ]]; then
     EXPECTED_BASE=${FACTORY_PLANNING_BASE_COMMIT:-}
-    if [[ -z "$EXPECTED_BASE" && -s .factory-state/planning-base-commit ]]; then
-        EXPECTED_BASE=$(tr -d '[:space:]' < .factory-state/planning-base-commit)
+    if [[ -z "$EXPECTED_BASE" ]]; then
+        EXPECTED_BASE=$("$SCRIPT_DIR/factory-state-file.py" read planning-base-commit --missing-ok) || exit $?
     fi
     [[ -n "$EXPECTED_BASE" && "$BASE_COMMIT" == "$EXPECTED_BASE" ]] || {
         echo "plan-freshness: base_commit differs from the selected planning cycle base" >&2; exit 1;

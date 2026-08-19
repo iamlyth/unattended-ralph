@@ -6,19 +6,26 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/bin" "$tmp/docs" "$tmp/.factory" \
-    "$tmp/.factory/artifacts" "$tmp/.ralph/agent" "$tmp/.factory-state"
-cp "$PROJECT_ROOT/scripts/ralph-plan.sh" "$PROJECT_ROOT/scripts/ralph-supervision.sh" "$tmp/scripts/"
+    "$tmp/.factory/artifacts" "$tmp/.factory/prompts" "$tmp/.ralph/agent" "$tmp/.factory-state"
+cp "$PROJECT_ROOT/scripts/ralph-plan.sh" "$PROJECT_ROOT/scripts/ralph-supervision.sh" \
+    "$PROJECT_ROOT/scripts/factory-lock.sh" "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
+    "$PROJECT_ROOT/scripts/factory_lock.py" "$PROJECT_ROOT/scripts/factory_state_io.py" \
+    "$PROJECT_ROOT/scripts/factory-state-file.py" "$PROJECT_ROOT/scripts/ralph-event-boundary.py" \
+    "$PROJECT_ROOT/scripts/ralph-final-state.py" "$tmp/scripts/"
+chmod 700 "$tmp/.factory-state"
 
 cat > "$tmp/.factory/config.toml" <<'EOF'
 [project]
 spec = "docs/SPEC.md"
 EOF
 printf '# Specification\n' > "$tmp/docs/SPEC.md"
+printf 'fake planning prompt' > "$tmp/.factory/prompts/plan.md"
 printf '# Initial handoff\n' > "$tmp/.ralph/agent/scratchpad.md"
 printf '# Initial plan\n' > "$tmp/.factory/artifacts/implementation-plan.md"
 cat > "$tmp/.gitignore" <<'EOF'
 .factory-state/
 .factory-lock
+__pycache__/
 .ralph/*
 !.ralph/agent/
 .ralph/agent/*
@@ -32,10 +39,6 @@ EOF
 cat > "$tmp/scripts/check-factory-environment.py" <<'EOF'
 #!/usr/bin/env python3
 raise SystemExit(0)
-EOF
-cat > "$tmp/scripts/factory-lock.sh" <<'EOF'
-#!/usr/bin/env bash
-factory_lock_acquire() { :; }
 EOF
 cat > "$tmp/scripts/initialize-plan-cycle.py" <<'EOF'
 #!/usr/bin/env python3
@@ -57,7 +60,11 @@ exit 1
 EOF
 cat > "$tmp/scripts/git-commit-hook.sh" <<'EOF'
 #!/usr/bin/env bash
-exit "${FAKE_FINALIZE_RC:-0}"
+set -euo pipefail
+(( ${FAKE_FINALIZE_RC:-0} == 0 )) || exit "$FAKE_FINALIZE_RC"
+if [[ " $* " == *' --final-handoff '* ]]; then
+    ./scripts/ralph-final-state.py ensure-checkpoint planning "$(git rev-parse HEAD)" >/dev/null
+fi
 EOF
 cat > "$tmp/scripts/check-plan-freshness.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -78,9 +85,15 @@ cat > "$tmp/bin/ralph" <<'EOF'
 set -euo pipefail
 printf 'ralph %s\n' "$*" >> .factory-state/fake-calls
 mkdir -p .ralph
+printf '%s\n' '.ralph/events.jsonl' > .ralph/current-events
+printf '%s\n' 'fake-planning-loop' > .ralph/current-loop-id
+printf '%s\n' \
+    '{"ts":"2026-08-14T00:00:00Z","iteration":0,"hat":"loop","topic":"factory.plan","triggered":"planner","payload":"fake planning prompt"}' \
+    >> .ralph/events.jsonl
 printf '%s\n' '{"ts":"2026-08-14T00:00:00Z","type":{"kind":"loop_started","prompt":"fake planning"}}' >> .ralph/history.jsonl
 if [[ -n ${FAKE_NOOP_SUCCESS:-} ]]; then
     printf '%s\n' '{"ts":"2026-08-14T00:00:01Z","type":{"kind":"loop_completed","reason":"completed"}}' >> .ralph/history.jsonl
+    printf '%s\n' '{"ts":"2026-08-14T00:00:01Z","iteration":1,"hat":"loop","topic":"iteration.summary","payload":"{\"cache_read_tokens\":0,\"cache_write_tokens\":0,\"context_pct\":0,\"context_tokens\":0,\"context_window\":0,\"cost_usd\":0,\"duration_ms\":0,\"input_tokens\":0,\"num_turns\":0,\"output_tokens\":0}"}' >> .ralph/events.jsonl
     exit 0
 fi
 if [[ ! -e .factory-state/fake-stale-seen ]]; then
@@ -95,6 +108,7 @@ PLAN
     git add .factory/artifacts/implementation-plan.md .ralph/agent/scratchpad.md
     git commit -qm 'fake stale planning checkpoint'
     printf '%s\n' '{"ts":"2026-08-14T00:00:01Z","type":{"kind":"loop_completed","reason":"loop_stale"}}' >> .ralph/history.jsonl
+    printf '%s\n' '{"ts":"2026-08-14T00:00:01Z","iteration":1,"hat":"loop","topic":"iteration.summary","payload":"{\"cache_read_tokens\":0,\"cache_write_tokens\":0,\"context_pct\":0,\"context_tokens\":0,\"context_window\":0,\"cost_usd\":0,\"duration_ms\":0,\"input_tokens\":0,\"num_turns\":0,\"output_tokens\":0}"}' >> .ralph/events.jsonl
     exit 1
 fi
 grep -q 'Supervisor recovery feedback' .ralph/agent/scratchpad.md
@@ -111,6 +125,7 @@ printf '# Planning handoff\n\n- Strict gate now passes.\n' > .ralph/agent/scratc
 git add .factory/artifacts/implementation-plan.md .ralph/agent/scratchpad.md
 git commit -qm 'fake recovered planning checkpoint'
 printf '%s\n' '{"ts":"2026-08-14T00:00:02Z","type":{"kind":"loop_completed","reason":"completed"}}' >> .ralph/history.jsonl
+printf '%s\n' '{"ts":"2026-08-14T00:00:02Z","iteration":1,"hat":"loop","topic":"iteration.summary","payload":"{\"cache_read_tokens\":0,\"cache_write_tokens\":0,\"context_pct\":0,\"context_tokens\":0,\"context_window\":0,\"cost_usd\":0,\"duration_ms\":0,\"input_tokens\":0,\"num_turns\":0,\"output_tokens\":0}"}' >> .ralph/events.jsonl
 exit 0
 EOF
 chmod +x "$tmp/scripts/"* "$tmp/bin/"*
@@ -140,7 +155,7 @@ set +e
 (
     cd "$tmp"
     PATH="$tmp/bin:$PATH" RALPH_BIN="$tmp/bin/ralph" FAKE_NOOP_SUCCESS=1 \
-        FAKE_FINALIZE_RC=42 ./scripts/ralph-plan.sh --resume --no-tui >/dev/null 2>&1
+        FAKE_FINALIZE_RC=42 ./scripts/ralph-plan.sh --no-tui >/dev/null 2>&1
 )
 finalization_rc=$?
 set -e

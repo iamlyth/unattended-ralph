@@ -103,17 +103,19 @@ Each iteration:
 7. creates a Git checkpoint;
 8. exits so the next task receives fresh context.
 
-Ralph 2.10.1 otherwise interprets the real `ralph emit` acknowledgement as a
-five-second deadline, kills Pi while it finishes the tool turn, and counts that
-kill as an iteration failure. `scripts/pi2-ollama.sh` explicitly loads a Pi
-tool-call extension that rewrites only a direct final `ralph emit` command to
-`scripts/pi-cli-shims/ralph`. The shim resolves real Ralph from the jail's
-trusted PATH, preserves its status and stderr, and changes only that command's
-acknowledgement. Arbitrary identical output stays fail-closed, while
-`scripts/pi2-secure-exec.py` preserves exec-style signals and snapshots bridged
-host prompts with bounded no-follow checks. Pi may use a short final model turn
-after publication; a genuine silent hang remains bounded by Ralph's normal
-five-minute inactivity timeout.
+Ralph 2.10.1 starts a five-second deadline when Pi returns the successful
+`ralph emit` acknowledgement, then misclassifies its own timeout signal as a
+failed iteration. `scripts/pi2-ollama.sh` explicitly loads a Pi tool-call
+extension that rewrites only a direct final `ralph emit` command to
+`scripts/pi-cli-shims/ralph` and blocks lifecycle completion tokens as event
+topics or payloads. Completion uses only the exact standalone reserved
+model-output line. The shim resolves real Ralph from the jail's trusted PATH,
+preserves its status and stderr, and changes only that command's
+acknowledgement after Ralph writes the authoritative event. Arbitrary identical
+output stays fail-closed, while `scripts/pi2-secure-exec.py` preserves
+exec-style signals and snapshots bridged host prompts with bounded no-follow
+checks. Pi may use a short final model turn after publication; a genuine silent
+hang remains bounded by Ralph's normal five-minute inactivity timeout.
 
 Only the final documentation and specification audit may produce `LOOP_COMPLETE`. `scripts/validate-implementation-plan.py` requires every conformance row to be verified, every task complete, the final audit to depend on every other task, and the plan status to be complete. The final gate also rejects unresolved open bugs and requires commit-bound, zero-skip `test_installed_functional` evidence before completion.
 
@@ -132,14 +134,18 @@ implementation, verification, and independent audit rounds with one command:
 ./scripts/ralph-campaign.sh --rounds 3
 ```
 
-Campaigns are headless by default so phase completion never waits for a TUI;
-use `--tui` only for attended diagnostics. Every round records a new clean Git
-base. Attempt-bound stale loops receive fixed strict-gate recovery instructions
-and bounded automatic continuation. A preceding completion claim never shortens
-the requested campaign. Resume an interrupted active campaign with
-`--resume`; use `--restart` only to replace a terminal saved campaign. Audit
-findings feed the next fresh plan, while findings in the final round block
-completion.
+Campaigns are headless by default so phase completion does not wait for a TUI
+to close; use `--tui` only for attended diagnostics. Every round receives a new
+clean Git base and replaces the active plan; completed plans and audits remain
+in Git history. Attempt-bound stale and completion-rejection ceilings persist
+across child restarts. Scratchpad-only updates remain recoverable without
+creating commits, while one tightly scoped final handoff precedes clean-HEAD
+attestation. Arbitrary nonzero leaf or gate failures stop after one invocation
+at the same resumable phase; quota waits remain leaf-owned. A preceding
+completion claim never shortens the requested campaign. Interrupted campaigns
+resume with the same round count and phase using `--resume`; use `--restart`
+only to replace a terminal saved campaign. Audit findings feed the next fresh
+plan, while findings in the final round block completion.
 
 `.factory/environment.toml` is the credential-free declaration of available
 local tools and external runners. It initially declares none. Campaign

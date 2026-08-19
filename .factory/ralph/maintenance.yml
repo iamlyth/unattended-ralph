@@ -48,7 +48,7 @@ hooks:
         command: ["./scripts/check-maintenance-freshness.sh"]
         on_error: block
       - name: maintenance-scratchpad
-        command: ["./scripts/check-scratchpad.sh", "--allow-missing", "--allow-oversize"]
+        command: ["./scripts/check-scratchpad.sh", "MAINTENANCE_COMPLETE", "--allow-missing", "--allow-oversize"]
         on_error: block
       - name: maintenance-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--maintenance"]
@@ -58,10 +58,10 @@ hooks:
         timeout_seconds: 691200
         on_error: block
     pre.loop.complete:
+      - name: final-maintenance-checkpoint
+        command: ["./scripts/git-commit-hook.sh", "--maintenance", "--final-handoff"]
+        on_error: block
       - name: final-maintenance-gate
         command: ["./scripts/ralph-completion-gate.sh", "maintenance"]
         timeout_seconds: 3600
-        on_error: block
-      - name: final-maintenance-checkpoint
-        command: ["./scripts/git-commit-hook.sh", "--maintenance"]
         on_error: block

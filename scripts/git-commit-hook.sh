@@ -5,15 +5,22 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 MODE=implementation
-case ${1:-} in
-    "") ;;
-    --plan-only) MODE=planning ;;
-    --maintenance-plan) MODE=maintenance-planning ;;
-    --campaign-audit) MODE=campaign-audit ;;
-    --maintenance) MODE=maintenance ;;
-    --maintenance-ledger) MODE=maintenance-ledger ;;
-    *) echo "ralph-checkpoint: unknown argument '$1'" >&2; exit 2 ;;
-esac
+FINAL_HANDOFF=false
+for arg in "$@"; do
+    case "$arg" in
+        --plan-only) MODE=planning ;;
+        --maintenance-plan) MODE=maintenance-planning ;;
+        --campaign-audit) MODE=campaign-audit ;;
+        --maintenance) MODE=maintenance ;;
+        --maintenance-ledger) MODE=maintenance-ledger ;;
+        --final-handoff) FINAL_HANDOFF=true ;;
+        *) echo "ralph-checkpoint: unknown argument '$arg'" >&2; exit 2 ;;
+    esac
+done
+if [[ "$MODE" == maintenance-ledger && "$FINAL_HANDOFF" == true ]]; then
+    echo "ralph-checkpoint: maintenance-ledger does not support final handoffs" >&2
+    exit 2
+fi
 
 HOOK_PAYLOAD=$(cat)
 mapfile -t HOOK_META < <(python3 -c '
@@ -37,14 +44,55 @@ ITERATION=${HOOK_META[2]}
 cd -- "$PROJECT_ROOT"
 
 SCRATCHPAD=.ralph/agent/scratchpad.md
-git restore --staged -- .ralph 2>/dev/null || true
+if [[ "$FINAL_HANDOFF" == true ]]; then
+    python3 - "$SCRATCHPAD" <<'PY'
+import subprocess, sys
+scratchpad = sys.argv[1]
+raw = subprocess.check_output(
+    ['git', 'status', '--porcelain=v1', '-z', '--untracked-files=normal']
+)
+records = raw.split(b'\0')
+index = 0
+while index < len(records):
+    record = records[index]
+    index += 1
+    if not record:
+        continue
+    if len(record) < 4 or record[2:3] != b' ':
+        raise SystemExit('ralph-checkpoint: cannot parse final-handoff Git status')
+    status = record[:2].decode('ascii', 'strict')
+    try:
+        path = record[3:].decode('utf-8', 'surrogateescape')
+    except UnicodeError:
+        raise SystemExit('ralph-checkpoint: final-handoff path is not valid UTF-8')
+    if 'R' in status or 'C' in status:
+        raise SystemExit('ralph-checkpoint: final handoff must not rename or copy paths')
+    if path != scratchpad:
+        raise SystemExit(f'ralph-checkpoint: final handoff contains forbidden dirty path: {path}')
+PY
+    token=
+    case "$MODE" in
+        planning) token=PLAN_COMPLETE ;;
+        implementation) token=LOOP_COMPLETE ;;
+        campaign-audit) token=AUDIT_COMPLETE ;;
+        maintenance-planning) token=MAINTENANCE_PLAN_COMPLETE ;;
+        maintenance) token=MAINTENANCE_COMPLETE ;;
+    esac
+    ./scripts/check-scratchpad.sh "$token"
+else
+    git restore --staged -- .ralph 2>/dev/null || true
+fi
 
 case "$MODE" in
     planning) git add -- .factory/artifacts/implementation-plan.md ;;
     maintenance-planning) git add -- .factory/artifacts/maintenance-plan.md ;;
     campaign-audit) git add -- .factory/artifacts/campaign-audit.md ;;
     maintenance-ledger) git add -- .factory/bugs/open.md .factory/bugs/closed.md ;;
-    implementation|maintenance) git add -A -- . ':(exclude).ralph/**' ;;
+    implementation|maintenance)
+        if [[ "$FINAL_HANDOFF" != true ]]; then
+            git add -A -- . ':(exclude).ralph/**'
+        fi
+        ;;
 esac
 if [[ "$MODE" != maintenance-ledger && -f "$SCRATCHPAD" ]]; then
     git add -f -- "$SCRATCHPAD"
@@ -60,10 +108,35 @@ for path in "${STAGED[@]}"; do
         implementation:*|maintenance:*) ;;
         *) echo "ralph-checkpoint: $MODE checkpoint contains forbidden staged path: $path" >&2; exit 1 ;;
     esac
+    if [[ "$FINAL_HANDOFF" == true && "$path" != "$SCRATCHPAD" ]]; then
+        echo "ralph-checkpoint: final handoff may stage only $SCRATCHPAD (found $path)" >&2
+        exit 1
+    fi
 done
 
 if git diff --cached --quiet; then
+    if [[ "$FINAL_HANDOFF" == true ]]; then
+        [[ ${FACTORY_RALPH_CYCLE_ID:-} =~ ^[0-9a-f]{64}$ ]] || {
+            echo "ralph-checkpoint: final handoff requires a durable lifecycle cycle ID" >&2; exit 1;
+        }
+        ./scripts/ralph-final-state.py ensure-checkpoint "$MODE" "$(git rev-parse HEAD)" >/dev/null
+    fi
     exit 0
+fi
+
+# An ordinary iteration checkpoint must not turn recovery metadata into Git
+# progress. Keep the newest non-empty scratchpad in the worktree for --resume.
+if [[ "$FINAL_HANDOFF" != true && ${#STAGED[@]} -eq 1 && ${STAGED[0]} == "$SCRATCHPAD" ]]; then
+    git restore --staged -- "$SCRATCHPAD"
+    echo "ralph-checkpoint: preserved scratchpad-only handoff without a commit"
+    exit 0
+fi
+
+if [[ "$FINAL_HANDOFF" == true ]]; then
+    [[ ${FACTORY_RALPH_CYCLE_ID:-} =~ ^[0-9a-f]{64}$ ]] || {
+        echo "ralph-checkpoint: final handoff requires a durable lifecycle cycle ID" >&2; exit 1;
+    }
+    ./scripts/ralph-final-state.py allow-checkpoint-commit "$MODE" "$(git rev-parse HEAD)" >/dev/null
 fi
 
 CONTEXT=""
@@ -75,5 +148,15 @@ if [[ -z "$CONTEXT" ]]; then
 fi
 SUBJECT=$(printf 'ralph %s iteration %s: %s' "$MODE" "$ITERATION" "$CONTEXT" | head -c 72)
 
-printf '%s\n\nLoop: %s\nMode: %s\nIteration: %s\n' \
-    "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" | git commit -F - --no-verify
+if [[ "$FINAL_HANDOFF" == true ]]; then
+    printf '%s\n\nLoop: %s\nMode: %s\nIteration: %s\nCycle: %s\n' \
+        "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" "$FACTORY_RALPH_CYCLE_ID" | \
+        git commit -F - --no-verify
+else
+    printf '%s\n\nLoop: %s\nMode: %s\nIteration: %s\n' \
+        "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" | git commit -F - --no-verify
+fi
+
+if [[ "$FINAL_HANDOFF" == true ]]; then
+    ./scripts/ralph-final-state.py ensure-checkpoint "$MODE" "$(git rev-parse HEAD)" >/dev/null
+fi

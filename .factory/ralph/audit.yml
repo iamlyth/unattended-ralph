@@ -48,7 +48,7 @@ hooks:
         command: ["./scripts/check-factory-environment.py"]
         on_error: block
       - name: campaign-audit-scratchpad
-        command: ["./scripts/check-scratchpad.sh", "--allow-missing", "--allow-oversize"]
+        command: ["./scripts/check-scratchpad.sh", "AUDIT_COMPLETE", "--allow-missing", "--allow-oversize"]
         on_error: block
       - name: campaign-audit-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--campaign-audit"]
@@ -58,9 +58,9 @@ hooks:
         timeout_seconds: 691200
         on_error: block
     pre.loop.complete:
+      - name: final-campaign-audit-checkpoint
+        command: ["./scripts/git-commit-hook.sh", "--campaign-audit", "--final-handoff"]
+        on_error: block
       - name: final-campaign-audit-gate
         command: ["./scripts/ralph-completion-gate.sh", "campaign-audit"]
-        on_error: block
-      - name: final-campaign-audit-checkpoint
-        command: ["./scripts/git-commit-hook.sh", "--campaign-audit"]
         on_error: block

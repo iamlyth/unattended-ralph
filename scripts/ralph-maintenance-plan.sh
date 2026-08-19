@@ -6,6 +6,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 RALPH_BIN=${RALPH_BIN:-ralph}
 RESUME=false
 TUI=true
+ORIGINAL_ARGS=("$@")
 if [[ ${1:-} == -h || ${1:-} == --help ]]; then
     echo "Usage: scripts/ralph-maintenance-plan.sh BUG-ID [--resume] [--no-tui]"
     exit 0
@@ -23,38 +24,39 @@ while (( $# > 0 )); do
 done
 
 cd -- "$PROJECT_ROOT"
+# shellcheck source=scripts/factory-lock.sh
+source "$SCRIPT_DIR/factory-lock.sh"
+factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-maintenance-plan.sh" "${ORIGINAL_ARGS[@]}"
 command -v "$RALPH_BIN" >/dev/null || { echo "ralph-maintenance-plan: Ralph executable not found: $RALPH_BIN" >&2; exit 2; }
 command -v pi2 >/dev/null || { echo "ralph-maintenance-plan: pi2 is unavailable" >&2; exit 2; }
-./scripts/branch-guard.sh
+factory_lock_run_untrusted ./scripts/branch-guard.sh
 
 # Select and validate the cycle only while holding the single-writer lock. This
 # closes the race between clean-tree inspection and writing volatile selection.
-# shellcheck source=scripts/factory-lock.sh
-source "$SCRIPT_DIR/factory-lock.sh"
 # shellcheck source=scripts/ralph-supervision.sh
 source "$SCRIPT_DIR/ralph-supervision.sh"
-factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
-./scripts/branch-guard.sh
-mkdir -p .factory-state
-BASE_MARKER=.factory-state/maintenance-base-commit
+factory_lock_acquire "$PROJECT_ROOT"
+factory_lock_run_untrusted ./scripts/branch-guard.sh
+ralph_supervision_prepare_state_directory
+STATE_FILE_HELPER="$SCRIPT_DIR/factory-state-file.py"
 if [[ "$RESUME" == false ]]; then
-    printf '%s\n' maintenance-planning > .factory-state/loop-mode
-    git rev-parse HEAD > "$BASE_MARKER"
+    FACTORY_MAINTENANCE_BASE_COMMIT=$(git rev-parse HEAD)
+    "$STATE_FILE_HELPER" write loop-mode maintenance-planning
+    "$STATE_FILE_HELPER" write maintenance-base-commit "$FACTORY_MAINTENANCE_BASE_COMMIT"
 else
-    [[ -s "$BASE_MARKER" ]] || {
-        echo "ralph-maintenance-plan: missing cycle base marker for resume" >&2; exit 1;
+    FACTORY_MAINTENANCE_BASE_COMMIT=$("$STATE_FILE_HELPER" read maintenance-base-commit) || {
+        echo "ralph-maintenance-plan: missing or unsafe cycle base marker for resume" >&2; exit 1;
     }
-    [[ $(cat .factory-state/loop-mode 2>/dev/null) == maintenance-planning ]] || {
+    [[ $("$STATE_FILE_HELPER" read loop-mode) == maintenance-planning ]] || {
         echo "ralph-maintenance-plan: saved lifecycle is not maintenance planning" >&2; exit 1;
     }
-    [[ $(cat .factory-state/maintenance-bug-id 2>/dev/null) == "$BUG_ID" ]] || {
+    [[ $("$STATE_FILE_HELPER" read maintenance-bug-id) == "$BUG_ID" ]] || {
         echo "ralph-maintenance-plan: saved maintenance selection does not match $BUG_ID" >&2; exit 1;
     }
     [[ -s .factory/artifacts/maintenance-plan.md ]] || {
         echo "ralph-maintenance-plan: missing maintenance draft for resume" >&2; exit 1;
     }
 fi
-FACTORY_MAINTENANCE_BASE_COMMIT=$(tr -d '[:space:]' < "$BASE_MARKER")
 export FACTORY_MAINTENANCE_BASE_COMMIT
 ./scripts/bug-ledger.py validate >/dev/null
 BUG_STATUS=$(python3 - "$BUG_ID" "$RESUME" <<'PY'
@@ -87,7 +89,7 @@ if [[ "$RESUME" == false && -n $(git status --porcelain --untracked-files=normal
     echo "ralph-maintenance-plan: start from a clean Git tree" >&2
     exit 1
 fi
-printf '%s\n' "$BUG_ID" > .factory-state/maintenance-bug-id
+"$STATE_FILE_HELPER" write maintenance-bug-id "$BUG_ID"
 # Repeat all mutable preconditions after selection while the same lock remains held.
 ./scripts/bug-ledger.py validate >/dev/null
 RECHECK_STATUS=$(python3 - "$BUG_ID" <<'PY'
@@ -111,38 +113,46 @@ if [[ "$RESUME" == false ]]; then
     ./scripts/initialize-plan-cycle.py maintenance \
         --base "$FACTORY_MAINTENANCE_BASE_COMMIT" --bug-id "$BUG_ID"
 fi
+ralph_supervision_initialize maintenance-planning "$RESUME"
+CONTINUE=false
+if $RESUME && ralph_supervision_should_continue maintenance-planning; then CONTINUE=true; fi
 
 finish_maintenance_planning_cycle() {
-    if ./scripts/final-gate.sh --maintenance-planning; then :; else return $?; fi
-    local payload ledger_payload
-    payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
-    if printf '%s' "$payload" | ./scripts/git-commit-hook.sh --maintenance-plan; then :; else return $?; fi
-    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
-        echo "ralph-maintenance-plan: completion left a dirty tree" >&2; return 1;
-    }
-    if ./scripts/check-maintenance-freshness.sh; then :; else return $?; fi
-    if [[ "$BUG_STATUS" == triaged ]]; then
-        if ./scripts/bug-ledger.py set-status "$BUG_ID" planned; then :; else return $?; fi
-        ledger_payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-ledger"},"iteration":{"current":"planned"}}' "$PROJECT_ROOT")
-        if printf '%s' "$ledger_payload" | ./scripts/git-commit-hook.sh --maintenance-ledger; then :; else return $?; fi
+    local payload head
+    if ./scripts/ralph-final-state.py verify maintenance-planning >/dev/null 2>&1; then
+        echo "ralph-maintenance-plan: plan committed and bug marked planned for $BUG_ID"
+        return 0
     fi
-    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
-        echo "ralph-maintenance-plan: ledger checkpoint left a dirty tree" >&2; return 1;
-    }
-    if ./scripts/check-maintenance-freshness.sh; then :; else return $?; fi
+    # The ledger transition precedes the single final checkpoint. It cannot
+    # become a later metadata-only commit that authorizes another checkpoint.
+    if ./scripts/finalize-maintenance-planning.sh; then :; else return $?; fi
+    payload=$(printf '{"loop":{"workspace":"%s","id":"maintenance-planning-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
+    if printf '%s' "$payload" | factory_lock_run_untrusted \
+            ./scripts/git-commit-hook.sh --maintenance-plan --final-handoff; then :; else return $?; fi
+    if factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 ./scripts/final-gate.sh --maintenance-planning; then :; else return $?; fi
+    head=$(git rev-parse HEAD)
+    ./scripts/ralph-final-state.py attest maintenance-planning "$head" >/dev/null
     echo "ralph-maintenance-plan: plan committed and bug marked planned for $BUG_ID"
 }
 
 while true; do
-    ./scripts/ollama-usage-guard.sh --wait
+    factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --wait
+    CONTINUE=false
+    if $RESUME && ralph_supervision_should_continue maintenance-planning; then CONTINUE=true; fi
     ralph_supervision_begin maintenance-planning
     command=("$RALPH_BIN" -c .factory/ralph/maintenance-plan.yml run --exclusive)
-    $RESUME && command+=(--continue)
+    $CONTINUE && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e
-    "${command[@]}"
+    factory_lock_run_untrusted "${command[@]}"
     rc=$?
+    ralph_supervision_finish_attempt maintenance-planning
+    boundary_rc=$?
     set -e
+    if (( boundary_rc == 2 || (rc == 0 && boundary_rc != 0) )); then
+        echo "ralph-maintenance-plan: launch/event boundary validation failed" >&2
+        exit 2
+    fi
     if (( rc == 0 )); then
         finish_maintenance_planning_cycle
         exit 0
@@ -166,11 +176,11 @@ while true; do
         exit 1
     fi
     set +e
-    ./scripts/ollama-usage-guard.sh --check
+    factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --check
     quota_rc=$?
     set -e
     if (( quota_rc == 1 )); then
-        ./scripts/ollama-usage-guard.sh --wait
+        factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --wait
         ./scripts/ralph-recover.sh --mode maintenance-planning --prepare-only
         RESUME=true
         continue
@@ -178,9 +188,9 @@ while true; do
         echo "ralph-maintenance-plan: quota status check failed with status $quota_rc" >&2
         exit "$quota_rc"
     fi
-    stale_diagnostics=$(mktemp)
+    stale_diagnostics=$(ralph_supervision_diagnostics_file maintenance-planning)
     set +e
-    ./scripts/final-gate.sh --maintenance-planning >"$stale_diagnostics" 2>&1
+    factory_lock_run_untrusted ./scripts/final-gate.sh --maintenance-planning >"$stale_diagnostics" 2>&1
     gate_rc=$?
     set -e
     if (( $(wc -c < "$stale_diagnostics") > 65536 )); then

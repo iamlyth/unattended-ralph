@@ -84,7 +84,15 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'scripts/validate-implementation-plan.py',
              'scripts/check-scratchpad.sh', 'tests/test-scratchpad-guard.sh',
              'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
+             'scripts/factory-lock.sh', 'scripts/factory-lock-exec.py',
+             'scripts/factory_lock.py', 'scripts/factory_state_io.py',
+             'scripts/factory-state-file.py', 'scripts/ralph_lock.py',
+             'scripts/ralph-lock-recover.py', 'scripts/ralph-event-boundary.py',
+             'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
+             'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
+             'tests/test-git-checkpoint.sh',
              'tests/test-ralph-completion-recovery.sh',
+             'tests/test-maintenance-planning-completion.sh',
              'scripts/ralph-maintenance-plan.sh',
              'scripts/ralph-maintenance-run.sh', 'docs/BUG_WORKFLOW.md',
              '.factory/environment.toml', '.factory/artifacts/campaign-audit.md', '.factory/ralph/audit.yml',
@@ -93,7 +101,9 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
              'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
              'tests/test-factory-environment.sh', 'tests/test-campaign-audit.sh',
-             'tests/test-ralph-campaign.sh', 'scripts/pi2-secure-exec.py',
+             'tests/test-ralph-campaign.sh', 'tests/test-ralph-campaign-state.py',
+             'tests/test-factory-lock.py', 'tests/test-orchestration-security.py',
+             'scripts/pi2-secure-exec.py',
              'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
              'tests/test-pi2-ollama-wrapper.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
@@ -115,18 +125,30 @@ for name, mode in {
 }.items():
     text = (root / 'scripts' / name).read_text(encoding='utf-8')
     lock = text.index('factory_lock_acquire')
-    marker = text.index(f"printf '%s\\n' {mode} > .factory-state/loop-mode")
+    marker = text.index(f'write loop-mode {mode}')
     assert marker > lock, f'{name}: loop-mode marker is not under factory lock'
-for name in ('.factory/ralph/implementation.yml', '.factory/ralph/plan.yml', '.factory/ralph/audit.yml', '.factory/ralph/maintenance.yml', '.factory/ralph/maintenance-plan.yml'):
+tokens = {
+    '.factory/ralph/implementation.yml': 'LOOP_COMPLETE',
+    '.factory/ralph/plan.yml': 'PLAN_COMPLETE',
+    '.factory/ralph/audit.yml': 'AUDIT_COMPLETE',
+    '.factory/ralph/maintenance.yml': 'MAINTENANCE_COMPLETE',
+    '.factory/ralph/maintenance-plan.yml': 'MAINTENANCE_PLAN_COMPLETE',
+}
+for name, token in tokens.items():
     text = (root / name).read_text(encoding='utf-8')
     assert text.index('check-scratchpad.sh') < text.index('git-commit-hook.sh'), \
         f'{name}: scratchpad guard must run before checkpoint'
+    assert f'check-scratchpad.sh", "{token}"' in text, f'{name}: lifecycle token guard missing'
+    if name != '.factory/ralph/maintenance-plan.yml':
+        final_checkpoint = text.rindex('git-commit-hook.sh')
+        final_gate = text.rindex('ralph-completion-gate.sh')
+        assert final_checkpoint < final_gate, f'{name}: completion gate must attest after final checkpoint'
 planning = (root / '.factory/ralph/plan.yml').read_text(encoding='utf-8')
 assert planning.index('check-plan-freshness.sh", "--planning') < planning.index('git-commit-hook.sh'), \
     '.factory/ralph/plan.yml: immutable planning metadata must be checked before checkpoint'
 maintenance = (root / 'scripts/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
 lock = maintenance.index('factory_lock_acquire')
-selection = maintenance.index('> .factory-state/maintenance-bug-id')
+selection = maintenance.index('write maintenance-bug-id "$BUG_ID"')
 clean = maintenance.index('git status --porcelain')
 assert lock < clean < selection, 'maintenance selection/clean check is not serialized'
 recover = (root / 'scripts/ralph-recover.sh').read_text(encoding='utf-8')
@@ -139,16 +161,43 @@ assert "${1:-} != emit" in pi2_shim
 assert "s/^Event emitted:/Event published:/" in pi2_shim
 for name in ('ralph-run.sh', 'ralph-plan.sh', 'ralph-audit.sh', 'ralph-maintenance-run.sh', 'ralph-maintenance-plan.sh'):
     launcher = (root / 'scripts' / name).read_text(encoding='utf-8')
+    assert 'factory_lock_bootstrap' in launcher
     assert 'ralph-supervision.sh' in launcher
+    assert 'ralph_supervision_initialize' in launcher
     assert 'ralph_supervision_begin' in launcher
     assert 'ralph_supervision_consume_rejection' in launcher
     assert '--loop-id "$rejected_loop_id"' in launcher
+audit = (root / 'scripts/ralph-audit.sh').read_text(encoding='utf-8')
+assert 'ralph-campaign-state.py audit-binding' in audit
+assert 'FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256=${saved_binding[2]}' in audit
+maintenance_hooks = (root / '.factory/ralph/maintenance-plan.yml').read_text(encoding='utf-8')
+# The untrusted completion hook may only validate unprivileged completion
+# artifacts. No lock-needing finalizer or strict checkpoint may run in the
+# hook chain; the trusted parent performs the ledger transition, final
+# handoff, gate attestation, and final-state attestation under the lock.
+assert 'finalize-maintenance-planning.sh' not in maintenance_hooks
+assert '--final-handoff' not in maintenance_hooks
+pre_complete = maintenance_hooks.split('pre.loop.complete:', 1)[1]
+assert 'git-commit-hook.sh' not in pre_complete
+assert pre_complete.count('command: [') == 1
+assert 'ralph-completion-gate.sh", "maintenance-planning"' in pre_complete
+launcher = (root / 'scripts/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
+assert 'finalize-maintenance-planning.sh' in launcher
+assert 'git-commit-hook.sh --maintenance-plan --final-handoff' in launcher
+assert 'final-gate.sh --maintenance-planning' in launcher
+assert 'ralph-final-state.py attest maintenance-planning' in launcher
+completion_gate = (root / 'scripts/ralph-completion-gate.sh').read_text(encoding='utf-8')
+assert "mode == 'maintenance-planning'" in completion_gate
 PY
+"$PROJECT_ROOT/tests/test-git-checkpoint.sh"
 "$PROJECT_ROOT/tests/test-bug-workflow.sh"
 "$PROJECT_ROOT/tests/test-plan-cycle.sh"
 "$PROJECT_ROOT/tests/test-ralph-completion-recovery.sh"
 "$PROJECT_ROOT/tests/test-factory-environment.sh"
 "$PROJECT_ROOT/tests/test-campaign-audit.sh"
 "$PROJECT_ROOT/tests/test-ralph-campaign.sh"
+"$PROJECT_ROOT/tests/test-ralph-campaign-state.py"
+"$PROJECT_ROOT/tests/test-factory-lock.py"
+"$PROJECT_ROOT/tests/test-orchestration-security.py"
 
 echo "test: boilerplate integration checks passed"

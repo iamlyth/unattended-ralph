@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PLAN=${FACTORY_MAINTENANCE_PLAN_PATH:-$PROJECT_ROOT/.factory/artifacts/maintenance-plan.md}
-SELECTION="$PROJECT_ROOT/.factory-state/maintenance-bug-id"
 PHASE=committed
 if [[ ${1:-} == --planning ]]; then
     PHASE=planning
@@ -13,13 +12,19 @@ fi
 (( $# == 0 )) || { echo "Usage: scripts/check-maintenance-freshness.sh [--planning]" >&2; exit 2; }
 cd -- "$PROJECT_ROOT"
 
-[[ -s "$SELECTION" ]] || { echo "maintenance-freshness: no selected bug; run ralph-maintenance-plan.sh BUG-ID" >&2; exit 1; }
-BUG_ID=$(tr -d '[:space:]' < "$SELECTION")
+BUG_ID=$("$SCRIPT_DIR/factory-state-file.py" read maintenance-bug-id) || {
+    echo "maintenance-freshness: no safe selected bug; run ralph-maintenance-plan.sh BUG-ID" >&2; exit 1;
+}
 [[ "$BUG_ID" =~ ^BUG-[0-9]{4,}$ ]] || { echo "maintenance-freshness: invalid selected bug ID" >&2; exit 1; }
 [[ -s "$PLAN" ]] || { echo "maintenance-freshness: missing .factory/artifacts/maintenance-plan.md" >&2; exit 1; }
 ./scripts/bug-ledger.py validate >/dev/null
 ./scripts/validate-maintenance-plan.py current "$PLAN" >/dev/null
 
+EXPECTED_MAINTENANCE_BASE=${FACTORY_MAINTENANCE_BASE_COMMIT:-}
+if [[ "$PHASE" == planning && -z "$EXPECTED_MAINTENANCE_BASE" ]]; then
+    EXPECTED_MAINTENANCE_BASE=$("$SCRIPT_DIR/factory-state-file.py" read maintenance-base-commit) || exit $?
+fi
+export EXPECTED_MAINTENANCE_BASE
 mapfile -t META < <(python3 - "$PLAN" "$PHASE" <<'PY'
 import importlib.util, os, pathlib, subprocess, sys
 plan_path, phase = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -33,10 +38,7 @@ def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 
 if phase == 'planning':
-    expected_base = os.environ.get('FACTORY_MAINTENANCE_BASE_COMMIT', '').strip()
-    if not expected_base:
-        marker = pathlib.Path('.factory-state/maintenance-base-commit')
-        expected_base = marker.read_text(encoding='utf-8').strip() if marker.is_file() else ''
+    expected_base = os.environ.get('EXPECTED_MAINTENANCE_BASE', '').strip()
     if not expected_base or current['base_commit'] != expected_base:
         raise SystemExit('maintenance-freshness: planning base_commit differs from the selected cycle base')
     try:

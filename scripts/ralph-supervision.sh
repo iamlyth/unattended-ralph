@@ -3,8 +3,254 @@
 
 RALPH_COMPLETION_REJECTION_MARKER=${RALPH_COMPLETION_REJECTION_MARKER:-.factory-state/completion-rejected.json}
 RALPH_HISTORY_FILE=${RALPH_HISTORY_FILE:-.ralph/history.jsonl}
-RALPH_SUPERVISION_STALE_RECOVERIES=0
-RALPH_SUPERVISION_COMPLETION_RECOVERIES=0
+RALPH_SUPERVISION_INITIALIZED=false
+RALPH_SUPERVISION_STATE_MODE=
+RALPH_SUPERVISION_STATE_FILE=
+
+ralph_supervision_prepare_state_directory() {
+    python3 - <<'PY'
+import os, stat
+from pathlib import Path
+path = Path('.factory-state')
+if path.exists() or path.is_symlink():
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid() or info.st_mode & 0o077):
+        raise SystemExit('ralph-supervision: unsafe .factory-state directory')
+else:
+    path.mkdir(mode=0o700)
+PY
+}
+
+ralph_supervision_initialize() {
+    local mode=${1:?ralph_supervision_initialize requires a lifecycle mode}
+    local resume=${2:-false}
+    case "$mode" in
+        implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
+        *) echo "ralph-supervision: invalid lifecycle mode '$mode'" >&2; return 2 ;;
+    esac
+    [[ "$resume" == true || "$resume" == false ]] || {
+        echo "ralph-supervision: resume flag must be true or false" >&2; return 2;
+    }
+    RALPH_SUPERVISION_STATE_MODE=$mode
+    RALPH_SUPERVISION_STATE_FILE=${FACTORY_RALPH_SUPERVISION_STATE:-.factory-state/ralph-supervision-$mode.json}
+    FACTORY_RALPH_CYCLE_ID=$(python3 - "$RALPH_SUPERVISION_STATE_FILE" "$mode" "$resume" <<'PY'
+import json, os, secrets, stat, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import StateIOError, atomic_write_json, read_json
+
+name, mode, resume_text = sys.argv[1:]
+resume = resume_text == 'true'
+path = Path(name)
+expected_parent = Path('.factory-state').absolute()
+if not expected_parent.exists():
+    expected_parent.mkdir(mode=0o700)
+parent = path.parent.absolute()
+if parent != expected_parent or path.name != f'ralph-supervision-{mode}.json':
+    raise SystemExit('ralph-supervision: durable state must use its canonical state-local path')
+parent_info = expected_parent.lstat()
+if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
+        or parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o077):
+    raise SystemExit('ralph-supervision: unsafe durable-state parent')
+
+keys_v2 = {
+    'schema', 'mode', 'cycle_id', 'stale_recoveries',
+    'completion_recoveries', 'no_progress_recoveries',
+}
+def validate(data):
+    if not isinstance(data, dict) or data.get('mode') != mode:
+        raise SystemExit('ralph-supervision: durable recovery state has an invalid schema')
+    if set(data) == keys_v2 and data.get('schema') == 'ralph-supervision/v2':
+        cycle = data.get('cycle_id')
+        if not isinstance(cycle, str) or len(cycle) != 64 or any(c not in '0123456789abcdef' for c in cycle):
+            raise SystemExit('ralph-supervision: durable cycle ID is invalid')
+    else:
+        raise SystemExit('ralph-supervision: durable recovery state has an invalid schema')
+    for key in ('stale_recoveries', 'completion_recoveries', 'no_progress_recoveries'):
+        if not isinstance(data.get(key), int) or not 0 <= data[key] <= 64:
+            raise SystemExit('ralph-supervision: durable recovery counter is invalid')
+    return data
+
+def read_json_file(candidate, label, maximum=16384):
+    candidate = Path(candidate)
+    if candidate.parent.absolute() != expected_parent or candidate.name != candidate.name.replace('/', ''):
+        raise SystemExit(f'ralph-supervision: unsafe {label} path')
+    try:
+        return read_json(Path.cwd(), candidate.name, maximum=maximum)
+    except (OSError, StateIOError) as exc:
+        raise SystemExit(f'ralph-supervision: cannot safely read {label}: {exc}')
+
+def write(data):
+    try:
+        atomic_write_json(Path.cwd(), path.name, data)
+    except (OSError, StateIOError) as exc:
+        raise SystemExit(f'ralph-supervision: cannot safely write durable recovery state: {exc}')
+
+if path.exists() or path.is_symlink():
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.getuid() or info.st_mode & 0o077):
+        raise SystemExit('ralph-supervision: unsafe durable recovery state')
+    existing_data = read_json_file(path, 'durable recovery state')
+    if resume:
+        if isinstance(existing_data, dict) and existing_data.get('schema') == 'ralph-supervision/v1':
+            raise SystemExit(
+                'ralph-supervision: legacy durable state requires explicit '
+                'scripts/ralph-supervision-migrate.py migration'
+            )
+        data = validate(existing_data)
+        print(data['cycle_id'])
+        raise SystemExit(0)
+    data = validate(existing_data)
+    final_marker = expected_parent / f'final-handoff-{mode}.json'
+    final = read_json_file(final_marker, 'prior final-state marker')
+    final_keys = {'schema', 'mode', 'cycle_id', 'checkpoint_head', 'attested_head'}
+    checkpoint = final.get('checkpoint_head') if isinstance(final, dict) else None
+    attested = final.get('attested_head') if isinstance(final, dict) else None
+    if (not isinstance(final, dict) or set(final) != final_keys
+            or final.get('schema') != 'ralph-final-state/v1' or final.get('mode') != mode
+            or final.get('cycle_id') != data['cycle_id']
+            or not isinstance(checkpoint, str) or len(checkpoint) != 40
+            or any(c not in '0123456789abcdef' for c in checkpoint)
+            or not isinstance(attested, str) or len(attested) != 40
+            or any(c not in '0123456789abcdef' for c in attested)):
+        raise SystemExit('ralph-supervision: unfinished lifecycle state requires --resume')
+    for commit in (checkpoint, attested):
+        if subprocess.run(
+            ['git', 'cat-file', '-e', f'{commit}^{{commit}}'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode:
+            raise SystemExit('ralph-supervision: prior final-state commit is unavailable')
+    if (subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', checkpoint, attested],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode or subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', attested, 'HEAD'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode):
+        raise SystemExit('ralph-supervision: prior final-state history was rewritten')
+elif resume:
+    raise SystemExit(
+        'ralph-supervision: durable recovery state is missing; refuse budget reset. '
+        'For the stopped legacy campaign run scripts/ralph-supervision-migrate.py explicitly.'
+    )
+data = {
+    'schema': 'ralph-supervision/v2', 'mode': mode, 'cycle_id': secrets.token_hex(32),
+    'stale_recoveries': 0, 'completion_recoveries': 0, 'no_progress_recoveries': 0,
+}
+write(data)
+print(data['cycle_id'])
+PY
+) || return 1
+    [[ "$FACTORY_RALPH_CYCLE_ID" =~ ^[0-9a-f]{64}$ ]] || {
+        echo "ralph-supervision: failed to establish a durable cycle ID" >&2; return 1;
+    }
+    export FACTORY_RALPH_CYCLE_ID
+    RALPH_SUPERVISION_INITIALIZED=true
+}
+
+ralph_supervision_should_continue() {
+    local mode=${1:?ralph_supervision_should_continue requires a lifecycle mode}
+    ralph_supervision_ensure_initialized "$mode" || return $?
+    python3 - "$mode" "${FACTORY_RALPH_CYCLE_ID:?missing cycle ID}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import read_json
+mode, cycle = sys.argv[1:]
+handshake = read_json(Path.cwd(), f'ralph-launch-handshake-{mode}.json', maximum=16384, missing_ok=True)
+handshake_keys = {
+    'schema', 'mode', 'cycle_id', 'attempt_id', 'campaign_round',
+    'campaign_phase', 'campaign_state_sha256', 'loop_id', 'events',
+    'events_dev', 'events_ino', 'events_offset', 'events_size', 'events_sha256',
+    'events_delta_size', 'events_delta_sha256', 'start_record_size',
+    'start_record_sha256', 'start_record_nonce',
+}
+if (isinstance(handshake, dict) and set(handshake) == handshake_keys
+        and handshake.get('schema') == 'ralph-launch-handshake/v2'
+        and handshake.get('mode') == mode and handshake.get('cycle_id') == cycle):
+    raise SystemExit(0)
+migration = read_json(
+    Path.cwd(), f'ralph-supervision-migration-{mode}.json', maximum=16384, missing_ok=True,
+)
+migration_keys = {
+    'schema', 'mode', 'cycle_id', 'campaign_state_sha256', 'round',
+    'legacy_verification_command_sha256', 'verification_binding_sha256',
+}
+if (not isinstance(migration, dict) or set(migration) != migration_keys
+        or migration.get('schema') != 'ralph-supervision-migration/v1'
+        or migration.get('mode') != mode or migration.get('cycle_id') != cycle):
+    raise SystemExit(1)
+PY
+}
+
+ralph_supervision_ensure_initialized() {
+    local mode=${1:?ralph_supervision_ensure_initialized requires a lifecycle mode}
+    if [[ "$RALPH_SUPERVISION_INITIALIZED" != true || "$RALPH_SUPERVISION_STATE_MODE" != "$mode" ]]; then
+        echo "ralph-supervision: lifecycle state was not explicitly initialized" >&2
+        return 2
+    fi
+}
+
+ralph_supervision_diagnostics_file() {
+    local mode=${1:?ralph_supervision_diagnostics_file requires a lifecycle mode}
+    ralph_supervision_ensure_initialized "$mode" || return $?
+    mktemp ".factory-state/final-gate-$mode.XXXXXX"
+}
+
+ralph_supervision_claim_recovery() {
+    local kind=${1:?ralph_supervision_claim_recovery requires a kind}
+    local maximum=${2:?ralph_supervision_claim_recovery requires a kind limit}
+    local no_progress_maximum=${FACTORY_RALPH_MAX_NO_PROGRESS_RECOVERIES:-8}
+    [[ "$kind" == stale || "$kind" == completion ]] || return 2
+    if [[ ! "$maximum" =~ ^[0-9]+$ || ! "$no_progress_maximum" =~ ^[0-9]+$ ]] \
+            || (( maximum > 32 || no_progress_maximum > 32 )); then
+        echo "ralph-supervision: invalid durable recovery limit" >&2
+        return 2
+    fi
+    python3 - "$RALPH_SUPERVISION_STATE_FILE" "$RALPH_SUPERVISION_STATE_MODE" \
+        "${FACTORY_RALPH_CYCLE_ID:?missing durable cycle ID}" \
+        "$kind" "$maximum" "$no_progress_maximum" <<'PY'
+import json, os, re, secrets, stat, sys
+from pathlib import Path
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import StateIOError, atomic_write_json, read_json
+path_text, mode, expected_cycle, kind, raw_maximum, raw_no_progress = sys.argv[1:]
+maximum, no_progress_maximum = int(raw_maximum), int(raw_no_progress)
+path = Path(path_text)
+if path.parent.absolute() != Path('.factory-state').absolute() or path.name != f'ralph-supervision-{mode}.json':
+    raise SystemExit(2)
+try:
+    data = read_json(Path.cwd(), path.name, maximum=16384)
+except (OSError, StateIOError):
+    raise SystemExit(2)
+expected = {
+    'schema', 'mode', 'cycle_id', 'stale_recoveries',
+    'completion_recoveries', 'no_progress_recoveries',
+}
+cycle = data.get('cycle_id')
+if (set(data) != expected or data.get('schema') != 'ralph-supervision/v2' or data.get('mode') != mode
+        or cycle != expected_cycle or not isinstance(cycle, str) or not re.fullmatch(r'[0-9a-f]{64}', cycle)
+        or any(not isinstance(data.get(key), int) or not 0 <= data[key] <= 64
+               for key in ('stale_recoveries', 'completion_recoveries', 'no_progress_recoveries'))):
+    raise SystemExit(2)
+key = f'{kind}_recoveries'
+if data[key] >= maximum or data['no_progress_recoveries'] >= no_progress_maximum:
+    print(f'ralph-supervision: {kind} recovery limit reached '
+          f'({data[key]}/{maximum}, no-progress {data["no_progress_recoveries"]}/{no_progress_maximum})',
+          file=sys.stderr)
+    raise SystemExit(1)
+data[key] += 1
+data['no_progress_recoveries'] += 1
+try:
+    atomic_write_json(Path.cwd(), path.name, data)
+except (OSError, StateIOError):
+    raise SystemExit(2)
+print(f'ralph-supervision: {kind} recovery {data[key]}/{maximum}; '
+      f'no-progress {data["no_progress_recoveries"]}/{no_progress_maximum}', file=sys.stderr)
+PY
+}
 
 ralph_supervision_begin() {
     local mode=${1:?ralph_supervision_begin requires a lifecycle mode}
@@ -12,32 +258,20 @@ ralph_supervision_begin() {
         implementation|planning|campaign-audit|maintenance-planning|maintenance) ;;
         *) echo "ralph-supervision: invalid lifecycle mode '$mode'" >&2; return 2 ;;
     esac
+    ralph_supervision_ensure_initialized "$mode" || return $?
 
     python3 - "$RALPH_COMPLETION_REJECTION_MARKER" <<'PY' || return 1
-import os
-import stat
 import sys
 from pathlib import Path
-
-marker = Path(sys.argv[1])
-parent = marker.parent if str(marker.parent) else Path('.')
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import StateIOError, remove
+canonical = (Path.cwd() / '.factory-state/completion-rejected.json').absolute()
+if Path(sys.argv[1]).absolute() != canonical:
+    raise SystemExit('ralph-supervision: completion marker must use its canonical state-local path')
 try:
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
-except OSError as exc:
-    print(f'ralph-supervision: unsafe completion-marker parent: {exc}', file=sys.stderr)
-    raise SystemExit(1)
-try:
-    try:
-        info = os.stat(marker.name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        raise SystemExit(0)
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()):
-        print('ralph-supervision: unsafe completion-rejection marker', file=sys.stderr)
-        raise SystemExit(1)
-    os.unlink(marker.name, dir_fd=parent_fd)
-    os.fsync(parent_fd)
-finally:
-    os.close(parent_fd)
+    remove(Path.cwd(), 'completion-rejected.json', missing_ok=True)
+except (OSError, StateIOError) as exc:
+    raise SystemExit(f'ralph-supervision: cannot safely remove completion marker: {exc}')
 PY
     FACTORY_RALPH_ATTEMPT_ID=$(python3 - <<'PY'
 import secrets
@@ -63,7 +297,8 @@ except OSError as exc:
     raise SystemExit(1)
 try:
     info = os.fstat(fd)
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()):
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+            or info.st_mode & 0o022):
         print('ralph-supervision: history is not a safe regular file', file=sys.stderr)
         raise SystemExit(1)
     size = info.st_size
@@ -80,82 +315,67 @@ PY
 ) || return 1
     read -r FACTORY_RALPH_HISTORY_ID FACTORY_RALPH_HISTORY_OFFSET <<<"$history_snapshot"
     export FACTORY_RALPH_HISTORY_ID FACTORY_RALPH_HISTORY_OFFSET
+    "$SCRIPT_DIR/ralph-event-boundary.py" begin "$mode"
+}
+
+ralph_supervision_finish_attempt() {
+    local mode=${1:?ralph_supervision_finish_attempt requires a lifecycle mode}
+    local boundary_rc
+    set +e
+    "$SCRIPT_DIR/ralph-event-boundary.py" finish "$mode"
+    boundary_rc=$?
+    set -e
+    if (( boundary_rc == 0 )); then
+        return 0
+    elif (( boundary_rc == 3 )); then
+        return 3
+    fi
+    echo "ralph-supervision: received event stream failed closed" >&2
+    return 2
 }
 
 ralph_supervision_consume_rejection() {
     local mode=${1:?ralph_supervision_consume_rejection requires a lifecycle mode}
     local workspace=${2:?ralph_supervision_consume_rejection requires a workspace}
     python3 - "$RALPH_COMPLETION_REJECTION_MARKER" "$FACTORY_RALPH_ATTEMPT_ID" "$mode" "$workspace" <<'PY'
-import json
-import os
 import re
-import stat
 import sys
 from pathlib import Path
-
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import StateIOError, consume_json
 marker, attempt, mode, workspace = sys.argv[1:]
-path = Path(marker)
-parent = path.parent if str(path.parent) else Path('.')
-try:
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
-except OSError as exc:
-    print(f'ralph-supervision: unsafe completion-marker parent: {exc}', file=sys.stderr)
+canonical = (Path.cwd() / '.factory-state/completion-rejected.json').absolute()
+if Path(marker).absolute() != canonical:
+    print('ralph-supervision: completion marker must use its canonical state-local path', file=sys.stderr)
     raise SystemExit(2)
-fd = None
-try:
-    try:
-        fd = os.open(path.name, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0), dir_fd=parent_fd)
-    except FileNotFoundError:
-        raise SystemExit(1)
-    info = os.fstat(fd)
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
-            or info.st_size > 16384):
-        print('ralph-supervision: unsafe completion-rejection marker', file=sys.stderr)
-        raise SystemExit(2)
-    raw = os.read(fd, 16385)
-    try:
-        data = json.loads(raw.decode('utf-8'))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        print(f'ralph-supervision: invalid completion-rejection marker: {exc}', file=sys.stderr)
-        raise SystemExit(2)
+def validate(data):
     if not isinstance(data, dict) or set(data) != {'schema', 'attempt_id', 'mode', 'workspace', 'loop_id'}:
-        print('ralph-supervision: completion-rejection marker has an invalid schema', file=sys.stderr)
-        raise SystemExit(2)
+        raise StateIOError('completion-rejection marker has an invalid schema')
     expected = {
         'schema': 'ralph-completion-rejection/v1',
         'attempt_id': attempt,
         'mode': mode,
-        'workspace': str(Path(workspace).resolve()),
+        'workspace': str(Path(workspace).resolve(strict=True)),
     }
     if any(data.get(key) != value for key, value in expected.items()):
-        print('ralph-supervision: stale or mismatched completion-rejection marker', file=sys.stderr)
-        raise SystemExit(2)
+        raise StateIOError('stale or mismatched completion-rejection marker')
     loop_id = data.get('loop_id')
     if not isinstance(loop_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', loop_id):
-        print('ralph-supervision: completion-rejection marker has an invalid loop ID', file=sys.stderr)
-        raise SystemExit(2)
-    os.unlink(path.name, dir_fd=parent_fd)
-    os.fsync(parent_fd)
-    print(loop_id)
-finally:
-    if fd is not None:
-        os.close(fd)
-    os.close(parent_fd)
+        raise StateIOError('completion-rejection marker has an invalid loop ID')
+    return loop_id
+try:
+    print(consume_json(Path.cwd(), 'completion-rejected.json', validate, maximum=16384))
+except FileNotFoundError:
+    raise SystemExit(1)
+except (OSError, StateIOError) as exc:
+    print(f'ralph-supervision: invalid completion-rejection marker: {exc}', file=sys.stderr)
+    raise SystemExit(2)
 PY
 }
 
 ralph_supervision_allow_completion_recovery() {
     local maximum=${FACTORY_RALPH_MAX_COMPLETION_RECOVERIES:-8}
-    if [[ ! "$maximum" =~ ^[0-9]+$ ]] || (( maximum > 32 )); then
-        echo "ralph-supervision: invalid completion recovery limit" >&2
-        return 2
-    fi
-    if (( RALPH_SUPERVISION_COMPLETION_RECOVERIES >= maximum )); then
-        echo "ralph-supervision: completion recovery limit reached ($maximum)" >&2
-        return 1
-    fi
-    (( RALPH_SUPERVISION_COMPLETION_RECOVERIES += 1 ))
-    echo "ralph-supervision: completion recovery $RALPH_SUPERVISION_COMPLETION_RECOVERIES/$maximum" >&2
+    ralph_supervision_claim_recovery completion "$maximum"
 }
 
 ralph_supervision_attempt_was_stale() {
@@ -182,7 +402,8 @@ except OSError as exc:
     raise SystemExit(2)
 try:
     info = os.fstat(fd)
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()):
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+            or info.st_mode & 0o022):
         print('ralph-supervision: history is not a safe regular file', file=sys.stderr)
         raise SystemExit(2)
     identity = f'{info.st_dev}:{info.st_ino}'
@@ -357,12 +578,17 @@ ralph_supervision_recover_stale() {
         stale_rc=$?
     fi
     (( stale_rc == 0 )) || return "$stale_rc"
-    if (( RALPH_SUPERVISION_STALE_RECOVERIES >= maximum )); then
-        echo "ralph-supervision: stale recovery limit reached ($maximum)" >&2
+    local claim_rc
+    if ralph_supervision_claim_recovery stale "$maximum"; then
+        claim_rc=0
+    else
+        claim_rc=$?
+    fi
+    if (( claim_rc == 1 )); then
         return 3
+    elif (( claim_rc != 0 )); then
+        return 2
     fi
     ralph_supervision_record_stale_feedback "$mode" "$workspace" || return 2
-    (( RALPH_SUPERVISION_STALE_RECOVERIES += 1 ))
-    echo "ralph-supervision: recovering stale attempt $RALPH_SUPERVISION_STALE_RECOVERIES/$maximum" >&2
     return 0
 }

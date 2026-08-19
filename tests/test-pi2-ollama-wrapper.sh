@@ -69,6 +69,9 @@ case "${FAKE_MODE:-success}" in
         printf '%s\n' "$$" > "${FAKE_CHILD_PID_FILE:?}"
         while :; do sleep 1; done
         ;;
+    raw-completion)
+        printf '%s\n' 'ordinary model text' 'LOOP_COMPLETE'
+        ;;
     ralph-probe)
         "${FAKE_SHIM:?}" emit test.work done
         count=0
@@ -108,6 +111,18 @@ grep -Fq 'Event emitted: factory.implement' "$stdout"
 assert_absent 'Event published: factory.implement' "$stdout"
 "$SHIM" --version >"$stdout"
 grep -Fq 'real Ralph command: --version' "$stdout"
+# Direct shim invocation inspects the shell-expanded final argv, not merely the
+# original command text seen by the Pi extension.
+reserved_payload=LOOP_COMPLETE
+events_before=$(wc -l < "$RALPH_EVENTS_FILE")
+set +e
+"$SHIM" emit factory.implement "$reserved_payload" >"$stdout" 2>"$stderr"
+direct_reserved_rc=$?
+"$SHIM" emit MAINTENANCE_PLAN_COMPLETE 'done' >"$stdout" 2>"$stderr"
+direct_topic_rc=$?
+set -e
+[[ $direct_reserved_rc -eq 2 && $direct_topic_rc -eq 2 ]]
+[[ $(wc -l < "$RALPH_EVENTS_FILE") -eq $events_before ]]
 node --input-type=module - "$PROJECT_ROOT/scripts/pi-ralph-emit-extension.mjs" <<'EOF'
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -119,6 +134,20 @@ assert.equal(typeof toolHandler, 'function');
 const directEvent = { toolName: 'bash', input: { command: 'ralph emit factory.implement done' } };
 toolHandler(directEvent);
 assert.equal(directEvent.input.command, './scripts/pi-cli-shims/ralph emit factory.implement done');
+for (const command of [
+  'ralph emit LOOP_COMPLETE done',
+  'ralph emit factory.implement LOOP_COMPLETE',
+  'ralph emit factory.plan "shortcut PLAN_COMPLETE payload"',
+  'ralph emit factory.audit AUDIT_COMPLETE',
+  'ralph emit factory.maintenance.plan MAINTENANCE_PLAN_COMPLETE',
+  'ralph emit factory.maintenance.implement MAINTENANCE_COMPLETE',
+]) {
+  const tokenEvent = { toolName: 'bash', input: { command } };
+  assert.equal(toolHandler(tokenEvent).block, true, command);
+  const tokenResult = rewriteRalphEmitCommand(command);
+  assert.equal(tokenResult.reserved, true, command);
+  assert.equal(tokenResult.matched, false, command);
+}
 const unsafeEvent = { toolName: 'bash', input: { command: 'cd /tmp && ralph emit factory.implement done' } };
 assert.equal(toolHandler(unsafeEvent).block, true);
 let result = rewriteRalphEmitCommand('ralph emit factory.implement "done"');
@@ -126,6 +155,9 @@ assert.equal(result.matched, true);
 assert.equal(result.unsafe, false);
 assert.equal(result.command, './scripts/pi-cli-shims/ralph emit factory.implement "done"');
 for (const command of [
+  'ralph emit factory.implement "$payload"',
+  'ralph emit factory.implement "${payload}"',
+  'PAYLOAD=done ralph emit factory.implement "$PAYLOAD"',
   'cd /tmp && ralph emit factory.implement done',
   'ralph emit factory.implement done; sleep 600',
   'ralph emit factory.implement done | cat',
@@ -240,6 +272,46 @@ hats:
     default_publishes: test.work
 EOF
 if [[ -n "$REAL_RALPH" && $($REAL_RALPH --version) == 'ralph 2.10.1' ]]; then
+    cat > "$tmp/completion-hook" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'hook\n' >> "${FAKE_COMPLETION_HOOK_LOG:?}"
+EOF
+    chmod +x "$tmp/completion-hook"
+    cat > "$tmp/completion.yml" <<EOF
+cli:
+  backend: pi
+  command: $WRAPPER
+event_loop:
+  prompt_file: PROMPT.md
+  completion_promise: LOOP_COMPLETE
+  starting_event: test.work
+  max_iterations: 2
+  max_runtime_seconds: 60
+hooks:
+  enabled: true
+  events:
+    pre.loop.complete:
+      - name: exact-raw-completion
+        command: ["$tmp/completion-hook"]
+        on_error: block
+hats:
+  worker:
+    name: Worker
+    description: exact raw completion regression probe
+    triggers: [test.work]
+    publishes: [test.work]
+    default_publishes: test.work
+EOF
+    export FAKE_COMPLETION_HOOK_LOG="$tmp/completion-hook.log"
+    : > "$FAKE_COMPLETION_HOOK_LOG"
+    FAKE_MODE=raw-completion "$REAL_RALPH" -c "$tmp/completion.yml" run --exclusive --no-tui \
+        >"$tmp/completion-out" 2>"$tmp/completion-err"
+    [[ $(grep -c '^hook$' "$FAKE_COMPLETION_HOOK_LOG") -eq 1 ]] || {
+        echo 'test-pi2-ollama-wrapper: exact raw token did not trigger completion exactly once' >&2
+        exit 1
+    }
+
     export FAKE_COUNTER_FILE="$tmp/probe-count"
     set +e
     FAKE_MODE=ralph-probe "$REAL_RALPH" -c "$tmp/ralph.yml" run --exclusive --no-tui \

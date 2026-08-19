@@ -6,8 +6,13 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/.ralph/agent" "$tmp/.factory-state"
-cp "$PROJECT_ROOT/scripts/ralph-recover.sh" "$PROJECT_ROOT/scripts/factory-lock.sh" "$tmp/scripts/"
+cp "$PROJECT_ROOT/scripts/ralph-recover.sh" "$PROJECT_ROOT/scripts/factory-lock.sh" \
+    "$PROJECT_ROOT/scripts/factory-lock-exec.py" "$PROJECT_ROOT/scripts/factory_lock.py" \
+    "$PROJECT_ROOT/scripts/factory_state_io.py" "$PROJECT_ROOT/scripts/factory-state-file.py" \
+    "$PROJECT_ROOT/scripts/ralph_lock.py" "$PROJECT_ROOT/scripts/ralph-lock-recover.py" \
+    "$tmp/scripts/"
 chmod +x "$tmp/scripts/"*
+chmod 700 "$tmp/.factory-state"
 printf '# Recovery handoff\n\n- Safe.\n' > "$tmp/.ralph/agent/scratchpad.md"
 printf '{}\n' > "$tmp/.ralph/events-20260814-120000.jsonl"
 printf 'planning\n' > "$tmp/.factory-state/loop-mode"
@@ -29,6 +34,26 @@ git -C "$tmp" commit -qm initial
 (cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null)
 [[ $(<"$tmp/.ralph/current-loop-id") == primary-20260814-120000 ]]
 [[ $(<"$tmp/.ralph/current-events") == .ralph/events-20260814-120000.jsonl ]]
+
+printf '{broken\n' > "$tmp/.ralph/loop.lock"
+set +e
+(cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null 2>&1)
+ambiguous_lock_rc=$?
+set -e
+[[ $ambiguous_lock_rc -ne 0 && -f "$tmp/.ralph/loop.lock" ]] || {
+    echo 'test-ralph-recover-safety: ambiguous loop lock was removed' >&2; exit 1;
+}
+printf '{"pid":%s}\n' "$$" > "$tmp/.ralph/loop.lock"
+set +e
+(cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null 2>&1)
+live_lock_rc=$?
+set -e
+[[ $live_lock_rc -ne 0 && -f "$tmp/.ralph/loop.lock" ]] || {
+    echo 'test-ralph-recover-safety: live-PID loop lock was removed' >&2; exit 1;
+}
+printf '{"pid":99999999}\n' > "$tmp/.ralph/loop.lock"
+(cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null 2>&1)
+[[ ! -e "$tmp/.ralph/loop.lock" ]]
 
 printf 'external-loop\n' > "$tmp/external-loop"
 rm -f "$tmp/.ralph/current-loop-id"

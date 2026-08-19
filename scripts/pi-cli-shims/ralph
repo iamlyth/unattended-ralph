@@ -12,6 +12,17 @@ if [[ ${1:-} != emit ]]; then
     exec "$REAL_RALPH" "$@"
 fi
 
+# The shell has already performed parameter, command, and quote expansion here.
+# Inspect the final argv so direct shim calls cannot bypass the Pi extension.
+for argument in "${@:2}"; do
+    case "$argument" in
+        *PLAN_COMPLETE*|*LOOP_COMPLETE*|*AUDIT_COMPLETE*|*MAINTENANCE_PLAN_COMPLETE*|*MAINTENANCE_COMPLETE*)
+            echo 'ralph-shim: lifecycle completion tokens are reserved model-output protocol lines' >&2
+            exit 2
+            ;;
+    esac
+done
+
 # `ralph emit` writes the authoritative JSONL record before printing this single
 # acknowledgement. Rewrite only that trusted command's exact line; preserve its
 # stderr and original status so failed emissions remain failed tool calls.

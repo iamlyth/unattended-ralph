@@ -48,7 +48,7 @@ hooks:
         command: ["./scripts/check-maintenance-freshness.sh", "--planning"]
         on_error: block
       - name: maintenance-planning-scratchpad
-        command: ["./scripts/check-scratchpad.sh", "--allow-missing", "--allow-oversize"]
+        command: ["./scripts/check-scratchpad.sh", "MAINTENANCE_PLAN_COMPLETE", "--allow-missing", "--allow-oversize"]
         on_error: block
       - name: maintenance-planning-checkpoint
         command: ["./scripts/git-commit-hook.sh", "--maintenance-plan"]
@@ -58,9 +58,11 @@ hooks:
         timeout_seconds: 691200
         on_error: block
     pre.loop.complete:
+      # The completion hook only validates unprivileged completion artifacts.
+      # The trusted parent launcher performs the ledger transition, strict
+      # final-handoff checkpoint, gate attestation, and final-state attestation
+      # under the retained factory lock after Ralph returns success; hook-side
+      # finalization would need the lock the untrusted child must not hold.
       - name: final-maintenance-planning-gate
         command: ["./scripts/ralph-completion-gate.sh", "maintenance-planning"]
-        on_error: block
-      - name: final-maintenance-planning-checkpoint
-        command: ["./scripts/git-commit-hook.sh", "--maintenance-plan"]
         on_error: block

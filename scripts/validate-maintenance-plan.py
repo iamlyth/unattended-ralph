@@ -26,6 +26,25 @@ def fail(message: str) -> None:
     raise ValueError(message)
 
 
+def parse_dependencies(value: str, number: int) -> list[int]:
+    value = value.strip()
+    if value.lower() == "none":
+        return []
+    dependencies: list[int] = []
+    for item in (part.strip() for part in value.split(",")):
+        match = re.fullmatch(r"Tasks? ([1-9][0-9]*)(?:\s*[-–—]\s*([1-9][0-9]*))?", item, re.I)
+        if not match:
+            fail(f"Task {number}: malformed Dependencies {value!r}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            fail(f"Task {number}: descending dependency range {item!r}")
+        dependencies.extend(range(start, end + 1))
+    if len(dependencies) != len(set(dependencies)):
+        fail(f"Task {number}: duplicate dependency")
+    return dependencies
+
+
 def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
     lines = text.splitlines()
     if not lines or lines[0] != "---":
@@ -53,6 +72,8 @@ def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
         fail(f"missing front-matter key(s): {', '.join(missing)}")
     if set(metadata) != set(KEYS):
         fail("front matter must contain exactly the seven required keys")
+    if tuple(metadata) != KEYS:
+        fail("front-matter keys must use the required order")
 
     headers: list[tuple[int, int, str]] = []
     for index, line in enumerate(lines[end + 1 :], end + 2):
@@ -77,9 +98,12 @@ def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
             if match:
                 name, value = match.groups()
                 entries.append((offset, name, value))
+        unknown_fields = [name for _offset, name, _value in entries if name not in FIELDS]
+        if unknown_fields:
+            fail(f"Task {number}: unknown field(s): {', '.join(unknown_fields)}")
+        if tuple(name for _offset, name, _value in entries) != FIELDS:
+            fail(f"Task {number}: fields must appear exactly once in the required order")
         for entry_index, (offset, name, value) in enumerate(entries):
-            if name not in FIELDS:
-                continue
             if name in found:
                 fail(f"Task {number}: duplicate {name}")
             next_offset = entries[entry_index + 1][0] if entry_index + 1 < len(entries) else len(task_lines)
@@ -100,10 +124,31 @@ def parse(text: str) -> tuple[dict[str, str], list[dict[str, object]]]:
             fail(f"Task {number}: missing {', '.join(missing_fields)}")
         if found["Status"] not in TASK_STATUSES:
             fail(f"Task {number}: invalid Status {found['Status']!r}")
-        tasks.append({"number": number, "title": title, "fields": found})
+        dependencies = parse_dependencies(found["Dependencies"], number)
+        tasks.append({
+            "number": number,
+            "title": title,
+            "fields": found,
+            "dependencies": dependencies,
+        })
+
+    numbers = {int(task["number"]) for task in tasks}
+    for task in tasks:
+        number = int(task["number"])
+        dependencies = list(task["dependencies"])
+        unknown = sorted(set(dependencies) - numbers)
+        if unknown:
+            fail(f"Task {number}: unknown dependencies {unknown}")
+        if number in dependencies:
+            fail(f"Task {number}: cannot depend on itself")
+        if any(dependency > number for dependency in dependencies):
+            fail(f"Task {number}: dependencies must refer to earlier tasks")
 
     if tasks[-1]["title"] != FINAL_TITLE:
         fail(f"last task title must be exactly {FINAL_TITLE!r}")
+    expected_final = numbers - {int(tasks[-1]["number"])}
+    if set(tasks[-1]["dependencies"]) != expected_final:
+        fail("final maintenance audit must depend on every prior task and no others")
     return metadata, tasks
 
 

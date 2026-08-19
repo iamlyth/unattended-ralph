@@ -6,6 +6,16 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 MODE=${1:-}
 cd -- "$PROJECT_ROOT"
+ATTEST=false
+ATTEST_HEAD=
+if [[ ${FACTORY_FINAL_GATE_ATTEST:-0} == 1 ]]; then
+    ATTEST=true
+    ATTEST_HEAD=$(git rev-parse HEAD)
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "final-gate: completion attestation requires a clean Git tree" >&2
+        exit 1
+    }
+fi
 
 case "$MODE" in
     --planning)
@@ -128,3 +138,15 @@ PY
         exit 2
         ;;
 esac
+
+if [[ "$ATTEST" == true ]]; then
+    [[ $(git rev-parse HEAD) == "$ATTEST_HEAD" ]] || {
+        echo "final-gate: HEAD changed while completion was being attested" >&2
+        exit 1
+    }
+    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
+        echo "final-gate: completion gate changed the tracked Git tree" >&2
+        exit 1
+    }
+    printf 'final-gate: attested clean unchanged HEAD %s\n' "$ATTEST_HEAD"
+fi

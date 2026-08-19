@@ -2,7 +2,9 @@
 set -euo pipefail
 source_root=${1:-$PWD}
 root=$(mktemp -d)
-trap 'rm -rf "$root"' EXIT
+sentinel=$(mktemp /tmp/factory-evidence-injection.XXXXXX)
+rm -f -- "$sentinel"
+trap 'rm -rf "$root"; rm -f -- "$sentinel"' EXIT
 cd "$root"
 git init -q
 git config user.name test
@@ -63,10 +65,9 @@ commit=$commit
 test=test_installed_functional
 result=PASS
 skipped=0
-touch /tmp/controller-box-evidence-injection
+touch -- '$sentinel'
 EOF
-rm -f /tmp/controller-box-evidence-injection
-if ./scripts/check-installed-functional-evidence.sh >/dev/null 2>&1 || [[ -e /tmp/controller-box-evidence-injection ]]; then
+if ./scripts/check-installed-functional-evidence.sh >/dev/null 2>&1 || [[ -e "$sentinel" ]]; then
     echo 'evidence guard accepted or executed injected shell content' >&2
     exit 1
 fi

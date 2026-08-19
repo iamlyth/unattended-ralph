@@ -11,8 +11,35 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/initialize-campaign-audit.py" \
    "$PROJECT_ROOT/scripts/check-factory-environment.py" \
    "$PROJECT_ROOT/scripts/run-factory-runners.py" \
-   "$PROJECT_ROOT/scripts/check-factory-runner-evidence.py" "$tmp/scripts/"
+   "$PROJECT_ROOT/scripts/check-factory-runner-evidence.py" \
+   "$PROJECT_ROOT/scripts/factory-lock.sh" \
+   "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
+   "$PROJECT_ROOT/scripts/factory_lock.py" \
+   "$PROJECT_ROOT/scripts/factory_state_io.py" \
+   "$PROJECT_ROOT/scripts/campaign-verifier-binding.py" "$tmp/scripts/"
+cat > "$tmp/scripts/assert-no-factory-lock.py" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+keys=('FACTORY_LOCK_HELD','FACTORY_LOCK_FD','FACTORY_LOCK_ID','FACTORY_LOCK_ROOT')
+assert all(key not in os.environ for key in keys), {key:os.environ.get(key) for key in keys}
+root=Path.cwd().stat()
+for item in Path('/proc/self/fd').iterdir():
+    try: info=os.stat(item)
+    except OSError: continue
+    assert (info.st_dev, info.st_ino) != (root.st_dev, root.st_ino)
+PY
+for helper in check-factory-environment.py run-factory-runners.py check-factory-runner-evidence.py; do
+    mv "$tmp/scripts/$helper" "$tmp/scripts/$helper.real"
+    cat > "$tmp/scripts/$helper" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+./scripts/assert-no-factory-lock.py
+exec python3 "\$0.real" "\$@"
+EOF
+done
 chmod +x "$tmp/scripts/"*
+chmod 700 "$tmp/.factory-state"
 cat > "$tmp/.factory/environment.toml" <<'EOF'
 schema_version = 1
 EOF
@@ -34,24 +61,62 @@ EOF
 cat > "$tmp/.gitignore" <<'EOF'
 .factory-state/
 .factory-lock
+__pycache__/
 .ralph/*
 !.ralph/agent/
 .ralph/agent/*
 !.ralph/agent/scratchpad.md
 EOF
+cat > "$tmp/scripts/fake-launch-handshake.py" <<'PY'
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, sys
+root=pathlib.Path.cwd(); mode=sys.argv[1]
+cycle=hashlib.sha256((mode+'-cycle').encode()).hexdigest()
+attempt=hashlib.sha256((mode+'-attempt').encode()).hexdigest()
+events=root/'.ralph/events.jsonl'
+events.parent.mkdir(exist_ok=True)
+offset=events.stat().st_size if events.exists() else 0
+start_line=(json.dumps({
+    'ts':'2026-08-19T00:00:00+00:00', 'iteration':0, 'hat':'loop',
+    'topic':{'planning':'factory.plan','implementation':'factory.implement','campaign-audit':'factory.audit'}[mode],
+    'triggered':'planner', 'payload':'trusted start prompt',
+})+'\n').encode()
+with events.open('ab') as stream:
+    stream.write(start_line)
+info=events.stat(); loop_id=f'fake-{mode}'
+(root/'.ralph/current-events').write_text('.ralph/events.jsonl\n')
+(root/'.ralph/current-loop-id').write_text(loop_id+'\n')
+(root/'.factory-state/loop-mode').write_text(mode+'\n')
+(root/f'.factory-state/ralph-supervision-{mode}.json').write_text(json.dumps({
+    'schema':'ralph-supervision/v2','mode':mode,'cycle_id':cycle,
+    'stale_recoveries':0,'completion_recoveries':0,'no_progress_recoveries':0,
+})+'\n')
+raw=(root/'.factory-state/ralph-campaign.json').read_bytes()
+phase=os.environ['FACTORY_CAMPAIGN_PHASE']
+handshake={
+    'schema':'ralph-launch-handshake/v2','mode':mode,'cycle_id':cycle,
+    'attempt_id':attempt,'campaign_round':os.environ['FACTORY_CAMPAIGN_ROUND'],
+    'campaign_phase':phase,'campaign_state_sha256':hashlib.sha256(raw).hexdigest(),
+    'loop_id':loop_id,'events':'.ralph/events.jsonl','events_dev':info.st_dev,
+    'events_ino':info.st_ino,'events_offset':offset,'events_size':info.st_size,
+    'events_sha256':hashlib.sha256(events.read_bytes()).hexdigest(),
+    'events_delta_size':len(start_line),'events_delta_sha256':hashlib.sha256(start_line).hexdigest(),
+    'start_record_size':len(start_line),'start_record_sha256':hashlib.sha256(start_line).hexdigest(),
+    'start_record_nonce':attempt,
+}
+(root/f'.factory-state/ralph-launch-handshake-{mode}.json').write_text(json.dumps(handshake)+'\n')
+PY
 cat > "$tmp/scripts/branch-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+./scripts/assert-no-factory-lock.py
 [[ $(git branch --show-current) == develop ]]
-EOF
-cat > "$tmp/scripts/factory-lock.sh" <<'EOF'
-#!/usr/bin/env bash
-factory_lock_acquire() { export FACTORY_LOCK_HELD=1; }
 EOF
 cat > "$tmp/scripts/ralph-plan.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'plan %s\n' "$*" >> .factory-state/calls
+./scripts/fake-launch-handshake.py planning
 base=$(git rev-parse HEAD)
 if [[ ${1:-} == --resume ]]; then base=$(cat .factory-state/planning-base-commit); else printf '%s\n' "$base" > .factory-state/planning-base-commit; fi
 cat > .factory/artifacts/implementation-plan.md <<PLAN
@@ -87,6 +152,11 @@ cat > "$tmp/scripts/ralph-run.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'implement %s\n' "$*" >> .factory-state/calls
+./scripts/fake-launch-handshake.py implementation
+if [[ -n ${FAKE_CRASH_CAMPAIGN:-} ]]; then
+    kill -KILL "$PPID"
+    exit 97
+fi
 if [[ -n ${FAKE_FAIL_IMPL_ONCE:-} && ! -e .factory-state/failed-implementation ]]; then
     : > .factory-state/failed-implementation
     [[ -z ${FAKE_DIRTY_IMPL:-} ]] || printf '%s\n' "${FAKE_DIRTY_CONTENT:-interrupted work}" > product.txt
@@ -101,6 +171,7 @@ cat > "$tmp/scripts/ralph-audit.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'audit %s\n' "$*" >> .factory-state/calls
+./scripts/fake-launch-handshake.py campaign-audit
 python3 - <<'PY'
 from pathlib import Path
 p=Path('.factory/artifacts/campaign-audit.md')
@@ -121,6 +192,7 @@ EOF
 cat > "$tmp/scripts/final-gate.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+./scripts/assert-no-factory-lock.py
 case ${1:-} in
  --planning) grep -q '^status: active$' .factory/artifacts/implementation-plan.md ;;
  --implementation) grep -q '^status: complete$' .factory/artifacts/implementation-plan.md ;;
@@ -131,13 +203,16 @@ EOF
 cat > "$tmp/scripts/verify-project.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+./scripts/assert-no-factory-lock.py
 printf 'verify\n' >> .factory-state/calls
 EOF
 cat > "$tmp/scripts/check-installed-functional-evidence.sh" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+./scripts/assert-no-factory-lock.py
 exit 0
 EOF
-chmod +x "$tmp/scripts/"*.sh
+chmod +x "$tmp/scripts/"*.sh "$tmp/scripts/"*.py
 
 git -C "$tmp" init -q -b develop
 git -C "$tmp" config user.name test
@@ -174,13 +249,27 @@ assert [c.split()[0] for c in latest] == ['plan','implement','verify','audit'], 
 assert all('--no-tui' not in c for c in latest), latest
 PY
 
-# Campaign-level resilience: a phase script that exits non-zero (e.g.
-# infrastructure failure) must self-recover via the while loop, not exit.
+# An arbitrary nonzero leaf result is invoked once and stops at the same active,
+# resumable phase. The campaign uses no replaceable lock pathname.
+rm -f "$tmp/.factory-state/failed-implementation"
+implementation_calls_before=$(grep -c '^implement ' "$tmp/.factory-state/calls")
 set +e
-(cd "$tmp" && CAMPAIGN_RETRY_DELAY=0 FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
 fail_rc=$?
 set -e
-[[ $fail_rc -eq 0 ]]
+[[ $fail_rc -eq 42 ]]
+[[ ! -e "$tmp/.factory-lock" ]]
+[[ $(grep -c '^implement ' "$tmp/.factory-state/calls") -eq $((implementation_calls_before + 1)) ]]
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+state=json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+assert state['status']=='active' and state['phase']=='implementation'
+assert state['rounds'][-1]['implementation_started'] is True
+assert state['rounds'][-1]['implementation_commit'] is None
+assert (root/'product.txt').read_text().strip() == 'interrupted work'
+PY
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null)
 grep -q '^implement --resume --no-tui$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
@@ -188,19 +277,67 @@ state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json'
 assert state['status']=='complete'
 PY
 
-# Attended mode: self-recovery preserves the saved TUI mode.
+# Attended mode also stops once, then preserves its mode on explicit resume.
 rm -f "$tmp/.factory-state/failed-implementation"
 set +e
-(cd "$tmp" && CAMPAIGN_RETRY_DELAY=0 FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 FAKE_DIRTY_CONTENT='attended interrupted work' ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null 2>&1)
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 FAKE_DIRTY_IMPL=1 FAKE_DIRTY_CONTENT='attended interrupted work' ./scripts/ralph-campaign.sh --rounds 1 --restart --tui >/dev/null 2>&1)
 attended_fail_rc=$?
 set -e
-[[ $attended_fail_rc -eq 0 ]]
+[[ $attended_fail_rc -eq 42 ]]
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --tui >/dev/null)
 grep -q '^implement --resume$' "$tmp/.factory-state/calls"
 python3 - "$tmp" <<'PY'
 import json, pathlib, sys
 state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())
 assert state['status']=='complete' and state['tui'] is True
 PY
+
+# If the campaign process dies after the receiver handshake but before the
+# started transition, resume validates that exact state digest/cycle handshake
+# and continues rather than resetting the phase or relaunching it as fresh.
+set +e
+(cd "$tmp" && FAKE_CRASH_CAMPAIGN=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+crash_rc=$?
+set -e
+[[ $crash_rc -ne 0 ]]
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+state=json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+assert state['status']=='active' and state['phase']=='implementation'
+assert state['rounds'][-1]['implementation_started'] is False
+assert (root/'.factory-state/ralph-launch-handshake-implementation.json').is_file()
+(root/'.factory-state/event-before-tamper').write_bytes((root/'.ralph/events.jsonl').read_bytes())
+PY
+# The receiver has completed its final check. Any later append or same-size
+# rewrite invalidates the exact byte/size/start-record handshake and leaves
+# campaign state unchanged.
+state_before_event_tamper=$(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1)
+printf '{"ts":"2026-08-19T00:00:01+00:00","topic":"factory.implement","payload":"late"}\n' >> "$tmp/.ralph/events.jsonl"
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null 2>&1)
+append_handshake_rc=$?
+set -e
+[[ $append_handshake_rc -ne 0 ]]
+[[ $(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1) == "$state_before_event_tamper" ]]
+cp "$tmp/.factory-state/event-before-tamper" "$tmp/.ralph/events.jsonl"
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1]); path=root/'.ralph/events.jsonl'
+handshake=json.loads((root/'.factory-state/ralph-launch-handshake-implementation.json').read_text())
+raw=bytearray(path.read_bytes()); offset=handshake['events_offset']
+raw[offset] = ord('[') if raw[offset] != ord('[') else ord('{')
+path.write_bytes(raw)
+PY
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null 2>&1)
+rewrite_handshake_rc=$?
+set -e
+[[ $rewrite_handshake_rc -ne 0 ]]
+[[ $(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1) == "$state_before_event_tamper" ]]
+cp "$tmp/.factory-state/event-before-tamper" "$tmp/.ralph/events.jsonl"
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+grep -q '^implement --resume --no-tui$' "$tmp/.factory-state/calls"
 
 set +e
 (cd "$tmp" && FAKE_AUDIT_FINDINGS=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
@@ -223,6 +360,17 @@ assert state['status']=='blocked' and state['phase']=='blocked-findings'
 assert state['rounds'][-1]['audit_result']=='findings'
 PY
 
+# Campaign startup never guesses about or unlinks Ralph's exclusive lock.
+printf '{broken\n' > "$tmp/.ralph/loop.lock"
+state_before_lock_rejection=$(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1)
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume >/dev/null 2>&1)
+loop_lock_rc=$?
+set -e
+[[ $loop_lock_rc -ne 0 && -f "$tmp/.ralph/loop.lock" ]]
+[[ $(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1) == "$state_before_lock_rejection" ]]
+rm -f "$tmp/.ralph/loop.lock"
+
 # Invalid verification configuration must fail closed before any phase runs.
 cp "$tmp/.factory/config.toml" "$tmp/.factory/config.toml.good"
 sed -i '/campaign_command/d' "$tmp/.factory/config.toml"
@@ -233,13 +381,21 @@ set -e
 mv "$tmp/.factory/config.toml.good" "$tmp/.factory/config.toml"
 [[ $config_rc -eq 1 ]]
 
-# The real inherited descriptor lock is re-entrant for children and excludes a
-# competing non-inheriting writer when flock is available.
-if command -v flock >/dev/null; then
-    lock_tmp=$(mktemp -d)
-    cp "$PROJECT_ROOT/scripts/factory-lock.sh" "$lock_tmp/"
-    bash -c 'unset FACTORY_LOCK_HELD; exec 9>&-; source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"; bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; if env -u FACTORY_LOCK_HELD bash -c '\''source "$1/factory-lock.sh"; factory_lock_acquire "$1/lock"'\'' _ "$1"; then exit 1; fi' _ "$lock_tmp"
-    rm -rf "$lock_tmp"
-fi
+# A symlinked state directory is rejected before campaign state is read or
+# replaced.
+mv "$tmp/.factory-state" "$tmp/.factory-state.real"
+mkdir "$tmp/external-state"
+ln -s "$tmp/external-state" "$tmp/.factory-state"
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --restart >/dev/null 2>&1)
+symlink_state_rc=$?
+set -e
+[[ $symlink_state_rc -ne 0 && -z $(find "$tmp/external-state" -mindepth 1 -print -quit) ]]
+rm "$tmp/.factory-state"
+mv "$tmp/.factory-state.real" "$tmp/.factory-state"
+
+# Dedicated descriptor-drop and legacy migration coverage lives in
+# test-factory-lock.py; campaign sequencing creates no lock-file authority.
+[[ ! -e "$tmp/.factory-lock" ]]
 
 echo "test: Ralph campaign sequencing and resume checks passed"

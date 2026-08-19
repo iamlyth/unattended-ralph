@@ -47,11 +47,37 @@ Each mandatory round starts a fresh specification plan at a new Git base, runs
 single-writer implementation and the configured campaign verifier, then starts
 an independent production-evidence audit. State is persisted atomically in
 `.factory-state/ralph-campaign.json`; prior plans and audits remain in Git.
-Resume an interrupted active campaign with matching options:
+The lifecycle lock is an exclusive Linux `flock` on the already-open canonical
+repository-root directory itself; there is no replaceable lock-file authority.
+The trusted supervisor retains that dynamic descriptor, while Ralph/Pi, hooks,
+gates, verifiers, runner/evidence commands, tests, and product leaves receive
+neither a root descriptor nor lock metadata. A separately opened root FD cannot
+unlock the supervisor's open-file description. Safe legacy lock files are
+acquired, quarantined, revalidated, and removed once; busy or ambiguous
+migration state stops the lifecycle. After interruption, confirm no child
+Ralph process is alive and resume the exact phase with matching options:
 
 ```bash
 ./scripts/ralph-campaign.sh --rounds 3 --resume
 ```
+
+If a checkout was stopped under the previous lock-file authority, run the
+one-time migration before resuming. The helper holds the stable factory lock,
+strictly validates the campaign and current committed verifier blob, preserves
+any legacy recovery counters, and creates cycle-bound supervision and migration
+markers without changing the campaign JSON. Its deterministic partial-write
+recovery may complete an interrupted first invocation, while an already
+completed migration is rejected:
+
+```bash
+./scripts/ralph-supervision-migrate.py --mode implementation \
+  --expected-campaign-sha256 <digest-of-the-saved-campaign-json>
+```
+
+Only a later explicitly authorized operator action may resume that saved state
+with `./scripts/ralph-campaign.sh --rounds N --resume`; resume validates the
+exact migration marker and atomically promotes the saved legacy verifier digest
+before any leaf launch, so later interruptions remain resumable.
 
 Ralph 2.10.1 misclassifies its five-second post-`ralph emit` SIGTERM as a
 failed iteration. The Pi2 wrapper explicitly loads a tool-call extension that
@@ -62,13 +88,21 @@ no-follow prompt bridge and wrapper retain exec-style signal propagation. Remove
 this compatibility path only after the pinned Ralph integration probe passes
 without it.
 
-Use `--restart` only to replace a terminal saved campaign. Reserved-token
-mistakes in checkpoint handoffs flow through strict completion rejection and
-automatic continuation. A `loop_stale` result is recoverable only from strict
-history appended during the current attempt; fixed command-only feedback directs
-the resumed agent to run the gate, with two stale retries by default. Corrupt
-history, exhausted retries, corrupt state, rewritten Git bindings, dirty phase
-boundaries, verifier changes, and final findings still fail closed. `.factory/environment.toml` declares tools and runners
+Use `--restart` only to replace a terminal saved campaign. Lifecycle tokens in a
+scratchpad or `ralph emit` topic/payload are rejected before checkpointing; only
+the exact standalone final model-output line requests completion. Ordinary
+scratchpad-only updates remain uncommitted in the worktree for recovery. A
+strict final-handoff checkpoint may commit only that file once, then the final
+gate attests a clean unchanged HEAD with no later tracked commit. A
+current-attempt `loop_stale` result may receive at most two recoveries.
+Completion rejection and combined no-progress ceilings are also persisted, so
+restarting a child or resuming the campaign cannot reset them. Quota handling
+stays in leaf launchers. Any other nonzero leaf or gate result stops immediately
+with campaign state active at the same phase; the campaign never unlinks its
+locked pathname or retries an arbitrary failure. Corrupt history/state, dirty
+boundaries, stale Git bindings, exhausted ceilings, verifier changes, and
+final-round findings all remain resumable blockers rather than skipped work.
+`.factory/environment.toml` declares tools and runners
 without endpoints or credentials. Campaign verification runs every declared
 runner and validates exact-commit evidence:
 

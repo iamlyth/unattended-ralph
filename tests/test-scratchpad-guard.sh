@@ -5,7 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 GUARD="$PROJECT_ROOT/scripts/check-scratchpad.sh"
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+link_tmp=$(mktemp -d)
+trap 'rm -f "$tmp"; rm -rf "$link_tmp"' EXIT
 export FACTORY_SCRATCHPAD_PATH=$tmp
 
 cat > "$tmp" <<'EOF'
@@ -22,6 +23,19 @@ cat > "$tmp" <<'EOF'
 - All targeted checks passed.
 EOF
 "$GUARD" PLAN_COMPLETE >/dev/null
+
+ln -s "$tmp" "$link_tmp/scratch-link"
+FACTORY_SCRATCHPAD_PATH="$link_tmp/scratch-link" \
+    "$GUARD" PLAN_COMPLETE >/dev/null 2>&1 && {
+        echo 'test-scratchpad-guard: symlinked scratchpad was accepted' >&2; exit 1;
+    }
+mkdir "$link_tmp/real-agent"
+printf '# Linked ancestor handoff\n' > "$link_tmp/real-agent/scratchpad.md"
+ln -s "$link_tmp/real-agent" "$link_tmp/agent-link"
+FACTORY_SCRATCHPAD_PATH="$link_tmp/agent-link/scratchpad.md" \
+    "$GUARD" PLAN_COMPLETE >/dev/null 2>&1 && {
+        echo 'test-scratchpad-guard: symlinked scratchpad ancestor was accepted' >&2; exit 1;
+    }
 
 rm -f "$tmp"
 if "$GUARD" PLAN_COMPLETE >/dev/null 2>&1; then
@@ -53,10 +67,12 @@ if "$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1; then
     echo 'test-scratchpad-guard: reserved completion token was accepted by the final protocol check' >&2
     exit 1
 fi
-# Iteration checkpoints validate the handoff structure without turning a model
-# protocol mistake into a terminal child failure. The strict completion gate
-# above remains responsible for rejecting it and authorizing automatic recovery.
-"$GUARD" --allow-oversize >/dev/null
+# Iteration checkpoints receive the lifecycle token too, so contamination fails
+# before checkpointing instead of bypassing the completion-rejection protocol.
+if "$GUARD" PLAN_COMPLETE --allow-oversize >/dev/null 2>&1; then
+    echo 'test-scratchpad-guard: iteration mode accepted a reserved token' >&2
+    exit 1
+fi
 
 {
     printf '# Scratchpad\n'

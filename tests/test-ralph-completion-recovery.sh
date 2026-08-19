@@ -8,21 +8,35 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/.factory-state" "$tmp/.ralph/agent"
 cp "$PROJECT_ROOT/scripts/ralph-completion-gate.sh" "$tmp/scripts/"
 cp "$PROJECT_ROOT/scripts/ralph-supervision.sh" "$tmp/scripts/"
+cp "$PROJECT_ROOT/scripts/ralph-final-state.py" \
+    "$PROJECT_ROOT/scripts/factory_state_io.py" \
+    "$PROJECT_ROOT/scripts/ralph-event-boundary.py" "$tmp/scripts/"
+chmod 700 "$tmp/.factory-state"
 cat > "$tmp/scripts/final-gate.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FAKE_GATE_LOG:?}"
 exit "${FAKE_GATE_RC:-0}"
 EOF
-chmod +x "$tmp/scripts/final-gate.sh" "$tmp/scripts/ralph-completion-gate.sh"
+chmod +x "$tmp/scripts/final-gate.sh" "$tmp/scripts/ralph-completion-gate.sh" \
+    "$tmp/scripts/ralph-final-state.py" "$tmp/scripts/ralph-event-boundary.py"
 
+git -C "$tmp" init -q -b develop
+git -C "$tmp" config user.name test
+git -C "$tmp" config user.email test@example.invalid
+printf 'base\n' > "$tmp/tracked.txt"
+printf '.factory-state/\n.ralph/\n__pycache__/\ngate.log\nstale-diagnostics\nexternal-state/\nsymlink-state\nelsewhere\nunsafe/\n' > "$tmp/.gitignore"
+git -C "$tmp" add .
+git -C "$tmp" commit -qm base
 cd -- "$tmp"
 export RALPH_COMPLETION_REJECTION_MARKER="$tmp/.factory-state/completion-rejected.json"
 export FAKE_GATE_LOG="$tmp/gate.log"
 # shellcheck source=scripts/ralph-supervision.sh
 source "$tmp/scripts/ralph-supervision.sh"
+SCRIPT_DIR="$tmp/scripts"
 payload=$(printf '{"schema_version":1,"phase":"pre","event":"loop.complete","phase_event":"pre.loop.complete","loop":{"workspace":"%s","id":"test-loop"},"iteration":{"current":1}}' "$tmp")
 
 export FAKE_GATE_RC=1
+ralph_supervision_initialize implementation false
 ralph_supervision_begin implementation
 set +e
 printf '%s' "$payload" | "$tmp/scripts/ralph-completion-gate.sh" implementation >/dev/null 2>&1
@@ -31,6 +45,10 @@ set -e
 [[ $gate_rc -eq 1 && -f "$RALPH_COMPLETION_REJECTION_MARKER" ]] || {
     echo 'test-completion-recovery: rejected gate did not create a marker' >&2; exit 1;
 }
+if compgen -G "$tmp/.factory-state/completion-hook.*" >/dev/null; then
+    echo 'test-completion-recovery: hook payload was exposed through a reopenable pathname' >&2
+    exit 1
+fi
 consumed_loop=$(ralph_supervision_consume_rejection implementation "$tmp")
 [[ "$consumed_loop" == test-loop ]] || {
     echo 'test-completion-recovery: consumed marker returned the wrong loop ID' >&2; exit 1;
@@ -40,14 +58,28 @@ if ralph_supervision_consume_rejection implementation "$tmp" >/dev/null 2>&1; th
     exit 1
 fi
 export FACTORY_RALPH_MAX_COMPLETION_RECOVERIES=1
-RALPH_SUPERVISION_COMPLETION_RECOVERIES=0
 ralph_supervision_allow_completion_recovery >/dev/null
+# Simulate a leaf/campaign process restart: resume must reload, not reset, the
+# durable completion and no-progress counters.
+RALPH_SUPERVISION_INITIALIZED=false
+ralph_supervision_initialize implementation true
 if ralph_supervision_allow_completion_recovery >/dev/null 2>&1; then
-    echo 'test-completion-recovery: completion recovery ceiling was not enforced' >&2
+    echo 'test-completion-recovery: completion recovery ceiling reset across resume' >&2
     exit 1
 fi
-unset FACTORY_RALPH_MAX_COMPLETION_RECOVERIES
-RALPH_SUPERVISION_COMPLETION_RECOVERIES=0
+state_before_restart=$(sha256sum "$RALPH_SUPERVISION_STATE_FILE" | cut -d' ' -f1)
+if ralph_supervision_initialize implementation false >/dev/null 2>&1; then
+    echo 'test-completion-recovery: unfinished lifecycle counters reset without --resume' >&2
+    exit 1
+fi
+[[ $(sha256sum "$RALPH_SUPERVISION_STATE_FILE" | cut -d' ' -f1) == "$state_before_restart" ]]
+ralph_supervision_initialize implementation true
+export FACTORY_RALPH_MAX_NO_PROGRESS_RECOVERIES=1
+if ralph_supervision_claim_recovery stale 2 >/dev/null 2>&1; then
+    echo 'test-completion-recovery: combined no-progress ceiling did not span recovery kinds' >&2
+    exit 1
+fi
+unset FACTORY_RALPH_MAX_NO_PROGRESS_RECOVERIES FACTORY_RALPH_MAX_COMPLETION_RECOVERIES
 
 ralph_supervision_begin implementation
 printf '%s' "$payload" | "$tmp/scripts/ralph-completion-gate.sh" implementation >/dev/null 2>&1 || true
@@ -96,6 +128,7 @@ fi
 export RALPH_COMPLETION_REJECTION_MARKER=$safe_marker
 
 export FAKE_GATE_RC=0
+./scripts/ralph-final-state.py ensure-checkpoint implementation "$(git rev-parse HEAD)" >/dev/null
 ralph_supervision_begin implementation
 printf '%s' "$payload" | "$tmp/scripts/ralph-completion-gate.sh" implementation >/dev/null
 [[ ! -e "$RALPH_COMPLETION_REJECTION_MARKER" ]] || {
@@ -150,6 +183,7 @@ set -e
 export RALPH_HISTORY_FILE="$tmp/.ralph/history.jsonl"
 printf '# Recovery handoff\n\n- Current work is preserved.\n' > "$tmp/.ralph/agent/scratchpad.md"
 printf 'implementation-plan: final audit must cover definition of done\n' > "$tmp/stale-diagnostics"
+ralph_supervision_initialize planning false
 ralph_supervision_begin planning
 printf '%s\n' \
     '{"ts":"2026-08-14T00:00:00Z","type":{"kind":"loop_started","prompt":"test planning"}}' \
@@ -162,6 +196,23 @@ if grep -q 'definition of done' "$tmp/.ralph/agent/scratchpad.md"; then
     echo 'test-completion-recovery: raw gate diagnostics entered the model handoff' >&2
     exit 1
 fi
+
+export FACTORY_RALPH_MAX_STALE_RECOVERIES=1
+RALPH_SUPERVISION_INITIALIZED=false
+ralph_supervision_initialize planning true
+ralph_supervision_begin planning
+printf '%s\n' \
+    '{"ts":"2026-08-14T00:00:10Z","type":{"kind":"loop_started","prompt":"resumed planning"}}' \
+    '{"ts":"2026-08-14T00:00:11Z","type":{"kind":"loop_completed","reason":"loop_stale"}}' \
+    >> "$RALPH_HISTORY_FILE"
+set +e
+ralph_supervision_recover_stale planning "$tmp" >/dev/null 2>&1
+persisted_stale_rc=$?
+set -e
+[[ $persisted_stale_rc -eq 3 ]] || {
+    echo 'test-completion-recovery: stale ceiling reset across resume' >&2; exit 1;
+}
+unset FACTORY_RALPH_MAX_STALE_RECOVERIES
 
 ralph_supervision_begin planning
 set +e

@@ -7,6 +7,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 RALPH_BIN=${RALPH_BIN:-ralph}
 RESUME=false
 TUI=true
+ORIGINAL_ARGS=("$@")
 
 while (( $# > 0 )); do
     case "$1" in
@@ -18,55 +19,87 @@ while (( $# > 0 )); do
 done
 
 cd -- "$PROJECT_ROOT"
-command -v "$RALPH_BIN" >/dev/null || { echo "ralph-audit: Ralph executable not found: $RALPH_BIN" >&2; exit 2; }
-command -v pi2 >/dev/null || { echo "ralph-audit: pi2 is not available in this shell" >&2; exit 2; }
-./scripts/branch-guard.sh
-./scripts/check-factory-environment.py
-if [[ -z ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} || -z ${FACTORY_CAMPAIGN_AUDIT_BASE:-} ]]; then
-    [[ -x scripts/ralph-campaign-state.py ]] || { echo "ralph-audit: campaign state helper is unavailable" >&2; exit 1; }
-    [[ $(./scripts/ralph-campaign-state.py get status) == active && $(./scripts/ralph-campaign-state.py get phase) == audit ]] || {
-        echo "ralph-audit: no active campaign audit binding" >&2; exit 1;
-    }
-    campaign_round=$(./scripts/ralph-campaign-state.py get round)
-    FACTORY_CAMPAIGN_AUDIT_ROUND=$campaign_round
-    FACTORY_CAMPAIGN_AUDIT_BASE=$(./scripts/ralph-campaign-state.py get "rounds.$((campaign_round - 1)).verification_commit")
-    export FACTORY_CAMPAIGN_AUDIT_ROUND FACTORY_CAMPAIGN_AUDIT_BASE
-fi
-[[ $FACTORY_CAMPAIGN_AUDIT_ROUND =~ ^[1-9][0-9]*$ && $FACTORY_CAMPAIGN_AUDIT_BASE =~ ^[0-9a-f]{40}$ ]] || {
-    echo "ralph-audit: invalid campaign audit binding" >&2; exit 1;
-}
-./scripts/campaign-audit-scope-guard.sh
-
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
+factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-audit.sh" "${ORIGINAL_ARGS[@]}"
+command -v "$RALPH_BIN" >/dev/null || { echo "ralph-audit: Ralph executable not found: $RALPH_BIN" >&2; exit 2; }
+command -v pi2 >/dev/null || { echo "ralph-audit: pi2 is not available in this shell" >&2; exit 2; }
+factory_lock_run_untrusted ./scripts/branch-guard.sh
+factory_lock_run_untrusted ./scripts/check-factory-environment.py
+[[ -x scripts/ralph-campaign-state.py ]] || { echo "ralph-audit: campaign state helper is unavailable" >&2; exit 1; }
+binding=$(./scripts/ralph-campaign-state.py audit-binding) || exit $?
+mapfile -t saved_binding < <(python3 - "$binding" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+expected = {'round', 'base', 'runner_evidence_sha256'}
+if set(data) != expected:
+    raise SystemExit('ralph-audit: invalid reconstructed audit binding')
+print(data['round']); print(data['base']); print(data['runner_evidence_sha256'])
+PY
+)
+(( ${#saved_binding[@]} == 3 )) || { echo "ralph-audit: incomplete reconstructed audit binding" >&2; exit 1; }
+for pair in \
+    "${FACTORY_CAMPAIGN_AUDIT_ROUND:-}:${saved_binding[0]}:round" \
+    "${FACTORY_CAMPAIGN_AUDIT_BASE:-}:${saved_binding[1]}:base" \
+    "${FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256:-}:${saved_binding[2]}:runner evidence"; do
+    IFS=: read -r supplied saved label <<<"$pair"
+    [[ -z "$supplied" || "$supplied" == "$saved" ]] || {
+        echo "ralph-audit: supplied $label binding does not match campaign state" >&2; exit 1;
+    }
+done
+FACTORY_CAMPAIGN_AUDIT_ROUND=${saved_binding[0]}
+FACTORY_CAMPAIGN_AUDIT_BASE=${saved_binding[1]}
+FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256=${saved_binding[2]}
+export FACTORY_CAMPAIGN_AUDIT_ROUND FACTORY_CAMPAIGN_AUDIT_BASE FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256
+[[ $FACTORY_CAMPAIGN_AUDIT_ROUND =~ ^[1-9][0-9]*$ \
+    && $FACTORY_CAMPAIGN_AUDIT_BASE =~ ^[0-9a-f]{40}$ \
+    && $FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ralph-audit: invalid campaign audit binding" >&2; exit 1;
+}
+factory_lock_run_untrusted ./scripts/campaign-audit-scope-guard.sh
+
 # shellcheck source=scripts/ralph-supervision.sh
 source "$SCRIPT_DIR/ralph-supervision.sh"
-factory_lock_acquire "$PROJECT_ROOT/.factory-lock"
-mkdir -p .factory-state
-printf '%s\n' campaign-audit > .factory-state/loop-mode
+factory_lock_acquire "$PROJECT_ROOT"
+ralph_supervision_prepare_state_directory
+"$SCRIPT_DIR/factory-state-file.py" write loop-mode campaign-audit
+ralph_supervision_initialize campaign-audit "$RESUME"
+CONTINUE=false
+if $RESUME && ralph_supervision_should_continue campaign-audit; then CONTINUE=true; fi
 
 finish_audit_cycle() {
-    if ./scripts/final-gate.sh --campaign-audit; then :; else return $?; fi
-    local payload
+    local payload head
+    if ./scripts/ralph-final-state.py verify campaign-audit >/dev/null 2>&1; then
+        echo "ralph-audit: independent audit completed"
+        return 0
+    fi
     payload=$(printf '{"loop":{"workspace":"%s","id":"campaign-audit-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
-    if printf '%s' "$payload" | ./scripts/git-commit-hook.sh --campaign-audit; then :; else return $?; fi
-    [[ -z $(git status --porcelain --untracked-files=normal) ]] || {
-        echo "ralph-audit: completion left a dirty Git tree" >&2
-        return 1
-    }
+    if printf '%s' "$payload" | factory_lock_run_untrusted \
+            ./scripts/git-commit-hook.sh --campaign-audit --final-handoff; then :; else return $?; fi
+    if factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 ./scripts/final-gate.sh --campaign-audit; then :; else return $?; fi
+    head=$(git rev-parse HEAD)
+    ./scripts/ralph-final-state.py attest campaign-audit "$head" >/dev/null
     echo "ralph-audit: independent audit completed"
 }
 
 while true; do
-    ./scripts/ollama-usage-guard.sh --wait
+    factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --wait
+    CONTINUE=false
+    if $RESUME && ralph_supervision_should_continue campaign-audit; then CONTINUE=true; fi
     ralph_supervision_begin campaign-audit
     command=("$RALPH_BIN" -c .factory/ralph/audit.yml run --exclusive)
-    $RESUME && command+=(--continue)
+    $CONTINUE && command+=(--continue)
     $TUI || command+=(--no-tui)
     set +e
-    "${command[@]}"
+    factory_lock_run_untrusted "${command[@]}"
     rc=$?
+    ralph_supervision_finish_attempt campaign-audit
+    boundary_rc=$?
     set -e
+    if (( boundary_rc == 2 || (rc == 0 && boundary_rc != 0) )); then
+        echo "ralph-audit: launch/event boundary validation failed" >&2
+        exit 2
+    fi
 
     if (( rc == 0 )); then
         finish_audit_cycle
@@ -91,11 +124,11 @@ while true; do
         exit 1
     fi
     set +e
-    ./scripts/ollama-usage-guard.sh --check
+    factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --check
     quota_rc=$?
     set -e
     if (( quota_rc == 1 )); then
-        ./scripts/ollama-usage-guard.sh --wait
+        factory_lock_run_untrusted ./scripts/ollama-usage-guard.sh --wait
         ./scripts/ralph-recover.sh --mode campaign-audit --prepare-only
         RESUME=true
         continue
@@ -103,9 +136,9 @@ while true; do
         echo "ralph-audit: quota status check failed with status $quota_rc" >&2
         exit "$quota_rc"
     fi
-    stale_diagnostics=$(mktemp)
+    stale_diagnostics=$(ralph_supervision_diagnostics_file campaign-audit)
     set +e
-    ./scripts/final-gate.sh --campaign-audit >"$stale_diagnostics" 2>&1
+    factory_lock_run_untrusted ./scripts/final-gate.sh --campaign-audit >"$stale_diagnostics" 2>&1
     gate_rc=$?
     set -e
     if (( $(wc -c < "$stale_diagnostics") > 65536 )); then

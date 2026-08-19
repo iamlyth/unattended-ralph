@@ -48,6 +48,13 @@ required = [
     'scripts/bug-ledger.py', 'scripts/validate-maintenance-plan.py',
     'scripts/validate-implementation-plan.py', 'scripts/check-scratchpad.sh',
     'scripts/ralph-completion-gate.sh', 'scripts/ralph-supervision.sh',
+    'scripts/factory-lock.sh', 'scripts/factory-lock-exec.py',
+    'scripts/factory_lock.py', 'scripts/factory_state_io.py',
+    'scripts/factory-state-file.py', 'scripts/ralph_lock.py',
+    'scripts/ralph-lock-recover.py', 'scripts/ralph-event-boundary.py',
+    'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
+    'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
+    'tests/test-git-checkpoint.sh',
     'scripts/check-installed-functional-evidence.sh',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
@@ -66,7 +73,10 @@ required = [
     'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
     'tests/test-campaign-audit.sh', 'tests/test-ralph-campaign.sh',
+    'tests/test-ralph-campaign-state.py', 'tests/test-factory-lock.py',
+    'tests/test-orchestration-security.py',
     'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
+    'tests/test-maintenance-planning-completion.sh',
     'tests/test-pi2-ollama-wrapper.sh', 'tests/test-production-path-bypass.sh',
 ]
 for name in required:
@@ -94,6 +104,7 @@ for config in .factory/ralph/implementation.yml .factory/ralph/plan.yml .factory
     grep -q 'ralph-completion-gate.sh' "$config"
 done
 for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-audit.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
+    grep -q 'factory_lock_bootstrap' "$launcher"
     grep -q 'ralph-supervision.sh' "$launcher"
     grep -q 'ralph_supervision_consume_rejection' "$launcher"
     grep -q 'ralph_supervision_recover_stale' "$launcher"
@@ -124,15 +135,27 @@ for prompt in .factory/prompts/plan.md .factory/prompts/implementation.md \
 done
 grep -q '^TUI=false$' scripts/ralph-campaign.sh
 grep -q -- '--tui)' scripts/ralph-campaign.sh
+grep -q 'factory_lock_bootstrap' scripts/ralph-campaign.sh
+grep -q 'factory_lock_bootstrap' scripts/ralph-recover.sh
 for config in .factory/ralph/plan.yml .factory/ralph/implementation.yml \
-        .factory/ralph/audit.yml .factory/ralph/maintenance-plan.yml \
-        .factory/ralph/maintenance.yml; do
+        .factory/ralph/audit.yml .factory/ralph/maintenance.yml; do
     checkpoint=$(grep 'command: \["./scripts/check-scratchpad.sh"' "$config")
-    [[ $checkpoint != *'_COMPLETE"'* ]] || {
-        echo "verify: iteration scratchpad hook must defer token rejection to the completion gate: $config" >&2
+    [[ $checkpoint == *'_COMPLETE"'* ]] || {
+        echo "verify: iteration scratchpad hook must reject its lifecycle token: $config" >&2
         exit 1
     }
+    grep -q -- '--final-handoff' "$config"
 done
+# Maintenance planning defers the strict final handoff to its trusted parent
+# launcher, which performs the ledger transition and final checkpoint under
+# the retained factory lock; its completion hook validates only.
+checkpoint=$(grep 'command: \["./scripts/check-scratchpad.sh"' .factory/ralph/maintenance-plan.yml)
+[[ $checkpoint == *'MAINTENANCE_PLAN_COMPLETE"'* ]] || {
+    echo "verify: maintenance-planning scratchpad hook must reject its lifecycle token" >&2
+    exit 1
+}
+grep -q -- '--final-handoff' scripts/ralph-maintenance-plan.sh
+grep -q 'finalize-maintenance-planning.sh' scripts/ralph-maintenance-plan.sh
 grep -q '.factory/environment.toml' .factory/prompts/plan.md
 grep -q '.factory/environment.toml' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/plan.md
@@ -156,12 +179,17 @@ for name in subprocess.check_output(['git', 'remote'], text=True).split():
 PY
 
 ./tests/test-scratchpad-guard.sh
+./tests/test-git-checkpoint.sh
 ./tests/test-ralph-completion-recovery.sh
 ./tests/test-installed-functional-evidence.sh "$PROJECT_ROOT"
 ./tests/test-factory-environment.sh
 ./tests/test-factory-runner.sh
 ./tests/test-campaign-audit.sh
 ./tests/test-ralph-campaign.sh
+./tests/test-ralph-campaign-state.py
+./tests/test-factory-lock.py
+./tests/test-orchestration-security.py
+./tests/test-maintenance-planning-completion.sh
 ./tests/test-ralph-stale-recovery.sh
 ./tests/test-ralph-recover-safety.sh
 ./tests/test-pi2-ollama-wrapper.sh
