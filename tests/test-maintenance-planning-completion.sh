@@ -9,6 +9,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
+
+# The scenario test drives the maintenance-planning completion chain through
+# its own trusted-parent finalization, which sets the attestation flag
+# explicitly where required (BUG-0013). An ambient flag from a wrapping
+# completion gate must not leak into the chain's nested validate-only gates.
+unset FACTORY_FINAL_GATE_ATTEST
+
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/.factory/artifacts" "$tmp/.factory/bugs" \
     "$tmp/.factory-state" "$tmp/.ralph/agent" "$tmp/docs"

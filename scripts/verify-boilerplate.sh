@@ -5,6 +5,20 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd -- "$PROJECT_ROOT"
 
+# The scenario suite exercises isolated temporary repositories and must not
+# inherit ambient lifecycle state. The implementation completion gate runs
+# this suite with FACTORY_FINAL_GATE_ATTEST=1; leaking the attestation flag,
+# attempt/cycle bindings, campaign bindings, or recovery ceilings into nested
+# final-gate invocations would make scenario tests attest dirty trees and fail
+# spuriously (BUG-0013 regression).
+unset FACTORY_FINAL_GATE_ATTEST FACTORY_RALPH_CYCLE_ID FACTORY_RALPH_ATTEMPT_ID \
+      FACTORY_RALPH_HISTORY_ID FACTORY_RALPH_HISTORY_OFFSET \
+      FACTORY_CAMPAIGN_PHASE FACTORY_CAMPAIGN_ROUND FACTORY_CAMPAIGN_AUDIT_ROUND \
+      FACTORY_CAMPAIGN_AUDIT_BASE FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256 \
+      FACTORY_PLANNING_BASE_COMMIT FACTORY_MAINTENANCE_BASE_COMMIT \
+      FACTORY_RALPH_MAX_COMPLETION_RECOVERIES FACTORY_RALPH_MAX_NO_PROGRESS_RECOVERIES \
+      FACTORY_RALPH_MAX_STALE_RECOVERIES
+
 mapfile -t SHELL_FILES < <(find scripts tests -type f -name '*.sh' -print | sort)
 for file in "${SHELL_FILES[@]}"; do
     bash -n "$file"
@@ -77,6 +91,7 @@ required = [
     'tests/test-orchestration-security.py',
     'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
     'tests/test-maintenance-planning-completion.sh',
+    'tests/test-boilerplate-env-isolation.sh',
     'tests/test-pi2-ollama-wrapper.sh', 'tests/test-production-path-bypass.sh',
 ]
 for name in required:
@@ -190,6 +205,7 @@ PY
 ./tests/test-factory-lock.py
 ./tests/test-orchestration-security.py
 ./tests/test-maintenance-planning-completion.sh
+./tests/test-boilerplate-env-isolation.sh
 ./tests/test-ralph-stale-recovery.sh
 ./tests/test-ralph-recover-safety.sh
 ./tests/test-pi2-ollama-wrapper.sh
