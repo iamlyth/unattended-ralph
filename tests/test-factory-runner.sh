@@ -9,7 +9,8 @@ mkdir -p "$tmp/repo/scripts" "$tmp/repo/docs" "$tmp/repo/.factory" \
 chmod 0700 "$tmp/runner/workspaces/fake-project"
 cp "$PROJECT_ROOT/scripts/run-factory-runners.py" \
    "$PROJECT_ROOT/scripts/check-factory-runner-evidence.py" \
-   "$PROJECT_ROOT/scripts/factory-runner-server.py" "$tmp/repo/scripts/"
+   "$PROJECT_ROOT/scripts/factory-runner-server.py" \
+   "$PROJECT_ROOT/scripts/factory_runner_policy.py" "$tmp/repo/scripts/"
 chmod +x "$tmp/repo/scripts/"*.py
 cat > "$tmp/repo/.factory/environment.toml" <<EOF
 schema_version = 1
@@ -24,6 +25,37 @@ EOF
 cat > "$tmp/repo/.factory/config.toml" <<'EOF'
 [project]
 development_branch = "develop"
+EOF
+cat > "$tmp/repo/.factory/capability-contracts.json" <<'EOF'
+{
+  "schema": "ralph-capability-contract/v1",
+  "capabilities": [
+    {
+      "name": "project-gate",
+      "status": "declared",
+      "probe_argv": ["./scripts/verify-boilerplate.sh"],
+      "probe_marker": "",
+      "probe_stage": "post",
+      "probe_stdout_contains": [],
+      "probe_is_verify_run": true,
+      "must_execute": true,
+      "must_not_skip": [],
+      "deny_simulated_markers": ["simulated", "fixture-only"]
+    },
+    {
+      "name": "user-service",
+      "status": "declared",
+      "probe_argv": ["/usr/bin/true"],
+      "probe_marker": "--- user-service capability contract ---",
+      "probe_stage": "post",
+      "probe_stdout_contains": ["factory-user-service-ok"],
+      "probe_is_verify_run": false,
+      "must_execute": true,
+      "must_not_skip": ["Skipped", "Not Run", "skip"],
+      "deny_simulated_markers": ["mock", "simulated"]
+    }
+  ]
+}
 EOF
 cat > "$tmp/repo/scripts/verify-boilerplate.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -48,10 +80,37 @@ print(json.dumps({
     "require_signature": True,
     "enabled": True,
     "namespace": "factory-runner-receipt",
-    "public_keys": [{"principal": "factory-signer", "public_key": sys.argv[1]}],
-    "allowed_principals": ["factory-signer"],
+    "public_keys": [{"principal": "fake-runner", "public_key": sys.argv[1]}],
+    "allowed_principals": ["fake-runner"],
 }))
 PY
+# Root-configured runner class policy: the executing UID binds to exactly one
+# class, whose workspace root, verifier argv, and capability allowlist the
+# endpoint must honor exactly.
+write_policy() {
+    local capabilities=$1 verify_argv=${2:-'["./scripts/verify-boilerplate.sh"]'}
+    python3 - "$tmp" "$capabilities" "$verify_argv" <<'PY' > "$tmp/policy.json"
+import json, os, sys
+tmp, capabilities, verify_argv = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
+print(json.dumps({
+    "schema": "factory-runner-policy/v1",
+    "namespace": "factory-runner-receipt",
+    "classes": [
+        {
+            "name": "fake-runner",
+            "uid": os.getuid(),
+            "workspace_root": f"{tmp}/runner/workspaces",
+            "verify_argv": verify_argv,
+            "allowed_capabilities": capabilities,
+            "signer_helper": "/usr/local/libexec/factory-runner-signer",
+            "signer_key": f"{tmp}/signer-key",
+            "signer_principal_file": f"{tmp}/signer-principal",
+        }
+    ],
+}))
+PY
+}
+write_policy '["project-gate"]'
 cat > "$tmp/fake-ssh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -72,18 +131,19 @@ sed -i \
     -e 's/if key_stat.st_uid != 0 or key_stat.st_mode & 0o077:/if key_stat.st_mode \& 0o077:/' \
     -e 's/if principal_stat.st_uid != 0 or principal_stat.st_mode & 0o077:/if principal_stat.st_mode \& 0o077:/' \
     "$tmp/repo/scripts/factory-runner-signer.py"
-printf 'factory-signer\n' > "$tmp/signer-principal"
+printf 'fake-runner\n' > "$tmp/signer-principal"
 chmod 0600 "$tmp/signer-principal" "$tmp/signer-key"
 export FACTORY_SIGNER_KEY="$tmp/signer-key"
 export FACTORY_SIGNER_PRINCIPAL_FILE="$tmp/signer-principal"
+export FACTORY_SIGNER_CLASS=fake-runner
+export FACTORY_RUNNER_POLICY="$tmp/policy.json"
 # The production endpoint reaches the signer through a narrowly scoped sudoers
 # entry; the disposable harness executes the copied helper directly instead.
-sed -i "s#\[SUDO, \"-n\", SIGNER_HELPER\]#[\"$(command -v python3)\", \"-I\", \"$tmp/repo/scripts/factory-runner-signer.py\"]#" "$tmp/repo/scripts/factory-runner-server.py"
+sed -i "s#\[SUDO, \"-n\", signer_helper\]#[\"$(command -v python3)\", \"-I\", \"$tmp/repo/scripts/factory-runner-signer.py\"]#" "$tmp/repo/scripts/factory-runner-server.py"
 # Validator bypass is confined to this disposable copied test harness because
 # its temporary workspace intentionally does not use the production /srv root.
 sed -i '0,/if subprocess.run(/s//if False and subprocess.run(/' "$tmp/repo/scripts/run-factory-runners.py"
 sed -i '0,/if subprocess.run(/s//if False and subprocess.run(/' "$tmp/repo/scripts/check-factory-runner-evidence.py"
-sed -i "s#ROOT = Path(\"/srv/dev-runner/workspaces\")#ROOT = Path(\"$tmp/runner/workspaces\")#" "$tmp/repo/scripts/factory-runner-server.py"
 sed -i 's/root_stat.st_uid != 0/root_stat.st_uid != os.getuid()/' "$tmp/repo/scripts/factory-runner-server.py"
 sed -i "s#/usr/bin/git#$(command -v git)#g" "$tmp/repo/scripts/factory-runner-server.py"
 sed -i 's#"PATH": "/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin"#"PATH": os.environ.get("PATH", "")#' "$tmp/repo/scripts/factory-runner-server.py"
@@ -108,7 +168,7 @@ manifest_path, sig_path, aggregate_path = map(pathlib.Path, sys.argv[1:4])
 public_key = sys.argv[4]
 manifest = json.loads(manifest_path.read_bytes())
 assert manifest["result"] == "pass"
-assert manifest["signer_principal"] == "factory-signer"
+assert manifest["signer_principal"] == "fake-runner"
 assert manifest["namespace"] == "factory-runner-receipt"
 assert manifest["signature_algorithm"] == "ssh-ed25519"
 assert manifest["signer_key_sha256"] == hashlib.sha256(public_key.encode()).hexdigest()
@@ -118,9 +178,9 @@ assert signer["principal"] == manifest["signer_principal"]
 assert signer["key_sha256"] == manifest["signer_key_sha256"]
 assert signer["signature_sha256"] == hashlib.sha256(sig_path.read_bytes()).hexdigest()
 allowed = pathlib.Path(".factory-state/allowed-signers")
-allowed.write_text(f"factory-signer {public_key}\n")
+allowed.write_text(f"fake-runner {public_key}\n")
 verified = subprocess.run(
-    ["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "factory-signer",
+    ["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "fake-runner",
      "-n", "factory-runner-receipt", "-s", str(sig_path)],
     input=manifest_path.read_bytes(), capture_output=True,
 )
@@ -152,31 +212,80 @@ set -e
 [[ $unsupported_capability_rc -eq 1 ]]
 git -C "$tmp/repo" reset -q --hard "$base"
 
-# Device presence alone cannot produce kernel-device evidence: the dedicated
-# non-skipping project contract must also exist and pass in the reconstructed job.
-sed -i 's/\["project-gate"\]/["project-gate", "kernel-device"]/' \
-    "$tmp/repo/.factory/environment.toml"
+# Device presence alone cannot produce capability evidence: a fabricated alias
+# (request runner/class not bound to the executing UID) is rejected by the
+# root endpoint before any probe can run.
+write_policy '["project-gate"]'
+sed -i 's/name = "fake-runner"/name = "intruder-runner"/' "$tmp/repo/.factory/environment.toml"
+sed -i 's/ssh_config_alias = "fake-runner"/ssh_config_alias = "intruder-runner"/' "$tmp/repo/.factory/environment.toml"
 git -C "$tmp/repo" add .factory/environment.toml
-git -C "$tmp/repo" commit -qm incomplete-kernel-device-contract
+git -C "$tmp/repo" commit -qm fabricated-alias
 set +e
 (cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
-kernel_contract_rc=$?
+alias_rc=$?
 set -e
-[[ $kernel_contract_rc -eq 1 ]]
+[[ $alias_rc -eq 1 ]]
 git -C "$tmp/repo" reset -q --hard "$base"
 
-# Packaging tools alone are not installed-runtime evidence: the isolated
-# Flatpak build, install, and installed-binary execution contract must pass.
-sed -i 's/\["project-gate"\]/["project-gate", "installed-runtime"]/' \
-    "$tmp/repo/.factory/environment.toml"
-git -C "$tmp/repo" add .factory/environment.toml
-git -C "$tmp/repo" commit -qm incomplete-installed-runtime-contract
+# The exact requested set rule: a runner may not claim fewer capabilities than
+# its class allowlist grants.
+write_policy '["project-gate", "user-service"]'
+git -C "$tmp/repo" add .
 set +e
 (cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
-installed_package_contract_rc=$?
+subset_rc=$?
 set -e
-[[ $installed_package_contract_rc -eq 1 ]]
+[[ $subset_rc -eq 1 ]]
 git -C "$tmp/repo" reset -q --hard "$base"
+write_policy '["project-gate"]'
+
+# The verifier argv is root-configured: a policy/request mismatch is rejected.
+write_policy '["project-gate"]' '["./scripts/other.sh"]'
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+argv_rc=$?
+set -e
+[[ $argv_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+write_policy '["project-gate"]'
+
+# A declared capability whose contract probe cannot pass is unevidenced, even
+# with the class allowlist granting it.
+write_policy '["project-gate", "user-service"]'
+sed -i 's/\["project-gate"\]/["project-gate", "user-service"]/' \
+    "$tmp/repo/.factory/environment.toml"
+git -C "$tmp/repo" add .factory/environment.toml
+git -C "$tmp/repo" commit -qm incomplete-user-service-contract
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+user_service_contract_rc=$?
+set -e
+[[ $user_service_contract_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+write_policy '["project-gate"]'
+
+# A skip marker inside a contract probe is never evidence.
+write_policy '["project-gate", "user-service"]'
+python3 - "$tmp/repo/.factory/capability-contracts.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for contract in data["capabilities"]:
+    if contract["name"] == "user-service":
+        contract["probe_argv"] = ["/usr/bin/printf", "factory-user-service-ok\nSkipped test\n"]
+open(path, "w").write(json.dumps(data, indent=2) + "\n")
+PY
+sed -i 's/\["project-gate"\]/["project-gate", "user-service"]/' \
+    "$tmp/repo/.factory/environment.toml"
+git -C "$tmp/repo" add .
+git -C "$tmp/repo" commit -qm skipped-contract-probe
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+skip_probe_rc=$?
+set -e
+[[ $skip_probe_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+write_policy '["project-gate"]'
 
 # Self-consistent local hashes cannot conceal a false archive binding.
 python3 - "$tmp/repo" "$base" <<'PY'

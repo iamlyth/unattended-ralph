@@ -293,14 +293,20 @@ Runner receipts are signed by a root-owned signer on the disposable runner VM
 (`scripts/factory-runner-signer.py`, installed root-owned and reached only
 through a narrow sudoers rule). The unprivileged forced-command endpoint never
 signs: after the exact archive/tree/environment/verifier/probes all pass, the
-root signer re-validates every manifest field (clean pass only, supported
-capabilities, bound digests, no caller-supplied signer identity), rebuilds the
-canonical signed manifest itself, and returns the detached signature plus
-aggregate signer metadata. The private signing key is root-owned mode 0600 on
-the runner, unavailable to the runner accounts, and is never printed or copied
-into Git; this repository carries only the public keys and trust policy in
-`.factory/signer-trust.json`. Signer rotation is fail-closed: a receipt signed
-by a key that is no longer in the trust store is rejected.
+root signer re-validates every manifest field (clean pass only, capability set
+exactly equal to the runner class allowlist, bound digests, no caller-supplied
+signer identity), rebuilds the canonical signed manifest itself, and returns
+the detached signature plus aggregate signer metadata. The runner protocol is
+class-based: `/etc/factory-runner/runner-policy.json` (root-owned, out-of-tree,
+validated by `scripts/factory_runner_policy.py`) binds the executing UID to
+exactly one class with its workspace root, approved verifier argv, capability
+allowlist, and root-owned signer key/principal; neither the endpoint nor the
+signer hardcodes product names, verifier paths, capability names, workspace
+roots, or the receipt namespace. The private signing key is root-owned mode
+0600 on the runner, unavailable to the runner accounts, and is never printed
+or copied into Git; this repository carries only the public keys and trust
+policy in `.factory/signer-trust.json`. Signer rotation is fail-closed: a
+receipt signed by a key that is no longer in the trust store is rejected.
 
 `.factory/config.toml` lists product-specific capabilities required for a clean audit.
 Only capabilities covered by accepted exact-commit evidence count; all others

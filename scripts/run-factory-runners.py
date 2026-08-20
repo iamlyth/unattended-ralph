@@ -117,6 +117,7 @@ def run_runner(runner: dict, commit: str, tree: str, environment_blob: str, arch
     request = {
         "schema": "factory-runner-request/v1",
         "runner": name,
+        "class": name,
         "commit": commit,
         "commit_object_b64": base64.b64encode(commit_object).decode(),
         "tree": tree,

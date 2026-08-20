@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Root-installed stdin protocol endpoint for a disposable factory runner."""
+"""Root-installed stdin protocol endpoint for a disposable factory runner.
+
+The endpoint is class-based and fully root-configured: every authorization
+decision (approved verifier argv, capability allowlist, workspace root,
+signer helper) comes from the root-owned runner policy
+(/etc/factory-runner/runner-policy.json) for the executing unprivileged UID.
+The committed project archive contributes only the capability-contract
+definitions that drive the non-skipping probes; no product name, verifier
+path, capability name, or workspace root is hardcoded here.
+
+The endpoint validates the request class from the executing UID, requires the
+requested capability set to equal the class allowlist exactly, runs the
+project gate, then executes each requested capability's committed contract
+probe (requiring a probe marker, required stdout markers, and no skip or
+simulated markers), and asks the root-owned signer to certify only manifests
+whose fields prove that clean pass. Failure and skip receipts are never
+signed.
+"""
 
 from __future__ import annotations
 
@@ -14,23 +31,37 @@ import re
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import threading
 import time
 
+# Explicit sibling-module resolution: the deployed root-installed copies share
+# one directory, and the disposable harness runs them with python -I.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from factory_runner_policy import PolicyError, class_for_uid, load_policy, validate_argv
+
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-ROOT = Path("/srv/dev-runner/workspaces")
 MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_FILES = 10_000
 MAX_CONTENT = 256 * 1024 * 1024
 MAX_LOG = 4 * 1024 * 1024
-NAMESPACE = "factory-runner-receipt"
 SUDO = "/usr/bin/sudo"
-SIGNER_HELPER = "/usr/local/libexec/factory-runner-signer"
+CONTRACT_SCHEMA = "ralph-capability-contract/v1"
+CONTRACT_FIELDS = {
+    "name", "status", "probe_argv", "probe_marker", "probe_stage",
+    "probe_stdout_contains", "probe_is_verify_run",
+    "must_execute", "must_not_skip", "deny_simulated_markers",
+}
+CONTRACT_REQUIRED = {
+    "name", "probe_argv", "probe_marker", "must_execute",
+    "must_not_skip", "deny_simulated_markers",
+}
 
 
 def emit(value: dict) -> None:
@@ -119,7 +150,112 @@ def remove_workspace(work: Path) -> None:
         shutil.rmtree(work)
 
 
-def sign_manifest(evidence: dict) -> dict:
+def load_contracts(job: Path) -> dict[str, dict]:
+    """Load capability-contract definitions from the committed project archive.
+
+    A requested capability must have exactly one contract with
+    must_execute=true here; the archive is the exact committed tree, so an
+    operator cannot inject or weaken contract definitions.
+    """
+    path = job / ".factory" / "capability-contracts.json"
+    if path.is_symlink() or not path.is_file():
+        fail("committed capability-contracts.json is missing or unsafe")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"committed capability-contracts.json is invalid: {type(exc).__name__}")
+    if not isinstance(data, dict) or data.get("schema") != CONTRACT_SCHEMA:
+        fail("committed capability-contracts.json schema is invalid")
+    contracts = data.get("capabilities", [])
+    if not isinstance(contracts, list):
+        fail("committed capability-contracts.json has no capabilities array")
+    loaded: dict[str, dict] = {}
+    for index, contract in enumerate(contracts):
+        if (
+            not isinstance(contract, dict)
+            or set(contract) - CONTRACT_FIELDS
+            or not CONTRACT_REQUIRED.issubset(set(contract))
+        ):
+            fail(f"committed contract contracts[{index}] fields are invalid")
+        name = contract["name"]
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            fail(f"committed contract contracts[{index}].name is invalid")
+        if contract["must_execute"] is not True:
+            fail(f"committed contract {name} must set must_execute=true")
+        if name in loaded:
+            fail(f"committed contract names must be unique: {name}")
+        status = contract.get("status", "declared")
+        if status not in ("declared", "candidate"):
+            fail(f"committed contract {name} has an invalid status")
+        probe_argv = contract["probe_argv"]
+        if not isinstance(probe_argv, list) or not probe_argv or not all(
+            isinstance(item, str) and item for item in probe_argv
+        ):
+            fail(f"committed contract {name} probe_argv is invalid")
+        for field in ("probe_marker", "probe_stage"):
+            value = contract.get(field, "")
+            if not isinstance(value, str):
+                fail(f"committed contract {name} {field} is invalid")
+        if contract.get("probe_stage", "post") not in ("env", "post"):
+            fail(f"committed contract {name} probe_stage is invalid")
+        if contract.get("probe_is_verify_run") not in (None, True, False):
+            fail(f"committed contract {name} probe_is_verify_run is invalid")
+        for field in ("probe_stdout_contains", "must_not_skip", "deny_simulated_markers"):
+            value = contract.get(field, [])
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item for item in value
+            ):
+                fail(f"committed contract {name} {field} is invalid")
+        loaded[name] = contract
+    return loaded
+
+
+def probe_tokens_found(combined: bytes, tokens: list[str]) -> list[str]:
+    hits: set[str] = set()
+    for token in tokens:
+        if token.encode("utf-8") in combined:
+            hits.add(token)
+    return sorted(hits)
+
+
+def run_contract_probe(
+    contract: dict, job: Path, env: dict[str, str]
+) -> tuple[bool, bytes, bytes]:
+    """Run one post-gate capability contract probe.
+
+    Pass requires: exit 0, every probe_stdout_contains substring in the probe
+    stdout, and no must_not_skip or deny_simulated_markers token anywhere in
+    the probe output. Probe output is appended (marker-delimited) to the
+    signed aggregate log exactly as check-capability-evidence scans it.
+    """
+    argv = contract["probe_argv"]
+    marker = contract.get("probe_marker", "")
+    returncode, stdout, stderr = run_bounded(argv, job, env)
+    appended_stdout = b""
+    appended_stderr = b""
+    if returncode == 0:
+        if marker:
+            appended_stdout = b"\n" + marker.encode("utf-8") + b"\n" + stdout
+            appended_stderr = stderr
+        else:
+            appended_stdout = stdout
+            appended_stderr = stderr
+    if returncode != 0:
+        return False, appended_stdout, appended_stderr
+    required = contract.get("probe_stdout_contains", [])
+    for substring in required:
+        if substring.encode("utf-8") not in stdout:
+            return False, appended_stdout, appended_stderr
+    denied = probe_tokens_found(
+        stdout + b"\n" + stderr,
+        contract.get("must_not_skip", []) + contract.get("deny_simulated_markers", []),
+    )
+    if denied:
+        return False, appended_stdout, appended_stderr
+    return True, appended_stdout, appended_stderr
+
+
+def sign_manifest(evidence: dict, signer_helper: str) -> dict:
     """Ask the root-owned signer to certify the server-generated evidence.
 
     The signer is a root-owned helper reached only through a narrowly scoped
@@ -135,7 +271,7 @@ def sign_manifest(evidence: dict) -> dict:
     ).encode() + b"\n"
     try:
         result = subprocess.run(
-            [SUDO, "-n", SIGNER_HELPER],
+            [SUDO, "-n", signer_helper],
             input=payload, capture_output=True, timeout=120,
         )
     except OSError as exc:
@@ -155,7 +291,6 @@ def sign_manifest(evidence: dict) -> dict:
         not isinstance(response, dict) or set(response) != expected
         or response.get("schema") != "factory-runner-sign-response/v1"
         or response.get("result") != "signed"
-        or response.get("namespace") != NAMESPACE
     ):
         fail("runner signer response schema is invalid")
     if (
@@ -181,7 +316,7 @@ def sign_manifest(evidence: dict) -> dict:
     expected_manifest.update({
         "signer_principal": response["signer_principal"],
         "signer_key_sha256": response["signer_key_sha256"],
-        "namespace": NAMESPACE,
+        "namespace": response["namespace"],
         "signature_algorithm": response["signature_algorithm"],
     })
     expected_bytes = (json.dumps(expected_manifest, sort_keys=True, indent=2) + "\n").encode()
@@ -195,6 +330,15 @@ def main() -> int:
         fail("server requires a dedicated unprivileged runner identity")
     if os.environ.get("SSH_ORIGINAL_COMMAND") != "factory-runner-v1":
         fail("server must be invoked by the fixed SSH protocol command")
+    try:
+        policy = load_policy()
+    except PolicyError as exc:
+        fail(f"runner policy is unavailable: {exc}")
+    namespace = policy["namespace"]
+    try:
+        runner_class = class_for_uid(policy, os.getuid())
+    except PolicyError as exc:
+        fail(f"runner class binding failed: {exc}")
     line = sys.stdin.buffer.readline(65_537)
     if not line or len(line) > 65_536 or not line.endswith(b"\n"):
         fail("invalid request header")
@@ -203,14 +347,17 @@ def main() -> int:
     except Exception:
         fail("request is not valid JSON")
     expected = {
-        "schema", "runner", "commit", "commit_object_b64", "tree", "environment_blob",
-        "verify_argv", "verify_argv_sha256", "archive_sha256", "archive_size",
-        "working_directory", "capabilities", "nonce",
+        "schema", "runner", "class", "commit", "commit_object_b64", "tree",
+        "environment_blob", "verify_argv", "verify_argv_sha256",
+        "archive_sha256", "archive_size", "working_directory",
+        "capabilities", "nonce",
     }
     if not isinstance(request, dict) or set(request) != expected or request.get("schema") != "factory-runner-request/v1":
         fail("request schema or fields are invalid")
     if not isinstance(request["runner"], str) or not NAME.fullmatch(request["runner"]):
         fail("invalid runner")
+    if request["runner"] != runner_class["name"] or request["class"] != runner_class["name"]:
+        fail("request runner/class does not match the executing runner class")
     if not isinstance(request["nonce"], str) or not SHA256.fullmatch(request["nonce"]):
         fail("invalid nonce")
     for key in ("commit", "tree", "environment_blob"):
@@ -226,8 +373,13 @@ def main() -> int:
         if not isinstance(request[key], str) or not SHA256.fullmatch(request[key]):
             fail("invalid digest")
     argv = request["verify_argv"]
-    if argv != ["./scripts/verify-boilerplate.sh"]:
-        fail("verifier argv is not approved")
+    approved_argv = runner_class["verify_argv"]
+    if argv != approved_argv:
+        fail("verifier argv is not approved for this runner class")
+    try:
+        validate_argv(argv, "request")
+    except PolicyError as exc:
+        fail(f"request verifier argv is invalid: {exc}")
     capabilities = request["capabilities"]
     if (
         not isinstance(capabilities, list) or not capabilities
@@ -235,26 +387,28 @@ def main() -> int:
         or not all(isinstance(item, str) and NAME.fullmatch(item) for item in capabilities)
     ):
         fail("invalid capabilities")
-    if not set(capabilities) <= {"project-gate", "user-service"}:
-        fail("unsupported capability claim")
+    allowed = runner_class["allowed_capabilities"]
+    if set(capabilities) != set(allowed) or sorted(capabilities) != sorted(allowed):
+        fail("capability claim does not equal the runner class allowlist exactly")
     argv_digest = hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()
     if argv_digest != request["verify_argv_sha256"]:
         fail("verifier digest mismatch")
     size = request["archive_size"]
     if not isinstance(size, int) or not 0 < size <= MAX_ARCHIVE:
         fail("invalid archive size")
+    workspace_root = Path(runner_class["workspace_root"])
     work = Path(request["working_directory"])
-    if work.parent != ROOT or not NAME.fullmatch(work.name):
-        fail("workspace is outside approved root")
+    if work.parent != workspace_root or not NAME.fullmatch(work.name):
+        fail("workspace is outside the approved class root")
     archive = sys.stdin.buffer.read(size + 1)
     if len(archive) != size:
         fail("archive length mismatch")
     if hashlib.sha256(archive).hexdigest() != request["archive_sha256"]:
         fail("archive digest mismatch")
 
-    if ROOT.is_symlink() or not ROOT.is_dir():
+    if workspace_root.is_symlink() or not workspace_root.is_dir():
         fail("unsafe workspace root")
-    root_stat = ROOT.stat()
+    root_stat = workspace_root.stat()
     if root_stat.st_uid != 0 or root_stat.st_mode & 0o022:
         fail("workspace root must be root-owned and not group/world writable")
     work_stat = work.stat() if work.exists() and not work.is_symlink() else None
@@ -331,23 +485,48 @@ def main() -> int:
             ):
                 fail("remote checkout is not clean after exact commit reconstruction")
 
-            probes: dict[str, bool] = {}
-            if "user-service" in capabilities:
-                probe = subprocess.run(
-                    [
-                        "/usr/bin/systemd-run", "--user", "--quiet", "--wait",
-                        "--pipe", "--collect", "--service-type=exec",
-                        "/usr/bin/printf", "factory-user-service-ok",
-                    ],
-                    env=env, capture_output=True, timeout=30,
-                )
-                probes["user-service"] = probe.returncode == 0 and probe.stdout == b"factory-user-service-ok"
-            if any(not value for value in probes.values()):
-                fail("trusted capability probe failed")
+            contracts = load_contracts(job)
+            missing = [capability for capability in capabilities if capability not in contracts]
+            if missing:
+                fail(f"requested capability lacks a committed contract: {missing}")
+            for capability in capabilities:
+                if contracts[capability].get("status", "declared") != "declared":
+                    fail(f"capability {capability} contract is not promoted (status=candidate)")
 
             returncode, stdout, stderr = run_bounded(argv, job, env)
-            probes["project-gate"] = returncode == 0
-
+            probes: dict[str, bool] = {}
+            for capability in capabilities:
+                contract = contracts[capability]
+                if contract.get("probe_is_verify_run"):
+                    probes[capability] = returncode == 0
+                    continue
+                stage = contract.get("probe_stage", "post")
+                if stage == "env":
+                    env_rc, env_stdout, env_stderr = run_bounded(
+                        contract["probe_argv"], job, env,
+                    )
+                    probes[capability] = (
+                        env_rc == 0
+                        and all(
+                            item.encode("utf-8") in env_stdout
+                            for item in contract.get("probe_stdout_contains", [])
+                        )
+                        and not probe_tokens_found(
+                            env_stdout + b"\n" + env_stderr,
+                            contract.get("must_not_skip", [])
+                            + contract.get("deny_simulated_markers", []),
+                        )
+                    )
+                    continue
+                if returncode != 0:
+                    probes[capability] = False
+                    continue
+                passed, probe_stdout, probe_stderr = run_contract_probe(contract, job, env)
+                probes[capability] = passed
+                if len(stdout) + len(stderr) + len(probe_stdout) + len(probe_stderr) > MAX_LOG:
+                    fail("combined runner verification output exceeded limits")
+                stdout += probe_stdout
+                stderr += probe_stderr
             evidenced = sorted(capability for capability in capabilities if probes.get(capability, False))
             finished_at = int(time.time())
             if returncode != 0 or len(evidenced) != len(capabilities):
@@ -376,7 +555,9 @@ def main() -> int:
                 "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
                 "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
             }
-            signed = sign_manifest(evidence)
+            signed = sign_manifest(evidence, runner_class["signer_helper"])
+            if signed.get("namespace") != namespace:
+                fail("runner signer namespace does not match the runner policy")
             emit({
                 "schema": "factory-runner-receipt/v1", "result": "pass",
                 "runner": request["runner"], "commit": request["commit"],

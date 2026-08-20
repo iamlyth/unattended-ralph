@@ -9,10 +9,15 @@ every field, so a caller can never have arbitrary bytes signed. Failures,
 skips, unsupported capability claims, unbound digests, tampered or oversized
 input, and post-cleanup mutations are rejected before a signature exists.
 
-The private signing key stays out-of-tree on the runner at a root-owned
-mode-0600 non-symlink path, unavailable to the unprivileged runner accounts,
-and is never printed or copied into Git. The repository carries only the
-matching public key and trust policy (`.factory/signer-trust.json`).
+The signing identity is class-bound and root-configured. sudo sets SUDO_USER
+and SUDO_UID to the invoking unprivileged account; the policy
+(/etc/factory-runner/runner-policy.json) binds that account to exactly one
+runner class, and the private key and principal file for that class are
+root-owned mode-0600 non-symlink files that the runner account can never read
+or replace. The manifest's capability set must equal the class allowlist
+exactly and its namespace must match the policy namespace. Environment
+overrides exist only for the disposable test harness (sudo resets the
+environment in production, so the installed defaults always apply there).
 """
 
 from __future__ import annotations
@@ -28,27 +33,16 @@ import stat
 import subprocess
 import sys
 
+# Explicit sibling-module resolution: the deployed root-owned copies share
+# one directory, and the disposable harness runs them with python -I.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from factory_runner_policy import PolicyError, class_for_name, load_policy
+
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-NAMESPACE = "factory-runner-receipt"
 ALGORITHM = "ssh-ed25519"
-# Out-of-tree root-owned provisioning paths; environment overrides exist only
-# for the disposable test harness (sudo resets the environment in production,
-# so the installed defaults always apply there).
-KEY = Path(os.environ.get("FACTORY_SIGNER_KEY", "/etc/factory-runner/signer-key"))
-PRINCIPAL_FILE = Path(
-    os.environ.get("FACTORY_SIGNER_PRINCIPAL_FILE", "/etc/factory-runner/signer-principal")
-)
-SUPPORTED_CAPABILITIES = {
-    "project-gate", "user-service",
-}
-REQUEST_FIELDS = {
-    "schema", "result", "runner", "commit", "tree", "environment_blob",
-    "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
-    "exit_code", "timed_out", "started_at", "finished_at", "cleanup",
-    "stdout_sha256", "stderr_sha256",
-}
 MAX_REQUEST = 1024 * 1024
 MAX_SIGNATURE = 64 * 1024
 SSH_KEYGEN = shutil.which("ssh-keygen") or "/usr/bin/ssh-keygen"
@@ -69,9 +63,56 @@ def checked_stat(path: Path) -> os.stat_result:
         fail(f"signer state unavailable at {path}: {type(exc).__name__}")
 
 
-def validate_key_state() -> None:
-    key_stat = checked_stat(KEY)
-    principal_stat = checked_stat(PRINCIPAL_FILE)
+def resolve_signing_state() -> tuple[Path, Path, str]:
+    """Resolve (key path, principal file, class name) from the root policy.
+
+    Production: sudo sets SUDO_USER/SUDO_UID; the policy binds that account to
+    one class and the class carries its own root-owned key/principal paths.
+    Harness: FACTORY_SIGNER_KEY / FACTORY_SIGNER_PRINCIPAL_FILE override the
+    paths and an optional FACTORY_SIGNER_CLASS enables the class capability
+    policy check. Without either, the signer refuses to run.
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_user:
+        try:
+            policy = load_policy()
+        except PolicyError as exc:
+            fail(f"runner policy is unavailable: {exc}")
+        try:
+            runner_class = class_for_name(policy, sudo_user)
+        except PolicyError as exc:
+            fail(f"signer class binding failed: {exc}")
+        if sudo_uid is not None:
+            try:
+                effective_uid = int(sudo_uid)
+            except ValueError:
+                fail("sudo uid is invalid")
+            if effective_uid != runner_class["uid"]:
+                fail("signer sudo identity does not match the runner class")
+        return (
+            Path(runner_class["signer_key"]),
+            Path(runner_class["signer_principal_file"]),
+            runner_class,
+        )
+    key_override = os.environ.get("FACTORY_SIGNER_KEY")
+    principal_override = os.environ.get("FACTORY_SIGNER_PRINCIPAL_FILE")
+    if not key_override or not principal_override:
+        fail("signer must run via sudo (root-configured class) or with explicit harness overrides")
+    runner_class = None
+    class_override = os.environ.get("FACTORY_SIGNER_CLASS")
+    if class_override:
+        try:
+            policy = load_policy()
+            runner_class = class_for_name(policy, class_override)
+        except PolicyError as exc:
+            fail(f"runner policy is unavailable: {exc}")
+    return Path(key_override), Path(principal_override), runner_class
+
+
+def validate_key_state(key: Path, principal_file: Path) -> None:
+    key_stat = checked_stat(key)
+    principal_stat = checked_stat(principal_file)
     if not stat.S_ISREG(key_stat.st_mode):
         fail("signing key is not a regular file")
     if not stat.S_ISREG(principal_stat.st_mode):
@@ -82,9 +123,9 @@ def validate_key_state() -> None:
         fail("signer principal must be root-owned mode 0600")
 
 
-def load_principal() -> str:
+def load_principal(principal_file: Path) -> str:
     try:
-        principal = PRINCIPAL_FILE.read_text(encoding="utf-8").strip()
+        principal = principal_file.read_text(encoding="utf-8").strip()
     except OSError as exc:
         fail(f"cannot read signer principal: {type(exc).__name__}")
     if not NAME.fullmatch(principal):
@@ -92,9 +133,9 @@ def load_principal() -> str:
     return principal
 
 
-def derive_public_key() -> str:
+def derive_public_key(key: Path) -> str:
     result = subprocess.run(
-        [SSH_KEYGEN, "-y", "-f", str(KEY)],
+        [SSH_KEYGEN, "-y", "-f", str(key)],
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
@@ -108,7 +149,7 @@ def derive_public_key() -> str:
     return " ".join(fields[:2])
 
 
-def validate_manifest(raw: bytes) -> dict:
+def validate_manifest(raw: bytes, runner_class: dict) -> dict:
     if len(raw) > MAX_REQUEST or not raw.endswith(b"\n"):
         fail("invalid signing request")
     try:
@@ -122,7 +163,13 @@ def validate_manifest(raw: bytes) -> dict:
     ):
         fail("signing request schema is invalid")
     manifest = request["manifest"]
-    if not isinstance(manifest, dict) or set(manifest) != REQUEST_FIELDS:
+    request_fields = {
+        "schema", "result", "runner", "commit", "tree", "environment_blob",
+        "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
+        "exit_code", "timed_out", "started_at", "finished_at", "cleanup",
+        "stdout_sha256", "stderr_sha256",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != request_fields:
         fail("signing request manifest fields are invalid")
     if manifest.get("schema") != "factory-runner-receipt/v1":
         fail("signing request is not a runner receipt")
@@ -130,6 +177,8 @@ def validate_manifest(raw: bytes) -> dict:
         fail("only passing receipts can be signed")
     if not isinstance(manifest["runner"], str) or not NAME.fullmatch(manifest["runner"]):
         fail("signing request runner is invalid")
+    if runner_class is not None and manifest["runner"] != runner_class["name"]:
+        fail("signing request runner does not match the runner class")
     for field in ("commit", "tree", "environment_blob"):
         if not isinstance(manifest[field], str) or not SHA1.fullmatch(manifest[field]):
             fail(f"signing request {field} is invalid")
@@ -152,30 +201,44 @@ def validate_manifest(raw: bytes) -> dict:
         or not all(isinstance(item, str) and NAME.fullmatch(item) for item in capabilities)
     ):
         fail("signing request capabilities are invalid")
-    if not set(capabilities) <= SUPPORTED_CAPABILITIES:
-        fail("signing request claims an unsupported capability")
+    if runner_class is not None:
+        allowed = runner_class["allowed_capabilities"]
+        if sorted(capabilities) != sorted(allowed):
+            fail("signing request capabilities do not equal the runner class allowlist")
     return manifest
 
 
 def main() -> int:
     if os.getuid() != os.geteuid() or os.geteuid() != 0:
         fail("signer must run as root")
-    validate_key_state()
-    principal = load_principal()
-    public = derive_public_key()
+    key_path, principal_path, runner_class = resolve_signing_state()
+    validate_key_state(key_path, principal_path)
+    principal = load_principal(principal_path)
+    if runner_class is not None and principal != runner_class["name"]:
+        fail("signer principal does not match the runner class")
+    policy_namespace = None
+    if runner_class is not None:
+        try:
+            policy_namespace = load_policy()["namespace"]
+        except PolicyError as exc:
+            fail(f"runner policy is unavailable: {exc}")
+    namespace = policy_namespace or os.environ.get(
+        "FACTORY_SIGNER_NAMESPACE", "factory-runner-receipt"
+    )
+    public = derive_public_key(key_path)
     key_sha256 = hashlib.sha256(public.encode("utf-8")).hexdigest()
     raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
-    evidence = validate_manifest(raw)
+    evidence = validate_manifest(raw, runner_class)
     manifest = dict(evidence)
     manifest.update({
         "signer_principal": principal,
         "signer_key_sha256": key_sha256,
-        "namespace": NAMESPACE,
+        "namespace": namespace,
         "signature_algorithm": ALGORITHM,
     })
     canonical = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
     signed = subprocess.run(
-        [SSH_KEYGEN, "-Y", "sign", "-f", str(KEY), "-n", NAMESPACE],
+        [SSH_KEYGEN, "-Y", "sign", "-f", str(key_path), "-n", namespace],
         input=canonical, capture_output=True, timeout=120,
     )
     if signed.returncode != 0:
@@ -197,7 +260,7 @@ def main() -> int:
         "signer_principal": principal,
         "signer_key_sha256": key_sha256,
         "signature_algorithm": ALGORITHM,
-        "namespace": NAMESPACE,
+        "namespace": namespace,
         "signature_sha256": hashlib.sha256(signature).hexdigest(),
     }
     sys.stdout.write(json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n")

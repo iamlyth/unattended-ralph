@@ -334,6 +334,7 @@ expect "$tmp/signed" 0 "valid signed runner manifest"
 helper_dir="$tmp/helper"
 mkdir -p "$helper_dir"
 cp "$SIGNER" "$helper_dir/factory-runner-signer.py"
+cp "$PROJECT_ROOT/scripts/factory_runner_policy.py" "$helper_dir/"
 chmod +x "$helper_dir/factory-runner-signer.py"
 # The disposable harness relaxes only the root-identity checks (the fixture
 # runs unprivileged) and points the private key/principal paths at ephemeral
@@ -347,12 +348,34 @@ sed -i \
 printf 'factory-signer\n' > "$tmp/signer-principal"
 chmod 0600 "$tmp/signer-principal"
 chmod 0600 "$tmp/signer-key"
+# The signer's capability policy is root-configured: the harness installs a
+# fixture policy whose class grants exactly the capability the valid request
+# claims, so the signer enforces the class allowlist even in harness mode.
+python3 - "$tmp" <<'PY' > "$tmp/policy.json"
+import json, os, sys
+print(json.dumps({
+    "schema": "factory-runner-policy/v1",
+    "namespace": "factory-runner-receipt",
+    "classes": [
+        {
+            "name": "factory-signer",
+            "uid": os.getuid(),
+            "workspace_root": "/srv/dev-runner/workspaces",
+            "verify_argv": ["./scripts/verify-boilerplate.sh"],
+            "allowed_capabilities": ["project-gate"],
+            "signer_helper": "/usr/local/libexec/factory-runner-signer",
+            "signer_key": f"{sys.argv[1]}/signer-key",
+            "signer_principal_file": f"{sys.argv[1]}/signer-principal",
+        }
+    ],
+}))
+PY
 
 valid_request() {
     python3 - "$PUBKEY_SHA256" <<'PY'
 import hashlib, json, sys
 manifest = {
-    "schema": "factory-runner-receipt/v1", "result": "pass", "runner": "fake-runner",
+    "schema": "factory-runner-receipt/v1", "result": "pass", "runner": "factory-signer",
     "commit": "a" * 40, "tree": "b" * 40, "environment_blob": "c" * 40,
     "verify_argv_sha256": hashlib.sha256(b"x").hexdigest(),
     "archive_sha256": hashlib.sha256(b"y").hexdigest(), "nonce": "0" * 64,
@@ -370,6 +393,7 @@ helper_run() {
     shift 2
     set +e
     FACTORY_SIGNER_KEY="$key_path" FACTORY_SIGNER_PRINCIPAL_FILE="$principal_path" \
+        FACTORY_SIGNER_CLASS=factory-signer FACTORY_RUNNER_POLICY="$tmp/policy.json" \
         python3 -I "$helper_dir/factory-runner-signer.py" \
         >"$tmp/helper-out" 2>"$tmp/helper-err"
     local rc=$?
@@ -411,7 +435,9 @@ PY
 
 # A caller-supplied manifest blob is never signed: an opaque request, a wrong
 # schema, an extra caller field, and caller-supplied signer identity are all
-# rejected without producing a signature.
+# rejected without producing a signature. A capability outside the class
+# allowlist (even one the old hardcoded list happened to reject differently)
+# is also never signed.
 rc=$(printf '%s\n' '{"schema":"factory-runner-sign-request/v1","manifest":"not-a-dict"}' \
     | helper_run "$tmp/signer-key" "$tmp/signer-principal")
 [[ $rc -eq 1 ]] || { echo "test: signer signed an opaque caller manifest" >&2; exit 1; }
@@ -422,13 +448,15 @@ rc=$(valid_request | sed 's/"capabilities": \["project-gate"\]/"capabilities": [
     | helper_run "$tmp/signer-key" "$tmp/signer-principal")
 [[ $rc -eq 1 ]] || { echo "test: signer accepted caller-supplied signer identity" >&2; exit 1; }
 
-# Failures, skips, and unsupported capability claims can never be signed.
+# Failures, skips, and capability claims outside the class allowlist can never
+# be signed.
 for broken in \
     '"result": "fail"' \
     '"exit_code": 3' \
     '"timed_out": true' \
     '"cleanup": false' \
-    '"capabilities": ["installed-runtime"]'; do
+    '"capabilities": ["installed-runtime"]' \
+    '"runner": "intruder-runner"'; do
     rc=$(valid_request | sed "s/\"result\": \"pass\"/$broken/" \
         | helper_run "$tmp/signer-key" "$tmp/signer-principal")
     [[ $rc -eq 1 ]] || { echo "test: signer signed a rejected claim ($broken)" >&2; exit 1; }

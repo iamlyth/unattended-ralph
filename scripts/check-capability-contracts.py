@@ -62,14 +62,21 @@ def load_contracts(path: Path) -> list[dict]:
     return contracts
 
 
-def validate_contract(contract: dict, index: int) -> str:
-    if not isinstance(contract, dict) or set(contract) != {
+def validate_contract(contract: dict, index: int) -> tuple[str, str]:
+    required = {
         "name", "probe_argv", "probe_marker", "must_execute", "must_not_skip", "deny_simulated_markers",
-    }:
-        fail(f"contracts[{index}] must contain exactly name, probe_argv, probe_marker, must_execute, must_not_skip, deny_simulated_markers")
+    }
+    optional = {"status", "probe_stage", "probe_stdout_contains", "probe_is_verify_run"}
+    if not isinstance(contract, dict):
+        fail(f"contracts[{index}] must be an object")
+    if not required.issubset(set(contract)) or not set(contract).issubset(required | optional):
+        fail(f"contracts[{index}] fields are invalid (required {sorted(required)}, optional {sorted(optional)})")
     name = contract["name"]
     if not isinstance(name, str) or not NAME.fullmatch(name):
         fail(f"contracts[{index}].name is invalid")
+    status = contract.get("status", "declared")
+    if status not in ("declared", "candidate"):
+        fail(f"contracts[{index}].status must be declared or candidate")
     argv = contract["probe_argv"]
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         fail(f"contracts[{index}].probe_argv must be a non-empty array of strings")
@@ -93,13 +100,21 @@ def validate_contract(contract: dict, index: int) -> str:
         fail(f"contracts[{index}].probe_marker must be a string")
     if marker and len(marker) > 256:
         fail(f"contracts[{index}].probe_marker is too long")
+    stage = contract.get("probe_stage", "post")
+    if stage not in ("env", "post"):
+        fail(f"contracts[{index}].probe_stage must be env or post")
+    if contract.get("probe_is_verify_run") not in (None, True, False):
+        fail(f"contracts[{index}].probe_is_verify_run must be a boolean")
+    contains = contract.get("probe_stdout_contains", [])
+    if not isinstance(contains, list) or not all(isinstance(item, str) and TOKEN.fullmatch(item) and item for item in contains):
+        fail(f"contracts[{index}].probe_stdout_contains must be an array of non-empty tokens")
     if contract["must_execute"] is not True:
         fail(f"contracts[{index}].must_execute must be true")
     for field in ("must_not_skip", "deny_simulated_markers"):
         markers = contract[field]
         if not isinstance(markers, list) or not all(isinstance(item, str) and TOKEN.fullmatch(item) and item for item in markers):
             fail(f"contracts[{index}].{field} must be an array of non-empty tokens")
-    return name
+    return name, status
 
 
 def main() -> int:
@@ -107,17 +122,29 @@ def main() -> int:
     declared = sorted(set(declared_capabilities(ROOT / ".factory/environment.toml")))
     contracts = load_contracts(contracts_path)
     named: list[str] = []
+    declared_named: list[str] = []
     for index, contract in enumerate(contracts):
-        named.append(validate_contract(contract, index))
+        name, status = validate_contract(contract, index)
+        named.append(name)
+        if status == "declared":
+            declared_named.append(name)
     if len(named) != len(set(named)):
         fail("contract names must be unique")
-    missing = sorted(set(declared) - set(named))
+    missing = sorted(set(declared) - set(declared_named))
     if missing:
-        fail(f"declared capabilities lack a tracked contract (unevidenced): {missing}")
-    unavailable = sorted(set(named) - set(declared))
+        fail(f"declared capabilities lack a declared contract (unevidenced): {missing}")
+    unavailable = sorted(set(declared_named) - set(declared))
     if unavailable:
-        fail(f"contract claims an undeclared/unavailable capability: {unavailable}")
-    print(f"capability-contracts: valid ({len(named)} contracts, {len(declared)} declared capabilities)")
+        fail(f"declared contract claims an undeclared/unavailable capability: {unavailable}")
+    # Candidate contracts are the designed-but-unprovisioned capability probes:
+    # they may be tracked before the capability is declared, but they must not
+    # claim an already-declared capability (a declared capability's contract
+    # must be promoted to declared status when the capability is declared).
+    candidates = sorted(set(named) - set(declared_named))
+    for name in candidates:
+        if name in declared:
+            fail(f"capability {name} is declared but its contract is still candidate")
+    print(f"capability-contracts: valid ({len(named)} contracts, {len(declared)} declared capabilities, {len(candidates)} candidates)")
     return 0
 
 
