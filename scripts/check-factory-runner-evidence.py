@@ -96,14 +96,40 @@ def load_signer_trust() -> dict:
     return data
 
 
-def verify_manifest_signature(signer: dict, manifest_path: Path, raw: bytes) -> None:
-    """Verify a runner manifest's detached signature with ssh-keygen -Y verify."""
+def verify_manifest_signature(signer: dict, manifest: dict, manifest_path: Path, raw: bytes) -> None:
+    """Verify a runner manifest's detached signature with ssh-keygen -Y verify.
+
+    The signature is anchored to the provisioned trust: the manifest must
+    declare exactly one provisioned principal/key pair (the signer's own
+    identity, bound into the signed manifest by the root-owned signer), the
+    namespace must match the trust policy, and the detached signature must
+    verify under that principal. Rotation is fail-closed: a signature from a
+    key that was removed from the trust store, or a manifest that claims an
+    unknown/foreign principal or key, is rejected.
+    """
     if not signer["enabled"] or not signer["public_keys"]:
         fail(
             "runner trust is not provisioned: no signer is configured, so unsigned "
             "legacy/local runner manifests are rejected and runner-evidenced "
             "capabilities stay unevidenced"
         )
+    namespace = manifest.get("namespace")
+    principal = manifest.get("signer_principal")
+    key_sha256 = manifest.get("signer_key_sha256")
+    algorithm = manifest.get("signature_algorithm")
+    if not isinstance(namespace, str) or namespace != signer["namespace"]:
+        fail("runner manifest namespace does not match signer trust")
+    if not isinstance(principal, str) or principal not in signer["allowed_principals"]:
+        fail("runner manifest signer principal is not trusted")
+    if algorithm not in ("ssh-ed25519", "ssh-rsa"):
+        fail("runner manifest signature algorithm is unsupported")
+    matches = [
+        key for key in signer["public_keys"]
+        if key.get("principal") == principal
+        and hashlib.sha256(key["public_key"].encode("utf-8")).hexdigest() == key_sha256
+    ]
+    if len(matches) != 1:
+        fail("runner manifest signer key is not provisioned (rotation or substitution)")
     signature_path = manifest_path.parent / f"{manifest_path.stem}.sig"
     if signature_path.is_symlink() or not signature_path.is_file():
         fail(f"runner manifest has no detached signature: {signature_path}")
@@ -112,7 +138,6 @@ def verify_manifest_signature(signer: dict, manifest_path: Path, raw: bytes) -> 
     allowed_signers: list[str] = []
     for key in signer["public_keys"]:
         allowed_signers.append(f"{key['principal']} {key['public_key']}")
-    namespace = signer["namespace"]
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix="-allowed-signers", delete=False) as allowed:
         allowed.write("\n".join(allowed_signers) + "\n")
         allowed_path = Path(allowed.name)
@@ -122,30 +147,19 @@ def verify_manifest_signature(signer: dict, manifest_path: Path, raw: bytes) -> 
         try:
             signature_file.write(signature_bytes)
             signature_file.close()
-            # ssh-keygen -Y verify requires the signing principal (-I); the
-            # signature carries the key, so each trust principal is tried.
-            failures: list[str] = []
-            verified = False
-            for key in signer["public_keys"]:
-                result = subprocess.run(
-                    [
-                        "ssh-keygen", "-Y", "verify",
-                        "-f", str(allowed_path),
-                        "-I", key["principal"],
-                        "-n", namespace,
-                        "-s", signature_file.name,
-                    ],
-                    input=raw, capture_output=True,
-                )
-                if result.returncode == 0:
-                    verified = True
-                    break
-                failures.append(
-                    result.stderr.decode("utf-8", errors="replace").strip()
-                )
-            if not verified:
-                detail = next((item for item in failures if item), "signature verification failed")
-                fail(f"runner manifest signature is invalid or fabricated: {detail}")
+            result = subprocess.run(
+                [
+                    "ssh-keygen", "-Y", "verify",
+                    "-f", str(allowed_path),
+                    "-I", principal,
+                    "-n", namespace,
+                    "-s", signature_file.name,
+                ],
+                input=raw, capture_output=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                fail(f"runner manifest signature is invalid or fabricated: {detail or 'verification failed'}")
         finally:
             try:
                 os.unlink(signature_file.name)
@@ -167,10 +181,21 @@ def validate_record(declared: dict, record: dict, commit: str, tree: str,
     aggregate's commit/tree/environment/blob/archive, argv-faithful to the
     commit-bound declaration, and signed by a provisioned trust principal.
     """
-    if not isinstance(record, dict) or set(record) != {"name", "manifest", "manifest_sha256", "capabilities"}:
+    if not isinstance(record, dict) or set(record) != {"name", "manifest", "manifest_sha256", "capabilities", "signer"}:
         fail("runner aggregate record is invalid")
     if record["name"] != declared.get("name") or record["capabilities"] != sorted(declared.get("capabilities", [])):
         fail("runner declaration/evidence mismatch")
+    signer_meta = record["signer"]
+    if (
+        not isinstance(signer_meta, dict)
+        or set(signer_meta) != {"principal", "key_sha256", "algorithm", "signature_sha256"}
+    ):
+        fail("runner aggregate signer metadata is invalid")
+    if not isinstance(signer_meta["principal"], str) or not signer_meta["principal"]:
+        fail("runner aggregate signer principal is invalid")
+    for field in ("key_sha256", "signature_sha256"):
+        if not isinstance(signer_meta[field], str) or not SHA256.fullmatch(signer_meta[field]):
+            fail(f"runner aggregate signer {field} is invalid")
     relative = Path(record["manifest"])
     if relative.is_absolute() or ".." in relative.parts:
         fail("manifest path escapes the repository")
@@ -190,11 +215,20 @@ def validate_record(declared: dict, record: dict, commit: str, tree: str,
         "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
         "exit_code", "timed_out", "started_at", "finished_at", "cleanup",
         "stdout_sha256", "stderr_sha256",
+        "signer_principal", "signer_key_sha256", "namespace", "signature_algorithm",
     }
     if set(manifest) != expected_fields or manifest.get("schema") != "factory-runner-receipt/v1" or manifest.get("result") != "pass":
         fail("runner manifest schema/result is invalid")
     if manifest["runner"] != record["name"] or manifest["commit"] != commit or manifest["tree"] != tree or manifest["environment_blob"] != environment_blob:
         fail("runner manifest binding mismatch")
+    if (
+        manifest["signer_principal"] != signer_meta["principal"]
+        or manifest["signer_key_sha256"] != signer_meta["key_sha256"]
+        or manifest["signature_algorithm"] != signer_meta["algorithm"]
+    ):
+        fail("runner manifest signer metadata mismatch")
+    if not isinstance(manifest["namespace"], str) or not manifest["namespace"]:
+        fail("runner manifest namespace is invalid")
     expected_argv_digest = hashlib.sha256(
         json.dumps(declared["verify_argv"], separators=(",", ":")).encode()
     ).hexdigest()
@@ -202,8 +236,11 @@ def validate_record(declared: dict, record: dict, commit: str, tree: str,
         fail("runner manifest verifier/archive binding mismatch")
     if manifest["capabilities"] != record["capabilities"] or manifest["exit_code"] != 0 or manifest["timed_out"] is not False or manifest["cleanup"] is not True:
         fail("runner manifest does not prove a clean pass")
-    for field in ("verify_argv_sha256", "archive_sha256", "nonce", "stdout_sha256", "stderr_sha256"):
+    for field in ("verify_argv_sha256", "archive_sha256", "nonce", "stdout_sha256", "stderr_sha256", "signer_key_sha256"):
         if not isinstance(manifest[field], str) or not SHA256.fullmatch(manifest[field]):
+            fail(f"runner manifest has invalid {field}")
+    for field in ("signer_principal", "signature_algorithm"):
+        if not isinstance(manifest[field], str) or not manifest[field]:
             fail(f"runner manifest has invalid {field}")
     for log_name, digest_field in (("stdout.log", "stdout_sha256"), ("stderr.log", "stderr_sha256")):
         log_path = manifest_path.parent / log_name
@@ -211,7 +248,12 @@ def validate_record(declared: dict, record: dict, commit: str, tree: str,
             fail(f"runner log validation failed: {log_name}")
         if hashlib.sha256(log_path.read_bytes()).hexdigest() != manifest[digest_field]:
             fail(f"runner log validation failed: {log_name}")
-    verify_manifest_signature(signer, manifest_path, raw)
+    signature_path = manifest_path.parent / f"{manifest_path.stem}.sig"
+    if signature_path.is_symlink() or not signature_path.is_file() or signature_path.stat().st_size > MAX_EVIDENCE_FILE:
+        fail("runner detached signature is missing or unsafe")
+    if hashlib.sha256(signature_path.read_bytes()).hexdigest() != signer_meta["signature_sha256"]:
+        fail("runner signature digest does not match the aggregate metadata")
+    verify_manifest_signature(signer, manifest, manifest_path, raw)
     return set(record["capabilities"])
 
 

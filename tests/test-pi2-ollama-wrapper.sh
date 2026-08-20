@@ -100,7 +100,7 @@ assert_absent 'Event emitted:' "$stdout"
 grep -Fq 'Event published: factory.implement' "$stdout"
 grep -Fq 'stderr remains untouched' "$stderr"
 grep -Fq '"topic":"factory.implement"' "$RALPH_EVENTS_FILE"
-printf '%s\n' --provider ollama --model glm-5.2 --extension \
+printf '%s\n' --provider ollama --model deepseek-v4-flash --extension \
     ./scripts/pi-ralph-emit-extension.mjs --mode json > "$tmp/expected-args"
 cmp "$tmp/expected-args" "$tmp/args"
 

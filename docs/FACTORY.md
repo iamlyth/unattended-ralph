@@ -287,7 +287,20 @@ archive through the pinned SSH alias, verifies the extracted Git tree remotely, 
 reusing a checkout or HOME, and cleans the remote workspace. Local receipts and
 bounded logs are written beneath `.factory-state/runner-evidence/` and validated
 by `scripts/check-factory-runner-evidence.py`. A failed transport, tree binding,
-probe, verifier, cleanup receipt, or evidence digest stops the campaign.
+probe, verifier, cleanup receipt, signer, or evidence digest stops the campaign.
+
+Runner receipts are signed by a root-owned signer on the disposable runner VM
+(`scripts/factory-runner-signer.py`, installed root-owned and reached only
+through a narrow sudoers rule). The unprivileged forced-command endpoint never
+signs: after the exact archive/tree/environment/verifier/probes all pass, the
+root signer re-validates every manifest field (clean pass only, supported
+capabilities, bound digests, no caller-supplied signer identity), rebuilds the
+canonical signed manifest itself, and returns the detached signature plus
+aggregate signer metadata. The private signing key is root-owned mode 0600 on
+the runner, unavailable to the runner accounts, and is never printed or copied
+into Git; this repository carries only the public keys and trust policy in
+`.factory/signer-trust.json`. Signer rotation is fail-closed: a receipt signed
+by a key that is no longer in the trust store is rejected.
 
 `.factory/config.toml` lists product-specific capabilities required for a clean audit.
 Only capabilities covered by accepted exact-commit evidence count; all others

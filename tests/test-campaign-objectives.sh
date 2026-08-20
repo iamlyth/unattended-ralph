@@ -62,7 +62,7 @@ OBJECTIVES
   "schema": "ralph-receipt-policy/v1",
   "categories": [
     {"name": "runner-evidence", "tier": "installed", "allow_manifest": true, "argv": [["./scripts/run-factory-runners.py"]]},
-    {"name": "project-verify", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/verify-boilerplate.sh"]]},
+    {"name": "project-verify", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/verify-project.sh"]]},
     {"name": "installed-visual", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/probe-visual.sh"]]},
     {"name": "visual-render", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/probe-visual.sh"]]},
     {"name": "real-system-service", "tier": "real_system", "allow_manifest": false, "argv": [["./scripts/probe-system.sh"]]},
@@ -102,9 +102,9 @@ write_evidence() {
     local head
     head=$(git -C "$dir" rev-parse HEAD)
     mkdir -p "$dir/.factory-state/runner-evidence/$runner/$head"
-    python3 - "$dir" "$runner" "$head" <<'PY'
+    python3 - "$dir" "$runner" "$head" "$PUBLIC_KEY" <<'PY'
 import hashlib, json, pathlib, subprocess, sys, tomllib
-root, runner, head = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+root, runner, head, public_key = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 
 def git(*args: str) -> str:
     result = subprocess.run(["git", *args], cwd=root, text=True, capture_output=True)
@@ -127,6 +127,7 @@ archive_sha256 = hashlib.sha256((root / "commit-archive.tar").read_bytes()).hexd
 (root / "commit-archive.tar").unlink()
 empty = hashlib.sha256(b"").hexdigest()
 capabilities = sorted(declared["capabilities"])
+key_sha256 = hashlib.sha256(public_key.encode()).hexdigest()
 manifest = {
     "schema": "factory-runner-receipt/v1", "result": "pass", "runner": runner,
     "commit": head, "tree": tree, "environment_blob": environment_blob,
@@ -134,6 +135,8 @@ manifest = {
     "capabilities": capabilities, "exit_code": 0, "timed_out": False,
     "started_at": 1, "finished_at": 2, "cleanup": True,
     "stdout_sha256": empty, "stderr_sha256": empty,
+    "signer_principal": "factory-signer", "signer_key_sha256": key_sha256,
+    "namespace": "factory-runner-receipt", "signature_algorithm": "ssh-ed25519",
 }
 raw = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
 manifest_path = root / f".factory-state/runner-evidence/{runner}/{head}/manifest.json"
@@ -147,7 +150,9 @@ else:
 aggregate["runners"] = [
     item for item in aggregate["runners"] if item["name"] != runner
 ] + [{"name": runner, "manifest": f".factory-state/runner-evidence/{runner}/{head}/manifest.json",
-      "manifest_sha256": hashlib.sha256(raw).hexdigest(), "capabilities": capabilities}]
+      "manifest_sha256": hashlib.sha256(raw).hexdigest(), "capabilities": capabilities,
+      "signer": {"principal": "factory-signer", "key_sha256": key_sha256,
+                  "algorithm": "ssh-ed25519", "signature_sha256": ""}}]
 aggregate_path.write_text(json.dumps(aggregate, sort_keys=True, indent=2) + "\n")
 (root / f".factory-state/runner-evidence/{runner}/{head}/stdout.log").write_bytes(b"")
 (root / f".factory-state/runner-evidence/{runner}/{head}/stderr.log").write_bytes(b"")
@@ -155,6 +160,16 @@ PY
     cat "$dir/.factory-state/runner-evidence/$runner/$head/manifest.json" \
         | ssh-keygen -Y sign -f "$tmp/signer-key" -n factory-runner-receipt \
             > "$dir/.factory-state/runner-evidence/$runner/$head/manifest.sig" 2>/dev/null
+    python3 - "$dir/.factory-state/runner-evidence/$runner/$head/manifest.sig" \
+        "$dir/.factory-state/runner-evidence.json" "$runner" <<'PY'
+import hashlib, json, pathlib, sys
+sig_path, aggregate_path, runner = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+aggregate = json.loads(aggregate_path.read_text())
+for record in aggregate["runners"]:
+    if record["name"] == runner:
+        record["signer"]["signature_sha256"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+aggregate_path.write_text(json.dumps(aggregate, sort_keys=True, indent=2) + "\n")
+PY
 }
 
 # mint_state <dir> <round>: authoritative protected coordinator state for the
@@ -204,7 +219,7 @@ result: pass
 - Specification: docs/SPEC.md §2
 - Production paths: src/main.c:100
 - Executable evidence: ./scripts/run-factory-runners.py PASS [receipt: .factory-state/audit-receipts/runner-evidence.json]
-- Executable evidence: ./scripts/verify-boilerplate.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
+- Executable evidence: ./scripts/verify-project.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
 - Executable evidence: ./scripts/probe-visual.sh FAIL [receipt: .factory-state/audit-receipts/visual-render.json]
 
 ## Findings
@@ -229,7 +244,7 @@ head=$(git -C "$tmp/blessed" rev-parse HEAD)
 write_evidence "$tmp/blessed" fake-runner
 write_evidence "$tmp/blessed" real-system-service
 receipt "$tmp/blessed" 1 runner-evidence 0 ./scripts/run-factory-runners.py
-receipt "$tmp/blessed" 1 project-verify 0 ./scripts/verify-boilerplate.sh
+receipt "$tmp/blessed" 1 project-verify 0 ./scripts/verify-project.sh
 receipt "$tmp/blessed" 1 visual-render 1 ./scripts/probe-visual.sh
 write_report "$tmp/blessed"
 
@@ -322,7 +337,7 @@ expect_rc "$tmp/blessed" 1 "$head" 1 "arbitrary command with a spoofed tag"
 
 # A stale receipt (evidence_commit != audit base) cannot cover a category.
 cat > "$tmp/blessed/.factory-state/audit-receipts/project-verify.json" <<JSON
-{"schema": "ralph-audit-receipt/v1", "tag": "project-verify", "argv": ["./scripts/verify-boilerplate.sh"], "argv_sha256": "$(printf 'e%.0s' {1..64})", "exit_code": 0, "stdout_sha256": "$(printf 'c%.0s' {1..64})", "stderr_sha256": "$(printf 'd%.0s' {1..64})", "started_at": 1, "finished_at": 2, "evidence_commit": "$(printf '2%.0s' {1..40})", "coordinator_round": 1, "coordinator_nonce": "$NONCE"}
+{"schema": "ralph-audit-receipt/v1", "tag": "project-verify", "argv": ["./scripts/verify-project.sh"], "argv_sha256": "$(printf 'e%.0s' {1..64})", "exit_code": 0, "stdout_sha256": "$(printf 'c%.0s' {1..64})", "stderr_sha256": "$(printf 'd%.0s' {1..64})", "started_at": 1, "finished_at": 2, "evidence_commit": "$(printf '2%.0s' {1..40})", "coordinator_round": 1, "coordinator_nonce": "$NONCE"}
 JSON
 cat > "$tmp/blessed/.factory/artifacts/campaign-audit.md" <<'REPORT'
 ---
@@ -331,7 +346,7 @@ result: pass
 # Campaign Audit
 ## Evidence reviewed
 - Executable evidence: ./scripts/run-factory-runners.py PASS [receipt: .factory-state/audit-receipts/runner-evidence.json]
-- Executable evidence: ./scripts/verify-boilerplate.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
+- Executable evidence: ./scripts/verify-project.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
 
 pass
 REPORT
@@ -352,7 +367,7 @@ result: pass
 # Campaign Audit
 ## Evidence reviewed
 - Executable evidence: ./scripts/probe.sh PASS [manifest: .factory-state/runner-manifests/runner-evidence/manifest.json]
-- Executable evidence: ./scripts/verify-boilerplate.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
+- Executable evidence: ./scripts/verify-project.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
 
 pass
 REPORT
@@ -361,14 +376,14 @@ expect_rc "$tmp/blessed" 1 "$head" 1 "minimal path-category manifest"
 
 # A signed, fully bound exact aggregate fixture DOES satisfy a manifest-allowed
 # category (runner-evidence) at the audit base.
-receipt "$tmp/blessed" 1 project-verify 0 ./scripts/verify-boilerplate.sh
+receipt "$tmp/blessed" 1 project-verify 0 ./scripts/verify-project.sh
 cat > "$tmp/blessed/.factory/artifacts/campaign-audit.md" <<REPORT
 ---
 result: pass
 ---
 # Campaign Audit
 ## Evidence reviewed
-- Executable evidence: ./scripts/verify-boilerplate.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
+- Executable evidence: ./scripts/verify-project.sh PASS [receipt: .factory-state/audit-receipts/project-verify.json]
 - Executable evidence: ./scripts/probe.sh PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]
 
 pass

@@ -73,10 +73,12 @@ JSON
 # recomputed) so aggregate membership and signature are the variables under test.
 write_signed_evidence() {
     local dir=$1 head=$2
+    local public_key
+    public_key=$(cut -d' ' -f1,2 "$tmp/signer-key.pub")
     mkdir -p "$dir/.factory-state/runner-evidence/fake-runner/$head"
-    python3 - "$dir" "$head" <<'PY'
+    python3 - "$dir" "$head" "$public_key" <<'PY'
 import hashlib, json, pathlib, subprocess, sys, tomllib
-root, head = pathlib.Path(sys.argv[1]), sys.argv[2]
+root, head, public_key = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 
 def git(*args: str) -> str:
     result = subprocess.run(["git", *args], cwd=root, text=True, capture_output=True)
@@ -99,6 +101,7 @@ archive_sha256 = hashlib.sha256((root / "commit-archive.tar").read_bytes()).hexd
 (root / "commit-archive.tar").unlink()
 empty = hashlib.sha256(b"").hexdigest()
 capabilities = sorted(declared["capabilities"])
+key_sha256 = hashlib.sha256(public_key.encode()).hexdigest()
 manifest = {
     "schema": "factory-runner-receipt/v1", "result": "pass", "runner": "fake-runner",
     "commit": head, "tree": tree, "environment_blob": environment_blob,
@@ -106,6 +109,8 @@ manifest = {
     "capabilities": capabilities, "exit_code": 0, "timed_out": False,
     "started_at": 1, "finished_at": 2, "cleanup": True,
     "stdout_sha256": empty, "stderr_sha256": empty,
+    "signer_principal": "factory-signer", "signer_key_sha256": key_sha256,
+    "namespace": "factory-runner-receipt", "signature_algorithm": "ssh-ed25519",
 }
 raw = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
 manifest_path = root / f".factory-state/runner-evidence/fake-runner/{head}/manifest.json"
@@ -117,7 +122,9 @@ aggregate = {
     "environment_blob": environment_blob,
     "runners": [
         {"name": "fake-runner", "manifest": f".factory-state/runner-evidence/fake-runner/{head}/manifest.json",
-         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "capabilities": capabilities}
+         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "capabilities": capabilities,
+         "signer": {"principal": "factory-signer", "key_sha256": key_sha256,
+                     "algorithm": "ssh-ed25519", "signature_sha256": ""}}
     ],
 }
 (root / ".factory-state/runner-evidence.json").write_text(json.dumps(aggregate, sort_keys=True, indent=2) + "\n")
@@ -127,6 +134,14 @@ PY
     cat "$dir/.factory-state/runner-evidence/fake-runner/$head/manifest.json" \
         | ssh-keygen -Y sign -f "$tmp/signer-key" -n factory-runner-receipt \
             > "$dir/.factory-state/runner-evidence/fake-runner/$head/manifest.sig" 2>/dev/null
+    python3 - "$dir/.factory-state/runner-evidence/fake-runner/$head/manifest.sig" \
+        "$dir/.factory-state/runner-evidence.json" <<'PY'
+import hashlib, json, pathlib, sys
+sig_path, aggregate_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+aggregate = json.loads(aggregate_path.read_text())
+aggregate["runners"][0]["signer"]["signature_sha256"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+aggregate_path.write_text(json.dumps(aggregate, sort_keys=True, indent=2) + "\n")
+PY
 }
 
 write_report() {
@@ -192,7 +207,7 @@ write_report "$tmp/audit" pass "\`sh -c 'printf ...'\` PASS [receipt: .factory-s
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
 # Fabricated command prose without a receipt cannot certify runtime.
-write_report "$tmp/audit" pass "\`./verify-boilerplate\` PASS with all checks green"
+write_report "$tmp/audit" pass "\`./verify-project\` PASS with all checks green"
 must_fail "fabricated command prose" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -266,7 +281,7 @@ write_report "$tmp/audit" findings "\`sh -c 'printf ...'\` PASS [receipt: .facto
 # A `[manifest:]` reference must be an exact signed record in the runner-
 # evidence aggregate bound to the audit base; an accepted manifest certifies a
 # clean PASS through the strict runner-evidence helper.
-write_report "$tmp/audit" pass "\`./verify-boilerplate\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
+write_report "$tmp/audit" pass "\`./verify-project\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
 # A standalone/minimal manifest is never accepted: it is not an exact signed

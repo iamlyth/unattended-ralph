@@ -62,6 +62,23 @@ chmod +x "$tmp/fake-ssh"
 mkdir -p "$tmp/client-home/.ssh"
 ln -s "$tmp/fake-ssh" "$tmp/client-home/.ssh/factory-ssh"
 export HOME="$tmp/client-home"
+# The root-owned signer helper runs in this disposable harness as the test
+# user with an ephemeral key; only the root-identity checks are relaxed in the
+# copied helper, exactly as the workspace-root checks are relaxed below.
+cp "$PROJECT_ROOT/scripts/factory-runner-signer.py" "$tmp/repo/scripts/factory-runner-signer.py"
+chmod +x "$tmp/repo/scripts/factory-runner-signer.py"
+sed -i \
+    -e 's/if os.getuid() != os.geteuid() or os.geteuid() != 0:/if False:/' \
+    -e 's/if key_stat.st_uid != 0 or key_stat.st_mode & 0o077:/if key_stat.st_mode \& 0o077:/' \
+    -e 's/if principal_stat.st_uid != 0 or principal_stat.st_mode & 0o077:/if principal_stat.st_mode \& 0o077:/' \
+    "$tmp/repo/scripts/factory-runner-signer.py"
+printf 'factory-signer\n' > "$tmp/signer-principal"
+chmod 0600 "$tmp/signer-principal" "$tmp/signer-key"
+export FACTORY_SIGNER_KEY="$tmp/signer-key"
+export FACTORY_SIGNER_PRINCIPAL_FILE="$tmp/signer-principal"
+# The production endpoint reaches the signer through a narrowly scoped sudoers
+# entry; the disposable harness executes the copied helper directly instead.
+sed -i "s#\[SUDO, \"-n\", SIGNER_HELPER\]#[\"$(command -v python3)\", \"-I\", \"$tmp/repo/scripts/factory-runner-signer.py\"]#" "$tmp/repo/scripts/factory-runner-server.py"
 # Validator bypass is confined to this disposable copied test harness because
 # its temporary workspace intentionally does not use the production /srv root.
 sed -i '0,/if subprocess.run(/s//if False and subprocess.run(/' "$tmp/repo/scripts/run-factory-runners.py"
@@ -79,9 +96,36 @@ git -C "$tmp/repo" commit -qm base
     cd "$tmp/repo"
     ./scripts/run-factory-runners.py >/dev/null
     head=$(git rev-parse HEAD)
-    cat ".factory-state/runner-evidence/fake-runner/$head/manifest.json" \
-        | ssh-keygen -Y sign -f "$tmp/signer-key" -n factory-runner-receipt \
-            > ".factory-state/runner-evidence/fake-runner/$head/manifest.sig" 2>/dev/null
+    # The endpoint signs the manifest it generated; the client stores the
+    # detached signature and the aggregate signer metadata verbatim.
+    [[ -f ".factory-state/runner-evidence/fake-runner/$head/manifest.sig" ]]
+    python3 - ".factory-state/runner-evidence/fake-runner/$head/manifest.json" \
+        ".factory-state/runner-evidence/fake-runner/$head/manifest.sig" \
+        ".factory-state/runner-evidence.json" \
+        "$(cut -d' ' -f1,2 "$tmp/signer-key.pub")" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+manifest_path, sig_path, aggregate_path = map(pathlib.Path, sys.argv[1:4])
+public_key = sys.argv[4]
+manifest = json.loads(manifest_path.read_bytes())
+assert manifest["result"] == "pass"
+assert manifest["signer_principal"] == "factory-signer"
+assert manifest["namespace"] == "factory-runner-receipt"
+assert manifest["signature_algorithm"] == "ssh-ed25519"
+assert manifest["signer_key_sha256"] == hashlib.sha256(public_key.encode()).hexdigest()
+aggregate = json.loads(aggregate_path.read_bytes())
+signer = aggregate["runners"][0]["signer"]
+assert signer["principal"] == manifest["signer_principal"]
+assert signer["key_sha256"] == manifest["signer_key_sha256"]
+assert signer["signature_sha256"] == hashlib.sha256(sig_path.read_bytes()).hexdigest()
+allowed = pathlib.Path(".factory-state/allowed-signers")
+allowed.write_text(f"factory-signer {public_key}\n")
+verified = subprocess.run(
+    ["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "factory-signer",
+     "-n", "factory-runner-receipt", "-s", str(sig_path)],
+    input=manifest_path.read_bytes(), capture_output=True,
+)
+assert verified.returncode == 0, verified.stderr
+PY
     ./scripts/check-factory-runner-evidence.py >/dev/null
     capabilities=$(./scripts/check-factory-runner-evidence.py --print-capabilities)
     grep -qx 'project-gate' <<<"$capabilities"
@@ -207,6 +251,19 @@ set +e
 remote_rc=$?
 set -e
 [[ $remote_rc -eq 1 ]]
+[[ ! -e "$tmp/runner/workspaces/fake-project/job" ]]
+
+# A signer failure is fail-closed: with the private key unavailable the
+# endpoint must refuse to emit any receipt, unsigned or otherwise.
+sed -i 's/exit 23/exit 0/' "$tmp/repo/scripts/verify-boilerplate.sh"
+git -C "$tmp/repo" add scripts/verify-boilerplate.sh
+git -C "$tmp/repo" commit -qm restore-verifier
+rm -rf "$tmp/repo/.factory-state" "$tmp/signer-key" "$tmp/signer-key.pub"
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+signer_unavailable_rc=$?
+set -e
+[[ $signer_unavailable_rc -eq 1 ]]
 [[ ! -e "$tmp/runner/workspaces/fake-project/job" ]]
 
 echo "test: factory runner transfer and evidence checks passed"

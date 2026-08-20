@@ -111,6 +111,19 @@ runner and validates exact-commit evidence:
 ./scripts/check-factory-runner-evidence.py
 ```
 
+Runner evidence is signed by a root-owned signer on the disposable runner VM:
+the unprivileged forced-command endpoint never signs, and after the exact
+archive/tree/environment/verifier/probes all pass, the root signer re-validates
+every manifest field (clean pass only, supported capabilities, bound digests,
+no caller-supplied signer identity), rebuilds the canonical signed manifest
+itself, and returns the detached signature plus aggregate signer metadata.
+`.factory/signer-trust.json` carries only public keys; the private signing key
+is root-owned mode 0600 on the runner and never leaves it. The detached
+signature (`manifest.sig`) and aggregate signer metadata are validated with
+`ssh-keygen -Y verify`; rotation is fail-closed (removed keys are rejected).
+Until a signer is provisioned (`enabled = true`), unsigned legacy/local
+manifests are rejected and runner-evidenced capabilities stay unevidenced.
+
 Required capabilities in `.factory/config.toml` must be both declared and
 evidenced before an independent audit may pass. Runner provisioning remains
 outside the repository.

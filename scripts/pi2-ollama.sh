@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROVIDER=${OLLAMA_PROVIDER:-ollama}
-MODEL=${OLLAMA_MODEL:-glm-5.2}
+MODEL=${OLLAMA_MODEL:-deepseek-v4-flash}
 args=("$@")
 prompt_prefix="Please read and execute the task in "
 

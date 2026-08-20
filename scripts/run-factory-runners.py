@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import subprocess
@@ -165,7 +166,9 @@ def run_runner(runner: dict, commit: str, tree: str, environment_blob: str, arch
         "schema", "result", "runner", "commit", "tree", "environment_blob",
         "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
         "exit_code", "timed_out", "stdout_b64", "stderr_b64", "started_at",
-        "finished_at", "cleanup",
+        "finished_at", "cleanup", "manifest_b64", "signature_b64",
+        "signer_principal", "signer_key_sha256", "signature_algorithm",
+        "namespace", "signature_sha256",
     }
     if set(receipt) != expected or receipt["schema"] != "factory-runner-receipt/v1":
         fail(f"runner {name} receipt fields are invalid")
@@ -187,29 +190,76 @@ def run_runner(runner: dict, commit: str, tree: str, environment_blob: str, arch
         or receipt["cleanup"] is not True
     ):
         fail(f"runner {name} did not evidence every declared capability")
+    if receipt.get("namespace") != "factory-runner-receipt" or receipt.get("signature_algorithm") != "ssh-ed25519":
+        fail(f"runner {name} signer binding is invalid")
+    for field in ("signer_key_sha256", "signature_sha256"):
+        if not isinstance(receipt[field], str) or not re.fullmatch(r"^[0-9a-f]{64}$", receipt[field]):
+            fail(f"runner {name} signer digest is invalid")
+    if not isinstance(receipt["signer_principal"], str) or not receipt["signer_principal"]:
+        fail(f"runner {name} signer principal is invalid")
     try:
         stdout = base64.b64decode(receipt.pop("stdout_b64"), validate=True)
         remote_stderr = base64.b64decode(receipt.pop("stderr_b64"), validate=True)
+        manifest_bytes = base64.b64decode(receipt.pop("manifest_b64"), validate=True)
+        signature = base64.b64decode(receipt.pop("signature_b64"), validate=True)
     except Exception:
-        fail(f"runner {name} returned invalid log encoding")
-    stderr = remote_stderr + transport_stderr
+        fail(f"runner {name} returned invalid log or signature encoding")
+    if not signature.startswith(b"-----BEGIN SSH SIGNATURE-----"):
+        fail(f"runner {name} returned an invalid detached signature")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeError, json.JSONDecodeError):
+        fail(f"runner {name} returned an invalid signed manifest")
+    expected_manifest = {
+        "schema": receipt["schema"], "result": receipt["result"],
+        "runner": receipt["runner"], "commit": receipt["commit"],
+        "tree": receipt["tree"], "environment_blob": receipt["environment_blob"],
+        "verify_argv_sha256": receipt["verify_argv_sha256"],
+        "archive_sha256": receipt["archive_sha256"], "nonce": receipt["nonce"],
+        "capabilities": receipt["capabilities"], "exit_code": receipt["exit_code"],
+        "timed_out": receipt["timed_out"], "started_at": receipt["started_at"],
+        "finished_at": receipt["finished_at"], "cleanup": receipt["cleanup"],
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(remote_stderr).hexdigest(),
+        "signer_principal": receipt["signer_principal"],
+        "signer_key_sha256": receipt["signer_key_sha256"],
+        "namespace": receipt["namespace"],
+        "signature_algorithm": receipt["signature_algorithm"],
+    }
+    expected_manifest_bytes = (json.dumps(expected_manifest, sort_keys=True, indent=2) + "\n").encode()
+    if manifest_bytes != expected_manifest_bytes or manifest != expected_manifest:
+        fail(f"runner {name} signed manifest does not match the receipt")
+    if (
+        hashlib.sha256(signature).hexdigest() != receipt["signature_sha256"]
+        or manifest["signer_principal"] != receipt["signer_principal"]
+        or manifest["signer_key_sha256"] != receipt["signer_key_sha256"]
+        or manifest["namespace"] != receipt["namespace"]
+        or manifest["signature_algorithm"] != receipt["signature_algorithm"]
+    ):
+        fail(f"runner {name} signed manifest signer binding mismatch")
     evidence_dir = STATE_ROOT / name / commit
     if evidence_dir.is_symlink() or (evidence_dir.exists() and not evidence_dir.is_dir()):
         fail(f"unsafe evidence directory for {name}")
     atomic_write(evidence_dir / "stdout.log", stdout)
-    atomic_write(evidence_dir / "stderr.log", stderr)
-    manifest = dict(receipt)
-    manifest.update({
-        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
-        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
-    })
-    manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+    # The signed manifest covers exactly the remote logs; the SSH transport's
+    # own stderr (host-key / connectivity diagnostics) is kept separate and is
+    # not part of the signed evidence.
+    atomic_write(evidence_dir / "stderr.log", remote_stderr)
+    if transport_stderr:
+        atomic_write(evidence_dir / "transport.stderr", transport_stderr)
     atomic_write(evidence_dir / "manifest.json", manifest_bytes)
+    atomic_write(evidence_dir / "manifest.sig", signature)
     return {
         "name": name,
         "manifest": str((evidence_dir / "manifest.json").relative_to(ROOT)),
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "capabilities": receipt["capabilities"],
+        "signer": {
+            "principal": receipt["signer_principal"],
+            "key_sha256": receipt["signer_key_sha256"],
+            "algorithm": receipt["signature_algorithm"],
+            "signature_sha256": receipt["signature_sha256"],
+        },
     }
 
 

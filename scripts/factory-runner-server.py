@@ -28,6 +28,9 @@ MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_FILES = 10_000
 MAX_CONTENT = 256 * 1024 * 1024
 MAX_LOG = 4 * 1024 * 1024
+NAMESPACE = "factory-runner-receipt"
+SUDO = "/usr/bin/sudo"
+SIGNER_HELPER = "/usr/local/libexec/factory-runner-signer"
 
 
 def emit(value: dict) -> None:
@@ -114,6 +117,77 @@ def remove_workspace(work: Path) -> None:
         work.unlink()
     else:
         shutil.rmtree(work)
+
+
+def sign_manifest(evidence: dict) -> dict:
+    """Ask the root-owned signer to certify the server-generated evidence.
+
+    The signer is a root-owned helper reached only through a narrowly scoped
+    sudoers entry (never a caller-supplied path). It rebuilds the canonical
+    manifest itself and returns the detached signature plus aggregate signer
+    metadata; the exact signed bytes are echoed back so the client can store
+    them verbatim. Any signer failure fails this run closed: no unsigned
+    receipt can ever be emitted.
+    """
+    payload = json.dumps(
+        {"schema": "factory-runner-sign-request/v1", "manifest": evidence},
+        separators=(",", ":"),
+    ).encode() + b"\n"
+    try:
+        result = subprocess.run(
+            [SUDO, "-n", SIGNER_HELPER],
+            input=payload, capture_output=True, timeout=120,
+        )
+    except OSError as exc:
+        fail(f"cannot invoke the runner signer: {type(exc).__name__}")
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        fail(f"runner signer rejected the receipt: {detail or 'nonzero exit'}")
+    try:
+        response = json.loads(result.stdout)
+    except (UnicodeError, json.JSONDecodeError):
+        fail("runner signer returned malformed output")
+    expected = {
+        "schema", "result", "manifest_b64", "signature_b64", "signer_principal",
+        "signer_key_sha256", "signature_algorithm", "namespace", "signature_sha256",
+    }
+    if (
+        not isinstance(response, dict) or set(response) != expected
+        or response.get("schema") != "factory-runner-sign-response/v1"
+        or response.get("result") != "signed"
+        or response.get("namespace") != NAMESPACE
+    ):
+        fail("runner signer response schema is invalid")
+    if (
+        not isinstance(response["signer_principal"], str)
+        or not NAME.fullmatch(response["signer_principal"])
+    ):
+        fail("runner signer principal is invalid")
+    if response.get("signature_algorithm") != "ssh-ed25519":
+        fail("runner signer algorithm is unsupported")
+    for field in ("signer_key_sha256", "signature_sha256"):
+        if not isinstance(response[field], str) or not SHA256.fullmatch(response[field]):
+            fail(f"runner signer response {field} is invalid")
+    try:
+        manifest_bytes = base64.b64decode(response["manifest_b64"], validate=True)
+        signature = base64.b64decode(response["signature_b64"], validate=True)
+    except Exception:
+        fail("runner signer returned invalid encodings")
+    if hashlib.sha256(signature).hexdigest() != response["signature_sha256"]:
+        fail("runner signer signature digest mismatch")
+    if not signature.startswith(b"-----BEGIN SSH SIGNATURE-----"):
+        fail("runner signer returned an invalid detached signature")
+    expected_manifest = dict(evidence)
+    expected_manifest.update({
+        "signer_principal": response["signer_principal"],
+        "signer_key_sha256": response["signer_key_sha256"],
+        "namespace": NAMESPACE,
+        "signature_algorithm": response["signature_algorithm"],
+    })
+    expected_bytes = (json.dumps(expected_manifest, sort_keys=True, indent=2) + "\n").encode()
+    if manifest_bytes != expected_bytes:
+        fail("runner signer manifest does not match the verified evidence")
+    return response
 
 
 def main() -> int:
@@ -273,18 +347,53 @@ def main() -> int:
 
             returncode, stdout, stderr = run_bounded(argv, job, env)
             probes["project-gate"] = returncode == 0
+
             evidenced = sorted(capability for capability in capabilities if probes.get(capability, False))
-            result = "pass" if returncode == 0 and len(evidenced) == len(capabilities) else "fail"
-            emit({
-                "schema": "factory-runner-receipt/v1", "result": result,
+            finished_at = int(time.time())
+            if returncode != 0 or len(evidenced) != len(capabilities):
+                # Failure/skip receipts are never signed and never carry a manifest.
+                emit({
+                    "schema": "factory-runner-receipt/v1", "result": "fail",
+                    "runner": request["runner"], "commit": request["commit"],
+                    "tree": tree, "environment_blob": request["environment_blob"],
+                    "verify_argv_sha256": request["verify_argv_sha256"],
+                    "archive_sha256": request["archive_sha256"], "nonce": request["nonce"],
+                    "capabilities": evidenced, "exit_code": returncode,
+                    "timed_out": False, "stdout_b64": base64.b64encode(stdout).decode(),
+                    "stderr_b64": base64.b64encode(stderr).decode(),
+                    "started_at": started, "finished_at": finished_at, "cleanup": True,
+                })
+                return 0
+            evidence = {
+                "schema": "factory-runner-receipt/v1", "result": "pass",
                 "runner": request["runner"], "commit": request["commit"],
                 "tree": tree, "environment_blob": request["environment_blob"],
                 "verify_argv_sha256": request["verify_argv_sha256"],
                 "archive_sha256": request["archive_sha256"], "nonce": request["nonce"],
-                "capabilities": evidenced, "exit_code": returncode,
+                "capabilities": evidenced, "exit_code": 0,
+                "timed_out": False, "started_at": started, "finished_at": finished_at,
+                "cleanup": True,
+                "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+                "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            }
+            signed = sign_manifest(evidence)
+            emit({
+                "schema": "factory-runner-receipt/v1", "result": "pass",
+                "runner": request["runner"], "commit": request["commit"],
+                "tree": tree, "environment_blob": request["environment_blob"],
+                "verify_argv_sha256": request["verify_argv_sha256"],
+                "archive_sha256": request["archive_sha256"], "nonce": request["nonce"],
+                "capabilities": evidenced, "exit_code": 0,
                 "timed_out": False, "stdout_b64": base64.b64encode(stdout).decode(),
                 "stderr_b64": base64.b64encode(stderr).decode(),
-                "started_at": started, "finished_at": int(time.time()), "cleanup": True,
+                "started_at": started, "finished_at": finished_at, "cleanup": True,
+                "manifest_b64": signed["manifest_b64"],
+                "signature_b64": signed["signature_b64"],
+                "signer_principal": signed["signer_principal"],
+                "signer_key_sha256": signed["signer_key_sha256"],
+                "signature_algorithm": signed["signature_algorithm"],
+                "namespace": signed["namespace"],
+                "signature_sha256": signed["signature_sha256"],
             })
         except subprocess.TimeoutExpired:
             fail("runner verification timed out")
