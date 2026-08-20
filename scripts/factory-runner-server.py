@@ -47,6 +47,10 @@ from factory_runner_policy import PolicyError, class_for_uid, load_policy, valid
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+# Structural fail-closed: a committed contract probe argv may never carry a
+# token that equals or is prefixed by a fixture option, so the exact probe
+# command can never switch into fixture/simulation mode on a live runner.
+FIXTURE_OPTION_PREFIXES = ("--fixture", "--fixture-dir", "--fixture-facts")
 MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_FILES = 10_000
 MAX_CONTENT = 256 * 1024 * 1024
@@ -62,6 +66,13 @@ CONTRACT_REQUIRED = {
     "name", "probe_argv", "probe_marker", "must_execute",
     "must_not_skip", "deny_simulated_markers",
 }
+
+
+def is_fixture_option_token(token: str) -> bool:
+    """True when a probe argv token equals or is prefixed by a fixture option."""
+    return token == "--fixture" or any(
+        token.startswith(prefix) for prefix in FIXTURE_OPTION_PREFIXES
+    )
 
 
 def emit(value: dict) -> None:
@@ -192,6 +203,13 @@ def load_contracts(job: Path) -> dict[str, dict]:
             isinstance(item, str) and item for item in probe_argv
         ):
             fail(f"committed contract {name} probe_argv is invalid")
+        fixture_tokens = [item for item in probe_argv if is_fixture_option_token(item)]
+        if fixture_tokens:
+            fail(
+                f"committed contract {name} probe_argv carries a fixture/simulation "
+                f"option token {fixture_tokens!r}; a committed probe can never run "
+                f"in fixture mode"
+            )
         for field in ("probe_marker", "probe_stage"):
             value = contract.get(field, "")
             if not isinstance(value, str):

@@ -23,6 +23,22 @@ ROOT = Path(__file__).resolve().parent.parent
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 TOKEN = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 BARE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+# Fixture/simulation option tokens are structural fail-closed: a committed
+# contract probe argv may never carry a token that equals or is prefixed by
+# one of these, so the exact probe command can never switch into fixture mode.
+FIXTURE_OPTION_PREFIXES = ("--fixture", "--fixture-dir", "--fixture-facts")
+
+
+def is_fixture_option_token(token: str) -> bool:
+    """True when a probe argv token equals or is prefixed by a fixture option.
+
+    Covers `--fixture`, `--fixture=/path`, `--fixture-dir`, `--fixture-dir=/p`,
+    `--fixture-facts`, and `--fixture-facts=/p`; any such token in a committed
+    probe argv would let the probe run in fixture mode, so it is rejected.
+    """
+    return token == "--fixture" or any(
+        token.startswith(prefix) for prefix in FIXTURE_OPTION_PREFIXES
+    )
 
 
 def fail(message: str) -> None:
@@ -66,7 +82,7 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
     required = {
         "name", "probe_argv", "probe_marker", "must_execute", "must_not_skip", "deny_simulated_markers",
     }
-    optional = {"status", "probe_stage", "probe_stdout_contains", "probe_is_verify_run"}
+    optional = {"status", "probe_stage", "probe_stdout_contains", "probe_is_verify_run", "runner_class"}
     if not isinstance(contract, dict):
         fail(f"contracts[{index}] must be an object")
     if not required.issubset(set(contract)) or not set(contract).issubset(required | optional):
@@ -82,6 +98,12 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
         fail(f"contracts[{index}].probe_argv must be a non-empty array of strings")
     if any(any(ord(char) < 32 for char in item) for item in argv):
         fail(f"contracts[{index}].probe_argv must be control-character-free")
+    fixture_tokens = [item for item in argv if is_fixture_option_token(item)]
+    if fixture_tokens:
+        fail(
+            f"contracts[{index}].probe_argv carries a fixture/simulation option "
+            f"token {fixture_tokens!r}; a committed probe can never run in fixture mode"
+        )
     probe0 = argv[0]
     if "/" in probe0:
         relative = Path(probe0)
@@ -105,6 +127,11 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
         fail(f"contracts[{index}].probe_stage must be env or post")
     if contract.get("probe_is_verify_run") not in (None, True, False):
         fail(f"contracts[{index}].probe_is_verify_run must be a boolean")
+    runner_class = contract.get("runner_class")
+    if runner_class is not None and (
+        not isinstance(runner_class, str) or not NAME.fullmatch(runner_class)
+    ):
+        fail(f"contracts[{index}].runner_class must be a lowercase runner class name")
     contains = contract.get("probe_stdout_contains", [])
     if not isinstance(contains, list) or not all(isinstance(item, str) and TOKEN.fullmatch(item) and item for item in contains):
         fail(f"contracts[{index}].probe_stdout_contains must be an array of non-empty tokens")
@@ -144,7 +171,17 @@ def main() -> int:
     for name in candidates:
         if name in declared:
             fail(f"capability {name} is declared but its contract is still candidate")
-    print(f"capability-contracts: valid ({len(named)} contracts, {len(declared)} declared capabilities, {len(candidates)} candidates)")
+    classes = sorted(
+        {
+            contract.get("runner_class")
+            for contract in contracts
+            if contract.get("runner_class")
+        }
+    )
+    print(
+        f"capability-contracts: valid ({len(named)} contracts, {len(declared)} declared capabilities, "
+        f"{len(candidates)} candidates, runner classes {classes})"
+    )
     return 0
 
 

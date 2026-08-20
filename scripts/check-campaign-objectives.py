@@ -21,9 +21,13 @@ Authorization (`.factory/campaign-receipt-policy.json`):
 - a `[manifest: <path>]` reference satisfies a category only when the
   manifest is an exact signed record in the runner-evidence aggregate bound to
   the audit base (validated by `check-factory-runner-evidence.py`), the
-  category allows manifests, and the manifest path contains the category as
-  one of its path segments; standalone/minimal, unsigned, fabricated, and
-  path-category-only manifests are rejected;
+  category allows manifests, and the manifest's recorded capabilities contain
+  the exact capability whose committed contract `probe_argv` equals one of
+  the category's allowlisted argv arrays (resolved through
+  `.factory/capability-contracts.json`); manifest matching is exact capability
+  evidence, never a path-substring proxy — the manifest path is ignored.
+  Standalone/minimal, unsigned, fabricated, and path-category-only manifests
+  are rejected;
 - the protected `.factory-state/audit-coordinator.json` state is read and
   revalidated: the audit round/base must equal it exactly and every receipt's
   coordinator nonce must match it (matching `check-audit-receipts.py`);
@@ -171,13 +175,78 @@ def receipt_record(root: Path, reference: str) -> dict:
     return {}
 
 
-def manifest_segments(root: Path, reference: str) -> list[str]:
+def manifest_capabilities(root: Path, reference: str) -> list[str]:
+    """Return the recorded capabilities of an accepted exact-commit manifest.
+
+    The reference has already passed the strict runner-evidence validation
+    (signature, commit/tree/environment/archive/argv bindings), so the file is
+    the exact signed record; its `capabilities` array is the runner's exact
+    capability evidence for category matching.
+    """
     path = resolve(root, reference)
+    if path.is_symlink() or not path.is_file():
+        fail(f"objective manifest is missing or unsafe: {reference}")
     try:
-        relative = path.relative_to(root.resolve())
-    except ValueError:
-        fail(f"objective manifest escapes the repository: {reference}")
-    return list(relative.parts)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid objective manifest {reference}: {exc}")
+    if not isinstance(data, dict) or data.get("schema") != "factory-runner-receipt/v1":
+        fail(f"objective manifest schema is invalid: {reference}")
+    capabilities = data.get("capabilities")
+    if not isinstance(capabilities, list) or not all(
+        isinstance(item, str) and item for item in capabilities
+    ):
+        fail(f"objective manifest has invalid capabilities: {reference}")
+    return list(capabilities)
+
+
+def capability_evidence(root: Path, policy: dict[str, dict]) -> dict[str, list[str]]:
+    """Map each receipt-policy category to the capabilities that evidence it.
+
+    A capability evidences a category exactly when its committed contract
+    `probe_argv` (from `.factory/capability-contracts.json`) equals one of the
+    category's allowlisted argv arrays. This is what makes manifest category
+    matching exact capability evidence rather than a path-substring proxy: a
+    runner manifest covers a category only through the capability that runs
+    exactly the category's fixed probe command.
+    """
+    contracts_path = root / ".factory/capability-contracts.json"
+    contracts: list[object] = []
+    if contracts_path.is_symlink() or not contracts_path.is_file():
+        fail("capability-contracts is missing or unsafe; manifest evidence cannot be category-matched")
+    try:
+        data = json.loads(contracts_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"cannot parse capability-contracts: {exc}")
+    if not isinstance(data, dict) or data.get("schema") != "ralph-capability-contract/v1":
+        fail("capability-contracts schema is invalid; manifest evidence cannot be category-matched")
+    contracts = data.get("capabilities", [])
+    if not isinstance(contracts, list):
+        fail("capability-contracts has no capabilities array")
+    by_argv: dict[str, str] = {}
+    for contract in contracts:
+        if not isinstance(contract, dict):
+            continue
+        name = contract.get("name")
+        argv = contract.get("probe_argv")
+        if not isinstance(name, str) or not name or not isinstance(argv, list) or not argv or not all(
+            isinstance(item, str) for item in argv
+        ):
+            continue
+        by_argv.setdefault(json.dumps(argv, separators=(",", ":")), name)
+    mapping: dict[str, list[str]] = {}
+    for name, category in policy.items():
+        capabilities = sorted(
+            {
+                by_argv[digest]
+                for digest in (
+                    json.dumps(entry, separators=(",", ":")) for entry in category["argv"]
+                )
+                if digest in by_argv
+            }
+        )
+        mapping[name] = capabilities
+    return mapping
 
 
 def coordinator_state(root: Path) -> dict | None:
@@ -282,6 +351,7 @@ def covered_categories(root: Path, lines: list[str], required: set[str],
                        round_number: int, base: str, nonce: str | None,
                        policy: dict[str, dict]) -> set[str]:
     covered: set[str] = set()
+    capability_evidence_by_category = capability_evidence(root, policy)
     for line in lines:
         for receipt_ref in RECEIPT.findall(line):
             data = receipt_record(root, receipt_ref)
@@ -332,18 +402,20 @@ def covered_categories(root: Path, lines: list[str], required: set[str],
             covered.add(tag)
         for manifest_ref in MANIFEST.findall(line):
             strict_manifest(root, manifest_ref, base)
-            segments = manifest_segments(root, manifest_ref)
-            for segment in segments:
-                if segment in required:
-                    category = policy.get(segment)
-                    if category is None:
-                        fail(f"manifest category {segment!r} has no tracked receipt-policy category")
-                    if not category["allow_manifest"]:
-                        fail(
-                            f"category {segment!r} does not allow runner-manifest coverage; "
-                            f"a machine receipt with the allowlisted argv is required"
-                        )
-                    covered.add(segment)
+            capabilities = manifest_capabilities(root, manifest_ref)
+            for category_name in sorted(required - covered):
+                category = policy[category_name]
+                evidencing = capability_evidence_by_category.get(category_name, [])
+                if not evidencing or not any(
+                    capability in capabilities for capability in evidencing
+                ):
+                    continue
+                if not category["allow_manifest"]:
+                    fail(
+                        f"category {category_name!r} does not allow runner-manifest coverage; "
+                        f"a machine receipt with the allowlisted argv is required"
+                    )
+                covered.add(category_name)
     return covered
 
 
