@@ -642,6 +642,14 @@ def update_state(args: argparse.Namespace) -> None:
         atomic_write(data)
 
 
+def discard_audit_coordinator() -> None:
+    """Discard the protected audit coordinator binding when the audit phase ends."""
+    try:
+        remove(ROOT, "audit-coordinator.json")
+    except (OSError, StateIOError) as exc:
+        fail(f"cannot remove the audit coordinator binding: {exc}")
+
+
 def advance_state(args: argparse.Namespace) -> None:
     with recovery_lock():
         data = load()
@@ -652,6 +660,7 @@ def advance_state(args: argparse.Namespace) -> None:
         if git("rev-parse", "HEAD") != data["rounds"][-1]["audit_commit"]:
             fail("cannot advance away from the recorded audit commit")
         discard_launch_handshake("audit")
+        discard_audit_coordinator()
         data["round"] += 1
         data["phase"] = "planning"
         record = empty_round(data["round"])
@@ -669,6 +678,7 @@ def finish_state(args: argparse.Namespace) -> None:
         if record["audit_result"] != args.result or git("rev-parse", "HEAD") != record["audit_commit"]:
             fail("finish result or HEAD does not match the recorded audit")
         discard_launch_handshake("audit")
+        discard_audit_coordinator()
         data["status"] = "complete" if args.result == "pass" else "blocked"
         data["phase"] = "complete" if args.result == "pass" else "blocked-findings"
         atomic_write(data)

@@ -152,7 +152,7 @@ def main() -> int:
         if not isinstance(request[key], str) or not SHA256.fullmatch(request[key]):
             fail("invalid digest")
     argv = request["verify_argv"]
-    if argv != ["./scripts/verify-project.sh"]:
+    if argv != ["./scripts/verify-boilerplate.sh"]:
         fail("verifier argv is not approved")
     capabilities = request["capabilities"]
     if (
@@ -161,7 +161,7 @@ def main() -> int:
         or not all(isinstance(item, str) and NAME.fullmatch(item) for item in capabilities)
     ):
         fail("invalid capabilities")
-    if not set(capabilities) <= {"remote-project-gate", "systemd-user"}:
+    if not set(capabilities) <= {"project-gate", "user-service"}:
         fail("unsupported capability claim")
     argv_digest = hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()
     if argv_digest != request["verify_argv_sha256"]:
@@ -258,21 +258,21 @@ def main() -> int:
                 fail("remote checkout is not clean after exact commit reconstruction")
 
             probes: dict[str, bool] = {}
-            if "systemd-user" in capabilities:
+            if "user-service" in capabilities:
                 probe = subprocess.run(
                     [
                         "/usr/bin/systemd-run", "--user", "--quiet", "--wait",
                         "--pipe", "--collect", "--service-type=exec",
-                        "/usr/bin/printf", "factory-systemd-user-ok",
+                        "/usr/bin/printf", "factory-user-service-ok",
                     ],
                     env=env, capture_output=True, timeout=30,
                 )
-                probes["systemd-user"] = probe.returncode == 0 and probe.stdout == b"factory-systemd-user-ok"
+                probes["user-service"] = probe.returncode == 0 and probe.stdout == b"factory-user-service-ok"
             if any(not value for value in probes.values()):
                 fail("trusted capability probe failed")
 
             returncode, stdout, stderr = run_bounded(argv, job, env)
-            probes["remote-project-gate"] = returncode == 0
+            probes["project-gate"] = returncode == 0
             evidenced = sorted(capability for capability in capabilities if probes.get(capability, False))
             result = "pass" if returncode == 0 and len(evidenced) == len(capabilities) else "fail"
             emit({

@@ -114,7 +114,7 @@ AG
 
 # A contract for an undeclared/unavailable capability is a forbidden claim.
 setup_repo "$tmp/undeclared-contract" probe-capability
-write_contract "$tmp/undeclared-contract" inputplumber-system-dbus "--- inputplumber-system-dbus contract ---"
+write_contract "$tmp/undeclared-contract" demo-system-service "--- demo-system-service contract ---"
 must_fail "contract claiming an undeclared capability" \
     "cd '$tmp/undeclared-contract' && ./scripts/check-capability-contracts.py"
 

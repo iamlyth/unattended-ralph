@@ -1,0 +1,5 @@
+{
+  "schema": "ralph-requirement-policy/v1",
+  "description": "Separately committed requirement policy map. required_tier is assigned here (external authority), never self-declared by the conformance sidecar. The conformance validator rejects any sidecar required_tier that differs from this map, and any matrix/sidecar requirement absent from this map. This product-neutral template declares no requirements yet: an adopting product commits its own requirement ids and required tiers here before planning.",
+  "requirements": []
+}

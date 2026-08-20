@@ -1,0 +1,66 @@
+{
+  "schema": "ralph-receipt-policy/v1",
+  "description": "Authorizes campaign objective receipt categories in the product-neutral boilerplate. A machine receipt satisfies a category only when its recorded argv equals one of the category's allowlisted argv exactly, its evidence_commit equals the active campaign audit base, and it carries the audit coordinator round/nonce binding. A runner manifest satisfies a category only when the category allows manifests and the manifest is an accepted exact-commit runner receipt whose path contains the category. Arbitrary commands (for example a bare `true`) are never allowed; receipt tags alone never authorize. The allowlists bind each category to the generic boilerplate's own gate tooling; an adopting product replaces this policy with its product commands before running campaigns.",
+  "categories": [
+    {
+      "name": "runner-evidence",
+      "tier": "installed",
+      "allow_manifest": true,
+      "argv": [["./scripts/run-factory-runners.py"]]
+    },
+    {
+      "name": "project-verify",
+      "tier": "installed",
+      "allow_manifest": false,
+      "argv": [["./scripts/verify-boilerplate.sh"]]
+    },
+    {
+      "name": "installed-functional",
+      "tier": "installed",
+      "allow_manifest": true,
+      "argv": [["./scripts/check-installed-functional-evidence.sh"]]
+    },
+    {
+      "name": "visual-render",
+      "tier": "installed",
+      "allow_manifest": false,
+      "argv": [["./scripts/check-golden-policy.py"]]
+    },
+    {
+      "name": "real-system-service",
+      "tier": "real_system",
+      "allow_manifest": false,
+      "argv": [["./scripts/check-factory-environment.py"]]
+    },
+    {
+      "name": "target-consumer",
+      "tier": "real_system",
+      "allow_manifest": false,
+      "argv": [["./scripts/check-factory-environment.py"]]
+    },
+    {
+      "name": "package-build",
+      "tier": "installed",
+      "allow_manifest": true,
+      "argv": [["./scripts/verify-boilerplate.sh"]]
+    },
+    {
+      "name": "package-install",
+      "tier": "installed",
+      "allow_manifest": true,
+      "argv": [["./scripts/verify-boilerplate.sh"]]
+    },
+    {
+      "name": "final-gate",
+      "tier": "installed",
+      "allow_manifest": false,
+      "argv": [["./scripts/final-gate.sh", "--implementation"]]
+    },
+    {
+      "name": "audit-report",
+      "tier": "unit",
+      "allow_manifest": false,
+      "argv": [["./scripts/validate-campaign-audit.py", "complete", ".factory/artifacts/campaign-audit.md"]]
+    }
+  ]
+}

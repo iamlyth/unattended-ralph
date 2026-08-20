@@ -1,35 +1,71 @@
 #!/usr/bin/env python3
-"""Seed a campaign audit report bound to the just-verified implementation."""
+"""Seed a campaign audit report bound to the just-verified implementation.
+
+Also mints the protected audit coordinator state (`.factory-state/audit-coordinator.json`)
+with a fresh random nonce bound to the round and audit base. `scripts/machine-receipt.py`
+requires this coordinator binding (round/base/nonce) to mint receipts; a bare model
+call cannot mint receipts outside the audit coordinator's bounded invocation.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
+SHA1 = re.compile(r"^[0-9a-f]{40}$")
+COORDINATOR_FILE = ROOT / ".factory-state/audit-coordinator.json"
 
 
 def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
         os.replace(temporary, path)
     finally:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def coordinator_state(round_number: int, base: str) -> dict:
+    state_dir = ROOT / ".factory-state"
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise SystemExit("initialize-campaign-audit: .factory-state must be a real directory")
+    info = state_dir.lstat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise SystemExit("initialize-campaign-audit: unsafe .factory-state directory")
+    state_dir.chmod(0o700)
+    if COORDINATOR_FILE.exists() or COORDINATOR_FILE.is_symlink():
+        raise SystemExit(
+            "initialize-campaign-audit: audit coordinator state already exists; "
+            "refusing to mint a new nonce for an active audit"
+        )
+    return json.dumps({
+        "schema": "ralph-audit-coordinator/v1",
+        "round": round_number,
+        "base_commit": base,
+        "nonce": hashlib.sha256(os.urandom(32)).hexdigest(),
+        "created_at": int(time.time()),
+    }, sort_keys=True, indent=2) + "\n"
 
 
 def main() -> int:
@@ -42,6 +78,8 @@ def main() -> int:
         raise SystemExit("initialize-campaign-audit: round must be positive")
     if not re.fullmatch(r"[0-9a-f]{64}", args.runner_evidence_sha256):
         raise SystemExit("initialize-campaign-audit: runner evidence digest is invalid")
+    if not SHA1.fullmatch(args.base):
+        raise SystemExit("initialize-campaign-audit: base must be a strict 40-hex commit")
     git("cat-file", "-e", f"{args.base}^{{commit}}")
     if git("rev-parse", "HEAD") != args.base:
         raise SystemExit("initialize-campaign-audit: audit base must equal HEAD")
@@ -76,7 +114,9 @@ Fresh independent audit initialized at `{args.base}`.
 """
     atomic_write(ROOT / ".factory/artifacts/campaign-audit.md", report)
     atomic_write(ROOT / ".ralph/agent/scratchpad.md", scratch)
+    atomic_write(COORDINATOR_FILE, coordinator_state(args.round, args.base), mode=0o600)
     print(f"initialize-campaign-audit: seeded round {args.round} at {args.base[:12]}")
+    print("initialize-campaign-audit: minted audit coordinator binding (nonce protected in .factory-state)")
     return 0
 
 

@@ -16,10 +16,10 @@ capabilities = ["controller-input"]
 [[runners]]
 name = "hardware"
 transport = "ssh"
-ssh_config_alias = "controller-box-vm"
+ssh_config_alias = "boilerplate-vm"
 working_directory = "/srv/dev-runner/workspaces/hardware"
 capabilities = ["controller-input", "gpu"]
-verify_argv = ["./scripts/verify-project.sh"]
+verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
 "$CHECK" "$tmp/valid.toml" >/dev/null
 for field in 'password = "bad"' 'host = "10.0.0.2"' 'private_key = "/tmp/key"'; do
@@ -35,7 +35,7 @@ schema_version = 1
 [[runners]]
 name = "bad"
 transport = "ssh"
-ssh_config_alias = "controller-box-vm"
+ssh_config_alias = "boilerplate-vm"
 working_directory = "/srv/dev-runner/workspaces/bad"
 capabilities = ["test"]
 verify_argv = ["runner", "--token", "secret-value"]
@@ -59,9 +59,9 @@ for mutation in bad-workdir bad-alias duplicate-capability shell-argv; do
     cp "$tmp/valid.toml" "$tmp/mutation.toml"
     case "$mutation" in
         bad-workdir) sed -i 's#/srv/dev-runner/workspaces/hardware#/srv/dev-runner/workspaces/../escape#' "$tmp/mutation.toml" ;;
-        bad-alias) sed -i 's/ssh_config_alias = "controller-box-vm"/ssh_config_alias = "10.0.0.2"/' "$tmp/mutation.toml" ;;
+        bad-alias) sed -i 's/ssh_config_alias = "boilerplate-vm"/ssh_config_alias = "10.0.0.2"/' "$tmp/mutation.toml" ;;
         duplicate-capability) sed -i 's/\["controller-input", "gpu"\]/["gpu", "gpu"]/' "$tmp/mutation.toml" ;;
-        shell-argv) sed -i 's#\["./scripts/verify-project.sh"\]#["./scripts/verify-project.sh", "; touch /tmp/pwned"]#' "$tmp/mutation.toml" ;;
+        shell-argv) sed -i 's#\["./scripts/verify-boilerplate.sh"\]#["./scripts/verify-boilerplate.sh", "; touch /tmp/pwned"]#' "$tmp/mutation.toml" ;;
     esac
     if "$CHECK" "$tmp/mutation.toml" >/dev/null 2>&1; then
         echo "test: environment validator accepted $mutation" >&2

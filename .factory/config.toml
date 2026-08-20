@@ -34,7 +34,7 @@ operations = "docs/OPERATIONS.md"
 final_task_title = "Final documentation and specification audit"
 
 [verification]
-maintenance_command = ["./scripts/verify-project.sh"]
+maintenance_command = ["./scripts/verify-boilerplate.sh"]
 campaign_command = ["./scripts/verify-boilerplate.sh"]
 
 [issues]

@@ -2,17 +2,24 @@
 # generate-golden.sh — Regenerate golden image baselines for visual tests.
 #
 # Protected golden policy (`.factory/golden-policy.json`): generation can
-# never overwrite active (committed) goldens as a side effect. This script
-# refuses to run unless the operator supplies an explicit review manifest
-# path, a human reviewer identity, and a review date. After regeneration it
-# writes the reviewed manifest entries (before = HEAD hash, after = new hash)
-# so `scripts/check-golden-policy.py` can validate the change before commit.
-# The goldens and the manifest are reviewed and committed together.
+# never overwrite active (committed) goldens as a side effect, and golden
+# approval is out-of-band and non-automatable. Unattended gates never accept
+# agent-authored `human: true`, reviewer strings, or environment reviewer
+# identity; until a verifiable external attestation mechanism is provisioned,
+# this template hook refuses to run in unattended mode.
 #
-# Usage:
-#   CBX_GOLDEN_REVIEW_MANIFEST=.factory/golden-review.json \
-#   CBX_GOLDEN_REVIEWER='<human name>' \
-#   CBX_GOLDEN_REVIEWED_AT=2026-08-19 \
+# A human operator supplies the out-of-band attestation marker
+# (GOLDEN_OUT_OF_BAND_ATTESTATION=1) plus the review manifest path, a human
+# reviewer identity, and a review date, and then replaces the placeholder
+# `generate-golden-project-hook` command below with the project's own golden
+# regeneration command.
+#
+# Usage (after a human supplies a canonical project spec and approves goldens
+# out-of-band):
+#   GOLDEN_OUT_OF_BAND_ATTESTATION=1 \
+#   GOLDEN_REVIEW_MANIFEST=.factory/golden-review.json \
+#   GOLDEN_REVIEWER='<human name>' \
+#   GOLDEN_REVIEWED_AT=2026-08-19 \
 #   scripts/generate-golden.sh
 set -euo pipefail
 
@@ -21,19 +28,24 @@ SOURCE_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$SOURCE_DIR"
 
-[[ -n "${CBX_GOLDEN_REVIEW_MANIFEST:-}" ]] || {
-    echo "generate-golden: refused: generation cannot overwrite active goldens without a review manifest (CBX_GOLDEN_REVIEW_MANIFEST)" >&2
+[[ "${GOLDEN_OUT_OF_BAND_ATTESTATION:-}" == 1 ]] || {
+    echo "generate-golden: refused: golden approval is out-of-band and non-automatable." >&2
+    echo "generate-golden: an unattended call cannot attest human review (GOLDEN_OUT_OF_BAND_ATTESTATION is not set)." >&2
     exit 1
 }
-[[ -n "${CBX_GOLDEN_REVIEWER:-}" ]] || {
-    echo "generate-golden: refused: a human reviewer identity is required (CBX_GOLDEN_REVIEWER)" >&2
+[[ -n "${GOLDEN_REVIEW_MANIFEST:-}" ]] || {
+    echo "generate-golden: refused: generation cannot overwrite active goldens without a review manifest (GOLDEN_REVIEW_MANIFEST)" >&2
     exit 1
 }
-[[ "${CBX_GOLDEN_REVIEWED_AT:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
-    echo "generate-golden: refused: an ISO-8601 review date is required (CBX_GOLDEN_REVIEWED_AT)" >&2
+[[ -n "${GOLDEN_REVIEWER:-}" ]] || {
+    echo "generate-golden: refused: a human reviewer identity is required (GOLDEN_REVIEWER)" >&2
     exit 1
 }
-MANIFEST="$CBX_GOLDEN_REVIEW_MANIFEST"
+[[ "${GOLDEN_REVIEWED_AT:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+    echo "generate-golden: refused: an ISO-8601 review date is required (GOLDEN_REVIEWED_AT)" >&2
+    exit 1
+}
+MANIFEST="$GOLDEN_REVIEW_MANIFEST"
 [[ "$MANIFEST" != /* ]] || { echo "generate-golden: manifest path must be repository-relative" >&2; exit 1; }
 [[ -f "$MANIFEST" ]] || { echo "generate-golden: review manifest does not exist: $MANIFEST" >&2; exit 1; }
 python3 - "$MANIFEST" <<'PY' || exit 1
@@ -46,15 +58,21 @@ if data['entries']:
     raise SystemExit('generate-golden: review manifest already has entries; resolve or commit the previous review first')
 PY
 
-echo "Building test_golden..."
-nix-shell --run "cmake --build build-maintenance-verify --target test_golden"
+# Project hook: regenerate goldens through the Controller product path.
+# This is a project hook wired into the generic golden template: golden
+# approval remains out-of-band and non-automatable.
+GOLDEN_GENERATE_COMMAND=${GOLDEN_GENERATE_COMMAND:-}
+if [[ -z "$GOLDEN_GENERATE_COMMAND" ]]; then
+    echo "Building test_golden..."
+    nix-shell --run "cmake --build build-maintenance-verify --target test_golden"
+    GOLDEN_GENERATE_COMMAND="ctest --test-dir build-maintenance-verify -R test_golden --output-on-failure"
+fi
 
-echo ""
 echo "Generating golden baselines..."
-CBX_GENERATE_GOLDEN=1 SDL_VIDEODRIVER=dummy \
-  ctest --test-dir build-maintenance-verify -R test_golden --output-on-failure
+GOLDEN_GENERATE=1 SDL_VIDEODRIVER=dummy \
+  ${GOLDEN_GENERATE_COMMAND}
 
-python3 - "$MANIFEST" "$CBX_GOLDEN_REVIEWER" "$CBX_GOLDEN_REVIEWED_AT" "${CBX_GOLDEN_REASON:-reviewed regeneration}" <<'PY'
+python3 - "$MANIFEST" "$GOLDEN_REVIEWER" "$GOLDEN_REVIEWED_AT" "${GOLDEN_REASON:-reviewed regeneration}" <<'PY'
 import hashlib, json, subprocess, sys
 from pathlib import Path
 manifest, reviewer, reviewed_at, reason = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -91,5 +109,5 @@ if not entries:
     raise SystemExit('golden-generate: no golden file changed; refusing to record an empty review')
 json.dump({'schema': 'ralph-golden-review/v1', 'entries': entries}, open(manifest, 'w'), indent=2)
 print(f'golden-generate: wrote {len(entries)} reviewed entry/entries to {manifest}')
-print('golden-generate: review the images, then commit goldens + manifest together')
+print('golden-generate: review the images out-of-band, then commit goldens + manifest together')
 PY

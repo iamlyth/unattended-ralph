@@ -9,8 +9,22 @@ the bounded stdout/stderr transcript under `.factory-state/audit-receipts/`.
 for every executable-evidence line in the campaign audit report; subagent prose
 cannot certify runtime.
 
+Authorization (receipt minting is coordinator-bounded):
+- a bare model call with no campaign binding fails;
+- inside a campaign audit the coordinator exports the protected launch
+  binding: `FACTORY_CAMPAIGN_AUDIT_ROUND`, `FACTORY_CAMPAIGN_AUDIT_BASE`, and
+  `FACTORY_CAMPAIGN_AUDIT_NONCE`. The nonce is minted into the protected
+  `.factory-state/audit-coordinator.json` state by the audit coordinator
+  (`scripts/initialize-campaign-audit.py`) and never by the model;
+- the receipt records `evidence_commit` equal to the campaign audit base
+  (strict 40-hex) plus the coordinator round/nonce binding, so stale or
+  cross-round receipts are rejected by the campaign-audit gate.
+
 Usage:
   scripts/machine-receipt.py --tag <tag> -- <argv...>
+  (campaign bound: FACTORY_CAMPAIGN_AUDIT_ROUND/BASE/NONCE must be exported)
+  tests may pass --audit-round/--evidence-commit/--nonce explicitly together
+  with a matching `.factory-state/audit-coordinator.json` fixture.
 """
 
 from __future__ import annotations
@@ -29,7 +43,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SHA1 = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_LOG = 4 * 1024 * 1024
+COORDINATOR_FILE = ".factory-state/audit-coordinator.json"
 
 
 def fail(message: str) -> None:
@@ -64,6 +81,65 @@ def atomic_write(path: Path, data: bytes) -> None:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def regular_json(path: Path, maximum: int) -> dict:
+    if path.is_symlink() or not path.is_file():
+        fail(f"unsafe or missing coordinator state: {path}")
+    if path.stat().st_size > maximum:
+        fail(f"coordinator state exceeds the size limit: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid coordinator state {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"coordinator state must be an object: {path}")
+    return data
+
+
+def coordinator_binding(root: Path, round_number: int | None, evidence_commit: str | None,
+                        nonce: str | None) -> tuple[int, str, str]:
+    """Validate the audit coordinator binding; every receipt is round-bound."""
+    env_round = os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND", "")
+    env_base = os.environ.get("FACTORY_CAMPAIGN_AUDIT_BASE", "")
+    env_nonce = os.environ.get("FACTORY_CAMPAIGN_AUDIT_NONCE", "")
+    if round_number is None:
+        round_number = int(env_round) if env_round.isdigit() else None
+    if evidence_commit is None:
+        evidence_commit = env_base or None
+    if nonce is None:
+        nonce = env_nonce or None
+    if (
+        round_number is None or round_number < 1
+        or not isinstance(evidence_commit, str) or not SHA1.fullmatch(evidence_commit)
+        or not isinstance(nonce, str) or not SHA256.fullmatch(nonce)
+    ):
+        fail(
+            "receipt minting is bound to the audit coordinator: "
+            "FACTORY_CAMPAIGN_AUDIT_ROUND/BASE/NONCE (or explicit test binding) are required; "
+            "a bare model receipt call is not authorized"
+        )
+    state = root / COORDINATOR_FILE
+    if not state.exists() and not (env_base or os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND")):
+        fail("audit coordinator state is missing; machine receipts cannot be minted outside a campaign audit")
+    if state.exists():
+        data = regular_json(state, 16384)
+        expected = {"schema", "round", "base_commit", "nonce", "created_at"}
+        if (
+            set(data) != expected
+            or data.get("schema") != "ralph-audit-coordinator/v1"
+            or type(data.get("round")) is not int
+            or data["round"] < 1
+            or not isinstance(data.get("base_commit"), str)
+            or not SHA1.fullmatch(data["base_commit"])
+            or not isinstance(data.get("nonce"), str)
+            or not SHA256.fullmatch(data["nonce"])
+            or not isinstance(data.get("created_at"), int)
+        ):
+            fail("audit coordinator state is invalid")
+        if data["round"] != round_number or data["base_commit"] != evidence_commit or data["nonce"] != nonce:
+            fail("supplied audit binding does not match the protected coordinator state")
+    return round_number, evidence_commit, nonce
 
 
 def run_bounded(argv: list[str], cwd: Path) -> tuple[int, bytes, bytes, bool]:
@@ -109,18 +185,9 @@ def run_bounded(argv: list[str], cwd: Path) -> tuple[int, bytes, bytes, bool]:
     return process.returncode, bytes(stdout), bytes(stderr), overflow.is_set()
 
 
-def git_head(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True,
-        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
-    )
-    if result.returncode:
-        fail("cannot resolve evidence commit")
-    return result.stdout.strip()
-
-
 def record_receipt(root: Path, tag: str, argv: list[str], exit_code: int,
-                   stdout: bytes, stderr: bytes, started: float) -> Path:
+                   stdout: bytes, stderr: bytes, started: float,
+                   round_number: int, evidence_commit: str, nonce: str) -> Path:
     receipts = receipts_dir(root)
     stdout_path = receipts / f"{tag}.stdout"
     stderr_path = receipts / f"{tag}.stderr"
@@ -136,7 +203,9 @@ def record_receipt(root: Path, tag: str, argv: list[str], exit_code: int,
         "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
         "started_at": int(started),
         "finished_at": int(time.time()),
-        "evidence_commit": git_head(root),
+        "evidence_commit": evidence_commit,
+        "coordinator_round": round_number,
+        "coordinator_nonce": nonce,
     }
     receipt_path = receipts / f"{tag}.json"
     atomic_write(receipt_path, (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode())
@@ -147,6 +216,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
     parser.add_argument("--root", default=str(ROOT))
+    parser.add_argument("--audit-round", type=int)
+    parser.add_argument("--evidence-commit")
+    parser.add_argument("--nonce")
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     root = Path(args.root).resolve()
@@ -159,11 +231,17 @@ def main() -> int:
         fail("no command provided")
     if any(item == "" for item in argv):
         fail("argv must be non-empty strings")
+    round_number, evidence_commit, nonce = coordinator_binding(
+        root, args.audit_round, args.evidence_commit, args.nonce
+    )
     started = time.time()
     returncode, stdout, stderr, overflow = run_bounded(argv, root)
     if overflow:
         fail("command output exceeded the receipt limit")
-    receipt_path = record_receipt(root, args.tag, argv, returncode, stdout, stderr, started)
+    receipt_path = record_receipt(
+        root, args.tag, argv, returncode, stdout, stderr, started,
+        round_number, evidence_commit, nonce,
+    )
     print(f"[receipt: {receipt_path.relative_to(root)}]")
     return returncode if returncode < 255 else 1
 

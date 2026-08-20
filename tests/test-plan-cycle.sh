@@ -11,6 +11,7 @@ cp "$PROJECT_ROOT/scripts/initialize-plan-cycle.py" \
    "$PROJECT_ROOT/scripts/bug-ledger.py" \
    "$PROJECT_ROOT/scripts/check-plan-freshness.sh" \
    "$PROJECT_ROOT/scripts/plan-scope-guard.sh" \
+   "$PROJECT_ROOT/scripts/check-spec-provided.sh" \
    "$PROJECT_ROOT/scripts/final-gate.sh" \
    "$PROJECT_ROOT/scripts/check-scratchpad.sh" \
    "$PROJECT_ROOT/scripts/validate-implementation-plan.py" \

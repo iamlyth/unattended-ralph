@@ -56,6 +56,30 @@ export FACTORY_CAMPAIGN_AUDIT_ROUND FACTORY_CAMPAIGN_AUDIT_BASE FACTORY_CAMPAIGN
     && $FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
     echo "ralph-audit: invalid campaign audit binding" >&2; exit 1;
 }
+# The protected audit coordinator binding authorizes machine-receipt minting
+# only inside this audit's bounded invocation; a bare model receipt call has
+# no nonce and fails. Validate the coordinator state against the campaign.
+FACTORY_CAMPAIGN_AUDIT_NONCE=$(python3 - <<'PY' || exit 1
+import json, os, re, sys
+from pathlib import Path
+state = Path('.factory-state/audit-coordinator.json')
+if state.is_symlink() or not state.is_file():
+    raise SystemExit('ralph-audit: audit coordinator state is missing')
+try:
+    data = json.loads(state.read_text(encoding='utf-8'))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'ralph-audit: invalid audit coordinator state: {exc}')
+expected = {'schema', 'round', 'base_commit', 'nonce', 'created_at'}
+if (not isinstance(data, dict) or set(data) != expected
+        or data.get('schema') != 'ralph-audit-coordinator/v1'
+        or data.get('round') != int(os.environ['FACTORY_CAMPAIGN_AUDIT_ROUND'])
+        or data.get('base_commit') != os.environ['FACTORY_CAMPAIGN_AUDIT_BASE']
+        or not re.fullmatch(r'[0-9a-f]{64}', data.get('nonce') or '')):
+    raise SystemExit('ralph-audit: audit coordinator binding does not match campaign state')
+print(data['nonce'])
+PY
+)
+export FACTORY_CAMPAIGN_AUDIT_NONCE
 factory_lock_run_untrusted ./scripts/campaign-audit-scope-guard.sh
 
 # shellcheck source=scripts/ralph-supervision.sh

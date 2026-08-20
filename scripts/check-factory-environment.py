@@ -115,7 +115,7 @@ def validate(path: Path, require_empty: bool) -> None:
         if not capabilities or len(capabilities) != len(set(capabilities)) or not all(CAP_RE.fullmatch(item) for item in capabilities):
             fail(f"runners[{index}] requires unique valid capabilities")
         sensitive_flags = {"-i", "--identity-file", "--password", "--private-key", "--token", "--secret", "--user", "-l", "--header", "-H"}
-        if argv != ["./scripts/verify-project.sh"]:
+        if argv != ["./scripts/verify-boilerplate.sh"]:
             fail(f"runners[{index}].verify_argv must be the approved project verifier argv")
         if any(any(ord(char) < 32 for char in item) for item in argv):
             fail(f"runners[{index}].verify_argv must be control-character-free")

@@ -18,21 +18,36 @@ name = "fake-runner"
 transport = "ssh"
 ssh_config_alias = "fake-runner"
 working_directory = "$tmp/runner/workspaces/fake-project"
-capabilities = ["remote-project-gate"]
-verify_argv = ["./scripts/verify-project.sh"]
+capabilities = ["project-gate"]
+verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
-cat > "$tmp/repo/scripts/verify-project.sh" <<'EOF'
+cat > "$tmp/repo/scripts/verify-boilerplate.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $(git rev-parse HEAD) =~ ^[0-9a-f]{40}$ ]]
 [[ -z $(git status --porcelain --untracked-files=normal) ]]
 exit 0
 EOF
-chmod +x "$tmp/repo/scripts/verify-project.sh"
+chmod +x "$tmp/repo/scripts/verify-boilerplate.sh"
 printf '# Spec\n' > "$tmp/repo/docs/SPEC.md"
 cat > "$tmp/repo/.gitignore" <<'EOF'
 .factory-state/
 EOF
+# Ephemeral signer for runner-receipt trust (private key stays out-of-tree).
+ssh-keygen -q -t ed25519 -N '' -f "$tmp/signer-key"
+PUBLIC_KEY=$(cut -d' ' -f1,2 "$tmp/signer-key.pub")
+python3 - "$PUBLIC_KEY" <<'PY' > "$tmp/repo/.factory/signer-trust.json"
+import json, sys
+print(json.dumps({
+    "schema": "ralph-runner-signer-trust/v1",
+    "description": "ephemeral test fixture signer",
+    "require_signature": True,
+    "enabled": True,
+    "namespace": "factory-runner-receipt",
+    "public_keys": [{"principal": "factory-signer", "public_key": sys.argv[1]}],
+    "allowed_principals": ["factory-signer"],
+}))
+PY
 cat > "$tmp/fake-ssh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -59,9 +74,13 @@ git -C "$tmp/repo" commit -qm base
 (
     cd "$tmp/repo"
     ./scripts/run-factory-runners.py >/dev/null
+    head=$(git rev-parse HEAD)
+    cat ".factory-state/runner-evidence/fake-runner/$head/manifest.json" \
+        | ssh-keygen -Y sign -f "$tmp/signer-key" -n factory-runner-receipt \
+            > ".factory-state/runner-evidence/fake-runner/$head/manifest.sig" 2>/dev/null
     ./scripts/check-factory-runner-evidence.py >/dev/null
     capabilities=$(./scripts/check-factory-runner-evidence.py --print-capabilities)
-    grep -qx 'remote-project-gate' <<<"$capabilities"
+    grep -qx 'project-gate' <<<"$capabilities"
 )
 base=$(git -C "$tmp/repo" rev-parse HEAD)
 # Historical validation must use the selected commit's declaration, not the
@@ -74,7 +93,7 @@ git -C "$tmp/repo" reset -q --hard "$base"
 
 # A resource name is not evidence: unsupported hardware claims fail before the
 # generic verifier can turn them into a passing receipt.
-sed -i 's/\["remote-project-gate"\]/["remote-project-gate", "physical-controller"]/' \
+sed -i 's/\["project-gate"\]/["project-gate", "physical-controller"]/' \
     "$tmp/repo/.factory/environment.toml"
 git -C "$tmp/repo" add .factory/environment.toml
 git -C "$tmp/repo" commit -qm unsupported-physical-controller
@@ -83,6 +102,32 @@ set +e
 unsupported_capability_rc=$?
 set -e
 [[ $unsupported_capability_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+
+# Device presence alone cannot produce kernel-device evidence: the dedicated
+# non-skipping project contract must also exist and pass in the reconstructed job.
+sed -i 's/\["project-gate"\]/["project-gate", "kernel-device"]/' \
+    "$tmp/repo/.factory/environment.toml"
+git -C "$tmp/repo" add .factory/environment.toml
+git -C "$tmp/repo" commit -qm incomplete-kernel-device-contract
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+kernel_contract_rc=$?
+set -e
+[[ $kernel_contract_rc -eq 1 ]]
+git -C "$tmp/repo" reset -q --hard "$base"
+
+# Packaging tools alone are not installed-runtime evidence: the isolated
+# Flatpak build, install, and installed-binary execution contract must pass.
+sed -i 's/\["project-gate"\]/["project-gate", "installed-runtime"]/' \
+    "$tmp/repo/.factory/environment.toml"
+git -C "$tmp/repo" add .factory/environment.toml
+git -C "$tmp/repo" commit -qm incomplete-installed-runtime-contract
+set +e
+(cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
+installed_package_contract_rc=$?
+set -e
+[[ $installed_package_contract_rc -eq 1 ]]
 git -C "$tmp/repo" reset -q --hard "$base"
 
 # Self-consistent local hashes cannot conceal a false archive binding.
@@ -133,12 +178,12 @@ set -e
 git -C "$tmp/repo" reset -q --hard HEAD^
 
 # Excessive verifier output is terminated without unbounded buffering.
-cat > "$tmp/repo/scripts/verify-project.sh" <<'EOF'
+cat > "$tmp/repo/scripts/verify-boilerplate.sh" <<'EOF'
 #!/usr/bin/env bash
 python3 -c 'import sys; sys.stdout.write("x" * (5 * 1024 * 1024))'
 EOF
-chmod +x "$tmp/repo/scripts/verify-project.sh"
-git -C "$tmp/repo" add scripts/verify-project.sh
+chmod +x "$tmp/repo/scripts/verify-boilerplate.sh"
+git -C "$tmp/repo" add scripts/verify-boilerplate.sh
 git -C "$tmp/repo" commit -qm excessive-output
 set +e
 (cd "$tmp/repo" && ./scripts/run-factory-runners.py >/dev/null 2>&1)
@@ -149,8 +194,8 @@ set -e
 git -C "$tmp/repo" reset -q --hard HEAD^
 
 # A verifier failure must propagate through the real endpoint protocol.
-sed -i 's/exit 0/exit 23/' "$tmp/repo/scripts/verify-project.sh"
-git -C "$tmp/repo" add scripts/verify-project.sh
+sed -i 's/exit 0/exit 23/' "$tmp/repo/scripts/verify-boilerplate.sh"
+git -C "$tmp/repo" add scripts/verify-boilerplate.sh
 git -C "$tmp/repo" commit -qm failing-verifier
 rm -rf "$tmp/repo/.factory-state"
 set +e

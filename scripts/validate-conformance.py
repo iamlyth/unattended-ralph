@@ -16,6 +16,13 @@ Rules:
 - `not_applicable` requires an explicit spec-scoped reason;
 - every `verified` row must name an exact evidence commit and either a receipt
   or an artifact ref that exists at that commit (free-text rows are rejected);
+- `required_tier` is assigned by the separately committed requirement-policy map
+  (`.factory/requirement-policy.json`), never self-declared by the sidecar;
+- in complete mode, receipt/artifact refs must exist as Git blobs at the
+  declared evidence commit (working-tree presence is never enough), the
+  evidence commit must resolve to a real commit object, and human-tier claims
+  are rejected because human/golden approval is out-of-band and non-automatable
+  until a verifiable external attestation mechanism exists;
 - complete mode requires every row `verified`.
 """
 
@@ -41,6 +48,7 @@ PLAN_PATH = ROOT / ".factory/artifacts/implementation-plan.md"
 ENVIRONMENT_PATH = ROOT / ".factory/environment.toml"
 SIDECAR_DEFAULT = ROOT / ".factory/artifacts/conformance.json"
 FACTS_DEFAULT = ROOT / ".factory/artifacts/blocked-facts.json"
+POLICY_DEFAULT = ROOT / ".factory/requirement-policy.json"
 
 
 def fail(message: str) -> None:
@@ -93,6 +101,36 @@ def load_sidecar(path: Path) -> dict:
     if not isinstance(requirements, list):
         fail("conformance sidecar must declare a requirements array")
     return data
+
+
+def load_requirement_policy(root: Path) -> dict[str, str]:
+    """Load the separately committed requirement-policy map (id -> required_tier)."""
+    path = root / POLICY_DEFAULT
+    if path.is_symlink() or not path.is_file():
+        fail(f"requirement policy must be a regular tracked file: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"cannot parse requirement policy {path}: {exc}")
+    if not isinstance(data, dict) or data.get("schema") != "ralph-requirement-policy/v1":
+        fail(f"requirement policy schema must be ralph-requirement-policy/v1: {path}")
+    entries = data.get("requirements")
+    if not isinstance(entries, list):
+        fail("requirement policy must declare a requirements array")
+    policy: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            fail("every requirement-policy entry must be an object")
+        requirement_id = entry.get("id")
+        required_tier = entry.get("required_tier")
+        if not isinstance(requirement_id, str) or not MATRIX_ID.fullmatch(requirement_id):
+            fail(f"requirement policy has an invalid id: {requirement_id!r}")
+        if required_tier not in TIER_INDEX:
+            fail(f"requirement policy {requirement_id} has invalid required_tier {required_tier!r}")
+        if requirement_id in policy:
+            fail(f"requirement policy has duplicate id {requirement_id}")
+        policy[requirement_id] = required_tier
+    return policy
 
 
 def load_facts(root: Path, path: Path) -> dict:
@@ -178,7 +216,24 @@ def validate_requirement(requirement: dict, index: int) -> None:
         fail(f"requirements[{index}] not_applicable requires a spec-scoped reason (a §section or docs/SPEC.md)")
 
 
-def reference_exists(root: Path, ref: str, commit: str) -> bool:
+def commit_exists(root: Path, commit: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def reference_exists(root: Path, ref: str, commit: str, *, blob_only: bool) -> bool:
+    if blob_only:
+        # Complete mode: the ref must be a Git blob at the declared evidence
+        # commit. Working-tree presence is never sufficient (stale or
+        # uncommitted evidence is rejected).
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}:{ref}"],
+            cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
     path = root / ref
     if path.exists() and not path.is_symlink():
         return True
@@ -198,7 +253,7 @@ def check_capability_evidence(root: Path, capabilities: list[str]) -> None:
         checker.verify_capability(root, capability)
 
 
-def validate_complete(root: Path, data: dict) -> None:
+def validate_complete(root: Path, data: dict, policy: dict[str, str]) -> None:
     for index, requirement in enumerate(data["requirements"]):
         validate_requirement(requirement, index)
         classification = requirement["classification"]
@@ -206,6 +261,24 @@ def validate_complete(root: Path, data: dict) -> None:
             fail(f"completion rejected while requirement {requirement['id']} is `{classification}` (blocked must fail implementation completion)")
         evidence_tier = requirement["evidence_tier"]
         required_tier = requirement["required_tier"]
+        if requirement["id"] not in policy:
+            fail(f"requirement {requirement['id']} has no required_tier in the requirement-policy map")
+        if required_tier != policy[requirement["id"]]:
+            fail(
+                f"requirement {requirement['id']} self-declares required_tier {required_tier} "
+                f"but the requirement-policy map assigns {policy[requirement['id']]}"
+            )
+        if required_tier == "human":
+            fail(
+                f"requirement {requirement['id']} requires the human evidence tier, which is "
+                f"out-of-band and non-automatable; keep the row as a finding until a "
+                f"verifiable external attestation mechanism exists"
+            )
+        if evidence_tier == "human":
+            fail(
+                f"requirement {requirement['id']} claims human-tier evidence, which cannot be "
+                f"self-attested by an unattended gate; force a finding"
+            )
         if TIER_INDEX[evidence_tier] < TIER_INDEX[required_tier]:
             fail(f"requirement {requirement['id']} claims verified at tier {evidence_tier} below required tier {required_tier}")
         if required_tier in {"real_system", "human"} and not requirement["required_capabilities"]:
@@ -214,12 +287,35 @@ def validate_complete(root: Path, data: dict) -> None:
         if capabilities:
             check_capability_evidence(root, capabilities)
         commit = requirement["evidence_commit"]
+        if not commit_exists(root, commit):
+            fail(f"requirement {requirement['id']} evidence_commit {commit[:12]} does not resolve to a commit")
         refs = requirement["receipts"] + requirement["artifacts"]
         if not refs:
             fail(f"requirement {requirement['id']} claims verified with no receipt or artifact refs (free-text row)")
         for ref in refs:
-            if not reference_exists(root, ref, commit):
-                fail(f"requirement {requirement['id']} references missing receipt/artifact {ref} at commit {commit}")
+            if not reference_exists(root, ref, commit, blob_only=True):
+                fail(
+                    f"requirement {requirement['id']} references receipt/artifact {ref} that is not a "
+                    f"Git blob at evidence commit {commit[:12]} (stale, uncommitted, or tampered)"
+                )
+
+
+def cross_check_policy(data: dict, policy: dict[str, str]) -> None:
+    """Bind required_tier to the separate requirement-policy map."""
+    sidecar_ids = {requirement["id"] for requirement in data["requirements"]}
+    for requirement in data["requirements"]:
+        requirement_id = requirement["id"]
+        if requirement_id not in policy:
+            fail(f"requirement {requirement_id} is absent from the requirement-policy map")
+        if requirement["required_tier"] != policy[requirement_id]:
+            fail(
+                f"requirement {requirement_id} self-declares required_tier "
+                f"{requirement['required_tier']} but the requirement-policy map assigns "
+                f"{policy[requirement_id]}"
+            )
+    unbound = sorted(set(policy) - sidecar_ids)
+    if unbound:
+        fail(f"requirement-policy map declares requirements absent from the sidecar: {unbound}")
 
 
 def cross_check(data: dict, matrix: dict[str, str]) -> None:
@@ -303,12 +399,14 @@ def main() -> int:
         fail("plan has no Specification conformance matrix but the sidecar declares requirements")
     if not data["requirements"]:
         fail("sidecar declares no requirements but the plan has a conformance matrix (drift)")
+    policy = load_requirement_policy(root)
+    cross_check_policy(data, policy)
     cross_check(data, matrix)
     cross_check_facts(data, facts)
     if args.mode == "complete":
-        validate_complete(root, data)
-        ledger = blocked_facts_module(root)
-        ledger.check_complete(root, facts)
+        validate_complete(root, data, policy)
+        blocked = blocked_facts_module(root)
+        blocked.check_complete(root, facts)
     print(f"conformance: {args.mode} valid ({len(data['requirements'])} requirements)")
     return 0
 

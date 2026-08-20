@@ -18,6 +18,17 @@ cat > "$tmp/.factory/config.toml" <<'EOF'
 [campaign]
 required_capabilities = []
 EOF
+cat > "$tmp/.factory/signer-trust.json" <<'EOF'
+{
+  "schema": "ralph-runner-signer-trust/v1",
+  "description": "test fixture: no signer provisioned",
+  "require_signature": true,
+  "enabled": false,
+  "namespace": "factory-runner-receipt",
+  "public_keys": [],
+  "allowed_principals": []
+}
+EOF
 cat > "$tmp/.factory/artifacts/implementation-plan.md" <<'EOF'
 ---
 status: complete

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Adversarial conformance-sidecar validation (BUG-0016): free-text verified
-# rows, lower-tier evidence for normative real-system/visual/hardware rows,
-# skipped probes, missing receipts, and not_applicable misuse must all fail.
+# Adversarial conformance-sidecar validation (BUG-0016 + provenance hardening):
+# free-text verified rows, lower-tier evidence for normative real-system/visual
+# hardware rows, skipped probes, missing receipts, not_applicable misuse,
+# uncommitted/stale refs (verified refs must be Git blobs at the evidence
+# commit), self-declared required_tier drift from the requirement-policy map,
+# and human-tier self-attestation must all fail.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -17,11 +20,11 @@ FACTS_VALIDATOR="$PROJECT_ROOT/scripts/validate-blocked-facts.py"
 setup_repo() {
     local dir=$1
     mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory-state/runner-evidence/probe-runner" \
-        "$dir/tests" "$dir/docs"
+        "$dir/tests/fixtures" "$dir/docs"
     cp "$VALIDATOR" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$FACTS_VALIDATOR" "$dir/scripts/"
     chmod +x "$dir/scripts/"*.py
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-project.sh"
-    chmod +x "$dir/scripts/verify-project.sh"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-boilerplate.sh"
+    chmod +x "$dir/scripts/verify-boilerplate.sh"
     cat > "$dir/.factory/environment.toml" <<'EOF'
 schema_version = 1
 [[runners]]
@@ -30,7 +33,7 @@ transport = "ssh"
 ssh_config_alias = "probe-runner"
 working_directory = "/srv/dev-runner/workspaces/probe"
 capabilities = ["probe-capability"]
-verify_argv = ["./scripts/verify-project.sh"]
+verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
     cat > "$dir/.factory/capability-contracts.json" <<'CONTRACT'
 {
@@ -38,7 +41,7 @@ EOF
   "capabilities": [
     {
       "name": "probe-capability",
-      "probe_argv": ["./scripts/verify-project.sh"],
+      "probe_argv": ["./scripts/verify-boilerplate.sh"],
       "probe_marker": "--- probe-capability contract ---",
       "must_execute": true,
       "must_not_skip": ["Skipped", "Not Run", "skip"],
@@ -56,9 +59,24 @@ CONTRACT
     git -C "$dir" add .
     git -C "$dir" commit -qm base
     printf 'int probe(void){return 0;}\n' > "$dir/tests/probe.c"
-    git -C "$dir" add tests/probe.c
+    printf '%s\n' '{"schema":"factory-runner-receipt/v1","result":"pass","exit_code":0}' > \
+        "$dir/tests/fixtures/runner-manifest.json"
+    git -C "$dir" add tests/probe.c tests/fixtures/runner-manifest.json
     git -C "$dir" commit -qm fixture
     local head
+    head=$(git -C "$dir" rev-parse HEAD)
+    cat > "$dir/.factory/requirement-policy.json" <<'POLICY'
+{
+  "schema": "ralph-requirement-policy/v1",
+  "requirements": [
+    {"id": "REQ-01", "required_tier": "unit", "spec_sections": ["§1"]},
+    {"id": "REQ-02", "required_tier": "unit", "spec_sections": ["§2"]},
+    {"id": "REQ-03", "required_tier": "real_system", "spec_sections": ["§3"]}
+  ]
+}
+POLICY
+    git -C "$dir" add .factory/requirement-policy.json
+    git -C "$dir" commit -qm policy
     head=$(git -C "$dir" rev-parse HEAD)
     mkdir -p "$dir/.factory-state/runner-evidence/probe-runner/$head"
     printf '%s\n' '{"schema":"factory-runner-receipt/v1","result":"pass","exit_code":0}' > \
@@ -77,6 +95,7 @@ LOG
   ]
 }
 AG
+    echo "$head"
 }
 
 write_plan() {
@@ -109,7 +128,7 @@ write_sidecar() {
       "required_tier": "unit",
       "required_capabilities": [],
       "evidence_commit": "$head",
-      "receipts": [".factory-state/runner-evidence/probe-runner/$head/manifest.json"],
+      "receipts": ["tests/fixtures/runner-manifest.json"],
       "artifacts": ["tests/probe.c"],
       "fact_refs": [],
       "reason": ""
@@ -192,7 +211,7 @@ for req in data['requirements']:
     req['evidence_tier'] = 'unit'
     req['required_tier'] = 'unit'
     req['required_capabilities'] = []
-    req['receipts'] = [f".factory-state/runner-evidence/probe-runner/{head}/manifest.json"]
+    req['receipts'] = ["tests/fixtures/runner-manifest.json"]
     req['artifacts'] = ["tests/probe.c"]
     req['fact_refs'] = []
     req['reason'] = ''
@@ -218,6 +237,27 @@ elif mode == 'missing-receipt':
     for req in data['requirements']:
         if req['id'] == 'REQ-01':
             req['receipts'] = ['.factory-state/runner-evidence/probe-runner/missing-receipt.json']
+elif mode == 'uncommitted-ref':
+    # The ref exists only in the working tree, never as a blob at the commit.
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['receipts'] = ['tests/fixtures/working-tree-only.json']
+elif mode == 'tampered-ref':
+    # The ref was committed, then deleted from the working tree: the blob still
+    # exists at the commit, so complete mode still accepts it; but a ref whose
+    # committed blob differs from the working tree is detected by hashing.
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['receipts'] = ['tests/fixtures/runner-manifest.json']
+elif mode == 'human-tier':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['evidence_tier'] = 'human'
+            req['required_tier'] = 'human'
+elif mode == 'tier-drift':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['required_tier'] = 'installed'
 open(path, 'w').write(json.dumps(data))
 PY
     sed -i -e 's/| REQ-02 | §2 | partial |/| REQ-02 | §2 | verified |/' \
@@ -244,8 +284,7 @@ expect_fail() {
 }
 
 # Blessed repo: planning valid, contract/receipt checkers pass.
-setup_repo "$tmp/blessed"
-head=$(git -C "$tmp/blessed" rev-parse HEAD)
+head=$(setup_repo "$tmp/blessed")
 write_plan "$tmp/blessed"
 write_sidecar "$tmp/blessed" "$head"
 write_facts "$tmp/blessed"
@@ -293,6 +332,52 @@ expect_fail "$tmp/skipped-probe" "a skipped probe in the receipt"
 mutate "$tmp/blessed" "$tmp/missing-receipt" missing-receipt
 expect_fail "$tmp/missing-receipt" "a missing receipt"
 
+# Uncommitted ref: a verified row whose receipt exists only in the working tree
+# (never committed at the evidence commit) must fail complete mode.
+mutate "$tmp/blessed" "$tmp/uncommitted-ref" uncommitted-ref
+printf '%s\n' '{"schema":"factory-runner-receipt/v1","result":"pass","exit_code":0}' > \
+    "$tmp/uncommitted-ref/tests/fixtures/working-tree-only.json"
+expect_fail "$tmp/uncommitted-ref" "an uncommitted receipt ref (working tree only)"
+
+# Human-tier self-attestation: a verified row claiming human-tier evidence is
+# out-of-band and rejected even though the policy map may assign human.
+mutate "$tmp/blessed" "$tmp/human-tier" human-tier
+python3 - "$tmp/human-tier/.factory/requirement-policy.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for entry in data['requirements']:
+    if entry['id'] == 'REQ-01':
+        entry['required_tier'] = 'human'
+open(path, 'w').write(json.dumps(data))
+PY
+expect_fail "$tmp/human-tier" "human-tier self-attestation"
+
+# required_tier drift: a sidecar self-declaring required_tier different from
+# the requirement-policy map must fail.
+mutate "$tmp/blessed" "$tmp/tier-drift" tier-drift
+set +e
+(cd "$tmp/tier-drift" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+tier_drift_rc=$?
+set -e
+[[ $tier_drift_rc -eq 1 ]] || { echo "test: required_tier drift was accepted" >&2; exit 1; }
+
+# A requirement absent from the requirement-policy map must fail planning.
+cp -a "$tmp/blessed" "$tmp/policy-missing"
+python3 - "$tmp/policy-missing/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirements'].append(dict(data['requirements'][0], id='REQ-99'))
+open(path, 'w').write(json.dumps(data))
+PY
+sed -i 's/| REQ-01 |/| REQ-99 |/' "$tmp/policy-missing/.factory/artifacts/implementation-plan.md"
+set +e
+(cd "$tmp/policy-missing" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+policy_missing_rc=$?
+set -e
+[[ $policy_missing_rc -eq 1 ]] || { echo "  test: requirement absent from policy map was accepted" >&2; exit 1; }
+
 # not_applicable misuse: without a spec-scoped reason the sidecar is invalid in
 # planning mode; with a scoped reason planning accepts it but completion fails.
 cp -a "$tmp/blessed" "$tmp/na-misuse"
@@ -333,7 +418,7 @@ python3 - "$tmp/mismatch/.factory/artifacts/conformance.json" <<'PY'
 import json, sys
 path = sys.argv[1]
 data = json.load(open(path))
-data['requirements'].append(dict(data['requirements'][0], id='REQ-99'))
+data['requirements'].append(dict(data['requirements'][0], id='REQ-98'))
 open(path, 'w').write(json.dumps(data))
 PY
 set +e
@@ -357,7 +442,7 @@ set +e
 (cd "$tmp/unknown-fact" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 unknown_fact_rc=$?
 set -e
-[[ $unknown_fact_rc -eq 1 ]] || { echo "test: unknown fact reference was accepted" >&2; exit 1; }
+[[ $unknown_fact_rc -eq 1 ]] || { echo "FAIL: unknown fact reference was accepted" >&2; exit 1; }
 
 # A partial row with no open fact reference must fail (unavailable evidence
 # must be fact-bound).
@@ -375,7 +460,7 @@ set +e
 (cd "$tmp/no-fact-ref" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 no_fact_rc=$?
 set -e
-[[ $no_fact_rc -eq 1 ]] || { echo "test: partial row without a fact reference was accepted" >&2; exit 1; }
+[[ $no_fact_rc -eq 1 ]] || { echo "FAIL: partial row without a fact reference was accepted" >&2; exit 1; }
 
 # A verified row may never reference a fact.
 cp -a "$tmp/blessed" "$tmp/verified-fact"
@@ -392,7 +477,7 @@ set +e
 (cd "$tmp/verified-fact" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 verified_fact_rc=$?
 set -e
-[[ $verified_fact_rc -eq 1 ]] || { echo "test: verified row referencing a fact was accepted" >&2; exit 1; }
+[[ $verified_fact_rc -eq 1 ]] || { echo "FAIL: verified row referencing a fact was accepted" >&2; exit 1; }
 
 # A fact whose requirements drift from the sidecar must fail.
 cp -a "$tmp/blessed" "$tmp/fact-drift"
@@ -409,7 +494,7 @@ set +e
 (cd "$tmp/fact-drift" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 fact_drift_rc=$?
 set -e
-[[ $fact_drift_rc -eq 1 ]] || { echo "test: fact/requirements drift was accepted" >&2; exit 1; }
+[[ $fact_drift_rc -eq 1 ]] || { echo "FAIL: fact drift was accepted" >&2; exit 1; }
 
 # A resolved fact may not remain referenced by a blocked/partial row.
 cp -a "$tmp/blessed" "$tmp/resolved-referenced"
@@ -422,7 +507,7 @@ for fact in data['facts']:
         fact['status'] = 'resolved'
         fact['resolution'] = {
             'type': 'receipt',
-            'refs': [f'.factory-state/runner-evidence/probe-runner/{head}/manifest.json'],
+            'refs': ['tests/fixtures/runner-manifest.json'],
             'evidence_commit': head,
             'resolved_at': '2026-01-01',
             'reason': 'fixture resolution'
@@ -433,6 +518,6 @@ set +e
 (cd "$tmp/resolved-referenced" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 resolved_rc=$?
 set -e
-[[ $resolved_rc -eq 1 ]] || { echo "test: resolved fact referenced by a partial row was accepted" >&2; exit 1; }
+[[ $resolved_rc -eq 1 ]] || { echo "FAIL: resolved fact referenced by a partial row was accepted" >&2; exit 1; }
 
 echo "test: conformance validator adversarial checks passed"

@@ -17,9 +17,13 @@ Rules:
 - an `artifact` resolution requires an exact non-documentation artifact at the
   evidence commit (`.md` documentation alone can never resolve a normative
   requirement);
-- a `decision` resolution requires an explicit human identity and a spec
-  location that permits the decision (e.g. SPEC §11.2.6 human-approved
-  deferral);
+- a `decision` resolution (human identity + spec location) is out-of-band and
+  non-automatable: unattended gates never accept agent-authored `human: true`,
+  reviewer strings, or environment reviewer identity, so every decision
+  resolution is rejected and the fact must stay open until a verifiable
+  external attestation mechanism exists;
+- in complete mode every receipt/artifact ref must exist as a Git blob at the
+  declared evidence commit (working-tree presence is never enough);
 - cross-checks against the conformance sidecar (every fact referenced by
   exactly the requirements it lists; every open fact referenced by at least
   one blocked/partial row; no verified row may reference a fact) are enforced
@@ -65,7 +69,15 @@ def load_ledger(path: Path) -> dict:
     return data
 
 
-def reference_exists(root: Path, ref: str, commit: str) -> bool:
+def reference_exists(root: Path, ref: str, commit: str, *, blob_only: bool) -> bool:
+    if blob_only:
+        # Complete mode: the ref must be a Git blob at the declared evidence
+        # commit; stale/uncommitted working-tree presence never suffices.
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}:{ref}"],
+            cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
     path = root / ref
     if path.exists() and not path.is_symlink():
         return True
@@ -88,7 +100,7 @@ def regular_json(path: Path) -> dict:
     return data
 
 
-def validate_ref(root: Path, fact_id: str, ref: str, commit: str, kind: str) -> None:
+def validate_ref(root: Path, fact_id: str, ref: str, commit: str, kind: str, *, blob_only: bool) -> None:
     if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
         fail(f"fact {fact_id} {kind} ref is unsafe: {ref}")
     if not ref.startswith(SAFE_PREFIXES) and "/" in ref:
@@ -98,12 +110,12 @@ def validate_ref(root: Path, fact_id: str, ref: str, commit: str, kind: str) -> 
             f"fact {fact_id} {kind} ref is documentation; documentation alone "
             f"cannot resolve a normative requirement: {ref}"
         )
-    if not reference_exists(root, ref, commit):
+    if not reference_exists(root, ref, commit, blob_only=blob_only):
         fail(f"fact {fact_id} {kind} ref does not exist at commit {commit[:12]}: {ref}")
 
 
-def validate_receipt_ref(root: Path, fact_id: str, ref: str, commit: str) -> None:
-    validate_ref(root, fact_id, ref, commit, "receipt")
+def validate_receipt_ref(root: Path, fact_id: str, ref: str, commit: str, *, blob_only: bool) -> None:
+    validate_ref(root, fact_id, ref, commit, "receipt", blob_only=blob_only)
     data = regular_json(root / ref)
     schema = data.get("schema")
     if schema not in RECEIPT_SCHEMAS:
@@ -118,7 +130,7 @@ def validate_receipt_ref(root: Path, fact_id: str, ref: str, commit: str) -> Non
             fail(f"fact {fact_id} receipt {ref} has no argv binding")
 
 
-def validate_fact(root: Path, fact: dict, index: int) -> None:
+def validate_fact(root: Path, fact: dict, index: int, *, blob_only: bool = False) -> None:
     if not isinstance(fact, dict):
         fail(f"facts[{index}] must be an object")
     expected = {
@@ -160,16 +172,20 @@ def validate_fact(root: Path, fact: dict, index: int) -> None:
     if not isinstance(resolution, dict):
         fail(f"resolved fact {fact_id} requires a resolution object")
     resolution_expected = {"type", "refs", "evidence_commit", "resolved_at", "reason"}
-    resolution_optional = {"reviewer", "human", "spec_permitted"}
     resolution_type = resolution["type"]
-    if resolution_type not in {"receipt", "artifact", "decision"}:
+    if resolution_type == "decision":
+        fail(
+            f"fact {fact_id} uses a decision resolution: human decisions and golden "
+            f"approval are out-of-band and non-automatable. Unattended gates never "
+            f"accept agent-authored human:true, reviewer strings, or environment "
+            f"reviewer identity. Keep the fact open as a finding until a verifiable "
+            f"external attestation mechanism exists."
+        )
+    if resolution_type not in {"receipt", "artifact"}:
         fail(f"fact {fact_id} resolution type is invalid: {resolution_type!r}")
     if resolution_type in {"receipt", "artifact"}:
         if set(resolution) != resolution_expected:
             fail(f"fact {fact_id} {resolution_type} resolution fields do not match the schema")
-    else:
-        if set(resolution) != resolution_expected | resolution_optional:
-            fail(f"fact {fact_id} decision resolution fields do not match the schema")
     commit = resolution["evidence_commit"]
     if not isinstance(commit, str) or not SHA.fullmatch(commit):
         fail(f"fact {fact_id} resolution evidence_commit must be a 40-character commit")
@@ -182,33 +198,16 @@ def validate_fact(root: Path, fact: dict, index: int) -> None:
     refs = resolution["refs"]
     if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
         fail(f"fact {fact_id} resolution refs must be a string array")
-    if resolution_type in {"receipt", "artifact"}:
-        if not refs:
-            fail(f"fact {fact_id} {resolution_type} resolution requires exact refs")
-        for ref in refs:
-            if resolution_type == "receipt":
-                validate_receipt_ref(root, fact_id, ref, commit)
-            else:
-                validate_ref(root, fact_id, ref, commit, "artifact")
-    else:
-        if refs:
-            fail(f"fact {fact_id} decision resolution must not carry new refs")
-        reviewer = resolution.get("reviewer")
-        if not isinstance(reviewer, str) or not reviewer.strip():
-            fail(f"fact {fact_id} decision resolution requires a human reviewer identity")
-        if resolution.get("human") is not True:
-            fail(f"fact {fact_id} decision resolution requires human: true")
-        spec_permitted = resolution.get("spec_permitted")
-        if not isinstance(spec_permitted, str) or not (
-            re.search(r"[§][0-9]", spec_permitted) or "SPEC.md" in spec_permitted
-        ):
-            fail(
-                f"fact {fact_id} decision resolution requires a spec-permitted "
-                f"location (a §section or docs/SPEC.md)"
-            )
+    if not refs:
+        fail(f"fact {fact_id} {resolution_type} resolution requires exact refs")
+    for ref in refs:
+        if resolution_type == "receipt":
+            validate_receipt_ref(root, fact_id, ref, commit, blob_only=blob_only)
+        else:
+            validate_ref(root, fact_id, ref, commit, "artifact", blob_only=blob_only)
 
 
-def validate_ledger(root: Path, data: dict) -> list[dict]:
+def validate_ledger(root: Path, data: dict, *, blob_only: bool = False) -> list[dict]:
     facts = data["facts"]
     if any(not isinstance(fact, dict) for fact in facts):
         fail("every ledger entry must be an object")
@@ -228,7 +227,7 @@ def validate_ledger(root: Path, data: dict) -> list[dict]:
             )
         previous = number
     for index, fact in enumerate(facts):
-        validate_fact(root, fact, index)
+        validate_fact(root, fact, index, blob_only=blob_only)
     return facts
 
 
@@ -237,7 +236,7 @@ def check_complete(root: Path, data: dict) -> None:
     for fact in data["facts"]:
         if fact["status"] != "resolved":
             fail(f"completion rejected while fact {fact['id']} is open")
-        validate_fact(root, fact, 0)
+        validate_fact(root, fact, 0, blob_only=True)
 
 
 def main() -> int:

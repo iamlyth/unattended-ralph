@@ -1,0 +1,9 @@
+{
+  "schema": "ralph-runner-signer-trust/v1",
+  "description": "Runner receipt signer trust. No signer is provisioned: enabled=false and public_keys empty. While no signer is provisioned, runner manifests cannot certify capability evidence; every capability that requires runner trust stays unevidenced and its conformance rows remain partial/open. Provisioning is out-of-band: the private signing key lives only in out-of-tree, root-owned forced-command infrastructure; this repository carries only this config and the public keys.",
+  "require_signature": true,
+  "enabled": false,
+  "namespace": "factory-runner-receipt",
+  "public_keys": [],
+  "allowed_principals": []
+}
