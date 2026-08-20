@@ -7,7 +7,7 @@
 # production-path failure.
 #
 # The failure mode this guards against: a test passes because it injects
-# an env var (e.g. CBX_ICON_DIR) or a source-tree path to make a resource
+# an env var (e.g. PRODUCT_ICON_DIR) or a source-tree path to make a resource
 # load, while the real binary (no injection) cannot find the resource and
 # silently renders without it. The test suite then reports green while the
 # product is broken — "thinking issues are complete when they are not."

@@ -241,26 +241,6 @@ def load(*, allow_terminal_head_mismatch: bool = False) -> dict:
     )
 
 
-def load_status_lenient() -> str:
-    """Read only the status field, skipping full validation.
-
-    Used by `start --replace-terminal`: replacing a terminal campaign must
-    work even when HEAD has moved past the terminal audit commit (which
-    would make strict `load()` fail). We only need to confirm the saved
-    campaign is not active before overwriting it.
-    """
-    path = state_path()
-    if path.is_symlink() or not path.is_file():
-        fail(f"missing or unsafe state file: {path}")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        fail(f"invalid state: {exc}")
-    if not isinstance(data, dict) or not isinstance(data.get("status"), str):
-        fail("invalid state: missing status")
-    return data["status"]
-
-
 def atomic_write(data: dict) -> None:
     validate(data)
     path = state_path()
