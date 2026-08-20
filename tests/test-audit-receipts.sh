@@ -13,23 +13,47 @@ trap 'rm -rf "$tmp"' EXIT
 
 RECORDER="$PROJECT_ROOT/scripts/machine-receipt.py"
 CHECKER="$PROJECT_ROOT/scripts/check-audit-receipts.py"
+RUNNER_EVIDENCE="$PROJECT_ROOT/scripts/check-factory-runner-evidence.py"
+ENV_CHECKER="$PROJECT_ROOT/scripts/check-factory-environment.py"
 
 ROUND=2
 
 setup_repo() {
     local dir=$1
-    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.ralph/agent" "$dir/.factory-state" "$dir/docs"
+    mkdir -p "$dir/scripts" "$dir/.factory" "$dir/.factory/artifacts" "$dir/.ralph/agent" \
+        "$dir/.factory-state/runner-evidence" "$dir/docs"
     chmod 700 "$dir/.factory-state"
-    cp "$RECORDER" "$CHECKER" "$dir/scripts/"
+    cp "$RECORDER" "$CHECKER" "$RUNNER_EVIDENCE" "$ENV_CHECKER" "$dir/scripts/"
     chmod +x "$dir/scripts/"*.py
     printf '# Spec\n' > "$dir/docs/SPEC.md"
     printf '# Plan\n' > "$dir/.factory/artifacts/implementation-plan.md"
     printf '# Audit\n' > "$dir/.factory/artifacts/campaign-audit.md"
     printf '%s\n' '.factory-state/' > "$dir/.gitignore"
-    mkdir -p "$dir/.factory"
     cat > "$dir/.factory/environment.toml" <<'EOF'
 schema_version = 1
+[[runners]]
+name = "fake-runner"
+transport = "ssh"
+ssh_config_alias = "fake-runner"
+working_directory = "/srv/dev-runner/workspaces/fake-project"
+capabilities = ["runner-gate"]
+verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
+    # Ephemeral signer for fixture runner-receipt trust (never committed).
+    ssh-keygen -q -t ed25519 -N '' -f "$tmp/signer-key"
+    PUBLIC_KEY=$(cut -d' ' -f1,2 "$tmp/signer-key.pub")
+    python3 - "$PUBLIC_KEY" <<'PY' > "$dir/.factory/signer-trust.json"
+import json, sys
+print(json.dumps({
+    "schema": "ralph-runner-signer-trust/v1",
+    "description": "ephemeral test fixture signer",
+    "require_signature": True,
+    "enabled": True,
+    "namespace": "factory-runner-receipt",
+    "public_keys": [{"principal": "factory-signer", "public_key": sys.argv[1]}],
+    "allowed_principals": ["factory-signer"],
+}))
+PY
     git -C "$dir" init -q -b develop
     git -C "$dir" config user.name test
     git -C "$dir" config user.email test@example.invalid
@@ -42,6 +66,67 @@ EOF
 JSON
     chmod 600 "$dir/.factory-state/audit-coordinator.json"
     echo "$head"
+}
+
+# write_signed_evidence <dir> <head>: a fully commit-bound signed aggregate
+# fixture (tree/environment blob/verifier argv digest/git archive hash all
+# recomputed) so aggregate membership and signature are the variables under test.
+write_signed_evidence() {
+    local dir=$1 head=$2
+    mkdir -p "$dir/.factory-state/runner-evidence/fake-runner/$head"
+    python3 - "$dir" "$head" <<'PY'
+import hashlib, json, pathlib, subprocess, sys, tomllib
+root, head = pathlib.Path(sys.argv[1]), sys.argv[2]
+
+def git(*args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=root, text=True, capture_output=True)
+    if result.returncode:
+        raise SystemExit(f"git {args} failed: {result.stderr}")
+    return result.stdout.strip()
+
+tree = git("rev-parse", f"{head}^{{tree}}")
+environment_blob = git("rev-parse", f"{head}:.factory/environment.toml")
+environment = tomllib.loads(git("show", f"{head}:.factory/environment.toml"))
+declared = environment["runners"][0]
+argv_digest = hashlib.sha256(json.dumps(declared["verify_argv"], separators=(",", ":")).encode()).hexdigest()
+archive = subprocess.run(
+    ["git", "archive", "--format=tar", "--output", str(root / "commit-archive.tar"), head],
+    cwd=root, capture_output=True,
+)
+if archive.returncode:
+    raise SystemExit("cannot archive fixture commit")
+archive_sha256 = hashlib.sha256((root / "commit-archive.tar").read_bytes()).hexdigest()
+(root / "commit-archive.tar").unlink()
+empty = hashlib.sha256(b"").hexdigest()
+capabilities = sorted(declared["capabilities"])
+manifest = {
+    "schema": "factory-runner-receipt/v1", "result": "pass", "runner": "fake-runner",
+    "commit": head, "tree": tree, "environment_blob": environment_blob,
+    "verify_argv_sha256": argv_digest, "archive_sha256": archive_sha256, "nonce": "0" * 64,
+    "capabilities": capabilities, "exit_code": 0, "timed_out": False,
+    "started_at": 1, "finished_at": 2, "cleanup": True,
+    "stdout_sha256": empty, "stderr_sha256": empty,
+}
+raw = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+manifest_path = root / f".factory-state/runner-evidence/fake-runner/{head}/manifest.json"
+manifest_path.write_bytes(raw)
+aggregate = {
+    "schema": "factory-runner-aggregate/v1",
+    "commit": head,
+    "tree": tree,
+    "environment_blob": environment_blob,
+    "runners": [
+        {"name": "fake-runner", "manifest": f".factory-state/runner-evidence/fake-runner/{head}/manifest.json",
+         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "capabilities": capabilities}
+    ],
+}
+(root / ".factory-state/runner-evidence.json").write_text(json.dumps(aggregate, sort_keys=True, indent=2) + "\n")
+(root / f".factory-state/runner-evidence/fake-runner/{head}/stdout.log").write_bytes(b"")
+(root / f".factory-state/runner-evidence/fake-runner/{head}/stderr.log").write_bytes(b"")
+PY
+    cat "$dir/.factory-state/runner-evidence/fake-runner/$head/manifest.json" \
+        | ssh-keygen -Y sign -f "$tmp/signer-key" -n factory-runner-receipt \
+            > "$dir/.factory-state/runner-evidence/fake-runner/$head/manifest.sig" 2>/dev/null
 }
 
 write_report() {
@@ -77,6 +162,7 @@ must_fail() {
 
 head=$(setup_repo "$tmp/audit")
 ROUND=2
+write_signed_evidence "$tmp/audit" "$head"
 
 # A bare model receipt call (no coordinator binding) must fail: receipt minting
 # outside the audit coordinator's bounded invocation is rejected.
@@ -106,7 +192,7 @@ write_report "$tmp/audit" pass "\`sh -c 'printf ...'\` PASS [receipt: .factory-s
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
 # Fabricated command prose without a receipt cannot certify runtime.
-write_report "$tmp/audit" pass "\`./verify-project\` PASS with all checks green"
+write_report "$tmp/audit" pass "\`./verify-boilerplate\` PASS with all checks green"
 must_fail "fabricated command prose" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -176,5 +262,51 @@ write_report "$tmp/audit" findings "\`real system probe\` BLOCKED (no real syste
 # the machine receipt, not prose).
 write_report "$tmp/audit" findings "\`sh -c 'printf ...'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
+
+# A `[manifest:]` reference must be an exact signed record in the runner-
+# evidence aggregate bound to the audit base; an accepted manifest certifies a
+# clean PASS through the strict runner-evidence helper.
+write_report "$tmp/audit" pass "\`./verify-boilerplate\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
+(cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
+
+# A standalone/minimal manifest is never accepted: it is not an exact signed
+# aggregate record, so the strict runner-evidence validation rejects it.
+mkdir -p "$tmp/audit/.factory-state/runner-manifests/runner-evidence"
+cat > "$tmp/audit/.factory-state/runner-manifests/runner-evidence/manifest.json" <<'JSON'
+{"schema": "factory-runner-receipt/v1", "result": "pass", "exit_code": 0}
+JSON
+write_report "$tmp/audit" pass "\`cmd\` PASS [manifest: .factory-state/runner-manifests/runner-evidence/manifest.json]"
+must_fail "standalone minimal manifest" \
+    "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
+
+# An unsigned manifest (no detached signature) fails even when every binding
+# matches and it is an exact aggregate record.
+cp -a "$tmp/audit" "$tmp/unsigned"
+rm -f "$tmp/unsigned/.factory-state/runner-evidence/fake-runner/$head/manifest.sig"
+write_report "$tmp/unsigned" pass "\`cmd\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
+must_fail "unsigned runner manifest" \
+    "cd '$tmp/unsigned' && ./scripts/check-audit-receipts.py"
+
+# A manifest that is not an exact record in the aggregate fails even if the
+# path would otherwise look evidence-shaped.
+write_report "$tmp/audit" pass "\`cmd\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$(printf '0%.0s' {1..40})/manifest.json]"
+must_fail "manifest not in the aggregate" \
+    "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
+
+# FAIL evidence semantics: a runner manifest certifies only a clean pass, so a
+# FAIL claim can never cite a pass manifest.
+write_report "$tmp/audit" findings "\`cmd\` FAIL [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
+must_fail "FAIL claim citing a pass manifest" \
+    "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
+
+# A manifest cannot be cited without the campaign audit base binding.
+rm -f "$tmp/audit/.factory-state/audit-coordinator.json"
+write_report "$tmp/audit" pass "\`cmd\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
+set +e
+(cd "$tmp/audit" && env -u FACTORY_CAMPAIGN_AUDIT_ROUND -u FACTORY_CAMPAIGN_AUDIT_BASE -u FACTORY_CAMPAIGN_AUDIT_NONCE \
+    ./scripts/check-audit-receipts.py >/dev/null 2>&1)
+no_base_rc=$?
+set -e
+[[ $no_base_rc -eq 1 ]] || { echo "test: manifest accepted without a base binding" >&2; exit 1; }
 
 echo "test: machine audit receipt checks passed"

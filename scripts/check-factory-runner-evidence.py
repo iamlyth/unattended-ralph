@@ -158,6 +158,82 @@ def verify_manifest_signature(signer: dict, manifest_path: Path, raw: bytes) -> 
             pass
 
 
+def validate_record(declared: dict, record: dict, commit: str, tree: str,
+                    environment_blob: str, archive_sha256: str, signer: dict) -> set[str]:
+    """Strictly validate one aggregate record and its runner manifest.
+
+    This is the shared canonical per-record validation: an accepted manifest
+    must be an exact record in the aggregate, digest-faithful, bound to the
+    aggregate's commit/tree/environment/blob/archive, argv-faithful to the
+    commit-bound declaration, and signed by a provisioned trust principal.
+    """
+    if not isinstance(record, dict) or set(record) != {"name", "manifest", "manifest_sha256", "capabilities"}:
+        fail("runner aggregate record is invalid")
+    if record["name"] != declared.get("name") or record["capabilities"] != sorted(declared.get("capabilities", [])):
+        fail("runner declaration/evidence mismatch")
+    relative = Path(record["manifest"])
+    if relative.is_absolute() or ".." in relative.parts:
+        fail("manifest path escapes the repository")
+    manifest_path = ROOT / relative
+    try:
+        resolved_parent = manifest_path.parent.resolve(strict=True)
+        evidence_root = (ROOT / ".factory-state/runner-evidence").resolve(strict=True)
+    except FileNotFoundError:
+        fail("manifest parent is missing")
+    if evidence_root not in (resolved_parent, *resolved_parent.parents):
+        fail("manifest is outside the evidence root")
+    manifest, raw = regular_json(manifest_path)
+    if hashlib.sha256(raw).hexdigest() != record["manifest_sha256"]:
+        fail("manifest digest mismatch")
+    expected_fields = {
+        "schema", "result", "runner", "commit", "tree", "environment_blob",
+        "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
+        "exit_code", "timed_out", "started_at", "finished_at", "cleanup",
+        "stdout_sha256", "stderr_sha256",
+    }
+    if set(manifest) != expected_fields or manifest.get("schema") != "factory-runner-receipt/v1" or manifest.get("result") != "pass":
+        fail("runner manifest schema/result is invalid")
+    if manifest["runner"] != record["name"] or manifest["commit"] != commit or manifest["tree"] != tree or manifest["environment_blob"] != environment_blob:
+        fail("runner manifest binding mismatch")
+    expected_argv_digest = hashlib.sha256(
+        json.dumps(declared["verify_argv"], separators=(",", ":")).encode()
+    ).hexdigest()
+    if manifest["verify_argv_sha256"] != expected_argv_digest or manifest["archive_sha256"] != archive_sha256:
+        fail("runner manifest verifier/archive binding mismatch")
+    if manifest["capabilities"] != record["capabilities"] or manifest["exit_code"] != 0 or manifest["timed_out"] is not False or manifest["cleanup"] is not True:
+        fail("runner manifest does not prove a clean pass")
+    for field in ("verify_argv_sha256", "archive_sha256", "nonce", "stdout_sha256", "stderr_sha256"):
+        if not isinstance(manifest[field], str) or not SHA256.fullmatch(manifest[field]):
+            fail(f"runner manifest has invalid {field}")
+    for log_name, digest_field in (("stdout.log", "stdout_sha256"), ("stderr.log", "stderr_sha256")):
+        log_path = manifest_path.parent / log_name
+        if log_path.is_symlink() or not log_path.is_file() or log_path.stat().st_size > MAX_EVIDENCE_FILE:
+            fail(f"runner log validation failed: {log_name}")
+        if hashlib.sha256(log_path.read_bytes()).hexdigest() != manifest[digest_field]:
+            fail(f"runner log validation failed: {log_name}")
+    verify_manifest_signature(signer, manifest_path, raw)
+    return set(record["capabilities"])
+
+
+def verify_manifest_reference(reference: str, expected_commit: str) -> dict:
+    """Strict helper: validate one `[manifest:]` reference as an exact record.
+
+    Runs the canonical full aggregate validation at the expected commit and then
+    requires the reference to be exactly one aggregate record. Used by the audit
+    scripts so any `[manifest:]` evidence passes the same signer/
+    commit/tree/environment/archive/argv validation as this checker.
+    """
+    if not SHA1.fullmatch(expected_commit):
+        fail("--verify-manifest requires a strict 40-hex --expected-commit audit base")
+    validate(expected_commit)
+    aggregate, _ = regular_json(AGGREGATE)
+    records = aggregate["runners"]
+    matches = [record for record in records if record["manifest"] == reference]
+    if len(matches) != 1:
+        fail(f"runner manifest is not an exact record in the aggregate: {reference}")
+    return matches[0]
+
+
 def validate(expected_commit: str | None = None) -> tuple[str, list[str]]:
     os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
     signer = load_signer_trust()
@@ -205,52 +281,10 @@ def validate(expected_commit: str | None = None) -> tuple[str, list[str]]:
         archive_sha256 = hashlib.sha256(Path(archive_file.name).read_bytes()).hexdigest()
     evidenced: set[str] = set()
     for declaration, record in zip(declared, records):
-        if not isinstance(record, dict) or set(record) != {"name", "manifest", "manifest_sha256", "capabilities"}:
-            fail("runner aggregate record is invalid")
-        if record["name"] != declaration.get("name") or record["capabilities"] != sorted(declaration.get("capabilities", [])):
-            fail("runner declaration/evidence mismatch")
-        relative = Path(record["manifest"])
-        if relative.is_absolute() or ".." in relative.parts:
-            fail("manifest path escapes the repository")
-        manifest_path = ROOT / relative
-        try:
-            resolved_parent = manifest_path.parent.resolve(strict=True)
-            evidence_root = (ROOT / ".factory-state/runner-evidence").resolve(strict=True)
-        except FileNotFoundError:
-            fail("manifest parent is missing")
-        if evidence_root not in (resolved_parent, *resolved_parent.parents):
-            fail("manifest is outside the evidence root")
-        manifest, raw = regular_json(manifest_path)
-        if hashlib.sha256(raw).hexdigest() != record["manifest_sha256"]:
-            fail("manifest digest mismatch")
-        expected_fields = {
-            "schema", "result", "runner", "commit", "tree", "environment_blob",
-            "verify_argv_sha256", "archive_sha256", "nonce", "capabilities",
-            "exit_code", "timed_out", "started_at", "finished_at", "cleanup",
-            "stdout_sha256", "stderr_sha256",
-        }
-        if set(manifest) != expected_fields or manifest.get("schema") != "factory-runner-receipt/v1" or manifest.get("result") != "pass":
-            fail("runner manifest schema/result is invalid")
-        if manifest["runner"] != record["name"] or manifest["commit"] != commit or manifest["tree"] != tree or manifest["environment_blob"] != environment_blob:
-            fail("runner manifest binding mismatch")
-        expected_argv_digest = hashlib.sha256(
-            json.dumps(declaration["verify_argv"], separators=(",", ":")).encode()
-        ).hexdigest()
-        if manifest["verify_argv_sha256"] != expected_argv_digest or manifest["archive_sha256"] != archive_sha256:
-            fail("runner manifest verifier/archive binding mismatch")
-        if manifest["capabilities"] != record["capabilities"] or manifest["exit_code"] != 0 or manifest["timed_out"] is not False or manifest["cleanup"] is not True:
-            fail("runner manifest does not prove a clean pass")
-        for field in ("verify_argv_sha256", "archive_sha256", "nonce", "stdout_sha256", "stderr_sha256"):
-            if not isinstance(manifest[field], str) or not SHA256.fullmatch(manifest[field]):
-                fail(f"runner manifest has invalid {field}")
-        for log_name, digest_field in (("stdout.log", "stdout_sha256"), ("stderr.log", "stderr_sha256")):
-            log_path = manifest_path.parent / log_name
-            if log_path.is_symlink() or not log_path.is_file() or log_path.stat().st_size > MAX_EVIDENCE_FILE:
-                fail(f"runner log validation failed: {log_name}")
-            if hashlib.sha256(log_path.read_bytes()).hexdigest() != manifest[digest_field]:
-                fail(f"runner log validation failed: {log_name}")
-        verify_manifest_signature(signer, manifest_path, raw)
-        evidenced.update(record["capabilities"])
+        evidenced.update(
+            validate_record(declaration, record, commit, tree, environment_blob,
+                            archive_sha256, signer)
+        )
     return hashlib.sha256(aggregate_raw).hexdigest(), sorted(evidenced)
 
 
@@ -259,7 +293,15 @@ def main() -> int:
     parser.add_argument("--expected-commit")
     parser.add_argument("--print-digest", action="store_true")
     parser.add_argument("--print-capabilities", action="store_true")
+    parser.add_argument("--verify-manifest")
     args = parser.parse_args()
+    if args.verify_manifest:
+        record = verify_manifest_reference(args.verify_manifest, args.expected_commit)
+        print(
+            f"factory-runner-evidence: verified manifest {record['manifest']} "
+            f"(runner={record['name']}, capabilities={record['capabilities']})"
+        )
+        return 0
     digest, capabilities = validate(args.expected_commit)
     if args.print_digest:
         print(digest)

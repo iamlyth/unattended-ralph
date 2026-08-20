@@ -7,6 +7,13 @@ status marker (PASS, FAIL, or BLOCKED) and a machine reference:
   `scripts/machine-receipt.py`, or
 - `[manifest: <path>]` for an accepted runner receipt manifest.
 
+A `[manifest: <path>]` reference is never a standalone/minimal manifest: it
+must be an exact record in the runner-evidence aggregate and pass the same
+signer/commit/tree/environment/archive/argv validation as
+`scripts/check-factory-runner-evidence.py`, anchored at the campaign audit
+base. Unsigned, fabricated, and path-category-only manifests fail. A manifest
+certifies only a clean pass, so a FAIL evidence line can never cite one.
+
 Prose-only claims cannot certify runtime. A PASS claim requires a receipt with
 exit 0 (or a pass manifest); a FAIL claim requires a receipt with a non-zero
 exit. Any BLOCKED evidence forces `result: findings`: a report with BLOCKED
@@ -32,6 +39,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,14 +165,29 @@ def validate_receipt(root: Path, reference: str) -> dict:
     return data
 
 
-def validate_manifest(root: Path, reference: str) -> dict:
-    path = resolve(root, reference)
-    data = regular_json(path)
-    if data.get("schema") != "factory-runner-receipt/v1" or data.get("result") != "pass":
-        fail(f"runner manifest does not prove a clean pass: {reference}")
-    if data.get("exit_code") != 0:
-        fail(f"runner manifest has a nonzero exit: {reference}")
-    return data
+def validate_manifest(root: Path, reference: str, expected_base: str) -> None:
+    """Require an exact signed aggregate record bound to the audit base.
+
+    A standalone/minimal manifest (a bare schema/result/exit JSON) is never
+    accepted: the reference must be an exact record in the runner-evidence
+    aggregate and pass the same signer/commit/tree/environment/archive/argv
+    validation as `check-factory-runner-evidence.py`, anchored at the campaign
+    audit base. Unsigned, fabricated, and path-category-only manifests fail.
+    """
+    helper = root / "scripts/check-factory-runner-evidence.py"
+    if helper.is_symlink() or not helper.is_file():
+        fail(f"strict runner-evidence helper is missing: {helper}")
+    result = subprocess.run(
+        [sys.executable, str(helper), "--verify-manifest", reference,
+         "--expected-commit", expected_base],
+        cwd=root, text=True, capture_output=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        fail(
+            f"runner manifest is not an accepted exact-commit runner receipt: "
+            f"{reference} ({detail or 'strict runner-evidence validation failed'})"
+        )
 
 
 def parse_evidence(root: Path, report: Path) -> tuple[list[dict], bool]:
@@ -206,7 +230,17 @@ def parse_evidence(root: Path, report: Path) -> tuple[list[dict], bool]:
             if expected_nonce is not None and receipt["coordinator_nonce"] != expected_nonce:
                 fail(f"receipt {receipt_match.group(1)} does not match the active audit coordinator nonce")
         if manifest_match:
-            validate_manifest(root, manifest_match.group(1))
+            if marker == "FAIL":
+                fail(
+                    f"FAIL evidence cannot cite a runner manifest (a runner "
+                    f"manifest certifies only a clean pass): {stripped}"
+                )
+            if expected_base is None:
+                fail(
+                    f"runner manifest {manifest_match.group(1)} requires the "
+                    f"campaign audit base binding"
+                )
+            validate_manifest(root, manifest_match.group(1), expected_base)
         exit_code = receipt["exit_code"] if receipt is not None else 0
         if marker == "PASS" and exit_code != 0:
             fail(f"PASS claim has a receipt with exit {exit_code}: {stripped}")

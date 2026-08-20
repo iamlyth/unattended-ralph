@@ -23,7 +23,8 @@ Rules:
   resolution is rejected and the fact must stay open until a verifiable
   external attestation mechanism exists;
 - in complete mode every receipt/artifact ref must exist as a Git blob at the
-  declared evidence commit (working-tree presence is never enough);
+  declared evidence commit (working-tree presence is never enough) and receipt
+  content is read from that blob, never from the working tree;
 - cross-checks against the conformance sidecar (every fact referenced by
   exactly the requirements it lists; every open fact referenced by at least
   one blocked/partial row; no verified row may reference a fact) are enforced
@@ -114,9 +115,33 @@ def validate_ref(root: Path, fact_id: str, ref: str, commit: str, kind: str, *, 
         fail(f"fact {fact_id} {kind} ref does not exist at commit {commit[:12]}: {ref}")
 
 
+def blob_json(root: Path, fact_id: str, ref: str, commit: str) -> dict:
+    """Read a receipt's content from the declared Git blob at the evidence commit.
+
+    Complete mode validates the exact committed content, never the working tree:
+    a tampered or stale working-tree copy cannot certify a resolution.
+    """
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{ref}"],
+        cwd=root, text=True, capture_output=True,
+    )
+    if result.returncode:
+        fail(f"fact {fact_id} receipt {ref} is not a Git blob at commit {commit[:12]}")
+    try:
+        data = json.loads(result.stdout)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"fact {fact_id} receipt {ref} is invalid JSON at commit {commit[:12]}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"fact {fact_id} receipt {ref} must be an object at commit {commit[:12]}")
+    return data
+
+
 def validate_receipt_ref(root: Path, fact_id: str, ref: str, commit: str, *, blob_only: bool) -> None:
     validate_ref(root, fact_id, ref, commit, "receipt", blob_only=blob_only)
-    data = regular_json(root / ref)
+    if blob_only:
+        data = blob_json(root, fact_id, ref, commit)
+    else:
+        data = regular_json(root / ref)
     schema = data.get("schema")
     if schema not in RECEIPT_SCHEMAS:
         fail(f"fact {fact_id} receipt {ref} has an unknown schema {schema!r}")
@@ -250,7 +275,10 @@ def main() -> int:
     root = Path(args.root).resolve()
     path = root / args.path if not Path(args.path).is_absolute() else Path(args.path)
     data = load_ledger(path)
-    facts = validate_ledger(root, data)
+    # Complete mode validates receipt/artifact refs against the declared Git
+    # blobs only, never the working tree: a tampered working-tree copy cannot
+    # break a clean committed receipt and cannot certify one either.
+    facts = validate_ledger(root, data, blob_only=(args.mode == "complete"))
     if args.mode == "complete":
         check_complete(root, data)
     print(f"blocked-facts: {args.mode} valid ({len(facts)} facts)")

@@ -28,7 +28,7 @@ transport = "ssh"
 ssh_config_alias = "probe-runner"
 working_directory = "/srv/dev-runner/workspaces/probe"
 capabilities = ["probe-capability"]
-verify_argv = ["./scripts/verify-project.sh"]
+verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
     printf '# Spec\n' > "$dir/docs/SPEC.md"
     printf '# Plan\n' > "$dir/.factory/artifacts/implementation-plan.md"
@@ -221,5 +221,89 @@ for fact in data['facts']:
 open(path, 'w').write(json.dumps(data))
 PY
 expect "$tmp/no-blocking" planning 1 "open fact without blocking evidence"
+
+# Complete mode reads receipt content from the declared Git blob, never from
+# the working tree: a tampered working-tree copy cannot break a clean commit.
+cp -a "$tmp/blessed" "$tmp/blob-read"
+python3 - "$tmp/blob-read" "$head" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); head = sys.argv[2]
+argv = ["./scripts/probe.sh"]
+receipt = {
+    "schema": "ralph-audit-receipt/v1", "tag": "probe", "argv": argv,
+    "argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest(),
+    "exit_code": 0, "started_at": 1, "finished_at": 2, "evidence_commit": head,
+    "coordinator_round": 1, "coordinator_nonce": "0" * 64,
+    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+}
+(root / "tests/probe-receipt.json").write_text(json.dumps(receipt))
+ledger = json.loads((root / ".factory/artifacts/blocked-facts.json").read_text())
+ledger["facts"][0]["status"] = "resolved"
+ledger["facts"][0]["resolution"] = {
+    "type": "receipt", "refs": ["tests/probe-receipt.json"],
+    "evidence_commit": head, "resolved_at": "2026-01-01", "reason": "receipt proves a clean run",
+}
+(root / ".factory/artifacts/blocked-facts.json").write_text(json.dumps(ledger))
+PY
+git -C "$tmp/blob-read" add tests/probe-receipt.json
+blob_head=$(git -C "$tmp/blob-read" commit -qm "add probe receipt" && git -C "$tmp/blob-read" rev-parse HEAD)
+python3 - "$tmp/blob-read" "$blob_head" <<'PY'
+import json, sys
+root, head = sys.argv[1], sys.argv[2]
+path = f"{root}/.factory/artifacts/blocked-facts.json"
+ledger = json.load(open(path))
+ledger["facts"][0]["resolution"]["evidence_commit"] = head
+open(path, "w").write(json.dumps(ledger))
+PY
+git -C "$tmp/blob-read" add .factory/artifacts/blocked-facts.json
+git -C "$tmp/blob-read" commit -qm "ledger receipt resolution"
+# Tamper the working-tree copy only: complete mode must still read the clean
+# committed blob at the declared evidence commit.
+python3 - "$tmp/blob-read" <<'PY'
+import json, sys
+path = f"{sys.argv[1]}/tests/probe-receipt.json"
+data = json.load(open(path))
+data["exit_code"] = 9
+open(path, "w").write(json.dumps(data))
+PY
+expect "$tmp/blob-read" complete 0 "complete mode reads receipt from the declared git blob"
+
+# A receipt whose committed blob is not a clean pass fails complete mode even
+# when the working tree would pass.
+cp -a "$tmp/blessed" "$tmp/bad-blob"
+python3 - "$tmp/bad-blob" "$head" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); head = sys.argv[2]
+argv = ["./scripts/probe.sh"]
+receipt = {
+    "schema": "ralph-audit-receipt/v1", "tag": "probe", "argv": argv,
+    "argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest(),
+    "exit_code": 9, "started_at": 1, "finished_at": 2, "evidence_commit": head,
+    "coordinator_round": 1, "coordinator_nonce": "0" * 64,
+    "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+    "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+}
+(root / "tests/bad-receipt.json").write_text(json.dumps(receipt))
+ledger = json.loads((root / ".factory/artifacts/blocked-facts.json").read_text())
+ledger["facts"][0]["status"] = "resolved"
+ledger["facts"][0]["resolution"] = {
+    "type": "receipt", "refs": ["tests/bad-receipt.json"],
+    "evidence_commit": head, "resolved_at": "2026-01-01", "reason": "receipt proves a clean run",
+}
+(root / ".factory/artifacts/blocked-facts.json").write_text(json.dumps(ledger))
+PY
+git -C "$tmp/bad-blob" add tests/bad-receipt.json
+bad_head=$(git -C "$tmp/bad-blob" commit -qm "add bad receipt" && git -C "$tmp/bad-blob" rev-parse HEAD)
+python3 - "$tmp/bad-blob" "$bad_head" <<'PY'
+import json, sys
+path = f"{sys.argv[1]}/.factory/artifacts/blocked-facts.json"
+ledger = json.load(open(path))
+ledger["facts"][0]["resolution"]["evidence_commit"] = sys.argv[2]
+open(path, "w").write(json.dumps(ledger))
+PY
+git -C "$tmp/bad-blob" add .factory/artifacts/blocked-facts.json
+git -C "$tmp/bad-blob" commit -qm "ledger bad receipt resolution"
+expect "$tmp/bad-blob" complete 1 "committed receipt blob with a nonzero exit"
 
 echo "test: blocked-facts ledger adversarial checks passed"

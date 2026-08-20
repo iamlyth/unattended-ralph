@@ -18,17 +18,23 @@ Authorization (`.factory/campaign-receipt-policy.json`):
   campaign audit base, and its `coordinator_round` equals the active round
   (arbitrary commands such as a bare `true`, tag/path spoofing, stale round
   receipts, and receipts reused across rounds are rejected);
-- a `[manifest: <path>]` reference satisfies a category only when the category
-  allows manifests and the manifest path contains the category as one of its
-  path segments;
+- a `[manifest: <path>]` reference satisfies a category only when the
+  manifest is an exact signed record in the runner-evidence aggregate bound to
+  the audit base (validated by `check-factory-runner-evidence.py`), the
+  category allows manifests, and the manifest path contains the category as
+  one of its path segments; standalone/minimal, unsigned, fabricated, and
+  path-category-only manifests are rejected;
+- the protected `.factory-state/audit-coordinator.json` state is read and
+  revalidated: the audit round/base must equal it exactly and every receipt's
+  coordinator nonce must match it (matching `check-audit-receipts.py`);
 - BLOCKED evidence lines carry no receipt/manifest and satisfy nothing;
 - every required category of the round's objective must be covered by at
   least one executable-evidence line in `## Evidence reviewed`.
 
 Usage:
   scripts/check-campaign-objectives.py [--round N] [--base COMMIT] [--report PATH] [--root ROOT]
-  (the audit round and audit base come from --round/--base or
-   FACTORY_CAMPAIGN_AUDIT_ROUND/FACTORY_CAMPAIGN_AUDIT_BASE)
+  (the audit round and audit base come from --round/--base, the environment, or
+   the protected audit coordinator state)
 """
 
 from __future__ import annotations
@@ -38,12 +44,15 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OBJECTIVES_DEFAULT = ROOT / ".factory/campaign-objectives.json"
 POLICY_DEFAULT = ROOT / ".factory/campaign-receipt-policy.json"
 REPORT_DEFAULT = ROOT / ".factory/artifacts/campaign-audit.md"
+COORDINATOR_FILE = ".factory-state/audit-coordinator.json"
 RECEIPT = re.compile(r"\[receipt:\s*([^\]]+)\]")
 MANIFEST = re.compile(r"\[manifest:\s*([^\]]+)\]")
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -171,25 +180,107 @@ def manifest_segments(root: Path, reference: str) -> list[str]:
     return list(relative.parts)
 
 
-def audit_binding(args: argparse.Namespace, root: Path) -> tuple[int, str]:
+def coordinator_state(root: Path) -> dict | None:
+    """Read and revalidate the protected audit coordinator state.
+
+    Mirrors `check-audit-receipts.py`: when the state exists it is authoritative
+    for the exact nonce/round/base binding, and receipts/manifests must match it.
+    """
+    state = root / COORDINATOR_FILE
+    if not state.exists():
+        return None
+    if state.is_symlink() or not state.is_file():
+        fail("audit coordinator state is unsafe")
+    try:
+        data = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid audit coordinator state: {exc}")
+    expected = {"schema", "round", "base_commit", "nonce", "created_at"}
+    if (
+        not isinstance(data, dict)
+        or set(data) != expected
+        or data.get("schema") != "ralph-audit-coordinator/v1"
+        or type(data.get("round")) is not int
+        or data["round"] < 1
+        or not isinstance(data.get("base_commit"), str)
+        or not SHA1.fullmatch(data["base_commit"])
+        or not isinstance(data.get("nonce"), str)
+        or not SHA256.fullmatch(data["nonce"])
+    ):
+        fail("audit coordinator state is invalid")
+    return data
+
+
+def audit_binding(args: argparse.Namespace, root: Path) -> tuple[int, str, str | None]:
+    """Return (round, base, nonce) with the protected coordinator binding enforced.
+
+    The audit round and base must equal the protected
+    `.factory-state/audit-coordinator.json` state exactly (when it exists), the
+    receipts' coordinator nonce must equal the state nonce, and receipts reused
+    across rounds/base are rejected — matching `check-audit-receipts.py`.
+    """
+    env_round = os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND", "")
+    env_base = os.environ.get("FACTORY_CAMPAIGN_AUDIT_BASE", "")
+    env_nonce = os.environ.get("FACTORY_CAMPAIGN_AUDIT_NONCE", "")
     round_number = args.round
-    if round_number is None:
-        env_round = os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND", "")
-        if not env_round.isdigit() or int(env_round) < 1:
-            fail("an audit round (--round or FACTORY_CAMPAIGN_AUDIT_ROUND) is required")
+    base = args.base
+    if round_number is None and env_round.isdigit() and int(env_round) >= 1:
         round_number = int(env_round)
+    if base is None and SHA1.fullmatch(env_base or ""):
+        base = env_base
+    state = coordinator_state(root)
+    if state is not None:
+        if round_number is not None and round_number != state["round"]:
+            fail("audit round does not match the protected coordinator state")
+        if base is not None and base != state["base_commit"]:
+            fail("audit base does not match the protected coordinator state")
+        if env_nonce and env_nonce != state["nonce"]:
+            fail("audit nonce does not match the protected coordinator state")
+        round_number = state["round"]
+        base = state["base_commit"]
+        nonce: str | None = state["nonce"]
+    else:
+        nonce = env_nonce if SHA256.fullmatch(env_nonce or "") else None
+        if round_number is None or base is None:
+            fail(
+                "an audit round and base (--round/--base or the protected "
+                "audit coordinator state) are required"
+            )
     if round_number < 1:
         fail("audit round must be positive")
-    base = args.base
-    if base is None:
-        base = os.environ.get("FACTORY_CAMPAIGN_AUDIT_BASE", "")
     if not isinstance(base, str) or not SHA1.fullmatch(base):
-        fail("an audit base commit (--base or FACTORY_CAMPAIGN_AUDIT_BASE) is required")
-    return round_number, base
+        fail("an audit base commit (--base or the protected state) is required")
+    return round_number, base, nonce
+
+
+def strict_manifest(root: Path, reference: str, base: str) -> None:
+    """Require an exact signed aggregate record bound to the audit base.
+
+    A standalone/minimal manifest (a bare schema/result/exit JSON) is never
+    accepted: the reference must be an exact record in the runner-evidence
+    aggregate and pass the same signer/commit/tree/environment/archive/argv
+    validation as `check-factory-runner-evidence.py`, anchored at the campaign
+    audit base. Unsigned, fabricated, and path-category-only manifests fail.
+    """
+    helper = root / "scripts/check-factory-runner-evidence.py"
+    if helper.is_symlink() or not helper.is_file():
+        fail(f"strict runner-evidence helper is missing: {helper}")
+    result = subprocess.run(
+        [sys.executable, str(helper), "--verify-manifest", reference,
+         "--expected-commit", base],
+        cwd=root, text=True, capture_output=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        fail(
+            f"runner manifest is not an accepted exact-commit runner receipt: "
+            f"{reference} ({detail or 'strict runner-evidence validation failed'})"
+        )
 
 
 def covered_categories(root: Path, lines: list[str], required: set[str],
-                       round_number: int, base: str, policy: dict[str, dict]) -> set[str]:
+                       round_number: int, base: str, nonce: str | None,
+                       policy: dict[str, dict]) -> set[str]:
     covered: set[str] = set()
     for line in lines:
         for receipt_ref in RECEIPT.findall(line):
@@ -233,13 +324,14 @@ def covered_categories(root: Path, lines: list[str], required: set[str],
                 )
             if not isinstance(coordinator_nonce, str) or not SHA256.fullmatch(coordinator_nonce):
                 fail(f"receipt {receipt_ref} has an invalid coordinator_nonce")
+            if nonce is not None and coordinator_nonce != nonce:
+                fail(
+                    f"receipt {receipt_ref} does not match the active audit "
+                    f"coordinator nonce (wrong or reused nonce)"
+                )
             covered.add(tag)
         for manifest_ref in MANIFEST.findall(line):
-            data = receipt_record(root, manifest_ref)
-            if data.get("schema") != "factory-runner-receipt/v1":
-                fail(f"objective manifest is not a factory-runner-receipt: {manifest_ref}")
-            if data.get("result") != "pass" or data.get("exit_code") != 0:
-                fail(f"objective manifest does not prove a clean pass: {manifest_ref}")
+            strict_manifest(root, manifest_ref, base)
             segments = manifest_segments(root, manifest_ref)
             for segment in segments:
                 if segment in required:
@@ -276,7 +368,7 @@ def main() -> int:
     parser.add_argument("--root", default=str(ROOT))
     args = parser.parse_args()
     root = Path(args.root).resolve()
-    round_number, base = audit_binding(args, root)
+    round_number, base, nonce = audit_binding(args, root)
     data = load_objectives(root)
     objectives = data["objectives"]
     objective = objectives[(round_number - 1) % len(objectives)]
@@ -292,7 +384,7 @@ def main() -> int:
     if report_path.is_symlink() or not report_path.is_file():
         fail(f"audit report is missing: {report_path}")
     lines = parse_evidence_lines(report_path)
-    covered = covered_categories(root, lines, required, round_number, base, policy)
+    covered = covered_categories(root, lines, required, round_number, base, nonce, policy)
     missing = sorted(required - covered)
     if missing:
         fail(

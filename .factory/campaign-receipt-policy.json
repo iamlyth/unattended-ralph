@@ -1,6 +1,6 @@
 {
   "schema": "ralph-receipt-policy/v1",
-  "description": "Authorizes campaign objective receipt categories in the product-neutral boilerplate. A machine receipt satisfies a category only when its recorded argv equals one of the category's allowlisted argv exactly, its evidence_commit equals the active campaign audit base, and it carries the audit coordinator round/nonce binding. A runner manifest satisfies a category only when the category allows manifests and the manifest is an accepted exact-commit runner receipt whose path contains the category. Arbitrary commands (for example a bare `true`) are never allowed; receipt tags alone never authorize. The allowlists bind each category to the generic boilerplate's own gate tooling; an adopting product replaces this policy with its product commands before running campaigns.",
+  "description": "Authorizes campaign objective receipt categories in the product-neutral boilerplate. A machine receipt satisfies a category only when its recorded argv equals one of the category's allowlisted argv exactly, its evidence_commit equals the active campaign audit base, and it carries the audit coordinator round/nonce binding. A runner manifest satisfies a category only when the category allows manifests and the manifest is an accepted exact-commit runner receipt whose path contains the category: every [manifest:] reference must be an exact signed record in the runner-evidence aggregate at the audit base, validated by scripts/check-factory-runner-evidence.py --verify-manifest. Standalone/minimal, unsigned, fabricated, and path-category-only manifests are rejected. Arbitrary commands (for example a bare `true`) are never allowed; receipt tags alone never authorize. The allowlists bind each category to the generic boilerplate's own gate tooling; an adopting product replaces this policy with its product commands before running campaigns.",
   "categories": [
     {
       "name": "runner-evidence",
@@ -64,3 +64,4 @@
     }
   ]
 }
+
