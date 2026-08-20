@@ -22,6 +22,10 @@ class Repo:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         (self.root / "scripts").mkdir()
+        (self.root / ".factory").mkdir()
+        (self.root / ".factory/config.toml").write_text(
+            "[project]\ndevelopment_branch = \"develop\"\n", encoding="utf-8"
+        )
         (self.root / ".factory-state").mkdir(mode=0o700)
         shutil.copy2(SOURCE, self.root / "scripts/ralph-campaign-state.py")
         scripts = Path(__file__).resolve().parent.parent / "scripts"

@@ -15,6 +15,8 @@ cat > "$tmp/.factory/environment.toml" <<'EOF'
 schema_version = 1
 EOF
 cat > "$tmp/.factory/config.toml" <<'EOF'
+[project]
+development_branch = "develop"
 [campaign]
 required_capabilities = []
 EOF

@@ -1,7 +1,7 @@
 [project]
 spec = "docs/SPEC.md"
 plan = ".factory/artifacts/implementation-plan.md"
-development_branch = "develop"
+development_branch = "boilerplate-develop"
 release_branch = "main"
 
 [concurrency]
@@ -48,7 +48,7 @@ external_sync = "manual"
 credentials = false
 
 [git]
-autonomous_branch = "develop"
+autonomous_branch = "boilerplate-develop"
 human_release_branch = "main"
 allow_worktrees = false
 checkpoint_each_iteration = true

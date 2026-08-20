@@ -8,7 +8,7 @@ Keep this file brief and operational. Progress, task status, and verification ev
 - Declared factory capabilities: `.factory/environment.toml` (never invent undeclared runners)
 - Active work and evidence: `.factory/artifacts/implementation-plan.md`
 - Ordinary defects: `.factory/bugs/open.md` and `.factory/bugs/closed.md`
-- Work only on `develop`; the human promotes to `main`.
+- Work only on the configured development branch (`.factory/config.toml` `development_branch`); the human promotes to `main`.
 - Do not use Git worktrees or edit the committed specification during implementation.
 
 ## Build

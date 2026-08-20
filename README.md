@@ -7,14 +7,14 @@ A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum deve
 ## Operating model
 
 - `main` is the human-controlled release branch.
-- `develop` is the autonomous implementation branch.
+- The configured development branch (`.factory/config.toml` `development_branch`) is the autonomous implementation branch.
 - One committed `docs/SPEC.md` is the source of truth; Git versions it.
 - A planning-only Ralph loop creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
 - Each implementation iteration selects one bounded task and starts with fresh model context.
 - Pi subagents perform parallel read-only planning, research, review, security, and documentation analysis.
 - Exactly one primary worker may edit, stage, or commit repository files.
 - Tests and documentation are completion gates.
-- You review `develop` and manually promote it to `main`.
+- You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used. `features.parallel` is disabled in both Ralph configurations.
 
@@ -30,13 +30,13 @@ Deliberate safety differences remain: eight adaptive read-only subagents rather 
 - `pi2` configured with the `@tintinweb/pi-subagents` extension
 - Ollama provider/model access
 - Bash, Git, Python 3.11+, curl, flock, and optionally ShellCheck
-- A clean `develop` branch with at least one commit
+- A clean configured development branch with at least one commit
 
 The project tracks `.pi/subagents.json` with a maximum of eight simultaneous read-only subagents. Project agents in `.pi/agents/` intentionally expose no `bash`, `edit`, or `write` tools.
 
 ## Initial setup
 
-1. Merge this boilerplate branch into `develop`.
+1. Merge this boilerplate branch into the configured development branch.
 2. Configure Ollama Cloud usage credentials:
 
    ```bash
@@ -242,11 +242,11 @@ Project implementation plans should add their own build, lint, test, and documen
 
 ## Release
 
-After Ralph reports completion, review `develop`. Release manually:
+After Ralph reports completion, review the configured development branch. Release manually:
 
 ```bash
 git switch main
-git merge --no-ff develop
+git merge --no-ff <development-branch>
 git tag vX.Y.Z
 ```
 

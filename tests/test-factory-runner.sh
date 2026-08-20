@@ -21,6 +21,10 @@ working_directory = "$tmp/runner/workspaces/fake-project"
 capabilities = ["project-gate"]
 verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
+cat > "$tmp/repo/.factory/config.toml" <<'EOF'
+[project]
+development_branch = "develop"
+EOF
 cat > "$tmp/repo/scripts/verify-boilerplate.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

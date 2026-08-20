@@ -5,7 +5,7 @@ used to implement the product defined by `docs/SPEC.md`. It is not relevant to
 end users — it documents the autonomous development loop, branch policy, quota
 management, and recovery procedures.
 
-The factory boilerplate is retained on the `develop` branch only. End users
+The factory boilerplate is retained on the configured development branch only. End users
 should refer to [README.md](../README.md) for product documentation.
 
 ## What this is
@@ -20,14 +20,14 @@ tracks task status and verification evidence.
 ## Operating model
 
 - `main` is the human-controlled release branch.
-- `develop` is the autonomous implementation branch.
+- The configured development branch (`.factory/config.toml` `development_branch`) is the autonomous implementation branch.
 - One committed `docs/SPEC.md` is the source of truth; Git versions it.
 - A planning-only Ralph loop creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
 - Each implementation iteration selects one bounded task and starts with fresh model context.
 - Pi subagents perform parallel read-only planning, research, review, security, and documentation analysis.
 - Exactly one primary worker may edit, stage, or commit repository files.
 - Tests and documentation are completion gates.
-- You review `develop` and manually promote it to `main`.
+- You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used. `features.parallel` is disabled in both Ralph configurations.
 
@@ -71,7 +71,7 @@ Git checkpoints make the plan, scratchpad, and implementation recoverable. Event
 
 ## Branch policy
 
-The autonomous lifecycle runs only on `develop`. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
+The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
 
 A boilerplate experiment on a `factory/*` branch requires the explicit temporary override:
 
@@ -87,13 +87,13 @@ Do not carry this override into normal development.
 - `pi2` configured with the `@tintinweb/pi-subagents` extension
 - Ollama provider/model access
 - Bash, Git, Python 3.11+, curl, flock, and optionally ShellCheck
-- A clean `develop` branch with at least one commit
+- A clean configured development branch with at least one commit
 
 The project tracks `.pi/subagents.json` with a maximum of eight simultaneous read-only subagents. Project agents in `.pi/agents/` intentionally expose no `bash`, `edit`, or `write` tools.
 
 ## Initial setup
 
-1. Merge this boilerplate branch into `develop`.
+1. Merge this boilerplate branch into the configured development branch.
 2. Configure Ollama Cloud usage credentials:
 
    ```bash
@@ -212,7 +212,7 @@ round count. The next round's fresh planner consumes the preceding
 
 Ignored state in `.factory-state/ralph-campaign.json` records the requested
 rounds, selected TUI mode, current phase, each round base, phase-start markers,
-commits, and audit results. Start a new campaign only from a clean `develop`.
+commits, and audit results. Start a new campaign only from a clean configured development branch.
 Resume an interrupted active campaign with exactly matching options:
 
 ```bash
@@ -242,7 +242,7 @@ Do not use the generic `update` command or edit the JSON. The dedicated command
 acquires the factory lock and succeeds only for an active first-round
 `verification` phase whose verification, runner-evidence, and audit fields are
 all unset. The explicit old value must match, the new value must be the current
-clean `develop` HEAD and a strict merge-free descendant, and state is strictly
+clean development-branch HEAD and a strict merge-free descendant, and state is strictly
 validated before and after an fsync-backed atomic replacement. Its JSON receipt
 records the old/new commits and before/after state SHA-256 digests. It never
 runs Ralph or changes evidence. Review the receipt, then use the normal campaign
@@ -451,11 +451,11 @@ The verifier checks shell syntax, ShellCheck when available, TOML/JSON configura
 
 ## Release
 
-After Ralph reports completion, review `develop`. Release manually:
+After Ralph reports completion, review the configured development branch. Release manually:
 
 ```bash
 git switch main
-git merge --no-ff develop
+git merge --no-ff <development-branch>
 git tag vX.Y.Z
 ```
 

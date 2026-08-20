@@ -24,7 +24,7 @@ Git checkpoints make the plan, scratchpad, and implementation recoverable. Event
 
 ## Branch policy
 
-The autonomous lifecycle runs only on `develop`. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
+The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
 
 A boilerplate experiment on a `factory/*` branch requires the explicit temporary override:
 
@@ -205,7 +205,7 @@ Every implementation plan ends with **Final documentation and specification audi
 
 ## Troubleshooting
 
-- **`expected develop`**: merge/switch to `develop`; use the trial override only for this boilerplate branch.
+- **`expected <development-branch>`**: merge/switch to the configured development branch; use the trial override only for this boilerplate branch.
 - **`exactly one working tree`**: remove stale worktrees and run `git worktree prune`.
 - **`plan is unplanned`**: run the planning loop.
 - **`fresh implementation plan may contain only pending tasks`**: remove carried-over lifecycle tasks; inspect current code and plan only remaining spec gaps.

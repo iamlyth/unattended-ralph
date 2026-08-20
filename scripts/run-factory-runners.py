@@ -213,10 +213,28 @@ def run_runner(runner: dict, commit: str, tree: str, environment_blob: str, arch
     }
 
 
+def development_branch() -> str:
+    """Return the development branch the factory may mutate, from config.toml.
+
+    The branch contract is declared in `.factory/config.toml` and consumed by
+    `scripts/branch-guard.sh`; runner verification must not hardcode it.
+    """
+    config = ROOT / ".factory/config.toml"
+    try:
+        with config.open("rb") as stream:
+            value = tomllib.load(stream)["project"]["development_branch"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError) as exc:
+        fail(f"development branch is not declared in .factory/config.toml: {exc}")
+    if not isinstance(value, str) or not value:
+        fail("development_branch must be a non-empty string")
+    return value
+
+
 def main() -> int:
     os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
-    if git("branch", "--show-current") != "develop":
-        fail("runner verification requires develop")
+    branch = development_branch()
+    if git("branch", "--show-current") != branch:
+        fail(f"runner verification requires {branch}")
     if git("status", "--porcelain", "--untracked-files=normal"):
         fail("runner verification requires a clean Git tree")
     if git("replace", "-l"):

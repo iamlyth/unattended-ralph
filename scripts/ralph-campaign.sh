@@ -17,7 +17,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/ralph-campaign.sh --rounds N [--resume|--restart] [--tui|--no-tui]
 
-A new campaign requires a clean develop branch and runs unattended by default.
+A new campaign requires a clean configured development branch and runs unattended by default.
 --tui opts into an attended diagnostic display. --resume continues the exact
 saved round and phase; --restart explicitly replaces only a terminal saved
 campaign. Rounds and TUI mode must match when resuming.

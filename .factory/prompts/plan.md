@@ -67,7 +67,7 @@ The launcher has already written all five metadata values into the fresh skeleto
 9. A final task titled **Final documentation and specification audit** that depends explicitly on every other task and executes the canonical specification's definition of done plus the factory defaults in `.factory/prompts/implementation.md`. Its acceptance criteria must require an all-`verified` conformance matrix, exhaustive interaction inventory results, no contradictory open release-scope bugs, independent adversarial reviews, full clean verification, accurate documentation, and a clean Git state.
 10. A remediation rule: when final audit finds a gap, preserve the ledger, append a uniquely numbered pending task, add it to the final audit's dependencies, return the audit to pending, and continue. Reaching an iteration/runtime/session ceiling leaves the cycle incomplete; it never satisfies the plan.
 
-This repository uses one autonomous `develop` branch and one mutating worker. Parallelism is for read-only analysis and review, not simultaneous edits.
+This repository uses one autonomous development branch and one mutating worker. Parallelism is for read-only analysis and review, not simultaneous edits.
 
 ## Finish
 

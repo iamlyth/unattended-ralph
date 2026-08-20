@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tomllib
 
 from factory_lock import FactoryLockError, locked
 from factory_state_io import StateIOError, atomic_write_json, read_bytes, read_json, remove
@@ -307,9 +308,27 @@ def promote_verifier_binding(args: argparse.Namespace) -> None:
         atomic_write(data)
 
 
+def development_branch() -> str:
+    """Return the tracked development branch the lifecycle may mutate.
+
+    The branch contract lives in `.factory/config.toml` (consumed by
+    `scripts/branch-guard.sh`); the rebind guard must not duplicate a
+    literal branch name.
+    """
+    config = ROOT / ".factory/config.toml"
+    try:
+        with config.open("rb") as stream:
+            value = tomllib.load(stream)["project"]["development_branch"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError) as exc:
+        fail(f"development branch is not declared in .factory/config.toml: {exc}")
+    if not isinstance(value, str) or not value:
+        fail("development_branch must be a non-empty string")
+    return value
+
+
 def require_rebind_head(requested_new: str) -> None:
-    if git("symbolic-ref", "--quiet", "--short", "HEAD", check=False) != "develop":
-        fail("rebind requires the develop branch")
+    if git("symbolic-ref", "--quiet", "--short", "HEAD", check=False) != development_branch():
+        fail(f"rebind requires the {development_branch()} branch")
     if git("rev-parse", "HEAD") != requested_new:
         fail("requested new implementation commit must equal current HEAD")
     if git("status", "--porcelain=v1", "--untracked-files=normal"):
