@@ -23,6 +23,9 @@ case "$MODE" in
         ./scripts/check-plan-freshness.sh --planning
         ./scripts/check-scratchpad.sh PLAN_COMPLETE
         ./scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md
+        if [[ -f .factory/artifacts/blocked-facts.json ]]; then
+            ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json
+        fi
         if [[ -f .factory/artifacts/conformance.json ]]; then
             ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json
         fi
@@ -58,8 +61,13 @@ PY
         fi
         # The machine-readable conformance sidecar is the only authority for
         # verified claims: free-text matrix cells cannot prove acceptance.
-        # Blocked/unevidenced requirements fail implementation completion.
+        # Blocked/unevidenced requirements fail implementation completion,
+        # and every blocked-facts entry must be resolved by an exact
+        # receipt/artifact or an explicit human decision.
         ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json
+        ./scripts/validate-blocked-facts.py complete .factory/artifacts/blocked-facts.json
+        ./scripts/check-context-summary.py
+        ./scripts/check-golden-policy.py
         ./scripts/check-capability-contracts.py
         ./scripts/check-capability-evidence.py
         ./scripts/check-docs-sync.sh
@@ -80,9 +88,16 @@ PY
         if [[ -f .factory/artifacts/conformance.json ]]; then
             ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json
         fi
+        if [[ -f .factory/artifacts/blocked-facts.json ]]; then
+            ./scripts/validate-blocked-facts.py complete .factory/artifacts/blocked-facts.json
+        fi
+        ./scripts/check-golden-policy.py
         # Coordinator-executed commands are only runtime evidence when a machine
         # receipt matches; BLOCKED evidence forces result: findings.
         ./scripts/check-audit-receipts.py
+        # Each audit round carries one falsification objective; the round
+        # cannot pass without objective-specific receipt categories.
+        ./scripts/check-campaign-objectives.py
         [[ ${FACTORY_CAMPAIGN_AUDIT_ROUND:-} =~ ^[1-9][0-9]*$ \
             && ${FACTORY_CAMPAIGN_AUDIT_BASE:-} =~ ^[0-9a-f]{40}$ \
             && ${FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || {

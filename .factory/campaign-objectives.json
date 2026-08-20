@@ -1,0 +1,36 @@
+{
+  "schema": "ralph-campaign-objectives/v1",
+  "description": "Product-neutral per-round falsification objectives for the independent campaign audit. Each audit round is assigned one objective (round r uses objectives[(r-1) mod N]) and the audit report cannot pass without machine receipt categories specific to that objective. Replaying the same generic receipt suite cannot satisfy every round: each objective requires its own receipt categories.",
+  "objectives": [
+    {
+      "key": "runner-capability",
+      "label": "Runner capability falsification",
+      "receipt_categories": ["runner-evidence", "project-verify"],
+      "rationale": "Challenge the claim that declared runner capabilities and the project verification gate really ran at the audited commit."
+    },
+    {
+      "key": "visual-installed",
+      "label": "Visual and installed acceptance falsification",
+      "receipt_categories": ["installed-functional", "visual-render"],
+      "rationale": "Challenge whether the installed product and its visual output are real acceptance rather than offscreen or source-tree proxies."
+    },
+    {
+      "key": "real-system",
+      "label": "Real system/service falsification",
+      "receipt_categories": ["real-system-service", "target-consumer"],
+      "rationale": "Challenge whether a real system service and a real target consumer were exercised through the production path."
+    },
+    {
+      "key": "package-namespace",
+      "label": "Package and namespace falsification",
+      "receipt_categories": ["package-build", "package-install"],
+      "rationale": "Challenge the packaged artifact namespace, build, and install layout claims."
+    },
+    {
+      "key": "final-evidence",
+      "label": "Final evidence and definition-of-done falsification",
+      "receipt_categories": ["final-gate", "audit-report"],
+      "rationale": "Challenge the final gate run and the audit report itself as durable evidence of the completion claim."
+    }
+  ]
+}

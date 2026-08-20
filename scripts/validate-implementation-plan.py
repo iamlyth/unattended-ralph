@@ -98,6 +98,12 @@ def parse_tasks(text: str) -> list[dict[str, object]]:
 
     numbers = {int(task["number"]) for task in tasks}
     graph: dict[int, list[int]] = {}
+    final_number = None
+    for task in tasks:
+        if task["title"] == FINAL_TITLE:
+            if final_number is not None:
+                fail("plan has more than one final audit task")
+            final_number = int(task["number"])
     for task in tasks:
         number = int(task["number"])
         dependencies = list(task["dependencies"])
@@ -107,7 +113,11 @@ def parse_tasks(text: str) -> list[dict[str, object]]:
         if number in dependencies:
             fail(f"Task {number} cannot depend on itself")
         if any(dependency > number for dependency in dependencies):
-            fail(f"Task {number} dependencies must refer to earlier tasks")
+            # Only the final audit may depend on appended remediation tasks
+            # that follow it in the ledger. Any other forward dependency is a
+            # defect: a task may only depend on tasks it can actually await.
+            if number != final_number:
+                fail(f"Task {number} dependencies must refer to earlier tasks")
         graph[number] = dependencies
 
     visiting: set[int] = set()
@@ -140,7 +150,7 @@ def table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
+def validate_matrix(text: str, task_numbers: set[int], task_statuses: dict[int, str], complete: bool) -> None:
     matrix = section(text, "Specification conformance matrix")
     lines = [line.strip() for line in matrix.splitlines() if line.strip()]
     table_lines = [line for line in lines if line.startswith("|")]
@@ -173,6 +183,13 @@ def validate_matrix(text: str, task_numbers: set[int], complete: bool) -> None:
             fail(f"conformance row {requirement_id} references an unknown task")
         if classification != "verified" and not task_refs:
             fail(f"non-verified conformance row {requirement_id} must reference an existing task")
+        if classification != "verified":
+            unresolved = sorted(number for number in task_refs if task_statuses[number] == "complete")
+            if len(task_refs) == len(unresolved):
+                fail(
+                    f"non-verified conformance row {requirement_id} references only completed "
+                    f"tasks ({unresolved}); a pending/in-progress/blocked task must own it"
+                )
         if complete and classification != "verified":
             fail(f"completion rejected while conformance row {requirement_id} is `{classification}`")
         if complete and re.search(
@@ -192,17 +209,31 @@ def validate_interactions(text: str) -> None:
             fail(f"interaction inventory must describe `{term}` coverage")
 
 
-def validate_final_task(tasks: list[dict[str, object]]) -> None:
+def validate_final_task(tasks: list[dict[str, object]], fresh: bool) -> None:
     finals = [task for task in tasks if task["title"] == FINAL_TITLE]
     if len(finals) != 1:
         fail(f"plan requires exactly one task titled `{FINAL_TITLE}`")
     final = finals[0]
-    if final is not tasks[-1]:
-        fail("final documentation and specification audit must be the last task")
+    final_index = tasks.index(final)
+    appended = tasks[final_index + 1:]
+    if fresh and appended:
+        fail("a fresh plan must end with the final documentation and specification audit")
     all_other = {int(task["number"]) for task in tasks if task is not final}
     dependencies = set(int(value) for value in final["dependencies"])
     if dependencies != all_other:
         fail("final audit must depend on every other task and no others")
+    if appended:
+        expected = int(final["number"]) + 1
+        for task in appended:
+            if int(task["number"]) != expected:
+                fail("appended remediation tasks after the final audit must be uniquely and contiguously numbered")
+            if task["status"] == "complete":
+                fail("a completed appended task after the final audit contradicts the active ledger")
+            expected += 1
+        if final["status"] == "complete":
+            fail("a completed final audit may not have appended tasks after it")
+    elif final is not tasks[-1]:
+        fail("final documentation and specification audit must be the last task")
     body = str(final["body"]).lower()
     for term in ("definition of done", "conformance", "interaction", "open", "review", "clean"):
         if term not in body:
@@ -242,14 +273,20 @@ def main() -> None:
     validate_front_matter(text, mode)
     tasks = parse_tasks(text)
     task_numbers = {int(task["number"]) for task in tasks}
-    validate_matrix(text, task_numbers, complete=mode == "complete")
+    task_statuses = {int(task["number"]): str(task["status"]) for task in tasks}
+    validate_matrix(text, task_numbers, task_statuses, complete=mode == "complete")
     validate_interactions(text)
-    validate_final_task(tasks)
 
     if mode == "planning":
         non_pending = [task for task in tasks if task["status"] != "pending"]
-        if non_pending:
-            fail("every task in a fresh plan must be pending")
+        fresh = not non_pending
+        validate_final_task(tasks, fresh=fresh)
+        if fresh:
+            for task in tasks:
+                if any(dep > int(task["number"]) for dep in task["dependencies"]):
+                    fail("fresh plans must not contain forward dependencies")
+        elif not any(task["status"] == "complete" for task in tasks):
+            fail("an active-cycle plan must preserve its completed task ledger")
     else:
         unfinished = [task for task in tasks if task["status"] != "complete"]
         if unfinished:
@@ -257,6 +294,7 @@ def main() -> None:
                 f"Task {task['number']}={task['status']}" for task in unfinished
             )
             fail(f"completion requires every task complete ({details})")
+        validate_final_task(tasks, fresh=False)
 
 
 if __name__ == "__main__":

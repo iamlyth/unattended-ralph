@@ -12,12 +12,13 @@ trap 'rm -rf "$tmp"' EXIT
 VALIDATOR="$PROJECT_ROOT/scripts/validate-conformance.py"
 EVIDENCE_CHECKER="$PROJECT_ROOT/scripts/check-capability-evidence.py"
 CONTRACT_CHECKER="$PROJECT_ROOT/scripts/check-capability-contracts.py"
+FACTS_VALIDATOR="$PROJECT_ROOT/scripts/validate-blocked-facts.py"
 
 setup_repo() {
     local dir=$1
     mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory-state/runner-evidence/probe-runner" \
         "$dir/tests" "$dir/docs"
-    cp "$VALIDATOR" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$dir/scripts/"
+    cp "$VALIDATOR" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$FACTS_VALIDATOR" "$dir/scripts/"
     chmod +x "$dir/scripts/"*.py
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-project.sh"
     chmod +x "$dir/scripts/verify-project.sh"
@@ -110,6 +111,7 @@ write_sidecar() {
       "evidence_commit": "$head",
       "receipts": [".factory-state/runner-evidence/probe-runner/$head/manifest.json"],
       "artifacts": ["tests/probe.c"],
+      "fact_refs": [],
       "reason": ""
     },
     {
@@ -122,6 +124,7 @@ write_sidecar() {
       "evidence_commit": "$head",
       "receipts": [],
       "artifacts": [],
+      "fact_refs": ["FACT-001"],
       "reason": "pending task"
     },
     {
@@ -134,7 +137,39 @@ write_sidecar() {
       "evidence_commit": "$head",
       "receipts": [],
       "artifacts": [],
+      "fact_refs": ["FACT-002"],
       "reason": "capability is not real-system evidenced"
+    }
+  ]
+}
+JSON
+}
+
+# Every blocked/partial row must reference an open fact; the fact ledger must
+# stay bidirectional with the sidecar.
+write_facts() {
+    local dir=$1
+    cat > "$dir/.factory/artifacts/blocked-facts.json" <<JSON
+{
+  "schema": "ralph-blocked-facts/v1",
+  "facts": [
+    {
+      "id": "FACT-001",
+      "title": "probe REQ-02 evidence unavailable",
+      "status": "open",
+      "capabilities": [],
+      "requirements": ["REQ-02"],
+      "blocking_evidence": "REQ-02 needs a real-system probe that the fixture lacks",
+      "resolution": null
+    },
+    {
+      "id": "FACT-002",
+      "title": "probe REQ-03 evidence unavailable",
+      "status": "open",
+      "capabilities": ["probe-capability"],
+      "requirements": ["REQ-03"],
+      "blocking_evidence": "REQ-03 needs a real-system probe that the fixture lacks",
+      "resolution": null
     }
   ]
 }
@@ -159,6 +194,7 @@ for req in data['requirements']:
     req['required_capabilities'] = []
     req['receipts'] = [f".factory-state/runner-evidence/probe-runner/{head}/manifest.json"]
     req['artifacts'] = ["tests/probe.c"]
+    req['fact_refs'] = []
     req['reason'] = ''
 if mode == 'free-text':
     for req in data['requirements']:
@@ -187,6 +223,15 @@ PY
     sed -i -e 's/| REQ-02 | §2 | partial |/| REQ-02 | §2 | verified |/' \
            -e 's/| REQ-03 | §3 | partial |/| REQ-03 | §3 | verified |/' \
         "$dst/.factory/artifacts/implementation-plan.md"
+    # All facts are resolved once every row is reclassified verified: an open
+    # fact must stay referenced by a blocked/partial row, so the mutated
+    # fixture carries an empty ledger.
+    cat > "$dst/.factory/artifacts/blocked-facts.json" <<'LEDGER'
+{
+  "schema": "ralph-blocked-facts/v1",
+  "facts": []
+}
+LEDGER
 }
 
 expect_fail() {
@@ -203,18 +248,26 @@ setup_repo "$tmp/blessed"
 head=$(git -C "$tmp/blessed" rev-parse HEAD)
 write_plan "$tmp/blessed"
 write_sidecar "$tmp/blessed" "$head"
+write_facts "$tmp/blessed"
 (cd "$tmp/blessed" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null)
+(cd "$tmp/blessed" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json --facts .factory/artifacts/blocked-facts.json >/dev/null)
+(cd "$tmp/blessed" && ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json >/dev/null)
 (cd "$tmp/blessed" && ./scripts/check-capability-contracts.py >/dev/null)
 (cd "$tmp/blessed" && ./scripts/check-capability-evidence.py >/dev/null)
 
 # A complete state with a non-verified row must fail (blocked fails
-# implementation completion).
+# implementation completion) and an open fact must keep completion failing.
 sed -i 's/^status: active$/status: complete/' "$tmp/blessed/.factory/artifacts/implementation-plan.md"
 set +e
 (cd "$tmp/blessed" && ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json >/dev/null 2>&1)
 blocked_complete_rc=$?
 set -e
 [[ $blocked_complete_rc -eq 1 ]]
+set +e
+(cd "$tmp/blessed" && ./scripts/validate-blocked-facts.py complete .factory/artifacts/blocked-facts.json >/dev/null 2>&1)
+open_fact_complete_rc=$?
+set -e
+[[ $open_fact_complete_rc -eq 1 ]]
 
 # Free-text verified row: verified with no receipt/artifact refs is rejected.
 mutate "$tmp/blessed" "$tmp/free-text" free-text
@@ -243,15 +296,20 @@ expect_fail "$tmp/missing-receipt" "a missing receipt"
 # not_applicable misuse: without a spec-scoped reason the sidecar is invalid in
 # planning mode; with a scoped reason planning accepts it but completion fails.
 cp -a "$tmp/blessed" "$tmp/na-misuse"
-python3 - "$tmp/na-misuse/.factory/artifacts/conformance.json" <<'PY'
+python3 - "$tmp/na-misuse/.factory/artifacts/conformance.json" \
+        "$tmp/na-misuse/.factory/artifacts/blocked-facts.json" <<'PY'
 import json, sys
-path = sys.argv[1]
-data = json.load(open(path))
+sidecar_path, facts_path = sys.argv[1], sys.argv[2]
+data = json.load(open(sidecar_path))
 for req in data['requirements']:
     if req['id'] == 'REQ-02':
         req['classification'] = 'not_applicable'
         req['reason'] = 'convenience'
-open(path, 'w').write(json.dumps(data))
+        req['fact_refs'] = []
+open(sidecar_path, 'w').write(json.dumps(data))
+ledger = json.load(open(facts_path))
+ledger['facts'] = [fact for fact in ledger['facts'] if fact['id'] != 'FACT-001']
+open(facts_path, 'w').write(json.dumps(ledger))
 PY
 set +e
 (cd "$tmp/na-misuse" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
@@ -283,5 +341,98 @@ set +e
 mismatch_rc=$?
 set -e
 [[ $mismatch_rc -eq 1 ]] || { echo "test: sidecar/plan ID mismatch was accepted" >&2; exit 1; }
+
+# A partial row that references an unknown fact must fail.
+cp -a "$tmp/blessed" "$tmp/unknown-fact"
+python3 - "$tmp/unknown-fact/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-02':
+        req['fact_refs'] = ['FACT-999']
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/unknown-fact" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+unknown_fact_rc=$?
+set -e
+[[ $unknown_fact_rc -eq 1 ]] || { echo "test: unknown fact reference was accepted" >&2; exit 1; }
+
+# A partial row with no open fact reference must fail (unavailable evidence
+# must be fact-bound).
+cp -a "$tmp/blessed" "$tmp/no-fact-ref"
+python3 - "$tmp/no-fact-ref/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-02':
+        req['fact_refs'] = []
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/no-fact-ref" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+no_fact_rc=$?
+set -e
+[[ $no_fact_rc -eq 1 ]] || { echo "test: partial row without a fact reference was accepted" >&2; exit 1; }
+
+# A verified row may never reference a fact.
+cp -a "$tmp/blessed" "$tmp/verified-fact"
+python3 - "$tmp/verified-fact/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['fact_refs'] = ['FACT-001']
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/verified-fact" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+verified_fact_rc=$?
+set -e
+[[ $verified_fact_rc -eq 1 ]] || { echo "test: verified row referencing a fact was accepted" >&2; exit 1; }
+
+# A fact whose requirements drift from the sidecar must fail.
+cp -a "$tmp/blessed" "$tmp/fact-drift"
+python3 - "$tmp/fact-drift/.factory/artifacts/blocked-facts.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for fact in data['facts']:
+    if fact['id'] == 'FACT-001':
+        fact['requirements'] = ['REQ-03']
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/fact-drift" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+fact_drift_rc=$?
+set -e
+[[ $fact_drift_rc -eq 1 ]] || { echo "test: fact/requirements drift was accepted" >&2; exit 1; }
+
+# A resolved fact may not remain referenced by a blocked/partial row.
+cp -a "$tmp/blessed" "$tmp/resolved-referenced"
+python3 - "$tmp/resolved-referenced/.factory/artifacts/blocked-facts.json" "$head" <<'PY'
+import json, sys
+path, head = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+for fact in data['facts']:
+    if fact['id'] == 'FACT-001':
+        fact['status'] = 'resolved'
+        fact['resolution'] = {
+            'type': 'receipt',
+            'refs': [f'.factory-state/runner-evidence/probe-runner/{head}/manifest.json'],
+            'evidence_commit': head,
+            'resolved_at': '2026-01-01',
+            'reason': 'fixture resolution'
+        }
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/resolved-referenced" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+resolved_rc=$?
+set -e
+[[ $resolved_rc -eq 1 ]] || { echo "test: resolved fact referenced by a partial row was accepted" >&2; exit 1; }
 
 echo "test: conformance validator adversarial checks passed"

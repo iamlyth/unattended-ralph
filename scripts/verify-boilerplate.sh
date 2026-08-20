@@ -15,6 +15,7 @@ unset FACTORY_FINAL_GATE_ATTEST FACTORY_RALPH_CYCLE_ID FACTORY_RALPH_ATTEMPT_ID 
       FACTORY_RALPH_HISTORY_ID FACTORY_RALPH_HISTORY_OFFSET \
       FACTORY_CAMPAIGN_PHASE FACTORY_CAMPAIGN_ROUND FACTORY_CAMPAIGN_AUDIT_ROUND \
       FACTORY_CAMPAIGN_AUDIT_BASE FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256 \
+      FACTORY_CAMPAIGN_OBJECTIVE \
       FACTORY_PLANNING_BASE_COMMIT FACTORY_MAINTENANCE_BASE_COMMIT \
       FACTORY_RALPH_MAX_COMPLETION_RECOVERIES FACTORY_RALPH_MAX_NO_PROGRESS_RECOVERIES \
       FACTORY_RALPH_MAX_STALE_RECOVERIES
@@ -97,8 +98,18 @@ required = [
     'scripts/validate-conformance.py', 'scripts/check-capability-contracts.py',
     'scripts/check-capability-evidence.py', 'scripts/machine-receipt.py',
     'scripts/check-audit-receipts.py',
+    'scripts/validate-blocked-facts.py', 'scripts/check-context-summary.py',
+    'scripts/ralph-context-summary.py', 'scripts/check-campaign-objectives.py',
+    'scripts/check-golden-policy.py',
+    '.factory/artifacts/blocked-facts.json', '.factory/artifacts/conformance.json',
+    '.factory/artifacts/context-summary.md',
+    '.factory/campaign-objectives.json', '.factory/golden-policy.json',
+    '.factory/golden-review.json', '.factory/schemas/blocked-facts.schema.json',
+    '.factory/schemas/golden-review.schema.json',
     'tests/test-conformance.sh', 'tests/test-capability-contracts.sh',
     'tests/test-audit-receipts.sh',
+    'tests/test-blocked-facts.sh', 'tests/test-campaign-objectives.sh',
+    'tests/test-context-summary.sh', 'tests/test-golden-policy.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -142,6 +153,11 @@ grep -q 'synthetic producer' .factory/prompts/implementation.md
 grep -q 'declaring or asserting evidence is not evidence' .factory/prompts/implementation.md
 grep -q 'conformance.json' .factory/prompts/implementation.md
 grep -q 'machine-receipt.py --tag' .factory/prompts/implementation.md
+# Unavailable evidence must be fact-bound; fresh contexts receive only the
+# durable context summary; golden baselines are protected by review manifests.
+grep -q 'blocked-facts.json' .factory/prompts/implementation.md
+grep -q 'context-summary' .factory/prompts/implementation.md
+grep -q 'golden-policy' .factory/prompts/implementation.md
 for role in visual-reviewer runner-reviewer evidence-reviewer spec-reviewer; do
     grep -q 'no runtime-certification authority' ".pi/agents/$role.md"
 done
@@ -151,6 +167,7 @@ grep -q 'conformance.json' .factory/prompts/plan.md
 grep -q 'evidence tier' .factory/prompts/plan.md
 grep -q 'Pixel/offscreen framebuffer checks are not real visual acceptance' .factory/prompts/plan.md
 grep -q 'capability-contracts.json' .factory/prompts/plan.md
+grep -q 'blocked-facts.json' .factory/prompts/plan.md
 grep -q 'Interaction acceptance inventory' .factory/prompts/plan.md
 grep -q 'definition of done' .factory/prompts/implementation.md
 grep -q 'Maintenance verification and documentation audit' .factory/prompts/maintenance-plan.md
@@ -162,6 +179,8 @@ grep -q 'AUDIT_COMPLETE.*final non-empty line' .factory/prompts/audit.md
 grep -q 'machine-receipt.py --tag' .factory/prompts/audit.md
 grep -q '\[receipt:' .factory/prompts/audit.md
 grep -q 'BLOCKED evidence forces' .factory/prompts/audit.md
+grep -q 'check-campaign-objectives.py' .factory/prompts/audit.md
+grep -q 'blocked-facts.json' .factory/prompts/audit.md
 grep -q 'Pixel/offscreen framebuffer checks are not real visual acceptance' .factory/prompts/audit.md
 grep -q 'conformance.json' .factory/prompts/audit.md
 grep -q 'final-gate.sh --planning' .factory/prompts/plan.md
@@ -204,6 +223,9 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 ./scripts/check-factory-environment.py
 ./scripts/check-capability-contracts.py
+./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json
+./scripts/check-golden-policy.py
+./scripts/check-context-summary.py
 cmp -s .github/ISSUE_TEMPLATE/bug_report.md .forgejo/ISSUE_TEMPLATE/bug_report.md
 ./scripts/bug-ledger.py validate
 
@@ -240,5 +262,9 @@ PY
 ./tests/test-conformance.sh
 ./tests/test-capability-contracts.sh
 ./tests/test-audit-receipts.sh
+./tests/test-blocked-facts.sh
+./tests/test-campaign-objectives.sh
+./tests/test-context-summary.sh
+./tests/test-golden-policy.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

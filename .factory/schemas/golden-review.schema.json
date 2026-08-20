@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ralph-golden-review/v1",
+  "title": "Ralph golden review manifest",
+  "description": "Separate review manifest for golden baseline changes. Every working-tree change to a file under a golden directory declared by .factory/golden-policy.json requires exactly one entry here recording the before hash (committed at HEAD), the after hash (new working-tree content), the reason, and the reviewer's human identity. Documentation or a bare commit message can never substitute for the manifest entry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "entries"],
+  "properties": {
+    "schema": {
+      "const": "ralph-golden-review/v1"
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "repo_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "before_sha256",
+        "after_sha256",
+        "reason",
+        "reviewer",
+        "human",
+        "reviewed_at"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/repo_path" },
+        "before_sha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ],
+          "description": "SHA-256 of the committed golden at HEAD; null when the file is new (not present at HEAD)."
+        },
+        "after_sha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ],
+          "description": "SHA-256 of the working-tree golden; null when the file was deleted."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "human": {
+          "type": "boolean",
+          "const": true
+        },
+        "reviewed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

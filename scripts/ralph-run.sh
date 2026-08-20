@@ -42,6 +42,12 @@ factory_lock_acquire "$PROJECT_ROOT"
 ralph_supervision_prepare_state_directory
 "$SCRIPT_DIR/factory-state-file.py" write loop-mode implementation
 ralph_supervision_initialize implementation "$RESUME"
+# A fresh implementation context receives only the durable context summary:
+# the active task, open tasks, unresolved facts, blocked/partial rows, and
+# exact receipt refs. Regenerate and validate it before every launch so the
+# worker never inherits stale completion prose or drifted claims.
+factory_lock_run_untrusted ./scripts/ralph-context-summary.py
+factory_lock_run_untrusted ./scripts/check-context-summary.py
 CONTINUE=false
 if $RESUME && ralph_supervision_should_continue implementation; then CONTINUE=true; fi
 

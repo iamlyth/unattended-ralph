@@ -58,6 +58,7 @@
         "evidence_commit",
         "receipts",
         "artifacts",
+        "fact_refs",
         "reason"
       ],
       "properties": {
@@ -83,11 +84,20 @@
           "type": "array",
           "items": { "$ref": "#/$defs/repo_path" }
         },
+        "fact_refs": {
+          "type": "array",
+          "description": "Open blocked-facts ledger entries explaining why the row's required evidence is unavailable. Required for blocked/partial rows; must be empty for every other classification. Every referenced fact must list this requirement id and must be open while this row is non-verified.",
+          "items": { "$ref": "#/$defs/fact_id" }
+        },
         "reason": {
           "type": "string",
           "description": "Required for blocked and not_applicable rows. not_applicable reason must reference the spec-scoped exclusion (a section marker or docs/SPEC.md)."
         }
       }
+    },
+    "fact_id": {
+      "type": "string",
+      "pattern": "^FACT-[0-9]{3,}$"
     }
   }
 }

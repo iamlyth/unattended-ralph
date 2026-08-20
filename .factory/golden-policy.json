@@ -1,0 +1,10 @@
+{
+  "schema": "ralph-golden-policy/v1",
+  "description": "Protected golden baseline policy. Golden baselines under golden_directories are active acceptance assets: they must never be overwritten by automatic test side effects or by unguarded regeneration. Any working-tree change to a tracked golden requires a matching reviewed entry in the review manifest (before/after hashes plus reviewer/human identity). Generation tooling must refuse to overwrite active goldens without an explicit review manifest and human identity.",
+  "golden_directories": ["tests/golden"],
+  "review_manifest": ".factory/golden-review.json",
+  "generation": {
+    "allow_overwrite_of_active": false,
+    "required_environment": ["CBX_GOLDEN_REVIEW_MANIFEST", "CBX_GOLDEN_REVIEWER"]
+  }
+}

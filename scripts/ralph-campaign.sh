@@ -344,6 +344,24 @@ PY
             export FACTORY_CAMPAIGN_AUDIT_ROUND=$round
             export FACTORY_CAMPAIGN_AUDIT_BASE=$expected_audit_base
             export FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256=$expected_runner_evidence
+            # Each audit round carries one product-neutral falsification objective
+            # from .factory/campaign-objectives.json; objective-specific receipt
+            # categories are enforced by the campaign-audit gate.
+            FACTORY_CAMPAIGN_OBJECTIVE=$(python3 - "$round" <<'PY'
+import json, sys
+from pathlib import Path
+round_number = int(sys.argv[1])
+data = json.loads(Path('.factory/campaign-objectives.json').read_text(encoding='utf-8'))
+objectives = data.get('objectives', [])
+if not objectives or data.get('schema') != 'ralph-campaign-objectives/v1':
+    raise SystemExit('ralph-campaign: campaign objectives map is invalid')
+print(objectives[(round_number - 1) % len(objectives)].get('key', ''))
+PY
+)
+            [[ -n $FACTORY_CAMPAIGN_OBJECTIVE ]] || {
+                echo "ralph-campaign: campaign objective could not be resolved" >&2; exit 1;
+            }
+            export FACTORY_CAMPAIGN_OBJECTIVE
             if [[ "$started" != true ]]; then
                 [[ $(git rev-parse HEAD) == "$expected_audit_base" ]] || { echo "ralph-campaign: audit HEAD does not match verified implementation" >&2; exit 1; }
                 ./scripts/initialize-campaign-audit.py --round "$round" --base "$expected_audit_base" \
