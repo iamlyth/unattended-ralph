@@ -21,6 +21,12 @@ Request/response sealing (per task):
   - The orchestrator generates a cryptographically random request nonce (>= 128
     bits, 32 lowercase hex chars) per task and passes it to the SDK driver. The
     frozen prompt demands the exact echo, and the finding schema requires it.
+  - Every live task passes the exact inventory `expected` string. Calibration
+    passes the exact optional control `note` as descriptive context while its
+    pass/finding expectation remains a separate, hidden classification. A
+    domain-separated task prompt SHA-256 binds the template hash, exact
+    description, and classification; the SDK recomputes it before invocation.
+    Notes and classifications are calibration inputs, not visual evidence.
   - The SDK verifies every model-returned sealed field (schema, state_id,
     image hash, role, model, prompt hash, schema hash, nonce) against the task
     values and never repairs/overwrites them; any mismatch is rejected per task
@@ -31,8 +37,9 @@ Request/response sealing (per task):
     side verifies receipt exact keys/values, filename, ownership/link/mode,
     finding digest, and task binding; a missing/tampered/replayed receipt or
     finding fails closed.
-  - The report deterministically includes each receipt SHA-256 and finding
-    SHA-256; `report-check` and `check-visual-audit.py` revalidate the actual
+  - The report deterministically binds the exact inventory file and includes
+    each task prompt binding, receipt SHA-256, and finding SHA-256;
+    `report-check` and `check-visual-audit.py` revalidate the actual
     receipt/finding files and digests against the current provenance/report
     instead of trusting report fields. The nonce proves invocation freshness
     only; supplemental authority stays in the docs.
@@ -71,6 +78,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import json
@@ -125,6 +133,9 @@ RECEIPT_KEYS = {
     "prompt_sha256", "schema_sha256", "model", "raw_response_sha256",
     "finding_sha256", "started_at_ms", "finished_at_ms", "elapsed_ms",
 }
+TASK_PROMPT_BINDING_SCHEMA = "ralph-visual-audit-task-prompt/v1"
+CALIBRATION_EXPECTATIONS = ("none", "pass", "finding")
+MAX_EXPECTED_DESCRIPTION_BYTES = 16384
 # Exact allowed keys per calibration control: id/expectation are required,
 # sha256 is required (exact lowercase 64-hex), note is the only optional key.
 # Any unexpected key fails the declared set.
@@ -206,6 +217,65 @@ def sha256_file(path: Path) -> str:
 def new_nonce() -> str:
     """Fresh cryptographically random 128-bit request nonce (32 hex chars)."""
     return secrets.token_hex(16)
+
+
+def validate_expected_description(value: object, label: str, *, allow_empty: bool) -> str:
+    """Expected-state criteria are bounded UTF-8 data, never prompt syntax."""
+    if not isinstance(value, str) or (not allow_empty and not value):
+        die(f"{label} must be a {'possibly empty ' if allow_empty else 'non-empty '}string")
+    if len(value.encode("utf-8")) > MAX_EXPECTED_DESCRIPTION_BYTES:
+        die(f"{label} exceeds {MAX_EXPECTED_DESCRIPTION_BYTES} UTF-8 bytes")
+    return value
+
+
+def task_prompt_sha256(prompt_path: Path, expected_description: str,
+                       calibration_expectation: str = "none") -> str:
+    """Domain-separated binding for the exact template and expected criteria.
+
+    `prompt_sha256` in each finding/receipt is this task binding, rather than
+    merely the shared template digest. The rendered prompt contains the same
+    exact description as a JSON string. Calibration's hidden pass/finding
+    classification is bound separately from its optional descriptive note and
+    is not disclosed as reviewer guidance.
+    """
+    if calibration_expectation not in CALIBRATION_EXPECTATIONS:
+        die(f"invalid calibration expectation binding: {calibration_expectation!r}")
+    expected_description = validate_expected_description(
+        expected_description, "expected description", allow_empty=calibration_expectation != "none")
+    payload = {
+        "schema": TASK_PROMPT_BINDING_SCHEMA,
+        "prompt_template_sha256": sha256_file(prompt_path),
+        "expected_description": expected_description,
+        "calibration_expectation": calibration_expectation,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(canonical)
+
+
+def expected_description_b64(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def load_inventory(path: Path) -> tuple[dict, dict[str, dict]]:
+    try:
+        inventory = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        die(f"inventory is invalid: {type(exc).__name__}")
+    if inventory.get("schema") != "ralph-visual-audit-inventory/v1":
+        die("inventory schema invalid")
+    entries = inventory.get("states")
+    if not isinstance(entries, list) or not entries:
+        die("inventory states array is invalid")
+    states: dict[str, dict] = {}
+    for state in entries:
+        if not isinstance(state, dict) or not valid_state_id(state.get("id")):
+            die(f"inventory state id invalid: {state.get('id') if isinstance(state, dict) else None!r}")
+        state_id = state["id"]
+        if state_id in states:
+            die(f"inventory state id duplicated: {state_id!r}")
+        validate_expected_description(state.get("expected"), f"inventory state {state_id!r} expected", allow_empty=False)
+        states[state_id] = state
+    return inventory, states
 
 
 def valid_nonce(value: object) -> bool:
@@ -306,6 +376,8 @@ def validate_calibration_declared_set(cal: dict) -> list[dict]:
         seen.add(cid)
         if expectation not in ("pass", "finding"):
             die(f"calibration control {cid!r} has an invalid expectation: {expectation!r}")
+        note = validate_expected_description(
+            entry.get("note", ""), f"calibration control {cid!r} note", allow_empty=True)
         if not isinstance(declared, str) or not SHA256.fullmatch(declared):
             die(f"calibration control {cid!r} must declare an exact lowercase 64-hex sha256: {declared!r}")
         if declared in declared_hashes:
@@ -315,7 +387,8 @@ def validate_calibration_declared_set(cal: dict) -> list[dict]:
             good += 1
         else:
             bad += 1
-        controls.append({"id": cid, "expectation": expectation, "sha256": declared})
+        controls.append({"id": cid, "expectation": expectation, "sha256": declared,
+                         "note": note})
     if good < 1:
         die("calibration declared set must contain at least one known-good control (expectation pass)")
     if bad < 2:
@@ -352,7 +425,7 @@ def prevalidate_calibration(section: dict, root: Path, cal: dict) -> list[dict]:
             die(f"calibration control {cid!r} is byte-identical to another control (duplicate hash)")
         actual_hashes.add(actual)
         verified.append({"id": cid, "expectation": control["expectation"],
-                         "sha256": actual, "image": image})
+                         "note": control["note"], "sha256": actual, "image": image})
     return verified
 
 
@@ -487,6 +560,10 @@ def validate_calibration_receipt(section: dict, root: Path) -> dict:
         entry = by_id[cid]
         if entry.get("expectation") != control["expectation"]:
             die(f"calibration receipt expectation mismatch for {cid} (tampered)")
+        expected_task_prompt = task_prompt_sha256(
+            prompt_path, control["note"], control["expectation"])
+        if entry.get("task_prompt_sha256") != expected_task_prompt:
+            die(f"calibration receipt expected-description binding mismatch for {cid} (tampered/stale)")
         if entry.get("ok") is not True:
             die(f"calibration receipt records a failed control: {cid} (tampered)")
         verdicts = entry.get("verdicts")
@@ -809,13 +886,19 @@ def build_sdk_argv(section: dict, driver: Path) -> list[str]:
 
 def run_one(section: dict, driver: Path, image: Path, expected_sha: str, state_id: str,
             role: str, prompt_path: Path, prompt_hash: str, schema_hash: str, nonce: str,
-            out_dir: Path, timeout: int) -> tuple[int, str, dict | None, dict | None]:
+            out_dir: Path, timeout: int, expected_description: str,
+            calibration_expectation: str = "none") -> tuple[int, str, dict | None, dict | None]:
+    # The exact criteria travel as canonical base64 data (safe for newlines,
+    # delimiters, and option-looking text). The SDK independently recomputes
+    # prompt_hash from the template + decoded criteria + calibration class.
     argv = build_sdk_argv(section, driver) + [
         "--image", str(image),
         "--expected-sha256", expected_sha,
         "--state-id", state_id,
         "--role", role,
         "--prompt-file", str(prompt_path),
+        "--expected-description-base64", expected_description_b64(expected_description),
+        "--calibration-expectation", calibration_expectation,
         "--prompt-sha256", prompt_hash,
         "--schema-sha256", schema_hash,
         "--model", section.get("vision_model", ""),
@@ -906,14 +989,17 @@ def cmd_calibrate(section: dict, root: Path, driver: Path) -> int:
     for control in verified:
         cid = control["id"]
         expectation = control["expectation"]
+        expected_description = control["note"]
         image = control["image"]
         image_sha = control["sha256"]
+        task_prompt_hash = task_prompt_sha256(prompt_path, expected_description, expectation)
         runs = 3 if expectation == "pass" else 1
         verdicts = []
         for run in range(runs):
             rc, output, finding, receipt = run_one(
                 section, driver, image, image_sha, cid, "adversarial",
-                prompt_path, prompt_hash, schema_hash, new_nonce(), out_dir, timeout)
+                prompt_path, task_prompt_hash, schema_hash, new_nonce(), out_dir, timeout,
+                expected_description, expectation)
             if rc != 0:
                 print(f"visual-audit-review: calibration {cid} run {run + 1} failed (rc={rc})", file=sys.stderr)
                 verdicts.append("error")
@@ -934,6 +1020,7 @@ def cmd_calibrate(section: dict, root: Path, driver: Path) -> int:
             "id": cid,
             "expectation": expectation,
             "image_sha256": image_sha,
+            "task_prompt_sha256": task_prompt_hash,
             "ok": ok,
             "verdicts": verdicts,
         })
@@ -1001,14 +1088,8 @@ def cmd_run(section: dict, root: Path, driver: Path) -> int:
     timeout = int(section.get("review_timeout_seconds", 300))
     parallelism = int(section.get("review_parallelism", 4))
 
-    inventory = json.loads((root / section["inventory"]).read_text(encoding="utf-8"))
-    if inventory.get("schema") != "ralph-visual-audit-inventory/v1":
-        die("inventory schema invalid")
-    states = {s["id"]: s for s in inventory["states"]}
-    # State ids are validated before any output path is constructed.
-    for state in inventory["states"]:
-        if not valid_state_id(state["id"]):
-            die(f"inventory state id invalid: {state['id']!r}")
+    inventory_path = resolve_path(root, section["inventory"])
+    inventory, states = load_inventory(inventory_path)
     images = {e["file"]: e for e in manifest["images"]}
     review_dir = resolve_path(root, section["review_dir"])
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -1022,18 +1103,22 @@ def cmd_run(section: dict, root: Path, driver: Path) -> int:
         if state is None:
             die(f"capture image {file_name} has no inventory state {entry['state_id']}")
         image_path = capture_dir / file_name
+        expected_description = state["expected"]
+        task_prompt_hash = task_prompt_sha256(prompt_path, expected_description)
         for role in ROLES:
             # Fresh cryptographically random per-task request nonce (>=128 bits).
-            tasks.append((state, image_path, entry["sha256"], role, new_nonce()))
+            tasks.append((state, image_path, entry["sha256"], role, new_nonce(),
+                          expected_description, task_prompt_hash))
 
     schema = load_review_schema(schema_path)
     records: list[tuple[str, str, dict, dict]] = []  # (state_id, role, finding, receipt)
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as pool:
         futures = {
             pool.submit(run_one, section, driver, image_path, expected_sha,
-                        state["id"], role, prompt_path, prompt_hash, schema_hash,
-                        nonce, review_dir, timeout): (state["id"], role)
-            for state, image_path, expected_sha, role, nonce in tasks
+                        state["id"], role, prompt_path, task_prompt_hash, schema_hash,
+                        nonce, review_dir, timeout, expected_description): (state["id"], role)
+            for state, image_path, expected_sha, role, nonce, expected_description,
+                task_prompt_hash in tasks
         }
         for future in concurrent.futures.as_completed(futures):
             state_id, role = futures[future]
@@ -1058,6 +1143,7 @@ def cmd_run(section: dict, root: Path, driver: Path) -> int:
             "role": role,
             "request_nonce": receipt["request_nonce"],
             "image_sha256": receipt["image_sha256"],
+            "prompt_sha256": receipt["prompt_sha256"],
             "finding_file": f"finding-{state_id}-{role}.json",
             "finding_sha256": finding_sha,
             "receipt_file": f"receipt-{state_id}-{role}.json",
@@ -1071,6 +1157,7 @@ def cmd_run(section: dict, root: Path, driver: Path) -> int:
         "environment_sha256": binding,
         "prompt_sha256": prompt_hash,
         "schema_sha256": schema_hash,
+        "inventory_sha256": sha256_file(inventory_path),
         "model": section.get("vision_model", ""),
         # The report is bound to the exact calibration receipt bytes that were
         # current when the live review ran, so a replaced/tampered receipt
@@ -1105,10 +1192,13 @@ def verify_report_artifacts(section: dict, root: Path, report: dict) -> None:
         die("report has no task receipt entries")
     images = {img["sha256"]: img for img in report.get("images", []) if isinstance(img, dict)}
     model = report.get("model", "")
-    prompt_hash = report.get("prompt_sha256")
+    template_hash = report.get("prompt_sha256")
     schema_hash = report.get("schema_sha256")
-    if not SHA256.fullmatch(str(prompt_hash)) or not SHA256.fullmatch(str(schema_hash)):
+    if not SHA256.fullmatch(str(template_hash)) or not SHA256.fullmatch(str(schema_hash)):
         die("report prompt/schema hashes invalid")
+    prompt_path = resolve_path(root, section["prompt_template"])
+    inventory_path = resolve_path(root, section["inventory"])
+    _, inventory_states = load_inventory(inventory_path)
     finding_keys: set[tuple[str, str]] = set()
     for finding in report.get("findings", []):
         if isinstance(finding, dict):
@@ -1122,6 +1212,7 @@ def verify_report_artifacts(section: dict, root: Path, report: dict) -> None:
         finding_file = entry.get("finding_file")
         receipt_file = entry.get("receipt_file")
         image_sha = entry.get("image_sha256")
+        task_prompt_hash = entry.get("prompt_sha256")
         if not valid_state_id(state_id) or role not in ROLES or not valid_nonce(nonce):
             die(f"report task receipt binding invalid for {state_id!r}/{role!r}")
         if finding_file != f"finding-{state_id}-{role}.json" \
@@ -1131,6 +1222,12 @@ def verify_report_artifacts(section: dict, root: Path, report: dict) -> None:
             die(f"report task receipt image hash invalid for {state_id}/{role}")
         if image_sha not in images:
             die(f"report task receipt image {image_sha[:12]} not in the provenance manifest (tamper)")
+        state = inventory_states.get(state_id)
+        if state is None:
+            die(f"report task receipt state {state_id!r} is absent from the current inventory")
+        current_task_prompt_hash = task_prompt_sha256(prompt_path, state["expected"])
+        if task_prompt_hash != current_task_prompt_hash:
+            die(f"report expected-description binding mismatch for {state_id}/{role} (tampered/stale)")
         if (state_id, role) not in finding_keys:
             die(f"report task receipt {state_id}/{role} has no matching finding")
         finding_path = review_dir / finding_file
@@ -1149,11 +1246,11 @@ def verify_report_artifacts(section: dict, root: Path, report: dict) -> None:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             die(f"artifact file is invalid JSON for {state_id}/{role}: {type(exc).__name__}")
         problem = check_receipt(receipt, state_id, role, image_sha, model,
-                                prompt_hash, schema_hash, nonce, finding_path)
+                                task_prompt_hash, schema_hash, nonce, finding_path)
         if problem:
             die(f"receipt revalidation failed for {state_id}/{role}: {problem}")
         problem = check_finding_binding(finding, state_id, image_sha, role,
-                                        model, prompt_hash, schema_hash, nonce)
+                                        model, task_prompt_hash, schema_hash, nonce)
         if problem:
             die(f"finding revalidation failed for {state_id}/{role}: {problem}")
 
@@ -1178,6 +1275,9 @@ def cmd_report_check(section: dict, root: Path, report_path: Path, current_commi
         die("prompt drift: report prompt hash differs from the committed template")
     if sha256_file(schema_path) != report.get("schema_sha256"):
         die("schema drift: report schema hash differs from the committed schema")
+    inventory_path = resolve_path(root, section["inventory"])
+    if report.get("inventory_sha256") != sha256_file(inventory_path):
+        die("inventory drift: report inventory binding differs from the current inventory")
     # The report is bound to the exact calibration receipt bytes that were
     # current when it was produced; the receipt must still be valid for the
     # current model/prompt/schema/calibration/commit/tree and byte-identical

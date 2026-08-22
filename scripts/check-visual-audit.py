@@ -263,6 +263,13 @@ def main() -> int:
         die("visual-audit: prompt drift; findings invalidated")
     if sha256_file(schema_path) != report["schema_sha256"]:
         die("visual-audit: schema drift; findings invalidated")
+    inventory_path = Path(section["inventory"])
+    if not inventory_path.is_absolute():
+        inventory_path = root / inventory_path
+    if not inventory_path.is_file() or inventory_path.is_symlink():
+        die("visual-audit: inventory missing or unsafe")
+    if report.get("inventory_sha256") != sha256_file(inventory_path):
+        die("visual-audit: inventory drift; findings invalidated")
 
     environment = report.get("environment_sha256")
     if not valid_environment_binding(environment):
@@ -276,6 +283,7 @@ def main() -> int:
     # byte-identical to the one the report references. Missing, stale, or
     # tampered receipts invalidate the report and exit fail-closed.
     review_mod = load_review_module()
+    _, inventory_states = review_mod.load_inventory(inventory_path)
     review_mod.validate_calibration_receipt(section, root)
     receipt_path = review_mod.resolve_path(
         root, section.get("calibration_receipt", review_mod.CALIBRATION_RECEIPT_DEFAULT))
@@ -313,7 +321,6 @@ def main() -> int:
         die("visual-audit: report has no task receipt entries")
     images = {img.get("sha256"): img for img in report.get("images", []) if isinstance(img, dict)}
     model = report.get("model", "")
-    prompt_hash = report.get("prompt_sha256")
     schema_hash = report.get("schema_sha256")
     finding_keys = {(f.get("state_id"), f.get("role")) for f in findings if isinstance(f, dict)}
     for entry in task_receipts:
@@ -325,6 +332,7 @@ def main() -> int:
         finding_file = entry.get("finding_file")
         receipt_file = entry.get("receipt_file")
         image_sha = entry.get("image_sha256")
+        task_prompt_hash = entry.get("prompt_sha256")
         if not valid_state_id(state_id) or role not in ROLES or not valid_nonce(nonce):
             die(f"visual-audit: report task receipt binding invalid for {state_id!r}/{role!r}")
         if finding_file != f"finding-{state_id}-{role}.json" \
@@ -334,6 +342,12 @@ def main() -> int:
             die(f"visual-audit: report task receipt image hash invalid for {state_id}/{role}")
         if image_sha not in images:
             die(f"visual-audit: task receipt image {image_sha[:12]} not in the provenance manifest (tamper)")
+        state = inventory_states.get(state_id)
+        if state is None:
+            die(f"visual-audit: task receipt state {state_id!r} absent from current inventory")
+        current_task_prompt_hash = review_mod.task_prompt_sha256(prompt_path, state["expected"])
+        if task_prompt_hash != current_task_prompt_hash:
+            die(f"visual-audit: expected-description binding mismatch for {state_id}/{role} (tampered/stale)")
         if (state_id, role) not in finding_keys:
             die(f"visual-audit: task receipt {state_id}/{role} has no matching finding")
         finding_path = review_dir / finding_file
@@ -352,12 +366,12 @@ def main() -> int:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             die(f"visual-audit: artifact file is invalid JSON for {state_id}/{role}: {type(exc).__name__}")
         problem = check_receipt(receipt, state_id, role, image_sha, model,
-                                prompt_hash, schema_hash, nonce, finding_path)
+                                task_prompt_hash, schema_hash, nonce, finding_path)
         if problem:
             die(f"visual-audit: receipt revalidation failed for {state_id}/{role}: {problem}")
         # The finding on disk must carry the sealed binding incl. the nonce.
         problem = check_finding_binding(stored_finding, state_id, image_sha, role,
-                                        model, prompt_hash, schema_hash, nonce)
+                                        model, task_prompt_hash, schema_hash, nonce)
         if problem:
             die(f"visual-audit: finding revalidation failed for {state_id}/{role}: {problem}")
 

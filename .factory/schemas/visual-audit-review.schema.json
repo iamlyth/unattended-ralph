@@ -32,7 +32,8 @@
     },
     "prompt_sha256": {
       "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Domain-separated task prompt binding over the exact prompt-template hash, exact expected-state description, and separate calibration classification. This is task-specific, not merely the shared template hash."
     },
     "schema_sha256": {
       "type": "string",

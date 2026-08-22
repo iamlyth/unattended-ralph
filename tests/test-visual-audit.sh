@@ -82,10 +82,14 @@ cal_dir, out = sys.argv[1], sys.argv[2]
 def sha(name):
     return hashlib.sha256(open(f"{cal_dir}/{name}", "rb").read()).hexdigest()
 controls = [
-    {"id": "cal-known-bad-blank", "expectation": "finding"},
-    {"id": "cal-known-bad-clipped", "expectation": "finding"},
-    {"id": "cal-current-bad-regression", "expectation": "finding"},
-    {"id": "cal-reviewed-good-reference", "expectation": "pass"},
+    {"id": "cal-known-bad-blank", "expectation": "finding",
+     "note": "Uniform blank control; report missing content, not this note's `}` delimiter."},
+    {"id": "cal-known-bad-clipped", "expectation": "finding",
+     "note": "Clipped layout control with quoted label: \"summary\"."},
+    {"id": "cal-current-bad-regression", "expectation": "finding",
+     "note": "Materially incorrect rendering control."},
+    {"id": "cal-reviewed-good-reference", "expectation": "pass",
+     "note": "Human-reviewed reference with complete layout."},
 ]
 for control in controls:
     control["sha256"] = sha(f"{control['id']}.png")
@@ -129,12 +133,16 @@ cat > "$tmp/mock-driver.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 out_dir=""; state_id=""; role=""; sha=""; model=""; psha=""; ssha=""; nonce=""
+prompt_file=""; expected_b64=""; calibration_expectation=""; expected_seen=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --out-dir) out_dir=$2; shift 2 ;;
         --state-id) state_id=$2; shift 2 ;;
         --role) role=$2; shift 2 ;;
         --expected-sha256) sha=$2; shift 2 ;;
+        --prompt-file) prompt_file=$2; shift 2 ;;
+        --expected-description-base64) expected_b64=$2; expected_seen=1; shift 2 ;;
+        --calibration-expectation) calibration_expectation=$2; shift 2 ;;
         --prompt-sha256) psha=$2; shift 2 ;;
         --schema-sha256) ssha=$2; shift 2 ;;
         --model) model=$2; shift 2 ;;
@@ -143,6 +151,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$nonce" ]] || { echo "mock-driver: --request-nonce is required" >&2; exit 2; }
+[[ $expected_seen -eq 1 ]] || { echo "mock-driver: --expected-description-base64 is required" >&2; exit 2; }
+[[ -n "$prompt_file" && -n "$calibration_expectation" ]] \
+    || { echo "mock-driver: task prompt binding inputs are required" >&2; exit 2; }
+# Independently reproduce the production SDK's canonical binding. This proves
+# the orchestrator passes the exact live inventory description and, for
+# calibration, the exact note plus a separately bound classification.
+python3 - "$prompt_file" "$expected_b64" "$calibration_expectation" "$psha" <<'PY'
+import base64, hashlib, json, sys
+prompt, expected_b64, calibration_expectation, supplied = sys.argv[1:]
+expected = base64.b64decode(expected_b64, validate=True).decode("utf-8")
+payload = {
+    "schema": "ralph-visual-audit-task-prompt/v1",
+    "prompt_template_sha256": hashlib.sha256(open(prompt, "rb").read()).hexdigest(),
+    "expected_description": expected,
+    "calibration_expectation": calibration_expectation,
+}
+actual = hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+assert actual == supplied, (actual, supplied)
+PY
 mkdir -p "$out_dir"
 case "$state_id" in
     probe)
@@ -420,6 +447,15 @@ elif mode == "receipt-wrong-nonce":
     rec["request_nonce"] = "e" * 32
     wrj(rp("good-main", "diagram"), rec)
     entry(rep, "good-main", "diagram")["receipt_sha256"] = sha(rp("good-main", "diagram"))
+elif mode == "receipt-wrong-prompt-binding":
+    rec = rdj(rp("good-main", "diagram"))
+    rec["prompt_sha256"] = "d" * 64
+    wrj(rp("good-main", "diagram"), rec)
+    entry(rep, "good-main", "diagram")["receipt_sha256"] = sha(rp("good-main", "diagram"))
+elif mode == "report-stale-expected-binding":
+    entry(rep, "good-main", "diagram")["prompt_sha256"] = "c" * 64
+elif mode == "report-inventory-binding":
+    rep["inventory_sha256"] = "b" * 64
 elif mode == "receipt-replay-state":
     shutil.copyfile(rp("good-main", "diagram"), rp("good-secondary", "diagram"))
     entry(rep, "good-secondary", "diagram")["receipt_sha256"] = sha(rp("good-secondary", "diagram"))
@@ -469,10 +505,25 @@ restore_baseline
 tamper_one receipt-wrong-nonce
 c3b_gates "receipt wrong nonce" "receipt request_nonce mismatch for task good-main/diagram" "receipt request_nonce mismatch for task good-main/diagram" "$tmp/c3b4"
 
-# --- C3b-5: receipt replayed/copied to another state -------------------------
+# --- C3b-5: receipt prompt/expectation binding mismatch ----------------------
+restore_baseline
+tamper_one receipt-wrong-prompt-binding
+c3b_gates "receipt expectation binding mismatch" "receipt prompt_sha256 mismatch for task good-main/diagram" "receipt prompt_sha256 mismatch for task good-main/diagram" "$tmp/c3b5"
+
+# --- C3b-6: report carries a stale expected-state binding --------------------
+restore_baseline
+tamper_one report-stale-expected-binding
+c3b_gates "stale expected-state binding" "expected-description binding mismatch for good-main/diagram" "expected-description binding mismatch for good-main/diagram" "$tmp/c3b6"
+
+# --- C3b-7: aggregate report inventory binding is tamper-evident -------------
+restore_baseline
+tamper_one report-inventory-binding
+c3b_gates "report inventory binding tamper" "inventory drift" "inventory drift" "$tmp/c3b7"
+
+# --- C3b-8: receipt replayed/copied to another state -------------------------
 restore_baseline
 tamper_one receipt-replay-state
-c3b_gates "receipt replayed to another state" "receipt state_id mismatch for task good-secondary/diagram" "receipt state_id mismatch for task good-secondary/diagram" "$tmp/c3b5"
+c3b_gates "receipt replayed to another state" "receipt state_id mismatch for task good-secondary/diagram" "receipt state_id mismatch for task good-secondary/diagram" "$tmp/c3b8"
 
 # --- C3b-6: finding replayed/swapped across states ---------------------------
 restore_baseline
@@ -771,7 +822,20 @@ reject_run_before_reviewer "tampered calibration receipt" "records a failed cont
 reject_gates "tampered calibration receipt" "records a failed control" "records a failed control"
 restore_calibration
 
-# --- C3c-10: model drift invalidates calibration before any reviewer -----------
+# --- C3c-10: calibration note/classification task binding cannot replay -------
+restore_baseline
+python3 - "$CAL_RECEIPT" <<'PY'
+import json, sys
+p = sys.argv[1]
+r = json.load(open(p))
+r["controls"][0]["task_prompt_sha256"] = "a" * 64
+json.dump(r, open(p, "w"), indent=2, sort_keys=True)
+PY
+reject_run_before_reviewer "tampered calibration expected binding" "expected-description binding mismatch"
+reject_gates "tampered calibration expected binding" "expected-description binding mismatch" "expected-description binding mismatch"
+restore_calibration
+
+# --- C3c-11: model drift invalidates calibration before any reviewer -----------
 restore_baseline
 sed -i 's/vision_model = "test-model"/vision_model = "drift-model"/' "$tmp/va.toml"
 reject_run_before_reviewer "model drift" "calibration receipt model drift"

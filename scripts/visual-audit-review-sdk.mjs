@@ -35,7 +35,9 @@
 // Usage:
 //   node visual-audit-review-sdk.mjs \
 //     --image PATH --expected-sha256 HEX --state-id ID --role ROLE \
-//     --prompt-file PATH --prompt-sha256 HEX --schema-sha256 HEX \
+//     --prompt-file PATH --expected-description-base64 BASE64 \
+//     --calibration-expectation none|pass|finding \
+//     --prompt-sha256 HEX --schema-sha256 HEX \
 //     --request-nonce NONCE --model <consumer-configured-vision-model> \
 //     --out-dir DIR
 //
@@ -55,6 +57,9 @@ const FINDING_SCHEMA = "ralph-visual-audit-review/v1";
 const RECEIPT_SCHEMA = "ralph-visual-audit-invocation/v1";
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const TASK_PROMPT_BINDING_SCHEMA = "ralph-visual-audit-task-prompt/v1";
+const MAX_EXPECTED_DESCRIPTION_BYTES = 16384;
 
 // Resolve the pi-coding-agent package without hardcoding a store path. The
 // pi2 wrapper exports PI_PACKAGE_DIR; failing that, resolve relative to the
@@ -175,6 +180,8 @@ const expectedSha = opt("--expected-sha256");
 const stateId = opt("--state-id");
 const role = opt("--role");
 const promptFile = resolve(opt("--prompt-file"));
+const expectedDescriptionBase64 = opt("--expected-description-base64");
+const calibrationExpectation = opt("--calibration-expectation");
 const promptSha = opt("--prompt-sha256");
 const schemaSha = opt("--schema-sha256");
 const requestNonce = opt("--request-nonce");
@@ -189,6 +196,31 @@ if (!SHA256_RE.test(promptSha) || !SHA256_RE.test(schemaSha) || !SHA256_RE.test(
   console.error("visual-audit-sdk: sealed sha256 bindings must be 64 lowercase hex chars");
   process.exit(2);
 }
+if (!["none", "pass", "finding"].includes(calibrationExpectation)) {
+  console.error("visual-audit-sdk: calibration expectation must be none, pass, or finding");
+  process.exit(2);
+}
+if (!BASE64_RE.test(expectedDescriptionBase64)) {
+  console.error("visual-audit-sdk: expected description must be canonical base64");
+  process.exit(2);
+}
+const expectedDescriptionBytes = Buffer.from(expectedDescriptionBase64, "base64");
+if (expectedDescriptionBytes.length > MAX_EXPECTED_DESCRIPTION_BYTES
+    || expectedDescriptionBytes.toString("base64") !== expectedDescriptionBase64) {
+  console.error("visual-audit-sdk: expected description base64 is non-canonical or too large");
+  process.exit(2);
+}
+let expectedDescription;
+try {
+  expectedDescription = new TextDecoder("utf-8", { fatal: true }).decode(expectedDescriptionBytes);
+} catch {
+  console.error("visual-audit-sdk: expected description is not valid UTF-8");
+  process.exit(2);
+}
+if (calibrationExpectation === "none" && expectedDescription.length === 0) {
+  console.error("visual-audit-sdk: live expected description must not be empty");
+  process.exit(2);
+}
 
 const bytes = readFileSync(imagePath);
 const imageSha = createHash("sha256").update(bytes).digest("hex");
@@ -198,18 +230,48 @@ if (imageSha !== expectedSha) {
 }
 const b64 = bytes.toString("base64");
 const promptTemplate = readFileSync(promptFile, "utf8");
+if (!promptTemplate.includes("{expected_json}")) {
+  console.error("visual-audit-sdk: prompt template omits the required expected-description placeholder");
+  process.exit(2);
+}
 
-// Frozen protocol: prompt/schema digests and the fresh nonce are bound into
-// the finding; the model must echo every sealed value exactly.
-const prompt = promptTemplate
-  .replaceAll("{role}", role)
-  .replaceAll("{state_id}", stateId)
-  .replaceAll("{expected}", "")
-  .replaceAll("{image_sha256}", imageSha)
-  .replaceAll("{model}", modelName)
-  .replaceAll("{prompt_sha256}", promptSha)
-  .replaceAll("{schema_sha256}", schemaSha)
-  .replaceAll("{request_nonce}", requestNonce);
+// Domain-separated task binding: the existing sealed prompt_sha256 now binds
+// the exact template bytes, exact expected-state description, and a separate
+// calibration classification. The classification is committed but is not
+// disclosed to the reviewer (avoids turning calibration into answer leakage).
+const promptTemplateSha = createHash("sha256").update(promptTemplate).digest("hex");
+const taskPromptBinding = JSON.stringify({
+  schema: TASK_PROMPT_BINDING_SCHEMA,
+  prompt_template_sha256: promptTemplateSha,
+  expected_description: expectedDescription,
+  calibration_expectation: calibrationExpectation,
+});
+const computedPromptSha = createHash("sha256").update(taskPromptBinding).digest("hex");
+if (computedPromptSha !== promptSha) {
+  console.error("visual-audit-sdk: task prompt/expected-description binding mismatch (tampered or stale)");
+  process.exit(3);
+}
+
+// Expected criteria are inserted only as a JSON-escaped data string. Quotes,
+// markdown delimiters, newlines, option-looking text, and prompt-like content
+// cannot break out of the template's task-context data boundary.
+const promptValues = new Map([
+  ["{role}", role],
+  ["{state_id}", stateId],
+  ["{expected_json}", JSON.stringify(expectedDescription)],
+  ["{image_sha256}", imageSha],
+  ["{model}", modelName],
+  ["{prompt_sha256}", promptSha],
+  ["{schema_sha256}", schemaSha],
+  ["{request_nonce}", requestNonce],
+]);
+// One-pass substitution is security-significant: placeholder-looking text
+// inside the untrusted expected description must remain byte-for-byte data,
+// rather than being rewritten by a later replacement pass.
+const prompt = promptTemplate.replace(
+  /\{(?:role|state_id|expected_json|image_sha256|model|prompt_sha256|schema_sha256|request_nonce)\}/g,
+  (placeholder) => promptValues.get(placeholder),
+);
 
 // Keep remote catalog cache state in memory. This prevents an unvalidated
 // models-store.json sibling from becoming a third filesystem config input.
