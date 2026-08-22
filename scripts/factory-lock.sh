@@ -45,12 +45,36 @@ factory_lock_assert_held() {
 factory_lock_run_untrusted() {
     local root=${FACTORY_LOCK_ROOT:?factory_lock_bootstrap must run first}
     (( $# > 0 )) || { echo "factory-lock: untrusted command required" >&2; return 2; }
-    local fd=${FACTORY_LOCK_FD:-}
+    local fd=${FACTORY_LOCK_FD:-} child rc had_errexit=0
+    [[ $- == *e* ]] && had_errexit=1
+    local old_term old_int old_hup
+    old_term=$(trap -p TERM || true)
+    old_int=$(trap -p INT || true)
+    old_hup=$(trap -p HUP || true)
     (
         if [[ ${FACTORY_LOCK_HELD:-0} == 1 && "$fd" =~ ^[0-9]+$ && $fd -ge 3 ]]; then
             eval "exec $fd>&-"
         fi
         unset FACTORY_LOCK_HELD FACTORY_LOCK_FD FACTORY_LOCK_ID FACTORY_LOCK_ROOT
+        if command -v setsid >/dev/null 2>&1; then
+            exec setsid -- "$@"
+        fi
         exec "$@"
-    )
+    ) &
+    child=$!
+    # A lifecycle supervisor may be terminated while this shell is waiting on
+    # an untrusted Ralph/Pi leaf. Forward the signal, reap the exact child, and
+    # exit with the conventional signal status so no orchestrator is orphaned.
+    trap 'kill -TERM -- -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM
+    trap 'kill -INT -- -"$child" 2>/dev/null || kill -INT "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 130' INT
+    trap 'kill -HUP -- -"$child" 2>/dev/null || kill -HUP "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 129' HUP
+    set +e
+    wait "$child"
+    rc=$?
+    (( had_errexit == 0 )) || set -e
+    trap - TERM INT HUP
+    [[ -z "$old_term" ]] || eval "$old_term"
+    [[ -z "$old_int" ]] || eval "$old_int"
+    [[ -z "$old_hup" ]] || eval "$old_hup"
+    return "$rc"
 }

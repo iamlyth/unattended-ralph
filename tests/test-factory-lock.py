@@ -8,8 +8,10 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 
 SOURCE = Path(__file__).resolve().parent.parent
 ENV_KEYS = ("FACTORY_LOCK_HELD", "FACTORY_LOCK_FD", "FACTORY_LOCK_ID", "FACTORY_LOCK_ROOT")
@@ -150,6 +152,39 @@ python3 "$root/scripts/factory-lock-exec.py" "$root" --check
         shutil.rmtree(root)
 
 
+def test_untrusted_signal_is_forwarded_and_reaped() -> None:
+    root = make_repo()
+    try:
+        leaf_pid = root / "leaf.pid"
+        grandchild_pid = root / "grandchild.pid"
+        command = (
+            f"source {root}/scripts/factory-lock.sh; FACTORY_LOCK_ROOT={root}; "
+            "factory_lock_run_untrusted bash -c '"
+            f"echo $$ > {leaf_pid}; sleep 300 & echo $! > {grandchild_pid}; wait'"
+        )
+        parent = subprocess.Popen(["bash", "-c", command], cwd=root)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (leaf_pid.exists() and grandchild_pid.exists()):
+            time.sleep(0.05)
+        assert leaf_pid.exists() and grandchild_pid.exists(), "untrusted process tree did not start"
+        leaf = int(leaf_pid.read_text().strip())
+        grandchild = int(grandchild_pid.read_text().strip())
+        parent.send_signal(signal.SIGTERM)
+        assert parent.wait(timeout=5) == 143
+        time.sleep(0.1)
+        assert not Path(f"/proc/{leaf}").exists(), "untrusted leaf was orphaned"
+        assert not Path(f"/proc/{grandchild}").exists(), "untrusted grandchild was orphaned"
+    finally:
+        if 'parent' in locals() and parent.poll() is None:
+            parent.kill()
+            parent.wait()
+        for pid_name in ("leaf", "grandchild"):
+            pid = locals().get(pid_name)
+            if pid and Path(f"/proc/{pid}").exists():
+                os.kill(pid, signal.SIGKILL)
+        shutil.rmtree(root)
+
+
 def test_legacy_holder_and_unsafe_legacy_fail_closed() -> None:
     root = make_repo()
     try:
@@ -221,6 +256,7 @@ def test_legacy_substitution_after_final_check_is_not_unlinked() -> None:
 
 def main() -> None:
     test_root_flock_drop_and_untrusted_background_child()
+    test_untrusted_signal_is_forwarded_and_reaped()
     test_legacy_holder_and_unsafe_legacy_fail_closed()
     test_legacy_substitution_after_final_check_is_not_unlinked()
     print("test: repository-root factory lock checks passed")
