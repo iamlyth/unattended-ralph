@@ -12,11 +12,23 @@ if [[ ${1:-} != emit ]]; then
     exec "$REAL_RALPH" "$@"
 fi
 
+# A lifecycle publication is exactly one allowlisted topic plus one non-empty
+# string payload. Ralph serializes a missing payload as JSON null, which is
+# outside the event-boundary schema and must be rejected before publication.
+[[ $# -eq 3 && -n ${3:-} ]] || {
+    echo 'ralph-shim: emit requires exactly one topic and one non-empty payload' >&2
+    exit 2
+}
+case "$2" in
+    factory.plan|factory.implement|factory.audit|factory.maintenance-plan|factory.maintenance) ;;
+    *) echo 'ralph-shim: event topic is outside the lifecycle allowlist' >&2; exit 2 ;;
+esac
+
 # The shell has already performed parameter, command, and quote expansion here.
 # Inspect the final argv so direct shim calls cannot bypass the Pi extension.
 for argument in "${@:2}"; do
     case "$argument" in
-        *PLAN_COMPLETE*|*LOOP_COMPLETE*|*AUDIT_COMPLETE*|*MAINTENANCE_PLAN_COMPLETE*|*MAINTENANCE_COMPLETE*)
+        *PLAN_COMPLETE*|*LOOP_COMPLETE*|*AUDIT_COMPLETE*|*MAINTENANCE_COMPLETE*)
             echo 'ralph-shim: lifecycle completion tokens are reserved model-output protocol lines' >&2
             exit 2
             ;;

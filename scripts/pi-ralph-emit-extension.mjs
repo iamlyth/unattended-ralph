@@ -9,6 +9,13 @@ import { fileURLToPath } from "node:url";
 const SHIM = "./scripts/pi-cli-shims/ralph";
 const GIT_SHIM = "./scripts/pi-cli-shims/git";
 const DIRECT_PREFIX = /^[ \t]*ralph(?=[ \t]+emit(?:[ \t]|$))/;
+const RALPH_EVENT_TOPICS = new Set([
+  "factory.plan",
+  "factory.implement",
+  "factory.audit",
+  "factory.maintenance-plan",
+  "factory.maintenance",
+]);
 const LIFECYCLE_TOKENS = [
   "PLAN_COMPLETE",
   "LOOP_COMPLETE",
@@ -119,8 +126,11 @@ export function rewriteRalphEmitCommand(command) {
   }
   if (
     !parsed.unsupported
+    && parsed.words.length === 4
     && parsed.words[0] === "ralph"
     && parsed.words[1] === "emit"
+    && RALPH_EVENT_TOPICS.has(parsed.words[2])
+    && parsed.words[3].length > 0
     && DIRECT_PREFIX.test(command)
   ) {
     return {

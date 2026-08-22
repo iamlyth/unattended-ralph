@@ -73,7 +73,7 @@ case "${FAKE_MODE:-success}" in
         printf '%s\n' 'ordinary model text' 'LOOP_COMPLETE'
         ;;
     ralph-probe)
-        "${FAKE_SHIM:?}" emit test.work done
+        "${FAKE_SHIM:?}" emit factory.implement done
         count=0
         [[ ! -f ${FAKE_COUNTER_FILE:?} ]] || count=$(<"$FAKE_COUNTER_FILE")
         count=$((count + 1))
@@ -120,8 +120,15 @@ set +e
 direct_reserved_rc=$?
 "$SHIM" emit MAINTENANCE_PLAN_COMPLETE 'done' >"$stdout" 2>"$stderr"
 direct_topic_rc=$?
+"$SHIM" emit factory.implement >"$stdout" 2>"$stderr"
+direct_missing_rc=$?
+"$SHIM" emit factory.implement one two >"$stdout" 2>"$stderr"
+direct_extra_rc=$?
+"$SHIM" emit test.work 'done' >"$stdout" 2>"$stderr"
+direct_unknown_rc=$?
 set -e
 [[ $direct_reserved_rc -eq 2 && $direct_topic_rc -eq 2 ]]
+[[ $direct_missing_rc -eq 2 && $direct_extra_rc -eq 2 && $direct_unknown_rc -eq 2 ]]
 [[ $(wc -l < "$RALPH_EVENTS_FILE") -eq $events_before ]]
 node --input-type=module - "$PROJECT_ROOT/scripts/pi-ralph-emit-extension.mjs" <<'EOF'
 import assert from 'node:assert/strict';
@@ -155,6 +162,10 @@ assert.equal(result.matched, true);
 assert.equal(result.unsafe, false);
 assert.equal(result.command, './scripts/pi-cli-shims/ralph emit factory.implement "done"');
 for (const command of [
+  'ralph emit factory.implement',
+  'ralph emit factory.implement ""',
+  'ralph emit factory.implement one two',
+  'ralph emit test.work done',
   'ralph emit factory.implement "$payload"',
   'ralph emit factory.implement "${payload}"',
   'PAYLOAD=done ralph emit factory.implement "$PAYLOAD"',
