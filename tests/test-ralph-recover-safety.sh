@@ -6,15 +6,25 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/.ralph/agent" "$tmp/.factory-state"
-cp "$PROJECT_ROOT/scripts/ralph-recover.sh" "$PROJECT_ROOT/scripts/factory-lock.sh" \
-    "$PROJECT_ROOT/scripts/factory-lock-exec.py" "$PROJECT_ROOT/scripts/factory_lock.py" \
+cp "$PROJECT_ROOT/scripts/ralph-recover.sh" "$PROJECT_ROOT/scripts/repair-scratchpad-handoffs.py" \
+    "$PROJECT_ROOT/scripts/factory-lock.sh" "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
+    "$PROJECT_ROOT/scripts/factory_lock.py" \
     "$PROJECT_ROOT/scripts/factory_state_io.py" "$PROJECT_ROOT/scripts/factory-state-file.py" \
     "$PROJECT_ROOT/scripts/ralph_lock.py" "$PROJECT_ROOT/scripts/ralph-lock-recover.py" \
     "$PROJECT_ROOT/scripts/git-commit-guard.sh" "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" \
     "$tmp/scripts/"
 chmod +x "$tmp/scripts/"*
 chmod 700 "$tmp/.factory-state"
-printf '# Recovery handoff\n\n- Safe.\n' > "$tmp/.ralph/agent/scratchpad.md"
+cat > "$tmp/.ralph/agent/scratchpad.md" <<'EOF'
+# Handoff: earlier
+
+- Earlier fact must survive.
+
+# Handoff: latest
+
+- Latest fact remains current.
+EOF
+printf '{"pid":99999999}\n' > "$tmp/.ralph/loop.lock"
 printf '{}\n' > "$tmp/.ralph/events-20260814-120000.jsonl"
 printf 'planning\n' > "$tmp/.factory-state/loop-mode"
 printf 'tracked\n' > "$tmp/product.txt"
@@ -33,8 +43,16 @@ git -C "$tmp" add .
 git -C "$tmp" commit -qm initial
 
 (cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null)
+[[ ! -e "$tmp/.ralph/loop.lock" ]]
 [[ $(<"$tmp/.ralph/current-loop-id") == primary-20260814-120000 ]]
 [[ $(<"$tmp/.ralph/current-events") == .ralph/events-20260814-120000.jsonl ]]
+[[ $(grep -c '^# ' "$tmp/.ralph/agent/scratchpad.md") -eq 1 ]]
+grep -q '^## Handoff: earlier$' "$tmp/.ralph/agent/scratchpad.md"
+grep -q 'Earlier fact must survive.' "$tmp/.ralph/agent/scratchpad.md"
+grep -q '^# Handoff: latest$' "$tmp/.ralph/agent/scratchpad.md"
+cp "$tmp/.ralph/agent/scratchpad.md" "$tmp/idempotent-scratchpad"
+(cd "$tmp" && ./scripts/ralph-recover.sh --mode planning --prepare-only >/dev/null)
+cmp "$tmp/idempotent-scratchpad" "$tmp/.ralph/agent/scratchpad.md"
 
 printf '{broken\n' > "$tmp/.ralph/loop.lock"
 set +e

@@ -20,6 +20,9 @@ usage() {
     cat <<'EOF'
 Usage: scripts/ralph-recover.sh [options]
 
+Safely repairs an interrupted appended scratchpad handoff before resuming.
+Earlier level-one handoffs are demoted; the latest remains current.
+
 Options:
   --loop-id ID       Override inferred loop ID
   --mode MODE        implementation (default), planning, campaign-audit,
@@ -98,6 +101,10 @@ if [[ ! -s "$SCRATCHPAD" ]]; then
         die "recovery scratchpad is missing"
     fi
 fi
+repair_args=(--project-root "$PROJECT_ROOT")
+$DRY_RUN && repair_args+=(--dry-run)
+"$SCRIPT_DIR/repair-scratchpad-handoffs.py" "${repair_args[@]}" || \
+    die "scratchpad recovery repair failed"
 
 # Select the newest valid stream. A marker is only a candidate; it must not
 # override a newer fallback stream left by a failed continuation.

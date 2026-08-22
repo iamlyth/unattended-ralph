@@ -11,6 +11,7 @@ cp "$PROJECT_ROOT/scripts/git-commit-hook.sh" \
    "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
    "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" \
    "$PROJECT_ROOT/scripts/ralph-recover.sh" \
+   "$PROJECT_ROOT/scripts/repair-scratchpad-handoffs.py" \
    "$PROJECT_ROOT/scripts/factory-lock.sh" \
    "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
    "$PROJECT_ROOT/scripts/factory_lock.py" \

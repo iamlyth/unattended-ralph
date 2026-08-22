@@ -81,7 +81,8 @@ required = [
     'scripts/factory-lock.sh', 'scripts/factory-lock-exec.py',
     'scripts/factory_lock.py', 'scripts/factory_state_io.py',
     'scripts/factory-state-file.py', 'scripts/ralph_lock.py',
-    'scripts/ralph-lock-recover.py', 'scripts/ralph-event-boundary.py',
+    'scripts/ralph-lock-recover.py', 'scripts/repair-scratchpad-handoffs.py',
+    'scripts/ralph-event-boundary.py',
     'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
     'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
     'tests/test-git-checkpoint.sh',
@@ -110,6 +111,7 @@ required = [
     'tests/test-ralph-campaign-state.py', 'tests/test-factory-lock.py',
     'tests/test-orchestration-security.py',
     'tests/test-ralph-stale-recovery.sh', 'tests/test-ralph-recover-safety.sh',
+    'tests/test-scratchpad-recovery-repair.sh',
     'tests/test-maintenance-planning-completion.sh',
     'tests/test-boilerplate-env-isolation.sh',
     'tests/test-pi2-ollama-wrapper.sh', 'tests/test-production-path-bypass.sh',
@@ -315,6 +317,7 @@ for name in subprocess.check_output(['git', 'remote'], text=True).split():
 PY
 
 ./tests/test-scratchpad-guard.sh
+./tests/test-scratchpad-recovery-repair.sh
 ./tests/test-git-checkpoint.sh
 ./tests/test-git-commit-guard.sh
 ./tests/test-ralph-completion-recovery.sh
