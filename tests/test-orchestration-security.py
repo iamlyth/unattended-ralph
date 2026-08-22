@@ -288,6 +288,10 @@ def test_verifier_executable_blob_binding() -> None:
             '[verification]\ncampaign_command = ["./scripts/verify-project.sh", "--strict"]\n',
             encoding="utf-8",
         )
+        (root / ".factory/verifier-acceptance.json").write_text(
+            json.dumps({"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}),
+            encoding="utf-8",
+        )
         init_git(root)
         run(["git", "add", "."], root)
         run(["git", "commit", "-qm", "base"], root)
@@ -347,6 +351,10 @@ def test_retained_helper_fd_immune_to_pathname_swap() -> None:
             '[verification]\ncampaign_command = ["./scripts/verify-project.sh", "--strict"]\n',
             encoding="utf-8",
         )
+        (root / ".factory/verifier-acceptance.json").write_text(
+            json.dumps({"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}),
+            encoding="utf-8",
+        )
         init_git(root)
         run(["git", "add", "."], root)
         run(["git", "commit", "-qm", "base"], root)
@@ -404,6 +412,10 @@ def test_verifier_swap_in_final_exec_race_runs_original() -> None:
             '[verification]\ncampaign_command = ["./scripts/verify-project.sh", "--strict"]\n',
             encoding="utf-8",
         )
+        (root / ".factory/verifier-acceptance.json").write_text(
+            json.dumps({"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}),
+            encoding="utf-8",
+        )
         init_git(root)
         run(["git", "add", "."], root)
         run(["git", "commit", "-qm", "base"], root)
@@ -458,6 +470,10 @@ def test_one_time_supervision_migration() -> None:
         verifier.chmod(0o755)
         (root / ".factory/config.toml").write_text(
             '[verification]\ncampaign_command = ["./scripts/verify-project.sh"]\n', encoding="utf-8"
+        )
+        (root / ".factory/verifier-acceptance.json").write_text(
+            json.dumps({"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}),
+            encoding="utf-8",
         )
         (root / ".gitignore").write_text(".factory-state/\n", encoding="utf-8")
         (root / "history").write_text("base\n", encoding="utf-8")

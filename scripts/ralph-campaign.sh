@@ -80,6 +80,18 @@ factory_lock_run_untrusted ./scripts/branch-guard.sh
 factory_lock_run_untrusted ./scripts/check-factory-environment.py
 factory_lock_acquire "$PROJECT_ROOT"
 
+# Record the verifier acceptance contract (entrypoint/config/gate-list identity)
+# as the campaign baseline. A fresh campaign always records it; a resume only
+# records a missing contract so the original baseline survives for
+# strengthening classification when the verifier legitimately grows.
+if $RESUME; then
+    "$STATE_HELPER" record-verifier-contract --if-missing \
+        --digest "$verification_digest" --binding "$verification_binding"
+else
+    "$STATE_HELPER" record-verifier-contract \
+        --digest "$verification_digest" --binding "$verification_binding"
+fi
+
 # Campaign orchestration never guesses whether Ralph's own exclusive lock is
 # stale. Recovery validates and repairs that lock explicitly; ambiguous, live,
 # and dead-but-unreconciled lock records all remain untouched here.

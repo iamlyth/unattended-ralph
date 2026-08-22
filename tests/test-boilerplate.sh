@@ -100,6 +100,7 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'scripts/ralph-campaign-state.py', 'scripts/initialize-campaign-audit.py',
              'scripts/validate-campaign-audit.py', 'scripts/campaign-audit-scope-guard.sh',
              'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
+             'scripts/ralph-verifier-migrate.sh', '.factory/verifier-acceptance.json',
              'tests/test-factory-environment.sh', 'tests/test-campaign-audit.sh',
              'tests/test-ralph-campaign.sh', 'tests/test-ralph-campaign-state.py',
              'tests/test-factory-lock.py', 'tests/test-orchestration-security.py',

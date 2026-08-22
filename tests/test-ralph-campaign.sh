@@ -17,11 +17,13 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/factory_lock.py" \
    "$PROJECT_ROOT/scripts/factory_state_io.py" \
    "$PROJECT_ROOT/scripts/campaign-verifier-binding.py" \
+   "$PROJECT_ROOT/scripts/ralph-verifier-migrate.sh" \
    "$PROJECT_ROOT/scripts/check-capability-contracts.py" \
    "$PROJECT_ROOT/scripts/check-capability-evidence.py" \
    "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
    "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" "$tmp/scripts/"
 cp "$PROJECT_ROOT/.factory/campaign-objectives.json" "$tmp/.factory/"
+cp "$PROJECT_ROOT/.factory/verifier-acceptance.json" "$tmp/.factory/"
 cat > "$tmp/scripts/assert-no-factory-lock.py" <<'PY'
 #!/usr/bin/env python3
 import os
@@ -419,6 +421,171 @@ mv "$tmp/.factory-state.real" "$tmp/.factory-state"
 
 # Dedicated descriptor-drop and legacy migration coverage lives in
 # test-factory-lock.py; campaign sequencing creates no lock-file authority.
+[[ ! -e "$tmp/.factory-lock" ]]
+
+# --- Verifier binding: baseline contract recorded, strict strengthening -----
+# The campaign records the verifier acceptance contract (entrypoint/config/
+# gate-list identity) as its baseline. A gate-list growth (entrypoint and
+# config unchanged) is legitimate progress: the campaign auto-rebinds with a
+# durable audit record instead of halting for an operator.
+rm -f "$tmp/.factory-state/failed-implementation"
+set +e
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+strengthen_start_rc=$?
+set -e
+[[ $strengthen_start_rc -eq 42 ]]
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+state = json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+assert state['status'] == 'active' and state['phase'] == 'implementation'
+baseline = [g['name'] for g in json.loads((root/'.factory/verifier-acceptance.json').read_text())['gates']]
+contract = json.loads((root/'.factory-state/verifier-contract.json').read_text())
+assert contract['schema'] == 'ralph-verifier-contract/v1'
+assert contract['acceptance_gates'] == baseline
+# The recorded baseline contract is the campaign's verifier identity.
+assert state['verification_command_sha256'] == contract['digest']
+(root/'.factory-state/baseline-gates.json').write_text(json.dumps(baseline))
+PY
+# Grow the gate list (strict strengthening) and commit.
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root/'.factory/verifier-acceptance.json').read_text())
+manifest['gates'].append({'name': 'test-generic-extra.sh', 'args': []})
+manifest['gates'].append({'name': 'test-generic-extra-two.sh', 'args': []})
+(root/'.factory/verifier-acceptance.json').write_text(json.dumps(manifest, indent=2) + '\n')
+PY
+(cd "$tmp" && git add .factory/verifier-acceptance.json && git commit -qm "grow gate list")
+# Resume: the campaign auto-rebinds and completes without any operator step.
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+state = json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+assert state['status'] == 'complete'
+audit = (root/'.factory-state/verifier-rebind-audit.jsonl').read_text().splitlines()
+assert len(audit) == 1
+entry = json.loads(audit[0])
+assert entry['classification'] == 'auto-strengthening'
+baseline = entry['old_gates']
+assert 'test-generic-extra.sh' not in baseline and 'test-generic-extra-two.sh' not in baseline
+assert entry['new_gates'] == baseline + ['test-generic-extra.sh', 'test-generic-extra-two.sh']
+contract = json.loads((root/'.factory-state/verifier-contract.json').read_text())
+assert contract['acceptance_gates'] == entry['new_gates']
+assert state['verification_command_sha256'] == contract['digest']
+(root/'.factory-state/baseline-gates.json').write_text(json.dumps(baseline))
+PY
+
+# --- Verifier binding: gate removal (weakening) halts for the operator --------
+# A shrink in the tracked gate list is a weakening; without the audited operator
+# pathway the campaign launch refuses while campaign state stays unchanged.
+rm -f "$tmp/.factory-state/failed-implementation"
+set +e
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+weaken_start_rc=$?
+set -e
+[[ $weaken_start_rc -eq 42 ]]
+# Remove a gate (weakening) and commit.
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root/'.factory/verifier-acceptance.json').read_text())
+manifest['gates'] = [g for g in manifest['gates'] if g['name'] != 'test-generic-extra.sh']
+(root/'.factory/verifier-acceptance.json').write_text(json.dumps(manifest, indent=2) + '\n')
+PY
+(cd "$tmp" && git add .factory/verifier-acceptance.json && git commit -qm "shrink gate list")
+# Resume without the operator pathway: the campaign must halt, state unchanged.
+state_before_weaken=$(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1)
+set +e
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null 2>&1)
+weaken_resume_rc=$?
+set -e
+[[ $weaken_resume_rc -ne 0 ]]
+[[ $(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1) == "$state_before_weaken" ]]
+# The audited operator pathway records a receipt, archives prior lifecycle
+# state, creates the one-shot migration marker, and promotes the binding; then
+# resume continues and the pathway is idempotent when already current.
+(cd "$tmp" && ./scripts/ralph-verifier-migrate.sh --mode implementation --authority "test-operator" --reason "adversarial test" >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+archives = sorted((root/'.factory-state/operator-archive').glob('verifier-migration-*/authorization-receipt.json'))
+assert archives, 'no authorization receipt recorded'
+receipt = json.loads(archives[-1].read_text())
+assert receipt['schema'] == 'factory-operator-verifier-authorization/v1'
+assert receipt['authority'] == 'test-operator'
+assert receipt['classification'] == 'weakening'
+migration_dir = archives[-1].parent
+# Prior lifecycle state was archived alongside the durable receipt.
+assert (migration_dir/'ralph-campaign.json').is_file()
+assert (migration_dir/'ralph-supervision-implementation.json').is_file()
+assert (root/'.factory-state/ralph-supervision-migration-implementation.json').is_file()
+state = json.loads((root/'.factory-state/ralph-campaign.json').read_text())
+contract = json.loads((root/'.factory-state/verifier-contract.json').read_text())
+assert state['verification_command_sha256'] == contract['digest']
+PY
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())
+assert state['status'] == 'complete'
+PY
+# The operator pathway is idempotent when the binding is already current.
+(cd "$tmp" && ./scripts/ralph-verifier-migrate.sh --mode implementation >/dev/null)
+
+# --- Verifier binding: weakening refused, then superseded marker archived -----
+# A weakening change without operator authority is refused with no state
+# mutation; the authorized migration then archives the superseded one-shot
+# marker before writing the new marker and the campaign resumes successfully.
+rm -f "$tmp/.factory-state/failed-implementation"
+set +e
+(cd "$tmp" && FAKE_FAIL_IMPL_ONCE=1 ./scripts/ralph-campaign.sh --rounds 1 --restart --no-tui >/dev/null 2>&1)
+refuse_start_rc=$?
+set -e
+[[ $refuse_start_rc -eq 42 ]]
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root/'.factory/verifier-acceptance.json').read_text())
+manifest['gates'] = [g for g in manifest['gates'] if g['name'] != 'test-generic-extra-two.sh']
+(root/'.factory/verifier-acceptance.json').write_text(json.dumps(manifest, indent=2) + '\n')
+PY
+(cd "$tmp" && git add .factory/verifier-acceptance.json && git commit -qm "shrink gate list again")
+state_before_refuse=$(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1)
+set +e
+(cd "$tmp" && ./scripts/ralph-verifier-migrate.sh --mode implementation >/dev/null 2>&1)
+refuse_migrate_rc=$?
+set -e
+[[ $refuse_migrate_rc -ne 0 ]]
+[[ $(sha256sum "$tmp/.factory-state/ralph-campaign.json" | cut -d' ' -f1) == "$state_before_refuse" ]]
+# Authorize the second migration: the previously created one-shot marker is
+# superseded and archived into the new operator archive before the new marker
+# is written (archive expectation from the superseded-marker pathway).
+(cd "$tmp" && ./scripts/ralph-verifier-migrate.sh --mode implementation --authority "test-operator" --reason "supersede marker" >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+archives = sorted((root/'.factory-state/operator-archive').glob('verifier-migration-*'))
+assert len(archives) >= 2
+latest = archives[-1]
+assert (latest/'authorization-receipt.json').is_file()
+# The superseded marker from the previous migration was archived, and the new
+# marker now lives in the active state.
+assert (latest/'ralph-supervision-migration-implementation.json').is_file()
+assert (root/'.factory-state/ralph-supervision-migration-implementation.json').is_file()
+PY
+(cd "$tmp" && ./scripts/ralph-campaign.sh --rounds 1 --resume --no-tui >/dev/null)
+python3 - "$tmp" <<'PY'
+import json, pathlib, sys
+state=json.loads((pathlib.Path(sys.argv[1])/'.factory-state/ralph-campaign.json').read_text())
+assert state['status'] == 'complete'
+PY
+# The operator pathway remains idempotent after a later migration.
+(cd "$tmp" && ./scripts/ralph-verifier-migrate.sh --mode implementation >/dev/null)
+
+# Campaign sequencing never creates lock-file authority through verifier
+# migration; dedicated descriptor-drop coverage lives in test-factory-lock.py.
 [[ ! -e "$tmp/.factory-lock" ]]
 
 echo "test: Ralph campaign sequencing and resume checks passed"
