@@ -10,6 +10,7 @@ cp "$PROJECT_ROOT/scripts/ralph-recover.sh" "$PROJECT_ROOT/scripts/factory-lock.
     "$PROJECT_ROOT/scripts/factory-lock-exec.py" "$PROJECT_ROOT/scripts/factory_lock.py" \
     "$PROJECT_ROOT/scripts/factory_state_io.py" "$PROJECT_ROOT/scripts/factory-state-file.py" \
     "$PROJECT_ROOT/scripts/ralph_lock.py" "$PROJECT_ROOT/scripts/ralph-lock-recover.py" \
+    "$PROJECT_ROOT/scripts/git-commit-guard.sh" "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" \
     "$tmp/scripts/"
 chmod +x "$tmp/scripts/"*
 chmod 700 "$tmp/.factory-state"

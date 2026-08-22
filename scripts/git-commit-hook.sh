@@ -155,13 +155,49 @@ if [[ -z "$CONTEXT" ]]; then
 fi
 SUBJECT=$(printf 'ralph %s iteration %s: %s' "$MODE" "$ITERATION" "$CONTEXT" | head -c 72)
 
+# The one-shot final-handoff authorization: written only here, after
+# allow-checkpoint-commit has enforced at-most-one per durable cycle, and
+# consumed by the fail-closed pre-commit boundary (scripts/git-commit-guard.sh)
+# at the actual commit. The EXIT trap removes a never-consumed token so a
+# failed commit can never leave a reusable authorization behind.
+TOKEN_NAME=final-handoff-authorization.json
+write_final_handoff_token() {
+    python3 - "$MODE" "$FACTORY_RALPH_CYCLE_ID" "$TOKEN_NAME" <<'PY'
+import secrets, sys
+from pathlib import Path
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import atomic_write_json
+mode, cycle, name = sys.argv[1:]
+atomic_write_json(Path.cwd(), name, {
+    'schema': 'ralph-final-handoff/v1',
+    'mode': mode,
+    'cycle_id': cycle,
+    'nonce': secrets.token_hex(32),
+})
+PY
+}
+remove_final_handoff_token() {
+    python3 - "$TOKEN_NAME" <<'PY' || true
+import sys
+from pathlib import Path
+sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+from factory_state_io import remove
+remove(Path.cwd(), sys.argv[1])
+PY
+}
+
+if [[ "$FINAL_HANDOFF" == true ]]; then
+    write_final_handoff_token
+    trap remove_final_handoff_token EXIT
+fi
+
 if [[ "$FINAL_HANDOFF" == true ]]; then
     printf '%s\n\nLoop: %s\nMode: %s\nIteration: %s\nCycle: %s\n' \
         "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" "$FACTORY_RALPH_CYCLE_ID" | \
-        git commit -F - --no-verify
+        git commit -F -
 else
     printf '%s\n\nLoop: %s\nMode: %s\nIteration: %s\n' \
-        "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" | git commit -F - --no-verify
+        "$SUBJECT" "$LOOP_ID" "$MODE" "$ITERATION" | git commit -F -
 fi
 
 if [[ "$FINAL_HANDOFF" == true ]]; then

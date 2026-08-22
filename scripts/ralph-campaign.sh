@@ -51,6 +51,7 @@ cd -- "$PROJECT_ROOT"
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-campaign.sh" "${ORIGINAL_ARGS[@]}"
+factory_lock_run_untrusted ./scripts/install-git-commit-guard.sh
 
 # Open and retain an immutable descriptor to the binding helper before any
 # untrusted phase. Every later helper invocation executes this exact opened

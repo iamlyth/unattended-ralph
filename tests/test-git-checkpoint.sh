@@ -8,6 +8,8 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/.ralph/agent" "$tmp/.factory-state"
 cp "$PROJECT_ROOT/scripts/git-commit-hook.sh" \
    "$PROJECT_ROOT/scripts/check-scratchpad.sh" \
+   "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
+   "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" \
    "$PROJECT_ROOT/scripts/ralph-recover.sh" \
    "$PROJECT_ROOT/scripts/factory-lock.sh" \
    "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
@@ -29,6 +31,8 @@ git -C "$tmp" config user.name test
 git -C "$tmp" config user.email test@example.invalid
 git -C "$tmp" add .
 git -C "$tmp" commit -qm initial
+(cd "$tmp" && ./scripts/install-git-commit-guard.sh >/dev/null)
+(cd "$tmp" && ./scripts/install-git-commit-guard.sh --check >/dev/null)
 payload=$(printf '{"loop":{"workspace":"%s","id":"checkpoint-test"},"iteration":{"current":"1"}}' "$tmp")
 
 # Repeated ordinary scratchpad updates remain recoverable worktree state and do

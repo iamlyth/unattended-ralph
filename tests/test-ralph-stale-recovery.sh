@@ -11,7 +11,8 @@ cp "$PROJECT_ROOT/scripts/ralph-plan.sh" "$PROJECT_ROOT/scripts/ralph-supervisio
     "$PROJECT_ROOT/scripts/factory-lock.sh" "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
     "$PROJECT_ROOT/scripts/factory_lock.py" "$PROJECT_ROOT/scripts/factory_state_io.py" \
     "$PROJECT_ROOT/scripts/factory-state-file.py" "$PROJECT_ROOT/scripts/ralph-event-boundary.py" \
-    "$PROJECT_ROOT/scripts/ralph-final-state.py" "$tmp/scripts/"
+    "$PROJECT_ROOT/scripts/ralph-final-state.py" "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
+    "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" "$tmp/scripts/"
 chmod 700 "$tmp/.factory-state"
 
 cat > "$tmp/.factory/config.toml" <<'EOF'

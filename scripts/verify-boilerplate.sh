@@ -70,6 +70,8 @@ required = [
     'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
     'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
     'tests/test-git-checkpoint.sh',
+    'scripts/git-commit-guard.sh', 'scripts/install-git-commit-guard.sh',
+    'scripts/pi-cli-shims/git', 'tests/test-git-commit-guard.sh',
     'scripts/check-installed-functional-evidence.sh',
     'scripts/initialize-plan-cycle.py', 'scripts/check-maintenance-freshness.sh',
     'scripts/maintenance-plan-scope-guard.sh',
@@ -142,10 +144,13 @@ for config in .factory/ralph/implementation.yml .factory/ralph/plan.yml .factory
 done
 for launcher in scripts/ralph-run.sh scripts/ralph-plan.sh scripts/ralph-audit.sh scripts/ralph-maintenance-run.sh scripts/ralph-maintenance-plan.sh; do
     grep -q 'factory_lock_bootstrap' "$launcher"
+    grep -q 'install-git-commit-guard.sh' "$launcher"
     grep -q 'ralph-supervision.sh' "$launcher"
     grep -q 'ralph_supervision_consume_rejection' "$launcher"
     grep -q 'ralph_supervision_recover_stale' "$launcher"
 done
+grep -q 'install-git-commit-guard.sh' scripts/ralph-campaign.sh
+grep -q 'install-git-commit-guard.sh' scripts/ralph-recover.sh
 grep -q '^## Build' AGENTS.md
 grep -q '^## Immediate validation' AGENTS.md
 (( $(wc -l < AGENTS.md) <= 100 )) || { echo 'verify: AGENTS.md must remain concise (100 lines maximum)' >&2; exit 1; }
@@ -260,6 +265,7 @@ PY
 
 ./tests/test-scratchpad-guard.sh
 ./tests/test-git-checkpoint.sh
+./tests/test-git-commit-guard.sh
 ./tests/test-ralph-completion-recovery.sh
 ./tests/test-installed-functional-evidence.sh "$PROJECT_ROOT"
 ./tests/test-factory-environment.sh

@@ -18,7 +18,9 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/factory_state_io.py" \
    "$PROJECT_ROOT/scripts/campaign-verifier-binding.py" \
    "$PROJECT_ROOT/scripts/check-capability-contracts.py" \
-   "$PROJECT_ROOT/scripts/check-capability-evidence.py" "$tmp/scripts/"
+   "$PROJECT_ROOT/scripts/check-capability-evidence.py" \
+   "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
+   "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" "$tmp/scripts/"
 cp "$PROJECT_ROOT/.factory/campaign-objectives.json" "$tmp/.factory/"
 cat > "$tmp/scripts/assert-no-factory-lock.py" <<'PY'
 #!/usr/bin/env python3

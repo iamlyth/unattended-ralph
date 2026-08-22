@@ -24,6 +24,7 @@ cd -- "$PROJECT_ROOT"
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-plan.sh" "${ORIGINAL_ARGS[@]}"
+factory_lock_run_untrusted ./scripts/install-git-commit-guard.sh
 command -v "$RALPH_BIN" >/dev/null || { echo "ralph-plan: Ralph executable not found: $RALPH_BIN" >&2; exit 2; }
 command -v pi2 >/dev/null || { echo "ralph-plan: pi2 is not available in this shell" >&2; exit 2; }
 factory_lock_run_untrusted ./scripts/branch-guard.sh

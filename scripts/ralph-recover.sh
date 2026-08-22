@@ -53,6 +53,7 @@ esac
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-recover.sh" "${ORIGINAL_ARGS[@]}"
+factory_lock_run_untrusted ./scripts/install-git-commit-guard.sh
 factory_lock_acquire "$PROJECT_ROOT"
 [[ -d "$RALPH_DIR" && ! -L "$RALPH_DIR" ]] || die "missing or unsafe $RALPH_DIR"
 python3 - "$RALPH_DIR" <<'PY' || die "unsafe Ralph recovery paths"
