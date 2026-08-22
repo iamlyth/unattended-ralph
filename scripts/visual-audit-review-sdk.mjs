@@ -26,7 +26,11 @@
 // authority (prompt/schema/calibration/gate policy) stays in the docs.
 //
 // The vision model is never a writer/Ralph model. Model selection is
-// configurable and credential-free (auth resolves from the host pi config).
+// configurable and credential-free. Production requires PI_CODING_AGENT_DIR
+// to name the same trusted Pi authority used by pi2; auth.json and models.json
+// are passed explicitly to ModelRuntime so SDK defaults cannot silently fall
+// back to a different agent directory. No visual-audit-specific credential or
+// config path override exists.
 //
 // Usage:
 //   node visual-audit-review-sdk.mjs \
@@ -40,9 +44,12 @@
 // provides no default model and enables nothing until the consumer sets one.
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import {
+  readFileSync, writeFileSync, chmodSync, mkdirSync, lstatSync, realpathSync,
+} from "node:fs";
+import { resolve, dirname, join, relative, isAbsolute, sep } from "node:path";
 import { createRequire } from "node:module";
+import { userInfo } from "node:os";
 
 const FINDING_SCHEMA = "ralph-visual-audit-review/v1";
 const RECEIPT_SCHEMA = "ralph-visual-audit-invocation/v1";
@@ -79,7 +86,82 @@ async function resolvePackage() {
 }
 
 const sdk = await import(resolve(await resolvePackage(), "dist/index.js"));
-const { createAgentSession, SessionManager, ModelRuntime, getAgentDir } = sdk;
+const {
+  createAgentSession, SessionManager, ModelRuntime, getAgentDir,
+  DefaultResourceLoader, SettingsManager,
+} = sdk;
+
+// Bind the SDK to Pi's standard, operator-provisioned authority. Requiring the
+// standard Pi variable is intentional: a silent ~/.pi/agent fallback can use a
+// different credential/model universe than pi2. The path is constrained to
+// the invoking user's real home/.pi tree and every consumed object is checked
+// without opening, parsing, or printing credential bytes.
+function authorityError(message) {
+  throw new Error(`unsafe Pi credential authority: ${message}`);
+}
+
+function requireSafeNode(path, kind, { exactOwner = false } = {}) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    authorityError(`${kind} is missing`);
+  }
+  if (st.isSymbolicLink()) authorityError(`${kind} must not be a symlink`);
+  if (exactOwner ? st.uid !== process.getuid() : ![0, process.getuid()].includes(st.uid)) {
+    authorityError(`${kind} has unsafe ownership`);
+  }
+  if ((st.mode & 0o022) !== 0) authorityError(`${kind} is group- or other-writable`);
+  return st;
+}
+
+function resolvePiAuthority() {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  if (!configured) {
+    authorityError("PI_CODING_AGENT_DIR is required and must match factory pi2");
+  }
+  if (!isAbsolute(configured) || configured !== resolve(configured)) {
+    authorityError("PI_CODING_AGENT_DIR must be an absolute normalized path");
+  }
+
+  const home = realpathSync(userInfo().homedir);
+  const piRoot = join(home, ".pi");
+  const rel = relative(piRoot, configured);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    authorityError("PI_CODING_AGENT_DIR must be beneath the invoking user's ~/.pi directory");
+  }
+
+  requireSafeNode(home, "home directory");
+  requireSafeNode(piRoot, "~/.pi directory", { exactOwner: true });
+  let current = piRoot;
+  for (const component of rel.split(sep)) {
+    current = join(current, component);
+    const st = requireSafeNode(current, "agent directory", { exactOwner: true });
+    if (!st.isDirectory()) authorityError("agent directory path contains a non-directory");
+  }
+  if (realpathSync(configured) !== configured) authorityError("agent directory must be canonical");
+
+  const checkedFile = (name) => {
+    const path = join(configured, name);
+    const st = requireSafeNode(path, name, { exactOwner: true });
+    if (!st.isFile()) authorityError(`${name} must be a regular file`);
+    if (st.nlink !== 1) authorityError(`${name} must have exactly one link`);
+    if ((st.mode & 0o077) !== 0 || (st.mode & 0o400) === 0) {
+      authorityError(`${name} must be owner-readable and inaccessible to group/other`);
+    }
+    if (st.size < 1 || st.size > 4 * 1024 * 1024) authorityError(`${name} has an unsafe size`);
+    return path;
+  };
+  const authPath = checkedFile("auth.json");
+  const modelsPath = checkedFile("models.json");
+
+  // Cross-check the loaded SDK's own standard resolver. agentDir alone does
+  // not retarget an already-created ModelRuntime, hence the explicit paths.
+  if (getAgentDir() !== configured) authorityError("Pi SDK agent directory resolution disagrees");
+  return { agentDir: configured, authPath, modelsPath };
+}
+
+const authority = resolvePiAuthority();
 
 const args = process.argv.slice(2);
 function opt(name) {
@@ -129,13 +211,49 @@ const prompt = promptTemplate
   .replaceAll("{schema_sha256}", schemaSha)
   .replaceAll("{request_nonce}", requestNonce);
 
-const modelRuntime = await ModelRuntime.create();
+// Keep remote catalog cache state in memory. This prevents an unvalidated
+// models-store.json sibling from becoming a third filesystem config input.
+const inMemoryModelsStore = {
+  async read() { return undefined; },
+  async write() {},
+  async delete() {},
+};
+const modelRuntime = await ModelRuntime.create({
+  authPath: authority.authPath,
+  modelsPath: authority.modelsPath,
+  modelsStore: inMemoryModelsStore,
+  allowModelNetwork: false,
+});
 const model = modelRuntime.getModel(...modelName.split("/"));
+if (!model) throw new Error("configured visual-audit model is not registered by the trusted Pi authority");
+
+// The visual reviewer needs no tools, extensions, skills, project context, or
+// mutable settings. Suppressing those surfaces prevents unrelated Pi config
+// from becoming executable review input while retaining the authority's model
+// and credentials only.
+const settingsManager = SettingsManager.inMemory({
+  compaction: { enabled: false },
+  retry: { enabled: false },
+});
+const resourceLoader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir: authority.agentDir,
+  settingsManager,
+  noExtensions: true,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await resourceLoader.reload();
 const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
+  settingsManager,
+  resourceLoader,
+  noTools: "all",
   modelRuntime,
   model,
-  agentDir: getAgentDir(),
+  agentDir: authority.agentDir,
 });
 
 let out = "";

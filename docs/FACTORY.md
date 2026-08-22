@@ -481,6 +481,24 @@ exact-commit capture driver, replace the placeholder inventory/calibration
 templates with its own visual states, and prove a real non-skipping image
 round-trip through `scripts/visual-audit-probe.sh`.
 
+The production SDK review must use the same Pi model/credential authority as
+factory `pi2`. Provision Pi's standard variable in the operator/service
+environment before probing, calibration, and review:
+
+```bash
+export PI_CODING_AGENT_DIR="<trusted-pi2-agent-directory>"
+```
+
+The directory must be a canonical, invoking-user-owned directory beneath that
+user's `~/.pi`, with no group/other-writable path component. Its `auth.json` and
+`models.json` must be owned, single-link regular non-symlink files, owner
+readable, and inaccessible to group/other (normally mode `0600`). The SDK passes
+those two paths explicitly to `ModelRuntime.create`; `agentDir` alone is not a
+credential-runtime binding. Missing or unsafe authority fails closed instead of
+falling back to `~/.pi/agent`. There is deliberately no visual-audit-specific
+auth, model-config, or agent-directory override, and credential contents are
+never logged or copied by the scaffold.
+
 Authority is **supplemental, findings-only, and never elevating**:
 
 - A machine visual review can only *add* findings; it never certifies that any

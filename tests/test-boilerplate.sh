@@ -106,7 +106,8 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'tests/test-factory-lock.py', 'tests/test-orchestration-security.py',
              'scripts/pi2-secure-exec.py',
              'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
-             'tests/test-pi2-ollama-wrapper.sh'):
+             'tests/test-pi2-ollama-wrapper.sh',
+             'tests/test-visual-audit-sdk-authority.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'
 PY
 for config in .factory/ralph/implementation.yml .factory/ralph/plan.yml .factory/ralph/audit.yml .factory/ralph/maintenance.yml .factory/ralph/maintenance-plan.yml; do
