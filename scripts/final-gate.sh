@@ -70,6 +70,9 @@ PY
         ./scripts/check-golden-policy.py
         ./scripts/check-capability-contracts.py
         ./scripts/check-capability-evidence.py
+        # Mechanical visual-audit methodology gate: check-only, never invokes
+        # capture/review-sdk/probe/model.
+        ./scripts/visual-audit-gate.sh
         ./scripts/check-docs-sync.sh
         ./scripts/verify-boilerplate.sh
         if [[ -x scripts/verify-project.sh ]]; then

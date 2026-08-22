@@ -40,17 +40,17 @@ verb=
 previous=
 for argument in "$@"; do
     case "$previous" in
-        -C|--git-dir|--work-tree|-c|--config)
+        -C|--git-dir|--work-tree|-c|--config|--config-env)
             previous=
             continue
             ;;
     esac
     case "$argument" in
-        -C|--git-dir|--work-tree|-c|--config)
+        -C|--git-dir|--work-tree|-c|--config|--config-env)
             previous=$argument
             continue
             ;;
-        -C=*|--git-dir=*|--work-tree=*|-c=*|--config=*) continue ;;
+        -C=*|--git-dir=*|--work-tree=*|-c=*|--config=*|--config-env=*) continue ;;
         -*) continue ;;
         *)
             verb=$argument
@@ -79,12 +79,13 @@ fi
 # family redirect or suppress hooks. None of these have a legitimate use in the
 # Ralph harness (the trusted checkpoint flow never bypasses hooks).
 for argument in "$@"; do
-    case "$argument" in
+    lower_argument=${argument,,}
+    case "$lower_argument" in
         --no-verify)
             echo "git-shim: --no-verify is forbidden: it bypasses the fail-closed commit boundary" >&2
             exit 1
             ;;
-        -c=core.hooksPath*|--config=core.hooksPath*|--config-env=core.hooksPath*)
+        -c=core.hookspath*|--config=core.hookspath*|--config-env=core.hookspath*)
             echo "git-shim: core.hooksPath redirection is forbidden" >&2
             exit 1
             ;;
@@ -92,10 +93,11 @@ for argument in "$@"; do
 done
 previous=
 for argument in "$@"; do
+    lower_argument=${argument,,}
     case "$previous" in
-        -c|--config)
-            case "$argument" in
-                core.hooksPath|core.hooksPath=*)
+        -c|--config|--config-env)
+            case "$lower_argument" in
+                core.hookspath|core.hookspath=*)
                     echo "git-shim: core.hooksPath redirection is forbidden" >&2
                     exit 1
                     ;;
@@ -104,8 +106,8 @@ for argument in "$@"; do
             continue
             ;;
     esac
-    case "$argument" in
-        -c|--config) previous=$argument ;;
+    case "$lower_argument" in
+        -c|--config|--config-env) previous=$lower_argument ;;
     esac
 done
 if [[ "$verb" == commit ]]; then

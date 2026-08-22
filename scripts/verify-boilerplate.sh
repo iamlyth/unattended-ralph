@@ -120,6 +120,19 @@ required = [
     'scripts/validate-blocked-facts.py', 'scripts/check-context-summary.py',
     'scripts/ralph-context-summary.py', 'scripts/check-campaign-objectives.py',
     'scripts/check-golden-policy.py',
+    '.factory/visual-audit.toml', '.factory/visual-audit-inventory.json',
+    '.factory/visual-audit-calibration.json',
+    '.factory/schemas/visual-audit-review.schema.json',
+    '.factory/prompts/visual-audit.md',
+    'scripts/visual-audit-provenance.py', 'scripts/visual-audit-lease.py',
+    'scripts/visual-audit-review.py', 'scripts/visual-audit-review-sdk.mjs',
+    'scripts/visual-audit-capture.sh', 'scripts/visual-audit-probe.sh',
+    'scripts/visual-capture-driver.sh', 'scripts/check-visual-audit.py',
+    'scripts/visual-audit-gate.sh',
+    'tests/test-visual-audit.sh',
+    'scripts/credential-guard.py',
+    'tests/test-credential-guard.sh',
+    'tests/test-credential-extension.sh',
     '.factory/artifacts/blocked-facts.json', '.factory/artifacts/conformance.json',
     '.factory/artifacts/context-summary.md',
     '.factory/campaign-objectives.json', '.factory/golden-policy.json',
@@ -258,6 +271,28 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
+# Machine visual-audit scaffold invariants: the generic scaffold is disabled by
+# default, defaults no vision model (consumer-configured placeholder), and keeps
+# every mutable capture/review/calibration/probe path under the ignored
+# .factory-state/visual-audit/ directory.
+grep -q '^enabled = false' .factory/visual-audit.toml
+grep -q '^vision_model = ""' .factory/visual-audit.toml
+for va_key in lease_file capture_dir review_dir; do
+    grep -q "^$va_key = \".factory-state/visual-audit/" .factory/visual-audit.toml
+done
+git check-ignore -q .factory-state/visual-audit/captures/good-main.png
+git check-ignore -q .factory-state/visual-audit/reviews/report.json
+git check-ignore -q .factory-state/visual-audit/lease
+# The visual-audit completion gate is a check-only mechanical step: the
+# implementation final gate invokes it, and the gate itself only runs the
+# aggregate checker against existing review evidence -- it never invokes the
+# capture/probe paths or the review SDK driver / vision model.
+grep -q 'scripts/visual-audit-gate.sh' scripts/final-gate.sh
+grep -q 'check-visual-audit.py' scripts/visual-audit-gate.sh
+if grep -Eq 'visual-audit-(capture|probe)|review-sdk' scripts/visual-audit-gate.sh; then
+    echo "verify: visual-audit-gate.sh must never invoke capture/review-sdk/probe" >&2
+    exit 1
+fi
 ./scripts/check-factory-environment.py
 ./scripts/check-capability-contracts.py
 ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json
@@ -304,6 +339,9 @@ PY
 ./tests/test-campaign-objectives.sh
 ./tests/test-context-summary.sh
 ./tests/test-golden-policy.sh
+./tests/test-visual-audit.sh
+./tests/test-credential-guard.sh
+./tests/test-credential-extension.sh
 ./tests/test-runner-signer.sh
 ./tests/test-boilerplate.sh
 echo "verify: boilerplate checks passed"

@@ -27,6 +27,9 @@
     {"name": "test-campaign-objectives.sh", "args": []},
     {"name": "test-context-summary.sh", "args": []},
     {"name": "test-golden-policy.sh", "args": []},
+    {"name": "test-visual-audit.sh", "args": []},
+    {"name": "test-credential-guard.sh", "args": []},
+    {"name": "test-credential-extension.sh", "args": []},
     {"name": "test-runner-signer.sh", "args": []},
     {"name": "test-boilerplate.sh", "args": []}
   ]

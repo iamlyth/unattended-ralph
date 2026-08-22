@@ -460,6 +460,88 @@ Proxy evidence must not be promoted to production verification. Three tracked ar
 
 Pixel/offscreen framebuffer checks are not real visual acceptance, private/session-scoped service instances are not the real system service, a synthetic test producer is not the target consumer, and an evidence declaration is not evidence. `final-gate.sh` `--implementation` and `--campaign-audit` run all three layers; `--planning` validates an existing sidecar so a fresh cycle stays pendable before migration.
 
+## Machine visual-audit scaffold
+
+A product-neutral, optional machine visual-audit framework ships in the
+boilerplate as a scaffold (`.factory/visual-audit.toml`, the
+`scripts/visual-audit-*.py/.sh` and `scripts/check-visual-audit.py` tools,
+`tests/test-visual-audit.sh`, the review schema, and the frozen review prompt).
+It is **disabled by default** and defaults **no vision model**: `vision_model`
+is a consumer-configured placeholder that stays empty until a consumer sets it,
+and `scripts/visual-audit-probe.sh` fails closed unless the consumer configures
+`VISUAL_AUDIT_VISION_MODEL`. The generic capture adapter
+(`scripts/visual-capture-driver.sh`) also fails closed with a clear message
+until the consumer implements installed exact-commit capture; tests use only
+explicit test-only mock drivers.
+
+All mutable capture/review/calibration/probe state lives under the ignored
+`.factory-state/visual-audit/` directory; nothing mutable is tracked. When a
+consumer enables the framework it must first implement an installed
+exact-commit capture driver, replace the placeholder inventory/calibration
+templates with its own visual states, and prove a real non-skipping image
+round-trip through `scripts/visual-audit-probe.sh`.
+
+Authority is **supplemental, findings-only, and never elevating**:
+
+- A machine visual review can only *add* findings; it never certifies that any
+  command ran, any window opened, or any runtime behavior occurred. A review
+  pass means only that the configured vision model reported no machine
+  findings over the provenance-bound screenshots.
+- Machine vision never promotes an evidence tier: it does not write to
+  `.factory/artifacts/conformance.json`, never reclassifies `verified`/tier
+  rows, and never replaces deterministic/real-system/human acceptance. The
+  conformance sidecar remains the only authority for verified claims.
+- Every review report is bound to the exact commit/tree, the frozen prompt and
+  schema digests, and the exact captured image bytes; replay, drift, tamper,
+  outage, and shared-session races fail closed (`scripts/check-visual-audit.py`
+  is the aggregate gate). A receipt proves invocation, not visual truth.
+
+Machine vision is **supplemental falsification/findings-only**, never a
+certification oracle:
+
+- A machine PASS cannot certify visual truth, and it cannot elevate
+  unit/simulated/private-integration/installed evidence to
+  `real_system`/`human`. A clean review only falsifies nothing; it confirms
+  nothing about real system behavior.
+- Captures and review reports do **not** replace compositor, physical,
+  target-consumer, or human evidence. A screenshot is not a compositor
+  observation, a framebuffer grab is not a physical display, a synthetic
+  producer is not the target consumer, and no machine report substitutes for
+  a human judgement call.
+- Machine-generated baselines cannot self-certify goldens: a baseline is not
+  independent ground truth, and human/golden acceptance remains out-of-band
+  (a separate, human-reviewed artifact and decision).
+- When enabled, the completion gate validates an existing exact-commit report
+  only; it never invokes the capture driver or vision model under the
+  lifecycle lock. Gate validation reads a stored report and does not run any
+  machine vision at completion time.
+
+## Credential boundary guard
+
+`scripts/credential-guard.py` and the project-local Pi extension enforce a
+best-effort credential boundary at tool invocation and result persistence.
+Potential environment/authentication dumps and sensitive direct file paths are
+blocked before execution. Text returned by tools, including nested result
+details, is redacted before Pi displays or persists it. Classification and
+redaction subprocesses receive candidate text on standard input, never in
+process arguments, and any guard failure blocks the call or replaces the
+result with `[REDACTION FAILED]` without echoing the candidate.
+
+Large Bash results require an additional precaution because Pi's built-in Bash
+tool writes its overflow file before emitting `tool_result`. The extension
+accepts only the expected owned, single-link, regular `pi-bash-*.log` path in
+the system temporary directory, changes it to owner-only access, and atomically
+replaces it with redacted bytes. Sanitization failure truncates that recognized
+owned file and fails the result closed. There is nevertheless a small
+pre-hook crash window between the built-in tool writing raw overflow and the
+`tool_result` handler sanitizing it. The guard therefore reduces exposure but
+does not claim perfect prevention; operators must keep temporary storage
+private and rotate any credential known to have appeared in prior output.
+
+These controls are defense in depth, not permission to place credentials in
+prompts, commands, tracked files, logs, or test fixtures. Adversarial tests use
+synthetic secret-shaped values only.
+
 ## Verify
 
 ```bash

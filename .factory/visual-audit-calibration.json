@@ -1,0 +1,30 @@
+{
+  "schema": "ralph-visual-audit-calibration/v1",
+  "description": "Calibration image set template for the read-only vision reviewers. Before a live review is trusted, the configured vision model must correctly classify every calibration image: known-bad images must be flagged as findings/errors, current-bad images must be flagged, and reviewed-good images must not be flagged above info. Calibration binds the exact model, prompt hash, and schema hash, so a drift in any of them invalidates the calibration and blocks live review. The sha256 field per control MUST be the exact lowercase 64-hex SHA-256 of the control image bytes (e.g. the committed calibration/{id}.png); consumers MUST replace every placeholder with their real hash and their own product images. Placeholder 64-hex values and placeholder artifacts are never accepted by calibration.",
+  "images": [
+    {
+      "id": "cal-known-bad-blank",
+      "expectation": "finding",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "note": "A blank/uniform image must never be passed as acceptable visual content. Replace the sha256 placeholder and the calibration/{id}.png artifact with the real control image."
+    },
+    {
+      "id": "cal-known-bad-clipped",
+      "expectation": "finding",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "note": "A clipped or truncated layout must be flagged. Replace the sha256 placeholder and the calibration/{id}.png artifact with the real control image."
+    },
+    {
+      "id": "cal-current-bad-regression",
+      "expectation": "finding",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "note": "The current known regression image (materially incorrect rendering) must be flagged. Replace the sha256 placeholder and the calibration/{id}.png artifact with the real control image."
+    },
+    {
+      "id": "cal-reviewed-good-reference",
+      "expectation": "pass",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "note": "A human-reviewed good reference image must not be flagged above info severity. Replace the sha256 placeholder and the calibration/{id}.png artifact with the real control image."
+    }
+  ]
+}
