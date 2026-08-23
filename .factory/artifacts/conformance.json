@@ -1,1 +1,505 @@
-{"schema": "ralph-conformance/v1", "requirements": []}
+{
+  "schema": "ralph-conformance/v1",
+  "requirements": [
+    {
+      "id": "AUTH-01",
+      "spec_sections": [
+        "\u00a75",
+        "\u00a77"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/plan_parser.py",
+        ".factory/loop/selector.py",
+        ".factory/artifacts/implementation-plan.md"
+      ],
+      "fact_refs": [
+        "FACT-001"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "CTX-01",
+      "spec_sections": [
+        "\u00a75",
+        "\u00a79"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/launch.py",
+        ".factory/loop/confine_launcher.py",
+        ".factory/tests/test-factory-launch.py"
+      ],
+      "fact_refs": [
+        "FACT-002"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "CTX-02",
+      "spec_sections": [
+        "\u00a75",
+        "\u00a718"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/workspace_confinement.py",
+        ".factory/loop/confinement.py",
+        ".factory/tests/test-factory-confinement.py"
+      ],
+      "fact_refs": [
+        "FACT-003"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "ROLE-01",
+      "spec_sections": [
+        "\u00a76"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/prompts/planner.md",
+        ".factory/prompts/developer.md",
+        ".factory/prompts/tester.md",
+        ".factory/prompts/auditor.md",
+        ".factory/loop/promptset.py"
+      ],
+      "fact_refs": [
+        "FACT-004"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "PLAN-01",
+      "spec_sections": [
+        "\u00a77"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/plan_parser.py",
+        ".factory/schemas/factory-plan-v1.schema.json",
+        ".factory/schemas/factory-plan-v1.requirements.json",
+        ".factory/tests/test-factory-plan-parser.py"
+      ],
+      "fact_refs": [
+        "FACT-005"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "TASK-01",
+      "spec_sections": [
+        "\u00a77",
+        "\u00a78"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/selector.py",
+        ".factory/tests/test-factory-selector.py"
+      ],
+      "fact_refs": [
+        "FACT-006"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "TASK-02",
+      "spec_sections": [
+        "\u00a79",
+        "\u00a720"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/launch.py",
+        ".factory/tests/test-factory-launch.py"
+      ],
+      "fact_refs": [
+        "FACT-007"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "QUOTA-01",
+      "spec_sections": [
+        "\u00a710"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/ollama-usage-guard.sh",
+        ".factory/loop/usage.py",
+        "tests/test-pi2-ollama-wrapper.sh"
+      ],
+      "fact_refs": [
+        "FACT-008"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "QUOTA-02",
+      "spec_sections": [
+        "\u00a710"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/usage.py",
+        ".factory/loop/usage_fetch.py",
+        ".factory/tests/test-factory-usage.py",
+        ".factory/tests/test-factory-redaction.py"
+      ],
+      "fact_refs": [
+        "FACT-009"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "STATE-01",
+      "spec_sections": [
+        "\u00a711",
+        "\u00a717"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/state.py",
+        ".factory/tests/test-factory-state.py"
+      ],
+      "fact_refs": [
+        "FACT-010"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "LOCK-01",
+      "spec_sections": [
+        "\u00a712"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/lock.py",
+        ".factory/tests/test-factory-lock.py",
+        "tests/test-factory-lock.py"
+      ],
+      "fact_refs": [
+        "FACT-011"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "PROC-01",
+      "spec_sections": [
+        "\u00a79",
+        "\u00a712",
+        "\u00a717"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/launch.py",
+        ".factory/tests/test-factory-launch.py",
+        ".factory/tests/test-factory-supervision.sh"
+      ],
+      "fact_refs": [
+        "FACT-012"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "GIT-01",
+      "spec_sections": [
+        "\u00a712",
+        "\u00a717"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/git-commit-guard.sh",
+        "scripts/install-git-commit-guard.sh",
+        "tests/test-git-commit-guard.sh"
+      ],
+      "fact_refs": [
+        "FACT-013"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "PHASE-01",
+      "spec_sections": [
+        "\u00a713",
+        "\u00a714"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/campaign.py",
+        ".factory/loop/launch.py",
+        ".factory/tests/test-factory-campaign.py"
+      ],
+      "fact_refs": [
+        "FACT-014"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "COMPLETE-01",
+      "spec_sections": [
+        "\u00a715"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/campaign.py",
+        ".factory/tests/test-factory-campaign.py"
+      ],
+      "fact_refs": [
+        "FACT-015"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "FIND-01",
+      "spec_sections": [
+        "\u00a716"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/findings.py",
+        ".factory/tests/test-factory-findings.py"
+      ],
+      "fact_refs": [
+        "FACT-016"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "CRED-01",
+      "spec_sections": [
+        "\u00a718"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "private_integration",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/credential-guard.py",
+        "scripts/pi2-secure-exec.py",
+        "tests/test-credential-guard.sh",
+        "tests/test-credential-extension.sh"
+      ],
+      "fact_refs": [
+        "FACT-017"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "EVID-01",
+      "spec_sections": [
+        "\u00a719"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/machine-receipt.py",
+        ".factory/loop/evidence.py",
+        ".factory/tests/test-factory-evidence.py",
+        "tests/test-audit-receipts.sh"
+      ],
+      "fact_refs": [
+        "FACT-018"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "VIS-01",
+      "spec_sections": [
+        "\u00a719"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/visual-audit-provenance.py",
+        "scripts/check-visual-audit.py",
+        "tests/test-visual-audit.sh"
+      ],
+      "fact_refs": [
+        "FACT-019"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "RUNNER-01",
+      "spec_sections": [
+        "\u00a719"
+      ],
+      "classification": "blocked",
+      "evidence_tier": "private_integration",
+      "required_tier": "real_system",
+      "required_capabilities": [
+        "hardware-runner"
+      ],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        "scripts/run-factory-runners.py",
+        "scripts/check-factory-runner-evidence.py",
+        "tests/test-factory-runner.sh",
+        "tests/test-runner-signer.sh"
+      ],
+      "fact_refs": [
+        "FACT-020"
+      ],
+      "reason": "real_system evidence requires a declared, provisioned, signed hardware-runner capability; .factory/environment.toml declares no runner and .factory/signer-trust.json provisions no signer, so the required evidence is unavailable until a human provisions and declares the runner (FACT-020)."
+    },
+    {
+      "id": "HIDE-01",
+      "spec_sections": [
+        "\u00a73"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [
+        ".factory/tests/test-factory-footprint.py",
+        ".factory/tests/test-factory-footprint.sh",
+        "scripts/check-generic-leakage.sh"
+      ],
+      "fact_refs": [
+        "FACT-021"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "MIG-01",
+      "spec_sections": [
+        "\u00a721"
+      ],
+      "classification": "missing",
+      "evidence_tier": "unit",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [],
+      "fact_refs": [],
+      "reason": ""
+    },
+    {
+      "id": "TEST-01",
+      "spec_sections": [
+        "\u00a722"
+      ],
+      "classification": "missing",
+      "evidence_tier": "unit",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [],
+      "fact_refs": [],
+      "reason": ""
+    },
+    {
+      "id": "ACCEPT-01",
+      "spec_sections": [
+        "\u00a723"
+      ],
+      "classification": "missing",
+      "evidence_tier": "unit",
+      "required_tier": "installed",
+      "required_capabilities": [],
+      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "receipts": [],
+      "artifacts": [],
+      "fact_refs": [],
+      "reason": ""
+    }
+  ]
+}

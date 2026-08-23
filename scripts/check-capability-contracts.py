@@ -45,6 +45,22 @@ def fail(message: str) -> None:
     raise SystemExit(f"capability-contracts: {message}")
 
 
+def no_duplicate_keys(pairs: list) -> dict:
+    """JSON object-pairs hook: reject duplicate object keys fail-closed.
+
+    A duplicate key in the committed contract file silently overwrites its
+    predecessor under a plain ``dict`` decode and can hide a drifted or
+    tampered authority; every committed-data load uses this hook instead
+    (Task 14 duplicate-key hardening).
+    """
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            fail(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
 def declared_capabilities(environment_path: Path) -> list[str]:
     if environment_path.is_symlink() or not environment_path.is_file():
         fail(f"environment declaration must be a regular tracked file: {environment_path}")
@@ -67,7 +83,7 @@ def load_contracts(path: Path) -> list[dict]:
     if path.is_symlink() or not path.is_file():
         fail(f"capability-contracts must be a regular tracked file: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse {path}: {exc}")
     if not isinstance(data, dict) or data.get("schema") != "ralph-capability-contract/v1":

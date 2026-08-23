@@ -19,10 +19,11 @@ contract-level probe/skip guards over the accepted aggregate.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
-import subprocess
+import sys
 from pathlib import Path
 import tomllib
 
@@ -33,6 +34,50 @@ MAX_LOG_SCAN = 32 * 1024 * 1024
 
 def fail(message: str) -> None:
     raise SystemExit(f"capability-evidence: {message}")
+
+
+def no_duplicate_keys(pairs: list) -> dict:
+    """JSON object-pairs hook: reject duplicate object keys fail-closed."""
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            fail(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def load_script_module(name: str, path: Path):
+    """Load a dashed-name factory script as an importable module."""
+    if not path.is_file() or path.is_symlink():
+        fail(f"factory script is unavailable: {path}")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load factory script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_PINNED_GIT_CACHE: dict[str, object] = {}
+
+
+def load_pinned_git(root: Path):
+    """Load the canonical pinned-Git authority (``.factory/loop/gitutil.py``).
+
+    The runner aggregate is bound to HEAD by a trusted Git call; that call runs
+    the PATH-pinned absolute executable with a sanitized environment,
+    ``GIT_NO_REPLACE_OBJECTS=1``, and a finite timeout — never an unqualified
+    ``git`` from a caller-controlled ``PATH``.
+    """
+    key = str(root)
+    if key not in _PINNED_GIT_CACHE:
+        try:
+            _PINNED_GIT_CACHE[key] = load_script_module(
+                "factory_gitutil", root / ".factory/loop/gitutil.py"
+            )
+        except Exception as exc:  # GitBoundaryError and import failures alike
+            fail(f"pinned Git authority is unavailable: {exc}")
+    return _PINNED_GIT_CACHE[key]
 
 
 def declared_capabilities(root: Path) -> set[str]:
@@ -59,7 +104,7 @@ def contract_for(root: Path, capability: str) -> dict:
     if path.is_symlink() or not path.is_file():
         fail(f"missing tracked capability contract file: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse {path}: {exc}")
     if not isinstance(data, dict) or data.get("schema") != "ralph-capability-contract/v1":
@@ -78,7 +123,7 @@ def aggregate_evidence(root: Path) -> tuple[set[str], list[Path]]:
     if aggregate.is_symlink() or not aggregate.is_file():
         fail(f"runner evidence aggregate is missing: {aggregate}")
     try:
-        data = json.loads(aggregate.read_text(encoding="utf-8"))
+        data = json.loads(aggregate.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"invalid runner evidence aggregate {aggregate}: {exc}")
     if not isinstance(data, dict) or data.get("schema") != "factory-runner-aggregate/v1":
@@ -112,9 +157,13 @@ def aggregate_evidence(root: Path) -> tuple[set[str], list[Path]]:
 
 
 def git_head(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True,
-        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+    git = load_pinned_git(root)
+    result = git.git_run(
+        ["-C", str(root), "rev-parse", "--verify", "HEAD"],
+        env=git.sanitize_git_environment(
+            {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+        ),
+        timeout=git.GIT_TIMEOUT,
     )
     if result.returncode:
         fail(f"cannot resolve HEAD of {root}")
@@ -167,7 +216,10 @@ def verify_capability(root: Path, capability: str) -> None:
     marker_seen_any = False
     for manifest_path in manifests:
         try:
-            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_data = json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+                object_pairs_hook=no_duplicate_keys,
+            )
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             fail(f"invalid runner manifest {manifest_path}: {exc}")
         if not isinstance(manifest_data, dict) or manifest_data.get("schema") != "factory-runner-receipt/v1":

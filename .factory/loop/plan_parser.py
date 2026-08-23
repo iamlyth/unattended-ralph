@@ -100,7 +100,22 @@ LIFECYCLE_STATUSES = ("active", "complete")
 TASK_STATUSES = ("pending", "in_progress", "complete", "blocked")
 
 # Allowed conformance classifications (mirrors the existing validator).
-CLASSIFICATIONS = ("verified", "partial", "missing", "ambiguous")
+CLASSIFICATIONS = ("verified", "partial", "missing", "ambiguous", "blocked", "not_applicable")
+
+
+def _reject_duplicate_keys(pairs):
+    """JSON object-pairs hook: reject duplicate object keys in committed data.
+
+    A duplicate key in any schema/config file (the \u00a724 registry included)
+    silently overwrites its predecessor under a plain ``dict`` decode and can
+    hide a drifted authority; the acceptance boundary rejects it instead.
+    """
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise PlanError(f"duplicate JSON object key in the \u00a724 registry: {key!r}")
+        result[key] = value
+    return result
 
 # Task field grammar: required fields exactly once; optional fields at most
 # once; any other field label is a parse error.
@@ -383,7 +398,10 @@ def _load_requirement_registry() -> List[str]:
     if _REGISTRY_CACHE is not None:
         return _REGISTRY_CACHE
     try:
-        data = json.loads(REQUIREMENTS_REGISTRY.read_text(encoding="utf-8"))
+        data = json.loads(
+            REQUIREMENTS_REGISTRY.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PlanError(
             f"cannot load the committed \u00a724 requirement registry "

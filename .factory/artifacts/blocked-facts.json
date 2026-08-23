@@ -1,1 +1,238 @@
-{"schema": "ralph-blocked-facts/v1", "facts": []}
+{
+  "schema": "ralph-blocked-facts/v1",
+  "facts": [
+    {
+      "id": "FACT-001",
+      "title": "AUTH-01 installed-tier authority evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "AUTH-01"
+      ],
+      "blocking_evidence": "AUTH-01 requires installed-tier acceptance evidence from the completed fresh-context campaign (specification, plan, and current code/tests authoritative with the plan as the sole task ledger). The machinery exists and hidden suites pass, but no installed-tier campaign receipt exists and Tasks 16/20 (adversarial suite and final audit) are pending, so the required tier cannot be verified yet.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-002",
+      "title": "CTX-01 installed-tier fresh-process evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "CTX-01"
+      ],
+      "blocking_evidence": "CTX-01 requires installed-tier evidence that every role runs in a fresh process with only allowlisted current inputs and no semantic memory/session resume. The launch/supervision machinery (Task 6) is fixture-proven only; no installed-tier campaign receipt exists and final verification is pending Tasks 16/20.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-003",
+      "title": "CTX-02 installed-tier confinement evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "CTX-02"
+      ],
+      "blocking_evidence": "CTX-02 requires installed-tier evidence that legacy task, memory, scratch, event, and state paths are unavailable to model tools. Confinement machinery is fixture-proven, but no installed-tier campaign receipt exists; final verification pending Tasks 16/20.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-004",
+      "title": "ROLE-01 installed-tier role-isolation evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "ROLE-01"
+      ],
+      "blocking_evidence": "ROLE-01 requires installed-tier evidence that planner, developer, tester, and auditor are distinct static roles with tester/auditor independence and no adaptive model roles. Static role prompts and prompt-set binding exist, but no installed-tier campaign receipt proves the four-role fresh-process boundary; final verification pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-005",
+      "title": "PLAN-01 unit-tier parser acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "PLAN-01"
+      ],
+      "blocking_evidence": "PLAN-01 requires unit-tier acceptance of the factory-plan/v1 schema and parser binding spec/base/tasks/requirements/interactions/conformance with byte-exact round-trip, section-24 registry coverage, and adversarial invariants. The parser and fixtures pass, but the requirement's acceptance within a completed campaign is pending final verification (Tasks 16/20).",
+      "resolution": null
+    },
+    {
+      "id": "FACT-006",
+      "title": "TASK-01 unit-tier selector acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "TASK-01"
+      ],
+      "blocking_evidence": "TASK-01 requires unit-tier evidence of trusted task transitions and deterministic priority-plus-ID selection. Selector fixtures pass, but acceptance within the completed campaign is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-007",
+      "title": "TASK-02 installed-tier task-excerpt binding evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "TASK-02"
+      ],
+      "blocking_evidence": "TASK-02 requires installed-tier evidence that delivered task bytes and digest exactly match the committed plan. Byte binding is fixture-proven in the launch machinery, but no installed-tier campaign receipt exists; final verification pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-008",
+      "title": "QUOTA-01 decision-table integration evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "QUOTA-01"
+      ],
+      "blocking_evidence": "QUOTA-01 requires private_integration evidence of the Ollama check/wait decision table before every model invocation. The retained guard and synthetic decision-table tests pass, but live campaign-wired decision-table evidence is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-009",
+      "title": "QUOTA-02 credential-leakage campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "QUOTA-02"
+      ],
+      "blocking_evidence": "QUOTA-02 requires private_integration evidence that Ollama credentials appear in no child argv, environ, or log and that owned material is securely removed. Synthetic cookie argv/environ tests pass, but final campaign verification is pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-010",
+      "title": "STATE-01 unit-tier state-machine acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "STATE-01"
+      ],
+      "blocking_evidence": "STATE-01 requires unit-tier evidence of one minimal atomic control-state file enforcing the monotonic transition table and tamper detection. The hidden state suite passes, but acceptance within the completed campaign is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-011",
+      "title": "LOCK-01 lock non-inheritance campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "LOCK-01"
+      ],
+      "blocking_evidence": "LOCK-01 requires private_integration evidence of the canonical root-descriptor flock with one writer, non-inheritance by untrusted children, and non-unlockability through a second descriptor. Lock suites pass, but campaign-level one-writer concurrency proof is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-012",
+      "title": "PROC-01 supervision campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "PROC-01"
+      ],
+      "blocking_evidence": "PROC-01 requires private_integration evidence of bounded process-session signaling, escaped-child detection, full reap, and dirty-work preservation. Supervision suites pass, but final campaign verification is pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-013",
+      "title": "GIT-01 installed-tier Git-boundary evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "GIT-01"
+      ],
+      "blocking_evidence": "GIT-01 requires installed-tier evidence that canonical repository/branch/spec/plan bindings and the guarded commit boundary fail closed. Guarded-commit tests pass, but no installed-tier campaign receipt exists; final verification pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-014",
+      "title": "PHASE-01 phase-machine campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "PHASE-01"
+      ],
+      "blocking_evidence": "PHASE-01 requires private_integration evidence that all phase and campaign outcomes terminate or advance exactly as specified with no no-task spin. Campaign fixtures pass, but final verification is pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-015",
+      "title": "COMPLETE-01 predicate-distinction acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "COMPLETE-01"
+      ],
+      "blocking_evidence": "COMPLETE-01 requires unit-tier evidence that task completion, work exhaustion, verification, audit, product acceptance, and campaign success stay distinct. Campaign fixtures pass, but acceptance is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-016",
+      "title": "FIND-01 findings-flow campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "FIND-01"
+      ],
+      "blocking_evidence": "FIND-01 requires private_integration evidence that findings reach later developers only through a planner revision of the canonical plan. Findings fixtures pass, but final verification is pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-017",
+      "title": "CRED-01 credential-boundary campaign evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "CRED-01"
+      ],
+      "blocking_evidence": "CRED-01 requires private_integration evidence that Pi tool-call/tool-result credential enforcement and the trusted SDK authority remain active. Credential tests pass, but final campaign verification is pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-018",
+      "title": "EVID-01 installed-tier evidence-authority evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "EVID-01"
+      ],
+      "blocking_evidence": "EVID-01 requires installed-tier evidence that evidence tiers, exact receipts/manifests, immutable verifier binding, and no-elevation rules remain authoritative. Receipt/manifest machinery is fixture-proven, but no installed-tier campaign receipt exists; final verification pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-019",
+      "title": "VIS-01 installed-tier visual-provenance evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "VIS-01"
+      ],
+      "blocking_evidence": "VIS-01 requires installed-tier evidence that visual evidence preserves exact-byte provenance and never substitutes machine review for human authority. Visual-audit machinery is fixture-proven, but no installed-tier campaign receipt exists; final verification pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-020",
+      "title": "RUNNER-01 real_system runner capability unavailable",
+      "status": "open",
+      "capabilities": [
+        "hardware-runner"
+      ],
+      "requirements": [
+        "RUNNER-01"
+      ],
+      "blocking_evidence": "RUNNER-01 requires real_system evidence from a declared, provisioned, signed hardware runner. .factory/environment.toml declares no runner capability and .factory/signer-trust.json provisions no signer, so the hardware-runner capability is unavailable; the row is blocked until a human provisions and declares the runner.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-021",
+      "title": "HIDE-01 installed-tier footprint evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "HIDE-01"
+      ],
+      "blocking_evidence": "HIDE-01 requires installed-tier evidence that harness files remain within hidden namespaces and never pollute product/build/package paths. The footprint suite passes, but no installed-tier campaign receipt exists; final verification pending.",
+      "resolution": null
+    }
+  ]
+}

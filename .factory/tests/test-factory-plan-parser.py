@@ -98,6 +98,7 @@ FIXTURE_EXPECTATIONS = {
     "plan-final-audit-misplaced.md": "must be the last task",
     "plan-final-audit-missing-dependency.md": "must depend on every other task",
     "plan-matrix-complete-only-pending.md": "must own it",
+    "plan-matrix-complete-nonverified.md": "references only completed tasks",
     "plan-empty-required-value.md": "has an empty",
     "plan-missing-title.md": "has no title",
     "plan-duplicate-title.md": "exactly one",
@@ -105,9 +106,16 @@ FIXTURE_EXPECTATIONS = {
 
 # Accepted fixtures that must parse, serialize byte-identically, and stay
 # accepted by the legacy validator (parser/legacy-validator agreement).
+# Accepted fixtures that must parse, serialize byte-identically, and stay
+# accepted by the legacy validator (parser/legacy-validator agreement).
+# plan-classification-blocked/not-applicable cover the Task 14 classification
+# values added to the accepted enum (spec §22: `blocked` and narrowly
+# justified spec-scoped `not_applicable` keep their fail-closed semantics).
 ACCEPTED_FIXTURES = (
     FIXTURES / "plan-valid-base.md",
     FIXTURES / "plan-trailing-blank-line.md",
+    FIXTURES / "plan-classification-blocked.md",
+    FIXTURES / "plan-classification-not-applicable.md",
 )
 
 
@@ -250,6 +258,41 @@ class FixtureRejectionTest(unittest.TestCase):
         self.assertEqual(plan.tasks[0].dependencies, [])
         self.assertEqual(plan.tasks[1].dependencies, [1])
         self.assertEqual(plan.tasks[1].title, FINAL_AUDIT_TITLE)
+
+    def test_every_accepted_fixture_parses_and_roundtrips(self) -> None:
+        for path in ACCEPTED_FIXTURES:
+            with self.subTest(fixture=path.name):
+                plan = parse_plan(path.read_text("utf-8"))
+                self.assertEqual(
+                    plan.serialize().encode("utf-8"), path.read_bytes()
+                )
+
+    def test_blocked_classification_parses(self) -> None:
+        plan = parse_plan(
+            (FIXTURES / "plan-classification-blocked.md").read_text("utf-8")
+        )
+        row = next(r for r in plan.matrix if r.requirement_id == "AUTH-01")
+        self.assertEqual(row.classification, "blocked")
+        self.assertEqual(row.tasks, [1])
+
+    def test_not_applicable_classification_parses(self) -> None:
+        plan = parse_plan(
+            (FIXTURES / "plan-classification-not-applicable.md").read_text("utf-8")
+        )
+        row = next(r for r in plan.matrix if r.requirement_id == "AUTH-01")
+        self.assertEqual(row.classification, "not_applicable")
+        self.assertEqual(row.tasks, [1])
+
+    def test_complete_plan_cannot_carry_blocked_row(self) -> None:
+        # A `complete` lifecycle plan may never carry a blocked/not_applicable
+        # row: every task is complete, so the non-verified row references only
+        # completed tasks and is rejected (blocked/not_applicable fail
+        # implementation completion).
+        with self.assertRaises(PlanError) as caught:
+            parse_plan(
+                (FIXTURES / "plan-matrix-complete-nonverified.md").read_text("utf-8")
+            )
+        self.assertIn("references only completed tasks", str(caught.exception))
 
 
 class BoundedRangeProbeTest(unittest.TestCase):

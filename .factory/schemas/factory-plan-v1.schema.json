@@ -60,7 +60,7 @@
       "enum": ["pending", "in_progress", "complete", "blocked"]
     },
     "classification": {
-      "enum": ["verified", "partial", "missing", "ambiguous"]
+      "enum": ["verified", "partial", "missing", "ambiguous", "blocked", "not_applicable"]
     },
     "task": {
       "type": "object",

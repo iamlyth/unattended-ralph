@@ -138,7 +138,13 @@ and one row per normative requirement:
 
 - `ID` matches `^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+$` and is unique;
 - `Spec §` and `Evidence` are non-empty;
-- `Classification` is one of `verified | partial | missing | ambiguous`;
+- `Classification` is one of `verified | partial | missing | ambiguous | blocked | not_applicable`
+  (`verified`, `partial`, `blocked`, and narrowly justified spec-scoped
+  `not_applicable` match FACTORY-LOOP-SPEC §22; `missing`/`ambiguous` stay
+  accepted for legacy rows). `blocked`/`partial`/`missing`/`ambiguous`/
+  `not_applicable` rows stay representable in an `active` plan but a
+  `complete` lifecycle requires every row `verified`, so a blocked or
+  not_applicable classification fails implementation completion;
 - `Task` references existing tasks (same item grammar as dependencies) and is
   non-empty for non-`verified` rows.
 

@@ -849,7 +849,7 @@ class TestDiscoveryExclusion(FootprintTestCase):
         for rel in product_files():
             self.assertIn(rel, discovered)
 
-    def test_packaging_manifest_never_contains_harness(self) -> None:
+    def test_product_install_manifest_never_contains_harness(self) -> None:
         repo = self.root / "repo"
         make_repo(repo, {**product_files(), **harness_files()})
         discovered = footprint.product_discovery(repo)

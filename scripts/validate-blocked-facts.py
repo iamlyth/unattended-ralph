@@ -37,16 +37,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FACT_ID = re.compile(r"^FACT-[0-9]{3,}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-SAFE_PREFIXES = (".factory", "src", "tests", "scripts", "data", "docs", "cmake", "packaging", "third_party", ".github", ".forgejo")
+SAFE_PREFIXES = ("src", "tests", "scripts", "data", "docs", "cmake", "packaging", "third_party", ".github", ".forgejo", ".factory")
 RECEIPT_SCHEMAS = {"ralph-audit-receipt/v1", "factory-runner-receipt/v1"}
 LEDGER_DEFAULT = ROOT / ".factory/artifacts/blocked-facts.json"
 
@@ -55,11 +56,60 @@ def fail(message: str) -> None:
     raise SystemExit(f"blocked-facts: {message}")
 
 
+def no_duplicate_keys(pairs: list) -> dict:
+    """JSON object-pairs hook: reject duplicate object keys fail-closed.
+
+    A duplicate key in the ledger (or in a receipt blob) silently overwrites
+    its predecessor under a plain ``dict`` decode and can hide a drifted or
+    tampered authority; every committed-data load uses this hook instead.
+    """
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            fail(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def load_script_module(name: str, path: Path):
+    """Load a dashed-name factory script as an importable module."""
+    if not path.is_file() or path.is_symlink():
+        fail(f"factory script is unavailable: {path}")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot load factory script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pinned_git(root: Path):
+    """Load the canonical pinned-Git authority (``.factory/loop/gitutil.py``)."""
+    path = root / ".factory/loop/gitutil.py"
+    try:
+        return load_script_module("factory_gitutil", path)
+    except Exception as exc:  # GitBoundaryError and import failures alike
+        fail(f"pinned Git authority is unavailable: {exc}")
+
+
+def trusted_git_env(module) -> dict:
+    """Sanitized environment plus replace-ref disabling for trusted Git calls."""
+    return module.sanitize_git_environment(
+        {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    )
+
+
+def require_sha(commit: str, where: str) -> None:
+    """Reject any non-full-SHA object argument before it reaches pinned Git."""
+    if not isinstance(commit, str) or not SHA.fullmatch(commit):
+        fail(f"{where} refuses a non-commit object argument: {commit!r}")
+
+
 def load_ledger(path: Path) -> dict:
     if path.is_symlink() or not path.is_file():
         fail(f"blocked-facts ledger must be a regular tracked file: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse blocked-facts ledger {path}: {exc}")
     if not isinstance(data, dict) or data.get("schema") != "ralph-blocked-facts/v1":
@@ -71,41 +121,49 @@ def load_ledger(path: Path) -> dict:
 
 
 def reference_exists(root: Path, ref: str, commit: str, *, blob_only: bool) -> bool:
-    if blob_only:
-        # Complete mode: the ref must be a Git blob at the declared evidence
-        # commit; stale/uncommitted working-tree presence never suffices.
-        result = subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}:{ref}"],
-            cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return result.returncode == 0
-    path = root / ref
-    if path.exists() and not path.is_symlink():
-        return True
-    result = subprocess.run(
-        ["git", "cat-file", "-e", f"{commit}:{ref}"],
-        cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    # The ref must be a Git blob at the declared evidence commit in every
+    # mode (planning included): stale or uncommitted working-tree presence
+    # never certifies a resolution and cannot be proxied into evidence. The
+    # commit argument is a full 40-hex SHA (never a ref), replace refs are
+    # disabled, and the call is finite-bounded.
+    require_sha(commit, "trusted Git blob lookup")
+    git = load_pinned_git(root)
+    result = git.git_run(
+        ["-C", str(root), "cat-file", "-e", f"{commit}:{ref}"],
+        env=trusted_git_env(git),
+        timeout=git.GIT_TIMEOUT,
     )
     return result.returncode == 0
 
 
-def regular_json(path: Path) -> dict:
-    if path.is_symlink() or not path.is_file():
-        fail(f"unsafe or missing evidence file: {path}")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        fail(f"invalid evidence file {path}: {exc}")
-    if not isinstance(data, dict):
-        fail(f"evidence must be an object: {path}")
-    return data
+def validate_ref_safety(ref: str, where: str) -> None:
+    """Reject any repository-relative path that can escape or bypass Git boundaries.
+
+    Mirrors `scripts/validate-conformance.py`: absolute paths, `..`/`.`
+    components, control characters (including NUL), backslash separators,
+    empty components (`//`), prefix-boundary aliases (`.factoryx/…`), and
+    first components outside the tracked ref namespaces are rejected.
+    """
+    if not isinstance(ref, str) or not ref:
+        fail(f"{where} must be a non-empty string")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ref):
+        fail(f"{where} contains control characters: {ref!r}")
+    if "\\" in ref:
+        fail(f"{where} uses a backslash path separator: {ref!r}")
+    if "//" in ref:
+        fail(f"{where} contains an empty path component: {ref!r}")
+    path = Path(ref)
+    if path.is_absolute():
+        fail(f"{where} is an absolute path: {ref!r}")
+    parts = path.parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        fail(f"{where} contains an unsafe path component: {ref!r}")
+    if len(parts) > 1 and parts[0] not in SAFE_PREFIXES:
+        fail(f"{where} first component must be a tracked refs prefix: {ref!r}")
 
 
 def validate_ref(root: Path, fact_id: str, ref: str, commit: str, kind: str, *, blob_only: bool) -> None:
-    if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
-        fail(f"fact {fact_id} {kind} ref is unsafe: {ref}")
-    if not ref.startswith(SAFE_PREFIXES) and "/" in ref:
-        fail(f"fact {fact_id} {kind} ref must start with a tracked prefix: {ref}")
+    validate_ref_safety(ref, f"fact {fact_id} {kind} ref")
     if ref.lower().endswith(".md"):
         fail(
             f"fact {fact_id} {kind} ref is documentation; documentation alone "
@@ -121,14 +179,17 @@ def blob_json(root: Path, fact_id: str, ref: str, commit: str) -> dict:
     Complete mode validates the exact committed content, never the working tree:
     a tampered or stale working-tree copy cannot certify a resolution.
     """
-    result = subprocess.run(
-        ["git", "show", f"{commit}:{ref}"],
-        cwd=root, text=True, capture_output=True,
+    require_sha(commit, "trusted Git blob read")
+    git = load_pinned_git(root)
+    result = git.git_run(
+        ["-C", str(root), "show", f"{commit}:{ref}"],
+        env=trusted_git_env(git),
+        timeout=git.GIT_TIMEOUT,
     )
     if result.returncode:
         fail(f"fact {fact_id} receipt {ref} is not a Git blob at commit {commit[:12]}")
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout, object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"fact {fact_id} receipt {ref} is invalid JSON at commit {commit[:12]}: {exc}")
     if not isinstance(data, dict):
@@ -138,10 +199,10 @@ def blob_json(root: Path, fact_id: str, ref: str, commit: str) -> dict:
 
 def validate_receipt_ref(root: Path, fact_id: str, ref: str, commit: str, *, blob_only: bool) -> None:
     validate_ref(root, fact_id, ref, commit, "receipt", blob_only=blob_only)
-    if blob_only:
-        data = blob_json(root, fact_id, ref, commit)
-    else:
-        data = regular_json(root / ref)
+    # Receipt content is always read from the declared Git blob at the
+    # evidence commit, never from the working tree: a tampered or stale
+    # working-tree copy can neither certify nor break a resolution.
+    data = blob_json(root, fact_id, ref, commit)
     schema = data.get("schema")
     if schema not in RECEIPT_SCHEMAS:
         fail(f"fact {fact_id} receipt {ref} has an unknown schema {schema!r}")

@@ -78,34 +78,40 @@ Non-goals:
 ## Specification conformance matrix
 
 Every normative requirement in `docs/FACTORY-LOOP-SPEC.md` §24 is mapped to
-the bounded tasks below. Classification in this fresh plan is `missing` when
-the behavior does not exist yet and `partial` when existing machinery is
-retained but must be re-bound/hardened; no row is `verified` until its task
-completes with evidence.
+the bounded tasks below. These classifications are reconciled exactly to the
+machine-readable conformance sidecar (`.factory/artifacts/conformance.json`,
+which `scripts/validate-conformance.py` cross-checks row-by-row): the
+retained-and-rebound machinery rows AUTH-01 through HIDE-01 are `partial`
+(existing harness authority is preserved and re-bound to the new path),
+RUNNER-01 is `blocked` (real-system evidence requires a provisioned,
+signed hardware runner the generic environment does not declare), and the
+not-yet-implemented migration/acceptance suites MIG-01, TEST-01, and
+ACCEPT-01 are `missing`; no row is `verified` until its task completes with
+exact-commit evidence.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
 | AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16 |
-| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6, Task 8, Task 16 |
-| CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16 |
-| ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16 |
-| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
-| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16 |
-| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16 |
+| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16 |
+| CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16 |
+| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16 |
+| PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18 |
+| TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16 |
+| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16 |
-| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16 |
-| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16 |
-| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
-| PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
+| QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16 |
+| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16 |
+| LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
+| PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16 |
-| PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
-| COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
-| FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
+| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
+| COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
+| FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12, Task 16 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16 |
-| RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12, Task 16 |
-| HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16 |
+| RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16 |
+| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16 |
 | MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
@@ -952,7 +958,7 @@ completes with evidence.
 
 ## Task 14: Conformance sidecar and requirement policy for the §24 registry
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 12, Task 13
 - Scope: Populate the existing machine-readable conformance sidecar
   (`.factory/artifacts/conformance.json`) and requirement policy
@@ -964,9 +970,22 @@ completes with evidence.
 - Acceptance criteria: `scripts/validate-conformance.py` passes with the
   populated sidecar; every §24 ID appears in both the sidecar and the policy
   with matching required tiers; no requirement is self-declared.
-- Verification: `scripts/validate-conformance.py`;
+- Verification: `.factory/tests/test-factory-conformance.py`,
+  `.factory/tests/test-factory-plan-parser.py`,
+  `tests/test-conformance.sh`, `tests/test-blocked-facts.sh`,
+  `scripts/validate-conformance.py`, and
   `scripts/check-capability-evidence.py`.
 - Documentation impact: none (sidecar is machine data).
+- Evidence: hidden conformance 37/37, parser 17/17, selector 32/32,
+  visible conformance and blocked-facts suites pass; planning mode validates
+  all 24 requirements while complete mode honestly exits 1 on `partial` /
+  `blocked` rows. Policy, sidecar, plan matrix, and committed §24 registry
+  match exactly; only RUNNER-01 requires the undeclared `hardware-runner` and
+  remains blocked, no row is verified, and no unavailable runner/system/human
+  evidence is elevated. Duplicate keys/IDs, stale/traversing refs, proxy tiers,
+  unevidenced verified capabilities, PATH/Git-config redirects, and replace
+  objects fail closed. Independent evidence review accepted the checkpoint;
+  stale ignored runner aggregate state is not evidence and is not committed.
 
 ## Task 15: Migration and deprecation of the Ralph control plane
 

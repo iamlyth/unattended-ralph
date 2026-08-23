@@ -19,10 +19,15 @@ FACTS_VALIDATOR="$PROJECT_ROOT/scripts/validate-blocked-facts.py"
 
 setup_repo() {
     local dir=$1
-    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory-state/runner-evidence/probe-runner" \
-        "$dir/tests/fixtures" "$dir/docs"
+    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory/schemas" "$dir/.factory/loop" \
+        "$dir/.factory-state/runner-evidence/probe-runner" "$dir/tests/fixtures" "$dir/docs"
     cp "$VALIDATOR" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$FACTS_VALIDATOR" "$dir/scripts/"
     chmod +x "$dir/scripts/"*.py
+    # The validators run every trusted Git call through the committed
+    # pinned-Git authority; the fixture receives the exact committed module
+    # (never a weakened stub) so fake PATH/GIT_DIR/GIT_CONFIG/replace fixtures
+    # cannot redirect it.
+    cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$dir/.factory/loop/gitutil.py"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-boilerplate.sh"
     chmod +x "$dir/scripts/verify-boilerplate.sh"
     cat > "$dir/.factory/environment.toml" <<'EOF'
@@ -35,6 +40,15 @@ working_directory = "/srv/dev-runner/workspaces/probe"
 capabilities = ["probe-capability"]
 verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
+    # The committed section-24 requirement registry is part of the acceptance
+    # boundary: sidecar, plan matrix, and policy must each carry exactly these
+    # IDs (Task 14 registry exact-set binding).
+    cat > "$dir/.factory/schemas/factory-plan-v1.requirements.json" <<'REGISTRY'
+{
+  "schema": "factory-plan/v1/requirements",
+  "requirement_ids": ["REQ-01", "REQ-02", "REQ-03"]
+}
+REGISTRY
     cat > "$dir/.factory/capability-contracts.json" <<'CONTRACT'
 {
   "schema": "ralph-capability-contract/v1",
@@ -69,9 +83,9 @@ CONTRACT
 {
   "schema": "ralph-requirement-policy/v1",
   "requirements": [
-    {"id": "REQ-01", "required_tier": "unit", "spec_sections": ["§1"]},
-    {"id": "REQ-02", "required_tier": "unit", "spec_sections": ["§2"]},
-    {"id": "REQ-03", "required_tier": "real_system", "spec_sections": ["§3"]}
+    {"id": "REQ-01", "required_tier": "unit", "spec_sections": ["§1"], "required_capabilities": []},
+    {"id": "REQ-02", "required_tier": "unit", "spec_sections": ["§2"], "required_capabilities": []},
+    {"id": "REQ-03", "required_tier": "real_system", "spec_sections": ["§3"], "required_capabilities": ["probe-capability"]}
   ]
 }
 POLICY
@@ -110,7 +124,7 @@ status: active
 |----|--------|--------------|----------|------|
 | REQ-01 | §2 | verified | probe evidence | Task 1 |
 | REQ-02 | §2 | partial | probe evidence | Task 1 |
-| REQ-03 | §3 | partial | probe evidence | Task 1 |
+| REQ-03 | §3 | blocked | probe evidence | Task 1 |
 PLAN
 }
 
@@ -236,7 +250,7 @@ elif mode == 'skipped-probe':
 elif mode == 'missing-receipt':
     for req in data['requirements']:
         if req['id'] == 'REQ-01':
-            req['receipts'] = ['.factory-state/runner-evidence/probe-runner/missing-receipt.json']
+            req['receipts'] = ['tests/fixtures/missing-receipt.json']
 elif mode == 'uncommitted-ref':
     # The ref exists only in the working tree, never as a blob at the commit.
     for req in data['requirements']:
@@ -258,10 +272,54 @@ elif mode == 'tier-drift':
     for req in data['requirements']:
         if req['id'] == 'REQ-01':
             req['required_tier'] = 'installed'
+elif mode == 'proxy-elevation':
+    # The policy map raises REQ-01 to installed; the sidecar claims verified
+    # at unit, so the verified claim is below the required tier even though
+    # tier names match the (drifted) policy -- the policy file is also
+    # adjusted, isolating the tier-ordering violation.
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['evidence_tier'] = 'unit'
+            req['required_tier'] = 'installed'
+elif mode == 'capability-relax':
+    # The sidecar drops the policy-mandated capability: self-declared
+    # capability relaxation must fail.
+    for req in data['requirements']:
+        if req['id'] == 'REQ-03':
+            req['required_capabilities'] = []
+elif mode == 'traversal-ref':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['artifacts'] = ['tests/../../escape']
+elif mode == 'prefix-alias-ref':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['artifacts'] = ['.factoryx/escape']
+elif mode == 'absolute-ref':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['artifacts'] = ['/etc/passwd']
+elif mode == 'stale-ref-planning':
+    # A ref that exists only in the working tree is stale in planning mode
+    # too: evidence refs must be Git blobs at the evidence commit.
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['artifacts'] = ['tests/fixtures/working-tree-only.json']
+elif mode == 'missing-row-refs':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-02':
+            req['classification'] = 'missing'
+            req['fact_refs'] = []
+            req['artifacts'] = ['tests/probe.c']
+elif mode == 'human-planning':
+    for req in data['requirements']:
+        if req['id'] == 'REQ-01':
+            req['evidence_tier'] = 'human'
+            req['required_tier'] = 'human'
 open(path, 'w').write(json.dumps(data))
 PY
     sed -i -e 's/| REQ-02 | §2 | partial |/| REQ-02 | §2 | verified |/' \
-           -e 's/| REQ-03 | §3 | partial |/| REQ-03 | §3 | verified |/' \
+           -e 's/| REQ-03 | §3 | blocked |/| REQ-03 | §3 | verified |/' \
         "$dst/.factory/artifacts/implementation-plan.md"
     # All facts are resolved once every row is reclassified verified: an open
     # fact must stay referenced by a blocked/partial row, so the mutated
@@ -396,6 +454,8 @@ ledger = json.load(open(facts_path))
 ledger['facts'] = [fact for fact in ledger['facts'] if fact['id'] != 'FACT-001']
 open(facts_path, 'w').write(json.dumps(ledger))
 PY
+sed -i 's/| REQ-02 | §2 | partial |/| REQ-02 | §2 | not_applicable |/' \
+    "$tmp/na-misuse/.factory/artifacts/implementation-plan.md"
 set +e
 (cd "$tmp/na-misuse" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
 na_bad_rc=$?
@@ -411,6 +471,13 @@ for req in data['requirements']:
 open(path, 'w').write(json.dumps(data))
 PY
 (cd "$tmp/na-misuse" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null)
+# A spec-scoped not_applicable row stays representable in planning but fails
+# implementation completion (blocked/not_applicable fail complete).
+set +e
+(cd "$tmp/na-misuse" && ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json >/dev/null 2>&1)
+na_complete_rc=$?
+set -e
+[[ $na_complete_rc -eq 1 ]] || { echo "FAIL: not_applicable row passed implementation completion" >&2; exit 1; }
 
 # The sidecar and the plan matrix must agree on requirement IDs and claims.
 cp -a "$tmp/blessed" "$tmp/mismatch"
@@ -519,5 +586,380 @@ set +e
 resolved_rc=$?
 set -e
 [[ $resolved_rc -eq 1 ]] || { echo "FAIL: resolved fact referenced by a partial row was accepted" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Task 14 hardening: registry exact-set, capability match, stale refs in
+# planning mode, path traversal, and proxy elevation.  Each adversarial case
+# below starts from the blessed (valid) repository and mutates exactly one
+# authority so the intended check is the failing one.
+# ---------------------------------------------------------------------------
+
+edit_sidecar() {
+    local dir=$1
+    shift
+    python3 - "$dir/.factory/artifacts/conformance.json" "$@"
+}
+
+expect_planning_fail() {
+    local dir=$1 label=$2
+    set +e
+    (cd "$dir" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+    local rc=$?
+    set -e
+    [[ $rc -eq 1 ]] || { echo "test: conformance planning accepted $label (rc=$rc)" >&2; exit 1; }
+}
+
+# The §24 registry is the acceptance boundary: an extra or missing registry
+# ID must fail even when sidecar/plan/policy agree with each other.
+cp -a "$tmp/blessed" "$tmp/registry-extra"
+python3 - "$tmp/registry-extra/.factory/schemas/factory-plan-v1.requirements.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirement_ids'].append('REQ-99')
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/registry-extra" "a registry ID outside the sidecar/plan/policy set"
+
+cp -a "$tmp/blessed" "$tmp/registry-missing"
+python3 - "$tmp/registry-missing/.factory/schemas/factory-plan-v1.requirements.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirement_ids'] = [rid for rid in data['requirement_ids'] if rid != 'REQ-02']
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/registry-missing" "a registry ID missing from the sidecar/plan/policy set"
+
+# The policy map may not silently drop or add an ID either.
+cp -a "$tmp/blessed" "$tmp/policy-extra"
+python3 - "$tmp/policy-extra/.factory/requirement-policy.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirements'].append({'id': 'REQ-04', 'required_tier': 'unit', 'spec_sections': ['§4'], 'required_capabilities': []})
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/policy-extra" "a policy ID outside the registry set"
+
+# The sidecar may not relax a policy-mandated capability.
+cp -a "$tmp/blessed" "$tmp/capability-relax"
+python3 - "$tmp/capability-relax/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-03':
+        req['required_capabilities'] = []
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/capability-relax" "a self-declared capability relaxation"
+
+# Proxy elevation: a verified claim below the policy-assigned required tier.
+cp -a "$tmp/blessed" "$tmp/proxy-elevation"
+python3 - "$tmp/proxy-elevation/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['required_tier'] = 'installed'
+open(path, 'w').write(json.dumps(data))
+PY
+python3 - "$tmp/proxy-elevation/.factory/requirement-policy.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for entry in data['requirements']:
+    if entry['id'] == 'REQ-01':
+        entry['required_tier'] = 'installed'
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/proxy-elevation" "verified evidence below the policy-required tier"
+
+# Path traversal and prefix-boundary aliases are rejected in planning mode.
+cp -a "$tmp/blessed" "$tmp/traversal-ref"
+python3 - "$tmp/traversal-ref/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['artifacts'] = ['tests/../../escape']
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/traversal-ref" "a traversal receipt/artifact ref"
+
+cp -a "$tmp/blessed" "$tmp/prefix-alias-ref"
+python3 - "$tmp/prefix-alias-ref/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['artifacts'] = ['.factoryx/escape']
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/prefix-alias-ref" "a prefix-boundary alias ref"
+
+cp -a "$tmp/blessed" "$tmp/absolute-ref"
+python3 - "$tmp/absolute-ref/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['artifacts'] = ['/etc/passwd']
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/absolute-ref" "an absolute receipt/artifact ref"
+
+# Stale refs are rejected in planning mode too: a working-tree-only ref is
+# not a Git blob at the evidence commit.
+cp -a "$tmp/blessed" "$tmp/stale-planning"
+python3 - "$tmp/stale-planning/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['artifacts'] = ['tests/fixtures/working-tree-only.json']
+open(path, 'w').write(json.dumps(data))
+PY
+printf '%s\n' '{}' > "$tmp/stale-planning/tests/fixtures/working-tree-only.json"
+expect_planning_fail "$tmp/stale-planning" "a stale working-tree-only ref in planning mode"
+
+# Human-tier evidence is rejected even before completion (planning mode).
+cp -a "$tmp/blessed" "$tmp/human-planning"
+python3 - "$tmp/human-planning/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['evidence_tier'] = 'human'
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/human-planning" "human-tier evidence in planning mode"
+
+# A missing row may never carry evidence refs (no proxy acceptance).
+cp -a "$tmp/blessed" "$tmp/missing-refs"
+python3 - "$tmp/missing-refs/.factory/artifacts/conformance.json" "$tmp/missing-refs/.factory/artifacts/blocked-facts.json" <<'PY'
+import json, sys
+sidecar_path, facts_path = sys.argv[1], sys.argv[2]
+data = json.load(open(sidecar_path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-02':
+        req['classification'] = 'missing'
+        req['fact_refs'] = []
+        req['artifacts'] = ['tests/probe.c']
+open(sidecar_path, 'w').write(json.dumps(data))
+ledger = json.load(open(facts_path))
+ledger['facts'] = [fact for fact in ledger['facts'] if fact['id'] != 'FACT-001']
+open(facts_path, 'w').write(json.dumps(ledger))
+PY
+expect_planning_fail "$tmp/missing-refs" "a missing row carrying evidence refs"
+
+# ---------------------------------------------------------------------------
+# Task 14 hardening, part 2: a verified row can never rest on an undeclared
+# or unevidenced capability (planning gate), duplicate JSON keys / duplicate
+# IDs fail closed in every authority, fake PATH/GIT_DIR/GIT_CONFIG cannot
+# redirect the pinned Git boundary, and refs/replace objects are rejected or
+# ignored.
+# ---------------------------------------------------------------------------
+
+# A verified row requiring a capability the environment does not declare fails
+# in planning mode, not only at completion.
+cp -a "$tmp/blessed" "$tmp/verified-undeclared-cap"
+python3 - "$tmp/verified-undeclared-cap/.factory/artifacts/conformance.json" \
+        "$tmp/verified-undeclared-cap/.factory/requirement-policy.json" <<'PY'
+import json, sys
+sidecar_path, policy_path = sys.argv[1], sys.argv[2]
+data = json.load(open(sidecar_path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['required_capabilities'] = ['hardware-runner']
+open(sidecar_path, 'w').write(json.dumps(data))
+policy = json.load(open(policy_path))
+for entry in policy['requirements']:
+    if entry['id'] == 'REQ-01':
+        entry['required_capabilities'] = ['hardware-runner']
+open(policy_path, 'w').write(json.dumps(policy))
+PY
+expect_planning_fail "$tmp/verified-undeclared-cap" "a verified row requiring an undeclared capability"
+
+# A declared capability with no accepted runner receipt is unevidenced too.
+cp -a "$tmp/blessed" "$tmp/verified-unevidenced-cap"
+python3 - "$tmp/verified-unevidenced-cap/.factory/artifacts/conformance.json" \
+        "$tmp/verified-unevidenced-cap/.factory/requirement-policy.json" <<'PY'
+import json, sys
+sidecar_path, policy_path = sys.argv[1], sys.argv[2]
+data = json.load(open(sidecar_path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['required_capabilities'] = ['probe-capability']
+open(sidecar_path, 'w').write(json.dumps(data))
+policy = json.load(open(policy_path))
+for entry in policy['requirements']:
+    if entry['id'] == 'REQ-01':
+        entry['required_capabilities'] = ['probe-capability']
+open(policy_path, 'w').write(json.dumps(policy))
+PY
+rm -rf "$tmp/verified-unevidenced-cap/.factory-state/runner-evidence" \
+       "$tmp/verified-unevidenced-cap/.factory-state/runner-evidence.json"
+expect_planning_fail "$tmp/verified-unevidenced-cap" "a verified row requiring an unevidenced capability"
+
+# Duplicate JSON object keys fail closed in every authority (the duplicate
+# silently overwrites its predecessor under a plain decode).
+for label in sidecar policy registry facts contracts; do
+    cp -a "$tmp/blessed" "$tmp/dup-key-$label"
+    case "$label" in
+        sidecar)   file=".factory/artifacts/conformance.json"; schema="ralph-conformance/v1"; key="requirements";;
+        policy)   file=".factory/requirement-policy.json"; schema="ralph-requirement-policy/v1"; key="requirements";;
+        registry) file=".factory/schemas/factory-plan-v1.requirements.json"; schema="factory-plan/v1/requirements"; key="requirement_ids";;
+        facts)    file=".factory/artifacts/blocked-facts.json"; schema="ralph-blocked-facts/v1"; key="facts";;
+        contracts) file=".factory/capability-contracts.json"; schema="ralph-capability-contract/v1"; key="capabilities";;
+    esac
+    printf '{"schema": "%s", "%s": [], "%s": []}\n' "$schema" "$key" "$key" > "$tmp/dup-key-$label/$file"
+    case "$label" in
+        sidecar|policy|registry)
+            set +e
+            (cd "$tmp/dup-key-$label" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+            dup_rc=$?
+            set -e
+            ;;
+        facts)
+            set +e
+            (cd "$tmp/dup-key-facts" && ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json >/dev/null 2>&1)
+            dup_rc=$?
+            set -e
+            ;;
+        contracts)
+            set +e
+            (cd "$tmp/dup-key-contracts" && ./scripts/check-capability-contracts.py >/dev/null 2>&1)
+            dup_rc=$?
+            set -e
+            ;;
+    esac
+    [[ $dup_rc -eq 1 ]] || { echo "FAIL: duplicate JSON key accepted in $label" >&2; exit 1; }
+done
+
+# Duplicate IDs fail closed in every authority.
+cp -a "$tmp/blessed" "$tmp/dup-id-sidecar"
+python3 - "$tmp/dup-id-sidecar/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirements'].append(dict(data['requirements'][0]))
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/dup-id-sidecar" "a duplicate sidecar requirement ID"
+
+cp -a "$tmp/blessed" "$tmp/dup-id-policy"
+python3 - "$tmp/dup-id-policy/.factory/requirement-policy.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirements'].append(dict(data['requirements'][0]))
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/dup-id-policy" "a duplicate policy requirement ID"
+
+cp -a "$tmp/blessed" "$tmp/dup-id-registry"
+python3 - "$tmp/dup-id-registry/.factory/schemas/factory-plan-v1.requirements.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['requirement_ids'].append('REQ-01')
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/dup-id-registry" "a duplicate registry requirement ID"
+
+cp -a "$tmp/blessed" "$tmp/dup-id-facts"
+python3 - "$tmp/dup-id-facts/.factory/artifacts/blocked-facts.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['facts'].append(dict(data['facts'][0]))
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/dup-id-facts" && ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json >/dev/null 2>&1)
+dup_facts_rc=$?
+set -e
+[[ $dup_facts_rc -eq 1 ]] || { echo "FAIL: duplicate fact ID accepted" >&2; exit 1; }
+
+cp -a "$tmp/blessed" "$tmp/dup-id-contracts"
+python3 - "$tmp/dup-id-contracts/.factory/capability-contracts.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['capabilities'].append(dict(data['capabilities'][0]))
+open(path, 'w').write(json.dumps(data))
+PY
+set +e
+(cd "$tmp/dup-id-contracts" && ./scripts/check-capability-contracts.py >/dev/null 2>&1)
+dup_contracts_rc=$?
+set -e
+[[ $dup_contracts_rc -eq 1 ]] || { echo "FAIL: duplicate contract name accepted" >&2; exit 1; }
+
+# Fake PATH / GIT_DIR / GIT_CONFIG / object-store redirectors cannot redirect
+# the trusted Git boundary: the blessed repo still validates under a hostile
+# environment that would poison any unqualified `git`.
+PYTHON_BIN=$(command -v python3)
+FAKE_BIN="$tmp/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/git" <<'FAKEGIT'
+#!/usr/bin/env bash
+printf 'fake git executed\n' >&2
+exit 42
+FAKEGIT
+chmod +x "$FAKE_BIN/git"
+set +e
+(cd "$tmp/blessed" && env \
+    PATH="$FAKE_BIN" \
+    GIT_DIR="$tmp/not-a-repo" \
+    GIT_WORK_TREE="$tmp/nowhere" \
+    GIT_OBJECT_DIRECTORY="$tmp/objects" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="$tmp/alts" \
+    GIT_INDEX_FILE="$tmp/index" \
+    GIT_CONFIG="$tmp/evil-config" \
+    GIT_CONFIG_GLOBAL="$tmp/evil-global" \
+    GIT_CONFIG_SYSTEM="$tmp/evil-system" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.bare GIT_CONFIG_VALUE_0=true \
+    "$PYTHON_BIN" ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null 2>&1)
+hardened_env_rc=$?
+set -e
+[[ $hardened_env_rc -eq 0 ]] || { echo "FAIL: fake PATH/GIT_DIR/GIT_CONFIG redirected a trusted Git call" >&2; exit 1; }
+
+# Only full 40-hex commit IDs are accepted as the evidence commit; a ref name
+# is refused.
+cp -a "$tmp/blessed" "$tmp/ref-name-commit"
+python3 - "$tmp/ref-name-commit/.factory/artifacts/conformance.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+for req in data['requirements']:
+    if req['id'] == 'REQ-01':
+        req['evidence_commit'] = 'HEAD'
+open(path, 'w').write(json.dumps(data))
+PY
+expect_planning_fail "$tmp/ref-name-commit" "a ref name as the evidence commit"
+
+# A replace ref cannot substitute the evidence object: GIT_NO_REPLACE_OBJECTS=1
+# makes object resolution ignore refs/replace/*.
+cp -a "$tmp/blessed" "$tmp/replace-ref"
+head3=$(git -C "$tmp/replace-ref" rev-parse HEAD)
+rm "$tmp/replace-ref/tests/probe.c"
+git -C "$tmp/replace-ref" add -A
+git -C "$tmp/replace-ref" commit -qm "tamper: drop probe.c"
+tamper3=$(git -C "$tmp/replace-ref" rev-parse HEAD)
+git -C "$tmp/replace-ref" replace "$head3" "$tamper3"
+(cd "$tmp/replace-ref" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json >/dev/null)
+set +e
+git -C "$tmp/replace-ref" cat-file -e "$head3:tests/probe.c" >/dev/null 2>&1
+replace_control_rc=$?
+set -e
+[[ $replace_control_rc -ne 0 ]] || { echo "FAIL: replace ref was honored, not disabled" >&2; exit 1; }
 
 echo "test: conformance validator adversarial checks passed"

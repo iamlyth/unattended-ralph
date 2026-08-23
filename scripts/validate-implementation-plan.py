@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 
-ALLOWED_CLASSIFICATIONS = {"verified", "partial", "missing", "ambiguous"}
+ALLOWED_CLASSIFICATIONS = {"verified", "partial", "missing", "ambiguous", "blocked", "not_applicable"}
 ALLOWED_STATUSES = {"pending", "in_progress", "complete", "blocked"}
 FINAL_TITLE = "Final documentation and specification audit"
 SHA = re.compile(r"^[0-9a-f]{40}$")
