@@ -816,6 +816,27 @@ class PinnedGit(LockConformanceCase):
         self.assertEqual(branch, "develop")
         self.assertFalse(marker.exists(), "the evil `git` shim must never run")
 
+    def test_resolve_head_is_finite_bounded(self) -> None:
+        # Task 9 review MED: every trusted state/branch Git invocation is
+        # finite bounded — resolve_head may never wait forever.
+        root = self.make_repo()
+        recorded: list = []
+        real_run = gitutil.git_run
+
+        def recording_run(argv, *, timeout=None, **kwargs):
+            recorded.append(timeout)
+            return real_run(argv, timeout=timeout, **kwargs)
+
+        with unittest.mock.patch.object(
+            gitutil, "git_run", side_effect=recording_run,
+        ):
+            head = gitutil.resolve_head(root)
+        self.assertEqual(len(head), 40)
+        self.assertEqual(len(recorded), 1)
+        self.assertIsNotNone(recorded[0])
+        self.assertGreater(recorded[0], 0)
+        self.assertLessEqual(recorded[0], gitutil.GIT_TIMEOUT)
+
     def test_lock_binding_git_calls_use_the_pinned_absolute_git(self) -> None:
         root = self.make_repo()
         marker = self.tmp / "substituted.marker"

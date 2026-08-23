@@ -99,6 +99,43 @@ produced by a trusted transition fails closed. Resume by reloading
 `.factory-state/factory-loop.json` (phase never moves backward, counters are
 monotonic); `init` refuses to overwrite existing state.
 
+## Finite campaign authority (Task 9)
+
+`.factory/loop/campaign.py` is the trusted standard-library orchestrator. It
+holds one root-descriptor writer lock through planning, implementation,
+verification, and audit; starts each role as a fresh confined process; and
+performs all Git status, history, staging, and commit operations outside the
+model sandbox through the pinned descriptor-anchored Git authority. Trusted
+Git calls and gates have finite timeouts. Pre-existing dirty work, unexpected
+renames/copies/gitlinks, unsafe path references, stale plan bases, and
+ambiguous crash state fail closed rather than being reset or overwritten.
+
+The implementation phase deterministically selects the first runnable task
+from the canonical plan and binds the developer to that exact committed task
+section. Auditor launches bind the deterministic objective selected from the
+committed audit-objective registry. A newly completed task is accepted only
+after the exact resulting committed plan and its repository-relative
+verification references pass deterministic checks. Model prose, exit text,
+and completion tokens are not lifecycle protocols.
+
+Work exhaustion and external blockers proceed to verification and independent
+audit instead of spinning. The finite campaign terminates as `success`,
+`findings`, `blocked`, `failed`, `infrastructure_failure`, or `interrupted`;
+every terminal, including an interrupted or infrastructure-failed audit, is
+persisted before result publication and cannot be re-entered. The result and
+per-phase contracts are
+`.factory/schemas/factory-campaign-result-v1.schema.json` and
+`.factory/schemas/factory-phase-result-v1.schema.json`.
+
+```bash
+.factory/loop/campaign.py --root ROOT run --campaign-id ID --rounds 5 \
+  --branch boilerplate-develop
+.factory/loop/campaign.py --root ROOT show
+```
+
+`--role-driver` and scenario/result-file options are deterministic hidden-suite
+fixtures only; they are not production confinement or acceptance evidence.
+
 ## Root-descriptor lock and Git writer boundary (LOCK-01, GIT-01, PROC-01)
 
 The writer boundary is an exclusive Linux `flock` on the *already-open

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-phase-result/v1",
+  "title": "factory-phase result",
+  "description": "The machine-readable structured output of one untrusted tester/auditor role process (FACTORY-LOOP-SPEC sections 13/16; Task 9). It is never control protocol: the trusted orchestrator validates this exact field set and derives the phase outcome from it only together with deterministic gates, the Git state, and the plan state. A blocked result must cite exact unavailable-evidence references; findings are the structured list that makes the final round non-passing under section 14 precedence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "outcome"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": ["factory-phase-result/v1"]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["pass", "findings", "blocked"]
+    },
+    "findings": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "blocked_on": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

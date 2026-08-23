@@ -162,6 +162,69 @@ TESTER_WRITE_TOP = frozenset({
     ".install-prefix", ".diag-prefix-build", ".test-diag-inspect",
 })
 
+# Repository-relative paths of the trusted policy/harness surface that no
+# untrusted role may write or commit (Task 9 review HIGH).  AGENTS.md is the
+# canonical operational policy; the hidden CI/forge tooling configuration
+# (``.gitignore``, ``.github``, ``.forgejo``) and the environment pinning
+# (``shell.nix``) are part of the trusted boundary; the ``.factory/``
+# configuration sidecars (config, environment, policies, contracts, and the
+# golden/visual-audit authorities) are the factory contracts; the harness
+# documentation (``docs/FACTORY.md``, ``docs/OPERATIONS.md``,
+# ``docs/FACTORY-LOOP-SPEC.md``) documents the control plane; and the legacy
+# visible ``scripts/`` tree is the security/harness surface (guards,
+# receipts, verifier, ralph entrypoints).  Genuine product entries
+# (``src/``, ``tests/``, product data, and product documentation other than
+# the harness docs) are NOT part of this surface and stay writable by the
+# developer role.
+#
+# Both the campaign scope authority (``campaign.scope_violation``) and the
+# confinement write allowlists (:func:`_role_write_paths`) enforce exactly
+# this set, so a path denied here is denied identically at the Landlock
+# write boundary and at the orchestrator commit boundary.  The canonical
+# plan (``.factory/artifacts/implementation-plan.md``) is deliberately not
+# in the set: the planner and the developer revise exactly that file.
+TRUSTED_POLICY_RELPATHS = frozenset({
+    "AGENTS.md",
+    ".gitignore",
+    ".github",
+    ".forgejo",
+    "shell.nix",
+    ".factory/campaign-objectives.json",
+    ".factory/campaign-receipt-policy.json",
+    ".factory/capability-contracts.json",
+    ".factory/config.toml",
+    ".factory/environment.toml",
+    ".factory/golden-policy.json",
+    ".factory/golden-review.json",
+    ".factory/requirement-policy.json",
+    ".factory/signer-trust.json",
+    ".factory/verifier-acceptance.json",
+    ".factory/visual-audit-calibration.json",
+    ".factory/visual-audit-inventory.json",
+    ".factory/visual-audit.toml",
+    "docs/FACTORY.md",
+    "docs/OPERATIONS.md",
+    "docs/FACTORY-LOOP-SPEC.md",
+    "scripts",
+})
+
+
+def is_trusted_policy_path(relpath: str) -> bool:
+    """True when ``relpath`` is trusted policy/harness surface.
+
+    A repository-relative path inside :data:`TRUSTED_POLICY_RELPATHS` (the
+    path itself or any path under a denied directory) is never writable by
+    an untrusted role — neither through the confinement write allowlist nor
+    through the campaign scope authority.  A path that equals a denied
+    entry or lies beneath a denied directory (``scripts/...``,
+    ``.github/...``, ``.forgejo/...``) is denied even when it does not
+    exist yet.
+    """
+    for denied in TRUSTED_POLICY_RELPATHS:
+        if relpath == denied or relpath.startswith(denied + "/"):
+            return True
+    return False
+
 # System/tool allowlist: read+execute for the trusted runtime roots
 # (immutable Nix store, the tool binary roots and their libraries); read
 # for the narrow explicit host files enumerated above.  The model has no
@@ -506,14 +569,70 @@ def _role_read_paths(role: str, workspace: Path) -> List[Path]:
     return paths
 
 
+def _dir_write_grant_safe(relative: str) -> bool:
+    """True when a write grant on directory ``relative`` covers no policy path.
+
+    A Landlock write grant on a directory covers every descendant, so a
+    directory may be granted only when no trusted policy/harness path can
+    be created or modified beneath it.  The deny set is authoritative even
+    for entries that do not exist yet (``shell.nix``, a future harness
+    config), so the check is pattern-based rather than existence-based.
+    """
+    return not any(
+        denied == relative or denied.startswith(relative + "/")
+        for denied in TRUSTED_POLICY_RELPATHS
+    )
+
+
+def _developer_write_candidates(path: Path, workspace: Path) -> List[Path]:
+    """Write-allowlist candidates rooted at ``path`` (never trusted policy).
+
+    A regular file is a candidate unless it is trusted policy surface; a
+    directory is a candidate only when :func:`_dir_write_grant_safe` holds
+    (no trusted policy path can exist beneath it), otherwise the function
+    recurses into the directory's children so trusted files are pruned
+    while genuine product files/directories stay writable.  A directory
+    that contains harness documentation (for example ``docs/`` with
+    ``docs/FACTORY.md``) is therefore never granted as a whole: only its
+    genuine product children are, and creating a *new* harness doc under it
+    stays denied by default (the deny set is pattern-based).
+    """
+    try:
+        info = os.lstat(str(path))
+    except OSError:
+        return []
+    relative = str(path.relative_to(workspace))
+    if is_trusted_policy_path(relative):
+        return []
+    if stat.S_ISDIR(info.st_mode):
+        if _dir_write_grant_safe(relative):
+            return [path]
+        try:
+            children = sorted(os.listdir(str(path)))
+        except OSError:
+            return []
+        candidates: List[Path] = []
+        for child in children:
+            candidates.extend(
+                _developer_write_candidates(path / child, workspace)
+            )
+        return candidates
+    if stat.S_ISREG(info.st_mode):
+        return [path]
+    return []
+
+
 def _role_write_paths(role: str, workspace: Path) -> List[Path]:
     """Absolute per-role write-allowlist paths.
 
     Every write path is validated like the read paths (no symlink in any
     component, resolved containment, no forbidden hardlink alias); the
-    developer writes product entries and the plan — never ``.git``, whose
-    history/commit authority belongs to the trusted orchestrator (Task 8
-    review, finding 2).
+    developer writes genuine product entries and the plan — never the
+    trusted policy/harness surface (``AGENTS.md``, hidden CI/forge
+    tooling, factory configs, harness docs, the legacy ``scripts/``
+    security surface) and never ``.git``, whose history/commit authority
+    belongs to the trusted orchestrator (Task 8 review, finding 2; Task 9
+    review HIGH).
     """
     forbidden_inodes = _forbidden_inode_map(workspace)
 
@@ -531,11 +650,14 @@ def _role_write_paths(role: str, workspace: Path) -> List[Path]:
             if (path := validated(workspace / relative)) is not None
         ]
     if role == "developer":
-        paths = [
-            path
-            for entry in _workspace_read_entries(workspace)
-            if (path := validated(workspace / entry)) is not None
-        ]
+        paths: List[Path] = []
+        for entry in _workspace_read_entries(workspace):
+            for candidate in _developer_write_candidates(
+                workspace / entry, workspace
+            ):
+                validated_path = validated(candidate)
+                if validated_path is not None:
+                    paths.append(validated_path)
         plan = workspace / ".factory/artifacts/implementation-plan.md"
         if (path := validated(plan)) is not None:
             paths.append(path)

@@ -102,7 +102,15 @@ verification   infrastructure_failure -> infrastructure_failure (terminal)
 audit          pass            -> planning (next round) | success      (final)
 audit          findings        -> planning (next round) | findings     (final)
 audit          blocked         -> planning (next round) | blocked      (final)
+audit          interrupted     -> interrupted        (terminal)
+audit          infrastructure_failure -> infrastructure_failure (terminal)
 ```
+
+An interrupted audit and an untrusted audit (`infrastructure_failure`) are
+the two terminal fail-closed closes that have no nonfinal `audit ->
+planning(next round)` edge: they always end the campaign (Task 9 review
+B1), never advance the round, and are persisted in the authoritative
+control state so a later run refuses to re-execute them.
 
 Round finality resolves at the `audit` phase from `rounds_requested`:
 `current_round < rounds_requested` advances to the next round's `planning`

@@ -36,14 +36,21 @@ transition):
     verification   pass                 -> audit
     verification   findings             -> audit
     verification   blocked              -> audit
-    verification   infrastructure_failure -> infrastructure_failure (terminal)
     audit          pass | findings | blocked -> planning(next round)
-                                             when current_round < rounds_requested
+                                      when current_round < rounds_requested
     audit          pass                 -> success            (final, terminal)
     audit          findings             -> findings           (final, terminal)
     audit          blocked              -> blocked            (final, terminal)
+    audit          interrupted          -> interrupted        (terminal)
+    audit          infrastructure_failure -> infrastructure_failure (terminal)
 
-Round advances only on ``audit --nonfinal``; phase never moves backward
+An interrupted audit and an untrusted audit (``infrastructure_failure``)
+are the two terminal fail-closed closes that have no nonfinal ``audit --
+planning(next round)`` edge: they always end the campaign (Task 9, review
+B1), never advance the round, and are persisted in the authoritative
+control state so a later run refuses to re-execute them.
+
+Round advances only on ``audit --nonfinal``; phase never moves backwards
 within a round; counters are monotonic.  Retry bookkeeping (an interrupted
 planning phase or an implementation ``task_progress``/``task_failed``/
 ``interrupted`` retry whose attempt budget remains) is a trusted
@@ -159,10 +166,18 @@ TRANSITIONS: Dict[Tuple[str, str], str] = {
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
+    ("audit", "interrupted"): "interrupted",
+    ("audit", "infrastructure_failure"): "infrastructure_failure",
 }
 # ``audit --final--> success | findings | blocked``; the same outcomes advance
-# to the next round's planning when the audit is non-final.
+# to the next round's planning when the audit is non-final.  The two terminal
+# abort outcomes (``interrupted`` / ``infrastructure_failure``) always end the
+# campaign and never advance the round (Task 9 review B1).
 AUDIT_FINAL_TARGETS = {"pass": "success", "findings": "findings", "blocked": "blocked"}
+AUDIT_ABORT_TARGETS = {
+    "interrupted": "interrupted",
+    "infrastructure_failure": "infrastructure_failure",
+}
 
 # Outcomes that retry the same phase/attempt without claiming a §11 phase
 # transition (their attempt budget remains): a planning step interrupted
@@ -365,11 +380,24 @@ def live_branch(root) -> str:
 
     The branch is resolved through the PATH-pinned absolute Git executable
     (``gitutil.GIT_EXECUTABLE``), never through an unqualified ``git`` that a
-    caller-controlled PATH could substitute (GIT-01).
+    caller-controlled PATH could substitute (GIT-01).  Every trusted
+    invocation is finite-bounded (Task 9 review MED): the pinned Git
+    executable may never wait forever, so the call passes
+    ``gitutil.GIT_TIMEOUT``, and a pinned-runner failure (``GitBoundaryError``
+    — timeout, missing binary, broken pipe) is routed into the state contract
+    as :class:`StateError`, so no caller sees a bare ``GitBoundaryError``
+    escape.
     """
-    result = _git.git_run(
-        ["-C", str(_as_root(root)), "rev-parse", "--abbrev-ref", "HEAD"]
-    )
+    try:
+        result = _git.git_run(
+            ["-C", str(_as_root(root)), "rev-parse", "--abbrev-ref", "HEAD"],
+            timeout=_git.GIT_TIMEOUT,
+        )
+    except _git.GitBoundaryError as exc:
+        raise StateError(
+            f"the pinned Git runner failed resolving the live branch of "
+            f"{root}: {exc}"
+        ) from exc
     if result.returncode != 0:
         raise StateError(f"cannot resolve the live Git branch of {root}")
     branch = result.stdout.strip()
@@ -719,7 +747,11 @@ def advance(
       ``current_round < rounds_requested`` advances to the next round's
       ``planning`` (``current_round`` increments); the final round ends the
       campaign in the terminal state named by the outcome
-      (``pass -> success``, ``findings -> findings``, ``blocked -> blocked``);
+      (``pass -> success``, ``findings -> findings``, ``blocked -> blocked``).
+      An interrupted audit (``interrupted``) and an untrusted audit
+      (``infrastructure_failure``) are terminal fail-closed closes with no
+      nonfinal edge: the round never advances and the campaign ends in the
+      named terminal (Task 9 review B1);
     * every other row is the §11 table verbatim; a terminal state accepts no
       further transition.
 
@@ -736,12 +768,19 @@ def advance(
     if outcome not in OUTCOMES:
         raise StateTransitionError(f"unknown trusted outcome {outcome!r}")
     if state.current_phase == "audit":
-        if outcome not in AUDIT_FINAL_TARGETS:
+        if outcome in AUDIT_ABORT_TARGETS:
+            # An interrupted audit and an untrusted audit are terminal
+            # fail-closed closes with no nonfinal edge: the round never
+            # advances and the campaign ends in the named terminal (Task 9
+            # review B1).
+            target = AUDIT_ABORT_TARGETS[outcome]
+        elif outcome not in AUDIT_FINAL_TARGETS:
             raise StateTransitionError(
                 f"no §11 audit transition with outcome {outcome!r}"
             )
-        final = state.current_round >= state.rounds_requested
-        target = AUDIT_FINAL_TARGETS[outcome] if final else "planning"
+        else:
+            final = state.current_round >= state.rounds_requested
+            target = AUDIT_FINAL_TARGETS[outcome] if final else "planning"
     else:
         target = TRANSITIONS.get((state.current_phase, outcome))
         if target is None:

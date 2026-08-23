@@ -66,11 +66,11 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
         selection = select_task(plan)
         self.assertTrue(selection.selected)
         self.assertEqual(selection.classification, "selected")
-        # Task 8 is complete at this plan revision, so Tasks 9 and 11 are
-        # runnable. Task 13 is also runnable from Task 1; numeric priority then
-        # lexicographic identifier deterministically picks Task 9.
-        self.assertEqual(selection.task_id, 9)
-        # Tasks 9, 11, and 13 are runnable; every other unfinished task still
+        # Task 9 is complete at this plan revision, so Tasks 10, 11, and 12
+        # are runnable. Task 13 is also runnable from Task 1; numeric priority
+        # then lexicographic identifier deterministically picks Task 10.
+        self.assertEqual(selection.task_id, 10)
+        # Tasks 10 through 13 are runnable; every other unfinished task still
         # has an incomplete dependency.
         statuses = {task.number: task.status for task in plan.tasks}
         runnable = sorted(
@@ -79,7 +79,7 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
             if task.status == "pending"
             and all(statuses[dep] == "complete" for dep in task.dependencies)
         )
-        self.assertEqual(runnable, [9, 11, 13])
+        self.assertEqual(runnable, [10, 11, 12, 13])
         self.assertEqual(plan.tasks[18].status, "complete")
         self.assertEqual(plan.tasks[18].priority, 1)
         self.assertEqual(plan.tasks[12].priority, 13)
@@ -89,7 +89,7 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
     def test_canonical_bound_base_commit_matches(self) -> None:
         plan = Plan.from_file(CANONICAL_PLAN)
         selection = select_task(plan, bound_base_commit=plan.base_commit)
-        self.assertEqual(selection.task_id, 9)
+        self.assertEqual(selection.task_id, 10)
 
     def test_bound_base_commit_mismatch_is_stale(self) -> None:
         plan = Plan.from_file(CANONICAL_PLAN)
@@ -349,7 +349,7 @@ class PurityAndLedgerBoundaryTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source, forbidden)
         plan = Plan.from_file(CANONICAL_PLAN)
-        self.assertEqual(select_task(plan).task_id, 9)
+        self.assertEqual(select_task(plan).task_id, 10)
 
     def test_selection_result_is_immutable(self) -> None:
         plan = parse_fixture("plan-select-priority-order.md")
@@ -377,7 +377,7 @@ class TrustedCliTest(unittest.TestCase):
     def test_cli_selects_canonical_next_task(self) -> None:
         result = self._run("select", str(CANONICAL_PLAN))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "selected=9")
+        self.assertEqual(result.stdout.strip(), "selected=10")
 
     def test_cli_reports_blocked(self) -> None:
         result = self._run("select", str(FIXTURES / "plan-select-blocked.md"))

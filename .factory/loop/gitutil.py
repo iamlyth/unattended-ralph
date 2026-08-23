@@ -60,6 +60,13 @@ class GitBoundaryError(RuntimeError):
     """The pinned Git executable cannot be resolved, or its invocation failed."""
 
 
+# Finite bound for every trusted state/branch Git invocation of this module
+# (Task 9 review MED): an unbounded ``subprocess.run`` behind the commit
+# boundary could wait forever on a wedged repository/pipe.  Callers that
+# need a different bound pass their own ``timeout`` explicitly.
+GIT_TIMEOUT = 120.0
+
+
 # Fixed absolute Git candidates, in precedence order.  ``PATH`` is *never*
 # consulted: an unqualified ``git`` resolved from a caller-controlled PATH
 # could substitute a different binary behind the guarded commit boundary
@@ -384,8 +391,16 @@ def git_bytes(
 
 
 def resolve_head(root: Path) -> Optional[str]:
-    """Resolve the full 40-hex HEAD of ``root`` (``None`` when unborn/invalid)."""
-    result = git_run(["-C", str(root), "rev-parse", "--verify", "HEAD"])
+    """Resolve the full 40-hex HEAD of ``root`` (``None`` when unborn/invalid).
+
+    Every trusted invocation is finite-bounded (Task 9 review MED): the
+    pinned Git executable may never wait forever behind the boundary, so
+    the call passes :data:`GIT_TIMEOUT`.
+    """
+    result = git_run(
+        ["-C", str(root), "rev-parse", "--verify", "HEAD"],
+        timeout=GIT_TIMEOUT,
+    )
     if result.returncode != 0:
         return None
     head = result.stdout.strip()

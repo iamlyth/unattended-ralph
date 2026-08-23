@@ -85,21 +85,21 @@ completes with evidence.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
-| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9 |
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16 |
 | CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6, Task 8, Task 16 |
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16 |
 | PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
-| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9 |
-| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9 |
-| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9 |
+| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16 |
+| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16 |
+| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11 |
-| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9 |
+| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16 |
 | LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11 |
-| PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9 |
-| COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9 |
+| PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
+| COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
 | FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12 |
@@ -750,7 +750,7 @@ completes with evidence.
 
 ## Task 9: Phase and campaign state machine with outcomes
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 4, Task 7, Task 8
 - Scope: Implement the phase/campaign orchestration: `planning ->
   implementation -> verification -> audit` with the §11 transition table,
@@ -779,11 +779,22 @@ completes with evidence.
   operations, history, and commit for the campaign are performed by the
   trusted orchestrator through the descriptor-anchored authority and no model
   tool has direct `.git` read or Git-history access.
-- Verification: `tests/test-factory-phase.py`;
-  `tests/test-factory-campaign.sh`, including a fixture asserting the trusted
-  orchestrator (not the model) performs every commit and that model tools hold
-  no direct `.git`/history read.
-- Documentation impact: `docs/FACTORY.md`.
+- Verification: `.factory/tests/test-factory-campaign.py`, including fixtures
+  asserting the trusted orchestrator (not the model) performs every commit,
+  model tools hold no direct `.git`/history read, all six terminals persist,
+  empty work reaches deterministic verification/audit, recovery fails closed,
+  and exact task/objective bytes are bound on the production launch path.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+- Evidence: `.factory/tests/test-factory-campaign.py` passes 66/66
+  warning-clean; state 129/129, lock 38/38, launch 76/76, confinement 72/72,
+  usage 106/106 (one honest root-only ownership skip), selector 32/32, parser
+  13/13, and hidden shell supervision pass. Independent adversarial review
+  accepted the final checkpoint after remediation of persisted audit-abort
+  terminals, exact production task/objective binding, new-plan acceptance,
+  authoritative stale-base rejection, bounded Git, deterministic-gate
+  requirements, and identical Landlock/commit denial of trusted policy paths.
+  No full boilerplate pass is claimed: the known legacy context-summary drift
+  remains assigned to Task 15.
 
 ## Task 10: Findings flow
 
@@ -836,7 +847,11 @@ completes with evidence.
   confinement is unproven.
   Ralph lifecycle topics, `ralph emit`, completion-token handling, event
   snapshots, launch handshakes, and Ralph CLI shims are removed from the new
-  path and never reimplemented.
+  path and never reimplemented. Close the accepted Task 9 defense-in-depth
+  residuals: reject a bare `.factory` dirty path and unsafe/control-character
+  porcelain paths at the trusted commit-scope layer even though Landlock
+  already prevents model creation, and map `GitBoundaryError` to a clean
+  launch-CLI failure rather than a traceback.
 - Acceptance criteria: adversarial fixture attempts to exfiltrate secrets
   through tools, results, logs, argv, or environment all fail closed; a
   synthetic credential rendered into child/tool output is redacted from

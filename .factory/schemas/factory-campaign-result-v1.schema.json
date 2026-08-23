@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-campaign-result/v1",
+  "title": "factory-campaign result",
+  "description": "The machine-readable terminal result of one phase/campaign orchestration run (FACTORY-LOOP-SPEC sections 13/14/15; Task 9). The trusted control plane, never a model role, derives every field from plan state, Git state, deterministic gates, and the control-state transition table; the JSON field set is validated against this committed schema by .factory/loop/campaign.py. No wall-clock timestamp, model prose, task description, memory, or evidence claim appears in a result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "campaign_id",
+    "rounds_requested",
+    "rounds_completed",
+    "terminal_phase",
+    "terminal_outcome",
+    "head_commit",
+    "exit_code",
+    "phase_history"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": ["factory-campaign-result/v1"]
+    },
+    "campaign_id": { "type": "string", "minLength": 1 },
+    "rounds_requested": { "type": "integer", "minimum": 1 },
+    "rounds_completed": { "type": "integer", "minimum": 0 },
+    "terminal_phase": {
+      "type": "string",
+      "enum": [
+        "success",
+        "findings",
+        "blocked",
+        "failed",
+        "interrupted",
+        "infrastructure_failure"
+      ]
+    },
+    "terminal_outcome": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "failed",
+        "interrupted",
+        "task_completed",
+        "task_progress",
+        "task_failed",
+        "work_exhausted",
+        "blocked",
+        "pass",
+        "findings",
+        "infrastructure_failure",
+        "success"
+      ]
+    },
+    "head_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "exit_code": { "type": "integer" },
+    "phase_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "round",
+          "phase",
+          "attempt",
+          "outcome",
+          "head_commit",
+          "plan_digest",
+          "detail"
+        ],
+        "properties": {
+          "round": { "type": "integer", "minimum": 1 },
+          "phase": {
+            "type": "string",
+            "enum": ["planning", "implementation", "verification", "audit"]
+          },
+          "attempt": { "type": "integer", "minimum": 1 },
+          "outcome": { "type": "string", "minLength": 1 },
+          "head_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "plan_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}

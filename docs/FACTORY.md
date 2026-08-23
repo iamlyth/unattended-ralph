@@ -48,6 +48,17 @@ existing write targets, and per-launch private paths are granted. The trusted
 orchestrator performs Git history and commit operations after the role exits.
 Hosts without the required confinement primitive cannot launch a model.
 
+## Finite phase campaign
+
+The trusted `.factory/loop/campaign.py` authority serializes one writer through
+planning, implementation, verification, and audit. It derives recovery from
+Git, the canonical plan, and `factory-state/v1`; it creates no runtime task
+queue, model memory, event stream, context summary, or resumed model identity.
+Exact task bytes and deterministic audit objectives are bound before launch,
+while trusted Git operations remain outside Landlock. Work exhaustion still
+runs verification and audit. Campaigns are finite and publish one of the six
+specified terminal outcomes rather than retrying empty work indefinitely.
+
 ## Relationship to Huntley's playbook
 
 The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at commit `88d488a148af97e4a3f22b11b4c3598c79d6a577`). This boilerplate adopts the playbook's highest-value context and backpressure patterns:

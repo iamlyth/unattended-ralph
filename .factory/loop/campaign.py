@@ -1,0 +1,2680 @@
+#!/usr/bin/env python3
+"""Phase/campaign orchestrator — Task 9 (PHASE-01, COMPLETE-01, GIT-01).
+
+This module implements the trusted phase/campaign control plane of
+``docs/FACTORY-LOOP-SPEC.md`` §13/§14/§15 on top of the already committed
+building blocks: the deterministic plan parser (``plan_parser.py``), the
+trusted selector (``selector.py``), the ``factory-state/v1`` control-state
+authority (``state.py``), the root-descriptor lock and Git writer boundary
+(``lock.py``/``gitutil.py``), the fresh-context launch/supervision authority
+(``launch.py``), the Ollama usage guard (``usage.py``), and the workspace
+confinement authority (``workspace_confinement.py``).  It is the only module
+that owns the *campaign loop*; every Git operation, repository-history read,
+staging step, and guarded commit of a campaign is performed here through the
+descriptor-anchored authority and never by a model tool.
+
+Responsibilities (Task 9 scope):
+
+* drive the exact phase machine ``planning -> implementation ->
+  verification -> audit`` with the §11 transition table, §13 outcome
+  classification, §14 finite round semantics, and the §15 predicate ladder
+  kept distinct (task completion, work exhaustion, verification pass, audit
+  pass, product acceptance, and campaign success never collapse);
+* enforce finite round and attempt bounds with the exact terminal
+  classification: ``success | findings | blocked | failed | interrupted |
+  infrastructure_failure``; ``work_exhausted``/``blocked`` always reach
+  verification and audit and never spin on empty work;
+* own the trusted, descriptor-anchored Git/history/status/commit authority:
+  every commit, history read, staging step, and dirty-scope verification is
+  performed behind the root-descriptor lock through the pinned absolute Git
+  executable (never through a model tool, never through a caller ``PATH``,
+  and with every ``GIT_CONFIG*``/redirector environment stripped); dirty
+  work is never reset, discarded, or silently overwritten;
+* crash recovery is derived from Git + plan + state: a trusted commit that
+  landed before its transition was recorded is reconciled deterministically,
+  an ``in_progress`` task resumes from current code and Git diff, and an
+  ambiguous live process, changed identity/branch, stale spec binding,
+  rewound counter, or invalid transition fails closed for operator
+  inspection;
+* one machine-readable campaign result (``factory-campaign-result/v1``) is
+  produced and published under the ignored ``.factory-state/`` evidence
+  namespace.  The control state, the digest ledger, and the published result
+  are the only lifecycle files the orchestrator touches; no runtime task
+  ledger, Ralph event stream, memory store, or context summary is ever
+  created.
+
+The untrusted model process is the only *untrusted* surface of a phase.  Its
+completion tokens and prose are never control protocol; the machine-readable
+process exit status is one deterministic §13 signal (FACTORY-LOOP-SPEC §13:
+the trusted harness derives outcomes from plan state, Git state, exit
+status, and deterministic gates).  The orchestrator derives every phase
+outcome from the plan state, the Git state, the role's exit status,
+deterministic gate commands, and the §11 transition table.
+
+The ``--role-driver`` CLI option is the explicit deterministic embedded/
+fixture role seam used by the hidden campaign suite: a repository-committed
+executable that acts as a scenario-driven model for synthetic fixture
+repos.  It is never evidence of real model acceptance or real confinement;
+production launches always go through the launch authority
+(:func:`launch_role_attempt`), which retains the §10 Ollama guard and the
+Task 8 real Landlock confinement.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+try:  # package import (the hidden `.factory/loop/` package)
+    from . import audit_objectives as audit_objectives_module
+    from . import gitutil
+    from . import lock as lock_module
+    from . import plan_parser
+    from . import selector as selector_module
+    from . import state as state_module
+    from . import launch as launch_module
+    from . import workspace_confinement as confinement_authority
+except ImportError:  # flat import used by the hidden `.factory/tests/` suite
+    import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
+    import gitutil  # type: ignore[no-redef]
+    import lock as lock_module  # type: ignore[no-redef]
+    import plan_parser  # type: ignore[no-redef]
+    import selector as selector_module  # type: ignore[no-redef]
+    import state as state_module  # type: ignore[no-redef]
+    import launch as launch_module  # type: ignore[no-redef]
+    import workspace_confinement as confinement_authority  # type: ignore[no-redef]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SCHEMA_NAME = "factory-campaign-result/v1"
+RESULT_SCHEMA_FILE = "factory-campaign-result-v1.schema.json"
+PHASE_RESULT_SCHEMA_NAME = "factory-phase-result/v1"
+PHASE_RESULT_SCHEMA_FILE = "factory-phase-result-v1.schema.json"
+
+PHASES = ("planning", "implementation", "verification", "audit")
+TERMINAL_PHASES = (
+    "success", "findings", "blocked", "failed", "interrupted",
+    "infrastructure_failure",
+)
+
+# §13 phase-outcome classification sets (subsets of the trusted outcome enum).
+# ``audit`` additionally classifies the two terminal fail-closed closes — an
+# interrupted audit (``interrupted``) and an untrusted audit
+# (``infrastructure_failure``) — which are persisted in the authoritative
+# control state through dedicated §11 terminal edges (Task 9 review B1), so
+# the campaign never re-executes them.
+PLANNING_OUTCOMES = ("planned", "failed", "interrupted")
+IMPLEMENTATION_OUTCOMES = (
+    "task_completed", "task_progress", "task_failed",
+    "interrupted", "work_exhausted", "blocked",
+)
+VERIFICATION_OUTCOMES = ("pass", "findings", "blocked", "infrastructure_failure")
+AUDIT_OUTCOMES = (
+    "pass", "findings", "blocked",
+    "interrupted", "infrastructure_failure",
+)
+
+PHASE_OUTCOME_SETS: Mapping[str, frozenset] = {
+    "planning": frozenset(PLANNING_OUTCOMES),
+    "implementation": frozenset(IMPLEMENTATION_OUTCOMES),
+    "verification": frozenset(VERIFICATION_OUTCOMES),
+    "audit": frozenset(AUDIT_OUTCOMES),
+}
+
+# Machine-readable result exit codes (§14 terminal classification).
+EXIT_SUCCESS = 0
+EXIT_FINDINGS = 1
+EXIT_BLOCKED = 2
+EXIT_FAILED = 3
+EXIT_INTERRUPTED = 4
+EXIT_INFRASTRUCTURE_FAILURE = 5
+# Fail-closed control-plane code (never a campaign outcome).
+EXIT_ERROR = 6
+
+TERMINAL_EXIT_CODES: Mapping[str, int] = {
+    "success": EXIT_SUCCESS,
+    "findings": EXIT_FINDINGS,
+    "blocked": EXIT_BLOCKED,
+    "failed": EXIT_FAILED,
+    "interrupted": EXIT_INTERRUPTED,
+    "infrastructure_failure": EXIT_INFRASTRUCTURE_FAILURE,
+}
+
+# The campaign phase context passed to an embedded/fixture role driver.
+CAMPAIGN_ENV_PREFIX = "FACTORY_LOOP_CAMPAIGN_"
+
+# The orchestration layer's own commit identity: every campaign commit is
+# provably orchestrator-created (the model never runs Git).
+COMMIT_AUTHOR_NAME = "factory-campaign"
+COMMIT_AUTHOR_EMAIL = "factory-campaign@localhost"
+
+PLAN_BLOB_MAX = 4 * 1024 * 1024
+MAX_RESULT_FILE = 256 * 1024
+STATUS_PORCELAIN_MAX = 4 * 1024 * 1024
+DEFAULT_ROLE_TIMEOUT = 900.0
+DEFAULT_GATE_TIMEOUT = 1800.0
+# Finite bound for every trusted Git call of the orchestrator (Task 9
+# review L4): no trusted Git invocation may wait forever behind the lock.
+GIT_TIMEOUT = 120.0
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+SAFE_CAMPAIGN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# The trusted scope authority: no untrusted role may ever modify Git history,
+# the mutable control state, legacy runtime namespaces, model tool stores, or
+# the canonical specification.
+FORBIDDEN_SCOPE_PREFIXES = (
+    ".git",
+    ".ralph",
+    ".factory-state",
+    ".pi",
+    "$tmp",
+    ".ollama-usage-env",
+)
+
+
+class CampaignError(Exception):
+    """Base class for every fail-closed campaign failure."""
+
+
+class CampaignConfigError(CampaignError):
+    """The campaign configuration is malformed, unbounded, or unbound."""
+
+
+class CampaignBindingError(CampaignError):
+    """A repository/branch/spec/plan/state binding does not match."""
+
+
+class CampaignGitError(CampaignError):
+    """A trusted Git operation failed or produced an unsafe result."""
+
+
+class CampaignRecoveryError(CampaignError):
+    """Git/plan/state recovery is ambiguous; fail closed for operator review."""
+
+
+class CampaignResultError(CampaignError):
+    """The campaign result or a phase-result artifact violates its schema."""
+
+
+class CampaignPhaseError(CampaignError):
+    """A phase step is invoked outside its transition-table contract."""
+
+
+# ---------------------------------------------------------------------------
+# Machine models
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoleOutcome:
+    """The machine-readable outcome of one untrusted role process.
+
+    ``exit_status`` is the process exit code; ``interrupted`` is true when
+    the role ended on a bounded signal/timeout (never the model's choice);
+    ``signal`` names the terminating signal when known.  The orchestrator
+    never interprets role prose as control protocol — only this enum
+    surface, the plan state, the Git state, and deterministic gates decide a
+    phase outcome.
+    """
+
+    role: str
+    exit_status: int
+    interrupted: bool = False
+    signal: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PhaseRecord:
+    """One trusted phase-step record of the campaign result history."""
+
+    round: int
+    phase: str
+    attempt: int
+    outcome: str
+    head_commit: str
+    plan_digest: str
+    detail: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "round": self.round,
+            "phase": self.phase,
+            "attempt": self.attempt,
+            "outcome": self.outcome,
+            "head_commit": self.head_commit,
+            "plan_digest": self.plan_digest,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class CampaignResult:
+    """Machine-readable terminal result (``factory-campaign-result/v1``)."""
+
+    campaign_id: str
+    rounds_requested: int
+    rounds_completed: int
+    terminal_phase: str
+    terminal_outcome: str
+    head_commit: str
+    phase_history: Tuple[PhaseRecord, ...] = ()
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "schema": SCHEMA_NAME,
+            "campaign_id": self.campaign_id,
+            "rounds_requested": self.rounds_requested,
+            "rounds_completed": self.rounds_completed,
+            "terminal_phase": self.terminal_phase,
+            "terminal_outcome": self.terminal_outcome,
+            "head_commit": self.head_commit,
+            "exit_code": TERMINAL_EXIT_CODES[self.terminal_phase],
+            "phase_history": [record.to_dict() for record in self.phase_history],
+        }
+
+    def validate(self) -> None:
+        if self.terminal_phase not in TERMINAL_PHASES:
+            raise CampaignResultError(
+                f"terminal_phase {self.terminal_phase!r} is not a terminal phase"
+            )
+        if self.terminal_phase not in TERMINAL_EXIT_CODES:
+            raise CampaignResultError("terminal phase has no documented exit code")
+        if not SHA40_RE.fullmatch(self.head_commit):
+            raise CampaignResultError(
+                "head_commit must be a 40-character lowercase Git commit hash"
+            )
+        if not SAFE_CAMPAIGN_ID_RE.fullmatch(self.campaign_id):
+            raise CampaignResultError(
+                "campaign_id must match the safe campaign-id pattern"
+            )
+        if (
+            isinstance(self.rounds_requested, bool)
+            or not isinstance(self.rounds_requested, int)
+            or self.rounds_requested < 1
+        ):
+            raise CampaignResultError("rounds_requested must be a positive integer")
+        if (
+            isinstance(self.rounds_completed, bool)
+            or not isinstance(self.rounds_completed, int)
+            or not (0 <= self.rounds_completed <= self.rounds_requested)
+        ):
+            raise CampaignResultError(
+                "rounds_completed must be between zero and rounds_requested"
+            )
+        for record in self.phase_history:
+            if record.round < 1 or record.round > self.rounds_requested:
+                raise CampaignResultError(
+                    f"phase record round {record.round} exceeds the round budget"
+                )
+            if record.phase not in PHASE_OUTCOME_SETS:
+                raise CampaignResultError(f"unknown phase {record.phase!r}")
+            if record.outcome not in PHASE_OUTCOME_SETS[record.phase]:
+                raise CampaignResultError(
+                    f"outcome {record.outcome!r} is not an outcome of phase "
+                    f"{record.phase!r}"
+                )
+            if not SHA40_RE.fullmatch(record.head_commit):
+                raise CampaignResultError(
+                    "phase record head_commit must be a 40-hex commit hash"
+                )
+            if not SHA256_RE.fullmatch(record.plan_digest):
+                raise CampaignResultError(
+                    "phase record plan_digest must be a 64-hex SHA-256 digest"
+                )
+            if record.attempt < 1:
+                raise CampaignResultError("phase record attempt must be positive")
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CampaignConfig:
+    """The trusted campaign contract (bounds, bindings, and role seams).
+
+    ``root`` is the canonical repository; ``spec_path``/``spec_commit``/
+    ``spec_blob`` come from the committed plan front matter and are
+    re-verified against the locked repository; ``plan_path`` is the
+    repository-relative canonical plan; ``phase_base_commit`` is the
+    campaign's initial bound base (the commit the first planning phase works
+    from).  ``planning_attempts`` and ``implementation_attempts`` bound each
+    round/task; the campaign never exceeds them.  ``provider`` is ``ollama``
+    (the §10 usage guard runs inside the launch mint) or ``synthetic``;
+    ``role_driver`` is the explicit deterministic embedded/fixture role seam
+    (a committed repository-relative executable) or ``None`` for the real
+    launch path.
+    """
+
+    root: Path
+    campaign_id: str
+    rounds_requested: int
+    branch: str
+    spec_path: str
+    spec_commit: str
+    spec_blob: str
+    plan_path: str
+    phase_base_commit: str
+    planning_attempts: int
+    implementation_attempts: int
+    specification_digest: str
+    plan_digest: str
+    role_prompt_digests: Mapping[str, str]
+    prompt_set_digest: str
+    audit_objectives_digest: str
+    provider: str = "synthetic"
+    model: str = "fixture-model"
+    backend: str = ""
+    role_driver: Optional[str] = None
+    scenario_path: str = ""
+    acceptance_command: Tuple[str, ...] = ()
+    verification_command: Tuple[str, ...] = ()
+    capability_command: Tuple[str, ...] = ()
+    phase_result_path: str = ""
+    audit_result_path: str = ""
+    role_timeout: float = DEFAULT_ROLE_TIMEOUT
+    gate_timeout: float = DEFAULT_GATE_TIMEOUT
+    runtime_limit: float = launch_module.DEFAULT_RUNTIME_LIMIT
+    inactivity_limit: float = launch_module.DEFAULT_INACTIVITY_LIMIT
+    usage_guard_cookie_file: Optional[str] = None
+    usage_guard_cookie_stdin: bool = False
+    usage_guard_settings_url: Optional[str] = None
+    usage_guard_poll_interval: Optional[int] = None
+    usage_guard_max_wait: Optional[int] = None
+    usage_guard_max_polls: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # Fail closed at construction: an invalid campaign contract can never
+        # reach a phase step.  ``derive_campaign_config`` builds only valid
+        # contracts; a caller-built or operator-built model is rejected here
+        # before any Git/state/role authority is touched.
+        self.validate()
+
+    def validate(self) -> None:
+        if not SAFE_CAMPAIGN_ID_RE.fullmatch(self.campaign_id):
+            raise CampaignConfigError(
+                "campaign_id must match the safe campaign-id pattern "
+                "`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`"
+            )
+        if (
+            isinstance(self.rounds_requested, bool)
+            or not isinstance(self.rounds_requested, int)
+            or self.rounds_requested < 1
+        ):
+            raise CampaignConfigError("rounds_requested must be a positive integer")
+        if (
+            isinstance(self.planning_attempts, bool)
+            or not isinstance(self.planning_attempts, int)
+            or self.planning_attempts < 1
+        ):
+            raise CampaignConfigError("planning_attempts must be a positive integer")
+        if (
+            isinstance(self.implementation_attempts, bool)
+            or not isinstance(self.implementation_attempts, int)
+            or self.implementation_attempts < 1
+        ):
+            raise CampaignConfigError(
+                "implementation_attempts must be a positive integer"
+            )
+        for name, value in (
+            ("branch", self.branch),
+            ("spec_path", self.spec_path),
+            ("spec_commit", self.spec_commit),
+            ("spec_blob", self.spec_blob),
+            ("plan_path", self.plan_path),
+            ("phase_base_commit", self.phase_base_commit),
+        ):
+            if not isinstance(value, str) or not value:
+                raise CampaignConfigError(f"`{name}` must be a non-empty string")
+        if not SHA40_RE.fullmatch(self.spec_commit) or not SHA40_RE.fullmatch(
+            self.spec_blob
+        ):
+            raise CampaignConfigError(
+                "spec_commit and spec_blob must be 40-hex Git object IDs"
+            )
+        if not SHA40_RE.fullmatch(self.phase_base_commit):
+            raise CampaignConfigError(
+                "phase_base_commit must be a 40-hex Git commit hash"
+            )
+        for name, value in (
+            ("specification_digest", self.specification_digest),
+            ("plan_digest", self.plan_digest),
+            ("audit_objectives_digest", self.audit_objectives_digest),
+            ("prompt_set_digest", self.prompt_set_digest),
+        ):
+            if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+                raise CampaignConfigError(
+                    f"`{name}` must be a 64-hex SHA-256 digest"
+                )
+        if (
+            not isinstance(self.role_prompt_digests, Mapping)
+            or not self.role_prompt_digests
+        ):
+            raise CampaignConfigError(
+                "role_prompt_digests must be a non-empty mapping"
+            )
+        for role, digest in self.role_prompt_digests.items():
+            if (
+                not isinstance(role, str)
+                or not isinstance(digest, str)
+                or not SHA256_RE.fullmatch(digest)
+            ):
+                raise CampaignConfigError(
+                    "role_prompt_digests must map each role to a 64-hex digest"
+                )
+        provider = self.provider.lower()
+        if provider not in ("ollama", "synthetic"):
+            raise CampaignConfigError(
+                "provider must be `ollama` or `synthetic`; an unknown provider "
+                "fails closed and can never bypass the per-policy guard"
+            )
+        if provider == "ollama" and self.role_driver is not None:
+            raise CampaignConfigError(
+                "the embedded role-driver seam is the explicit fixture surface; "
+                "an `ollama` provider must use the real launch path"
+            )
+        if self.role_driver is not None:
+            if not self.role_driver or self.role_driver.startswith("/"):
+                raise CampaignConfigError(
+                    "the role driver must be a repository-relative committed "
+                    "path, never an absolute or operator path"
+                )
+            if any(
+                segment in ("", ".", "..")
+                for segment in self.role_driver.split("/")
+            ):
+                raise CampaignConfigError(
+                    "the role driver path must not contain empty, `.`, or `..` "
+                    "segments"
+                )
+        for name in ("scenario_path", "phase_result_path", "audit_result_path"):
+            value = getattr(self, name)
+            if value and (value.startswith("/") or ".." in value.split("/")):
+                raise CampaignConfigError(
+                    f"{name} must be a safe repository-relative path"
+                )
+        for name in (
+            "role_timeout", "gate_timeout", "runtime_limit", "inactivity_limit",
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+                or float(value) != float(value)
+                or float(value) == float("inf")
+            ):
+                raise CampaignConfigError(
+                    f"`{name}` must be a finite positive number of seconds"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Trusted descriptor-anchored Git authority
+# ---------------------------------------------------------------------------
+
+
+class TrustedGit:
+    """The descriptor-anchored Git/history/status/commit authority.
+
+    Every Git operation of a campaign runs under the root-descriptor lock
+    through the pinned absolute Git executable (``gitutil.GIT_EXECUTABLE``)
+    anchored to the locked inode (``lock.RootLock``), so a canonical-path
+    rebind can never redirect a read or a commit and a caller-controlled
+    ``PATH`` or ``GIT_CONFIG*`` environment can never substitute a different
+    binary.  The model never executes Git; the orchestrator stages and
+    commits exactly the allowlisted dirty scope it verified.
+    """
+
+    def __init__(self, lock: object, plan_path: str) -> None:
+        if lock is None:
+            raise CampaignGitError(
+                "the trusted Git authority requires the root-descriptor lock"
+            )
+        self._lock = lock
+        self._plan_path = plan_path
+
+    def _run(self, argv: Sequence[str], *, timeout: Optional[float] = None):
+        # Task 9 review L4: every trusted Git call is bounded by a finite
+        # timeout; an unbounded trusted Git wait behind the lock is never
+        # permitted.
+        return self._lock._git_run(list(argv), timeout=timeout or GIT_TIMEOUT)
+
+    def _bytes(self, argv: Sequence[str], *, timeout: Optional[float] = None):
+        return self._lock._git_bytes(
+            list(argv), timeout=timeout or GIT_TIMEOUT
+        )
+
+    def head(self) -> str:
+        result = self._run(["rev-parse", "--verify", "HEAD"])
+        if result.returncode != 0:
+            raise CampaignGitError("cannot resolve HEAD of the canonical repository")
+        value = result.stdout.strip()
+        if len(value) != 40:
+            raise CampaignGitError("resolved HEAD is not a 40-hex commit hash")
+        return value
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        result = self._run(["merge-base", "--is-ancestor", ancestor, descendant])
+        if result.returncode not in (0, 1):
+            raise CampaignGitError(f"cannot test ancestry {ancestor}..{descendant}")
+        return result.returncode == 0
+
+    def status_entries(self) -> List[Tuple[str, str]]:
+        """``(status_flags, repository-relative path)`` porcelain pairs.
+
+        Untracked entries are enumerated per file (``--untracked-files=all``),
+        never as a whole-directory ``?? dir/`` marker, so the exact dirty
+        scope the orchestrator stages and commits is always a set of concrete
+        repository-relative file paths; a directory summary would stage files
+        the caller never explicitly allowlisted and break the exact staged
+        scope equality in :meth:`commit`.
+
+        Task 9 review L1: rename/copy entries (``R``/``C`` index flags),
+        whole-directory untracked markers (a path ending in ``/``, which is
+        how Git summarizes an untracked nested repository), and any tracked
+        gitlink (submodule) path are rejected explicitly — the orchestrator
+        never guesses how to stage a move or a submodule pointer, so each
+        dirty path is always one explicit create/modify/delete of a regular
+        committed file.  Quoted (ambiguous) porcelain output is rejected the
+        same way.
+        """
+        result = self._bytes(["status", "--porcelain", "-z", "--untracked-files=all"])
+        if result.returncode != 0:
+            raise CampaignGitError("cannot read the Git status")
+        raw = result.stdout
+        if len(raw) > STATUS_PORCELAIN_MAX:
+            raise CampaignGitError("the Git status is oversized")
+        entries: List[Tuple[str, str]] = []
+        index = 0
+        while index < len(raw):
+            end = raw.find(b"\x00", index)
+            if end < 0:
+                raise CampaignGitError("malformed porcelain status stream")
+            entry = raw[index:end]
+            if len(entry) < 4:
+                raise CampaignGitError("malformed porcelain status entry")
+            flags = entry[0:2]
+            path_bytes = entry[3:]
+            if flags[0:1] in (b"R", b"C"):
+                # A rename/copy record is ``XY old\0new\0``: the second
+                # NUL-terminated path is the rename/copy target.  The
+                # orchestrator never interprets a move implicitly.
+                raise CampaignGitError(
+                    "rename/copy status entries are not explicit scope paths; "
+                    f"refusing ambiguous porcelain output ({entry!r})"
+                )
+            if path_bytes.endswith(b"/"):
+                # A whole-directory untracked marker (e.g. an untracked
+                # nested repository) is never an explicit file path.
+                raise CampaignGitError(
+                    "a whole-directory status marker is not an explicit file "
+                    f"path; refusing to interpret {path_bytes!r}"
+                )
+            if path_bytes[:1] == b'"':
+                raise CampaignGitError(
+                    "a dirty path requires quoting; refusing to interpret "
+                    "ambiguous porcelain output"
+                )
+            entries.append(
+                (flags.decode("ascii", "replace"),
+                 path_bytes.decode("utf-8", "replace"))
+            )
+            index = end + 1
+        if entries:
+            gitlinks = self._gitlinks([path for _, path in entries])
+            if gitlinks:
+                raise CampaignGitError(
+                    "dirty paths include tracked gitlink/submodule "
+                    f"path(s) {sorted(gitlinks)!r}; the orchestrator never "
+                    "stages a submodule pointer"
+                )
+        return entries
+
+    def _gitlinks(self, paths: Sequence[str]) -> List[str]:
+        """Tracked gitlink (submodule, mode 160000) paths among ``paths``.
+
+        A gitlink is repository state owned by the parent repository's
+        submodule pointer, never explicit role file work; staging or
+        committing one would move a foreign repository's pointer behind the
+        guarded boundary (Task 9 review L1).
+        """
+        if not paths:
+            return []
+        result = self._bytes(["ls-files", "-s", "-z", "--", *paths])
+        if result.returncode != 0:
+            raise CampaignGitError("cannot enumerate tracked path modes")
+        raw = result.stdout
+        gitlinks: List[str] = []
+        index = 0
+        while index < len(raw):
+            end = raw.find(b"\x00", index)
+            if end < 0:
+                raise CampaignGitError("malformed ls-files stream")
+            record = raw[index:end]
+            if len(record) < 7:
+                raise CampaignGitError("malformed ls-files record")
+            mode = record[:6]
+            tab = record.find(b"\t")
+            if tab < 0:
+                raise CampaignGitError("malformed ls-files record")
+            path = record[tab + 1:].decode("utf-8", "replace")
+            if mode == b"160000":
+                gitlinks.append(path)
+            index = end + 1
+        return gitlinks
+
+    def status_paths(self) -> List[str]:
+        """Repository-relative dirty paths (modified/added/untracked)."""
+        return [path for _, path in self.status_entries()]
+
+    def role_dirty_paths(self) -> List[str]:
+        """Dirty paths attributable to an untrusted role.
+
+        The orchestrator's own runtime namespaces (the mutable control
+        state, digest ledger, and published results under ``.factory-state``
+        and the legacy runtime namespaces) are created by the trusted
+        control plane and are never role work; untracked entries there are
+        skipped.  Any *tracked* modification under those namespaces can only
+        have been made by an untrusted role and still surfaces as a
+        violation.
+        """
+        paths: List[str] = []
+        for flags, path in self.status_entries():
+            if flags == "??" and _is_harness_runtime(path):
+                continue
+            paths.append(path)
+        return paths
+
+    def dirty(self) -> bool:
+        return bool(self.role_dirty_paths())
+
+    def raw_dirty(self) -> bool:
+        return bool(self.status_paths())
+
+    def diff_paths(self, base: str) -> List[str]:
+        """Repository-relative paths changed between ``base`` and HEAD."""
+        result = self._bytes(["diff", "--name-only", "-z", base, "HEAD"])
+        if result.returncode != 0:
+            raise CampaignGitError(f"cannot diff {base}..HEAD")
+        raw = result.stdout
+        if not raw:
+            return []
+        return [item.decode("utf-8", "replace") for item in raw.split(b"\x00") if item]
+
+    def blob_at(self, commit: str, relpath: str) -> bytes:
+        """The exact blob bytes of ``<commit>:<relpath>`` (bounded)."""
+        resolved = self._run(["rev-parse", f"{commit}:{relpath}"])
+        if resolved.returncode != 0:
+            raise CampaignGitError(f"path {relpath!r} is not tracked at {commit}")
+        blob = resolved.stdout.strip()
+        if not SHA40_RE.fullmatch(blob):
+            raise CampaignGitError(f"path {relpath!r} at {commit} does not resolve")
+        raw = self._bytes(["cat-file", "blob", blob])
+        if raw.returncode != 0:
+            raise CampaignGitError(f"cannot read blob {blob}")
+        if len(raw.stdout) > PLAN_BLOB_MAX:
+            raise CampaignGitError(f"blob {blob} exceeds the {PLAN_BLOB_MAX}-byte bound")
+        return raw.stdout
+
+    def plan_at(self, commit: str):
+        """Parsed committed plan at ``commit`` (fail-closed on any violation)."""
+        try:
+            return plan_parser.Plan.from_bytes(self.blob_at(commit, self._plan_path))
+        except plan_parser.PlanError as exc:
+            raise CampaignGitError(
+                f"the committed plan at {commit} does not parse: {exc}"
+            ) from exc
+
+    def restore(self, paths: Sequence[str]) -> None:
+        """Restore repository-relative worktree paths from the committed HEAD.
+
+        The orchestrator restores exactly the regenerable plan path (never
+        product work) when an untrusted role left an unparsable/unbound plan
+        in the worktree, so a deterministic task failure proceeds to
+        verification at the last coherent committed state.  The command runs
+        through the pinned anchored executable and never commits.
+        """
+        paths = [path for path in paths if path]
+        if not paths:
+            return
+        result = self._run(["checkout", "HEAD", "--", *paths])
+        if result.returncode != 0:
+            raise CampaignGitError(
+                f"cannot restore {paths!r}: {result.stderr[-2000:]}"
+            )
+
+    def commit(self, paths: Sequence[str], message: str) -> str:
+        """Stage and commit exactly ``paths`` with the orchestrator identity.
+
+        The command runs through the pinned anchored executable with the
+        sanitized environment (``GIT_CONFIG*`` and redirect overrides
+        stripped) and never passes ``--no-verify``, hook-path overrides, or
+        worktree options; the committed Git commit guard stays authoritative.
+        The fixed author identity makes every campaign commit provably
+        orchestrator-created.  Returns the new HEAD.
+        """
+        paths = [path for path in paths if path]
+        if not paths:
+            raise CampaignGitError("refusing to commit an empty path set")
+        add = self._run(["add", "--", *paths])
+        if add.returncode != 0:
+            raise CampaignGitError(f"cannot stage {paths!r}: {add.stderr[-2000:]}")
+        staged = self._bytes(["diff", "--cached", "--name-only", "-z"])
+        if staged.returncode != 0:
+            raise CampaignGitError("cannot read the staged path set")
+        staged_names = {
+            item.decode("utf-8", "replace")
+            for item in staged.stdout.split(b"\x00")
+            if item
+        }
+        if not staged_names:
+            raise CampaignGitError(
+                "the attempt produced no staged changes; an empty commit "
+                "manufactures metadata-only progress"
+            )
+        if set(staged_names) != set(paths):
+            raise CampaignGitError(
+                f"staged scope {sorted(staged_names)} does not equal the allowed "
+                f"scope {sorted(paths)}; refusing a foreign commit"
+            )
+        commit_result = self._run(
+            [
+                "-c", f"user.name={COMMIT_AUTHOR_NAME}",
+                "-c", f"user.email={COMMIT_AUTHOR_EMAIL}",
+                "commit", "-m", message,
+            ]
+        )
+        if commit_result.returncode != 0:
+            raise CampaignGitError(
+                f"orchestrator commit rejected: {commit_result.stderr[-2000:]}"
+            )
+        new_head = self.head()
+        if not SHA40_RE.fullmatch(new_head):
+            raise CampaignGitError("commit did not advance HEAD deterministically")
+        return new_head
+
+    def history(self, limit: int) -> List[str]:
+        """Most recent ``limit`` commit hashes (newest first)."""
+        if limit < 1 or limit > 4096:
+            raise CampaignGitError("history bound must be within 1..4096")
+        result = self._run(["log", "--format=%H", f"--max-count={limit}"])
+        if result.returncode != 0:
+            raise CampaignGitError("cannot read the committed Git history")
+        values = [line for line in result.stdout.splitlines() if line]
+        for value in values:
+            if not SHA40_RE.fullmatch(value):
+                raise CampaignGitError("history contains a malformed commit hash")
+        return values
+
+    def commit_count(self) -> int:
+        result = self._run(["rev-list", "--count", "HEAD"])
+        if result.returncode != 0:
+            raise CampaignGitError("cannot count the committed history")
+        try:
+            return int(result.stdout.strip())
+        except ValueError as exc:
+            raise CampaignGitError("commit count is not an integer") from exc
+
+
+# ---------------------------------------------------------------------------
+# Deterministic scope validation
+# ---------------------------------------------------------------------------
+
+
+def scope_violation(
+    paths: Sequence[str],
+    *,
+    phase: str,
+    plan_path: str,
+    spec_path: str,
+    allow_paths: Sequence[str] = (),
+) -> Optional[str]:
+    """First scope violation among ``paths`` for ``phase``, or ``None``.
+
+    No untrusted role may touch the Git history, runtime state, the
+    canonical spec, the plan of a phase that does not own it, or any
+    forbidden namespace.  The planner may change exactly the plan path; the
+    developer may change product entries, tests, and the plan; the tester
+    and auditor are strictly read-only except for their designated
+    structured-result path (``allow_paths``).  A violation is a
+    deterministic fail-closed finding (``task_failed`` /
+    ``infrastructure_failure``).
+    """
+    allowed = set(allow_paths)
+    for path in paths:
+        if path in allowed:
+            continue
+        for prefix in FORBIDDEN_SCOPE_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return f"{path!r} is inside the forbidden {prefix!r} namespace"
+        # Task 9 review HIGH: the trusted policy/harness surface is shared
+        # with the confinement write allowlists
+        # (``workspace_confinement.TRUSTED_POLICY_RELPATHS``) — AGENTS.md,
+        # the hidden CI/forge tooling, shell.nix, the factory configs, the
+        # harness docs, and the legacy ``scripts/`` security surface.  An
+        # untrusted role must never write *or commit* these paths, so the
+        # orchestrator refuses them exactly like the model workspace does.
+        if confinement_authority.is_trusted_policy_path(path):
+            return (
+                f"{path!r} is trusted policy/harness surface (AGENTS.md, "
+                "hidden CI/forge tooling, factory configs, harness docs, "
+                "legacy scripts); no role may write or commit it"
+            )
+        if path == spec_path:
+            return f"{path!r} is the canonical specification; no role may edit it"
+        if phase == "planning":
+            if path != plan_path:
+                return (
+                    f"{path!r} is outside the planner's sole writable path "
+                    f"{plan_path!r}"
+                )
+        elif phase == "implementation":
+            if path.startswith(".factory/") and path != plan_path:
+                return (
+                    f"{path!r} is harness state outside the developer's plan "
+                    f"path {plan_path!r}"
+                )
+        else:  # verification and audit are strictly read-only
+            return f"{path!r} was modified by the read-only {phase!r} phase"
+    return None
+
+
+def plan_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _unsafe_repo_relative(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(unsafe_render, reason)`` for a path that is not repo-relative-safe.
+
+    A safe repository-relative path is non-empty, not absolute, free of
+    empty/``.``/``..`` segments, and free of backslashes and NUL/control
+    characters (Task 9 review L2).  ``(None, None)`` when the path is safe.
+    """
+    if not path or path.startswith("/"):
+        return (path or "<empty>", "absolute or empty")
+    if any(segment in ("", ".", "..") for segment in path.split("/")):
+        return (path, "contains an empty, `.`, or `..` segment")
+    if "\\" in path or any(ch in path for ch in "\x00\n\r"):
+        return (path, "contains a backslash or control character")
+    return (None, None)
+
+
+HARNESS_RUNTIME_PREFIXES = (".factory-state", ".ralph", ".pi", "$tmp")
+
+
+def _is_harness_runtime(path: str) -> bool:
+    """True when ``path`` lives in a namespace owned by the trusted harness."""
+    for prefix in HARNESS_RUNTIME_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _bounded_read(root: Path, relpath: str, label: str, maximum: int) -> bytes:
+    """Bounded no-follow read of a worktree file."""
+    path = Path(root) / relpath
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CampaignError(f"cannot open {label} {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise CampaignError(f"{label} {path} is not a regular file")
+        if before.st_size > maximum:
+            raise CampaignError(f"{label} {path} exceeds the {maximum}-byte bound")
+        raw = bytearray()
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > maximum:
+                raise CampaignError(f"{label} {path} exceeds the bound")
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise CampaignError(f"{label} {path} changed while being read")
+        return bytes(raw)
+    finally:
+        os.close(descriptor)
+
+
+def validate_plan_worktree(
+    data: bytes,
+    *,
+    spec_path: str,
+    spec_commit: str,
+    spec_blob: str,
+    base_commit: str,
+) -> Tuple[bool, Optional[str]]:
+    """``(valid, reason)``: the worktree plan parses and keeps the binding.
+
+    A plan that changes the specification path/commit/blob binding or the
+    cycle base commit is rejected as unbound — the plan contract (PLAN-01)
+    is part of the acceptance boundary and free-form prose cannot alter it.
+    """
+    try:
+        plan = plan_parser.Plan.from_bytes(data)
+    except plan_parser.PlanError as exc:
+        return False, f"worktree plan does not parse: {exc}"
+    if plan.spec_path != spec_path:
+        return False, f"plan spec_path {plan.spec_path!r} != bound {spec_path!r}"
+    if plan.spec_commit != spec_commit:
+        return False, f"plan spec_commit {plan.spec_commit!r} != bound {spec_commit!r}"
+    if plan.spec_blob != spec_blob:
+        return False, f"plan spec_blob {plan.spec_blob!r} != bound {spec_blob!r}"
+    if plan.base_commit != base_commit:
+        return False, f"plan base_commit {plan.base_commit!r} != bound {base_commit!r}"
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic outcome classification (§13; pure functions of trusted inputs)
+# ---------------------------------------------------------------------------
+
+
+def classify_planning(
+    *,
+    role: RoleOutcome,
+    plan_changed: bool,
+    plan_valid: bool,
+    scope_ok: bool,
+) -> str:
+    """Classify one planning attempt (planned/failed/interrupted).
+
+    ``planned`` requires a changed, valid, spec-bound plan within the
+    planner scope; ``interrupted`` records a bounded process interruption;
+    everything else is a deterministic planning failure retried until the
+    planning budget exhausts (then terminal ``failed``).
+    """
+    if role.interrupted:
+        return "interrupted"
+    if not plan_changed:
+        return "failed"
+    if not plan_valid:
+        return "failed"
+    if not scope_ok:
+        return "failed"
+    return "planned"
+
+
+def classify_implementation(
+    *,
+    role: RoleOutcome,
+    plan_valid: bool,
+    task_complete: bool,
+    acceptance_pass: bool,
+    had_changes: bool,
+    scope_ok: bool,
+) -> str:
+    """Pure classification of one developer attempt (§13.2).
+
+    ``task_completed`` requires a coherent, committed, acceptance-passing
+    completion of the selected task; ``task_progress`` preserves committed
+    work toward an ``in_progress`` task; a bounded process interruption is
+    ``interrupted``; every deterministic failure — a nonzero machine-readable
+    exit status (the §13 model-process-failed signal), an invalid plan, a
+    rejected completion claim, no usable work, or a scope violation — is
+    ``task_failed`` (Task 9 review L3).
+    """
+    if role.interrupted:
+        return "interrupted"
+    if role.exit_status != 0:
+        # §13: the harness derives outcomes from the machine-readable exit
+        # status as well as plan/Git state and gates; a nonzero developer
+        # exit is a deterministic model-process failure and is never
+        # accepted as a completion even when the worktree looks complete
+        # (the orchestrator preserves the coherent work and retries the
+        # same task while the attempt budget remains).
+        return "task_failed"
+    if not scope_ok:
+        return "task_failed"
+    if not plan_valid:
+        return "task_failed"
+    if task_complete:
+        if acceptance_pass and had_changes:
+            return "task_completed"
+        # The completion claim failed its deterministic acceptance gate or
+        # produced no coherent commit: it is never accepted.
+        return "task_failed"
+    if had_changes:
+        return "task_progress"
+    return "task_failed"
+
+
+def classify_verification(
+    *,
+    role: RoleOutcome,
+    scope_ok: bool,
+    gate_ran: bool,
+    gate_exit: int,
+    tester_result_valid: bool,
+    tester_result_outcome: Optional[str],
+    blocked_refs: Sequence[str],
+    capability_available: bool,
+) -> str:
+    """Pure verification classification (§13.3).
+
+    ``infrastructure_failure`` when the verifier itself cannot be trusted
+    (interrupted verifier, read-only violation, missing/invalid structured
+    result, unrun gate); ``pass`` when both the deterministic gate and the
+    tester pass; ``findings`` when a deterministic check fails or a finding
+    is reported; ``blocked`` only when a required declared capability
+    cannot execute and the tester cited exact unavailable references.
+
+    ``gate_ran`` reflects an **explicit deterministic verification
+    command** executed by the trusted orchestrator (Task 9 review MED):
+    the tester's structured result alone is never a gate, and an absent
+    verification command fails the campaign closed as
+    ``infrastructure_failure``.
+    """
+    if role.interrupted:
+        return "infrastructure_failure"
+    if not scope_ok:
+        return "infrastructure_failure"
+    if not gate_ran:
+        return "infrastructure_failure"
+    if not tester_result_valid:
+        return "infrastructure_failure"
+    if gate_exit != 0:
+        return "findings"
+    if tester_result_outcome == "blocked":
+        if not blocked_refs:
+            return "infrastructure_failure"
+        if not capability_available:
+            return "blocked"
+        return "findings"
+    if tester_result_outcome == "findings":
+        return "findings"
+    return "pass"
+
+
+def classify_audit(
+    *,
+    role: RoleOutcome,
+    scope_ok: bool,
+    result_valid: bool,
+    outcome: Optional[str],
+    findings: Sequence[str],
+    blocked_refs: Sequence[str],
+) -> str:
+    """Classify one audit attempt (§13.4).
+
+    An interrupted or untrusted audit fails the campaign closed
+    (``interrupted``/``infrastructure_failure``); a valid structured result
+    classifies ``pass``/``findings``/``blocked`` with the §14 precedence
+    rule (any finding makes it ``findings`` even when external blockers
+    exist).
+    """
+    if role.interrupted:
+        return "interrupted"
+    if not scope_ok:
+        return "infrastructure_failure"
+    if not result_valid:
+        return "infrastructure_failure"
+    if findings:
+        return "findings"
+    if blocked_refs:
+        return "blocked"
+    if outcome == "pass":
+        return "pass"
+    return "findings"
+
+
+# ---------------------------------------------------------------------------
+# Machine-result schema validation
+# ---------------------------------------------------------------------------
+
+
+def _load_schema(name: str) -> Dict[str, object]:
+    here = Path(__file__).resolve().parents[1]  # .factory/
+    path = here / "schemas" / name
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise CampaignResultError(f"cannot load the committed schema {path}: {exc}") from exc
+    if len(data) > 256 * 1024:
+        raise CampaignResultError(f"the committed schema {path} is oversized")
+    try:
+        schema = json.loads(data)
+    except ValueError as exc:
+        raise CampaignResultError(f"the committed schema {path} is not JSON") from exc
+    if not isinstance(schema, dict):
+        raise CampaignResultError(f"the committed schema {path} is not an object")
+    return schema
+
+
+def _json_type(value: object) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    if value is None:
+        return "null"
+    raise CampaignResultError(
+        f"value of type {type(value).__name__} is not JSON-serializable"
+    )
+
+
+def _schema_check(instance: object, schema: object, path: str) -> None:
+    """Validate against the JSON-Schema subset the committed schemas use."""
+    if not isinstance(schema, dict):
+        return
+    expected = schema.get("type")
+    if expected is not None:
+        types = expected if isinstance(expected, list) else [expected]
+        if _json_type(instance) not in types:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: expected "
+                f"{expected!r}, got {_json_type(instance)!r}"
+            )
+    if "enum" in schema and instance not in schema["enum"]:
+        raise CampaignResultError(
+            f"phase-result violation at {path or '(root)'}: value {instance!r} "
+            f"is not one of {schema['enum']!r}"
+        )
+    if isinstance(instance, str):
+        if "minLength" in schema and len(instance) < schema["minLength"]:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: string below the minimum"
+            )
+        if "pattern" in schema and re.fullmatch(schema["pattern"], instance) is None:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: pattern mismatch"
+            )
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema and instance < schema["minimum"]:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: value below minimum"
+            )
+    if isinstance(instance, dict):
+        properties = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in instance:
+                raise CampaignResultError(
+                    f"phase-result violation at {path or '(root)'}: missing {key!r}"
+                )
+        for key, subschema in properties.items():
+            if key in instance:
+                _schema_check(instance[key], subschema, f"{path}.{key}")
+        if schema.get("additionalProperties") is False:
+            for key in instance:
+                if key not in properties:
+                    raise CampaignResultError(
+                        f"phase-result violation at {path or '(root)'}: unexpected "
+                        f"property {key!r}"
+                    )
+    if isinstance(instance, list):
+        items = schema.get("items")
+        if items is not None:
+            for index, item in enumerate(instance):
+                _schema_check(item, items, f"{path}[{index}]")
+
+
+_RESULT_SCHEMA: Optional[Dict[str, object]] = None
+
+
+def validate_campaign_result(result: object) -> None:
+    """Fail closed unless the campaign result conforms to the committed schema."""
+    global _RESULT_SCHEMA
+    if _RESULT_SCHEMA is None:
+        _RESULT_SCHEMA = _load_schema(RESULT_SCHEMA_FILE)
+    instance = result.to_dict() if isinstance(result, CampaignResult) else result
+    _schema_check(instance, _RESULT_SCHEMA, "")
+
+
+_PHASE_RESULT_SCHEMA: Optional[Dict[str, object]] = None
+
+
+def phase_result_schema() -> Dict[str, object]:
+    global _PHASE_RESULT_SCHEMA
+    if _PHASE_RESULT_SCHEMA is None:
+        _PHASE_RESULT_SCHEMA = _load_schema(PHASE_RESULT_SCHEMA_FILE)
+    return _PHASE_RESULT_SCHEMA
+
+
+def read_phase_result(root: Path, relpath: str, label: str) -> Optional[Dict[str, object]]:
+    """Bounded no-follow read + schema validation of one role result file.
+
+    ``None`` when the result file does not exist; any unsafe, oversized,
+    malformed, or non-conforming file raises :class:`CampaignResultError` —
+    the untrusted phase's structured output is only ever interpreted through
+    this gate.  The file is removed after it is consumed: it is the
+    orchestrator's own transient handoff channel, never product state.
+    """
+    if not relpath:
+        return None
+    path = Path(root) / relpath
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CampaignResultError(f"cannot open the {label} result file {path}: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise CampaignResultError(f"{label} result {path} is not a regular file")
+        if info.st_size > MAX_RESULT_FILE:
+            raise CampaignResultError(f"{label} result {path} is oversized")
+        before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        raw = bytearray()
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > MAX_RESULT_FILE:
+                raise CampaignResultError(f"{label} result {path} is oversized")
+        after = os.fstat(descriptor)
+        if before != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            raise CampaignResultError(f"{label} result {path} changed while being read")
+    finally:
+        os.close(descriptor)
+    try:
+        data = json.loads(bytes(raw).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise CampaignResultError(f"{label} result {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CampaignResultError(f"{label} result {path} is not an object")
+    _schema_check(data, phase_result_schema(), "")
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Production launch integration (launch/usage/confinement)
+# ---------------------------------------------------------------------------
+
+
+def _blob_at(root: Path, relpath: str) -> bytes:
+    result = gitutil.git_run(
+        ["-C", str(root), "rev-parse", f"HEAD:{relpath}"],
+        timeout=GIT_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise CampaignError(f"blob {relpath!r} is not tracked at HEAD")
+    raw = gitutil.git_bytes(
+        ["-C", str(root), "cat-file", "blob", result.stdout.strip()],
+        timeout=GIT_TIMEOUT,
+    )
+    if raw.returncode != 0:
+        raise CampaignError(f"cannot read blob {relpath!r}")
+    if len(raw.stdout) > PLAN_BLOB_MAX:
+        raise CampaignError(f"blob {relpath!r} is oversized")
+    return raw.stdout
+
+
+def _live_head(root: Path) -> str:
+    result = gitutil.git_run(
+        ["-C", str(root), "rev-parse", "--verify", "HEAD"],
+        timeout=GIT_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise CampaignGitError(f"cannot resolve HEAD of {root}")
+    value = result.stdout.strip()
+    if len(value) != 40:
+        raise CampaignGitError("HEAD is not a 40-hex commit hash")
+    return value
+
+
+def _audit_objective_bytes(root: Path, round_number: int) -> bytes:
+    """Deterministic per-round audit-objective bytes from the committed registry.
+
+    The registry blob is read from the committed state at HEAD and validated
+    (``audit-objectives/v1``); the objective for the round is selected
+    deterministically (``index = (round - 1) % len``, §6.4) and serialized
+    with the exact deterministic JSON encoding the registry CLI prints, so
+    the same registry and round always produce the same bytes and digest
+    (Task 9 review B2).
+    """
+    registry = _blob_at(root, ".factory/audit-objectives/registry.json")
+    document = audit_objectives_module.parse_registry(registry)
+    selected = audit_objectives_module.select_audit_objective(
+        round_number, document
+    )
+    return json.dumps(
+        dict(selected), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def launch_role_attempt(
+    config: CampaignConfig,
+    *,
+    role: str,
+    head: str,
+    task_id: Optional[int] = None,
+    round_number: int = 1,
+    task_excerpt: Optional[bytes] = None,
+    audit_objective: Optional[bytes] = None,
+    _confinement_proof: Optional[object] = None,
+    _confinement_spec: Optional[Mapping[str, object]] = None,
+    _sanitized_home: Optional[Path] = None,
+) -> RoleOutcome:
+    """Run one fresh role attempt through the committed launch authority.
+
+    Reads every authoritative blob from the committed state at ``head``
+    (role prompt, operational policy, spec, plan, and the developer task
+    excerpt / auditor objective), binds the digests, and mints the
+    unforgeable verified-committed token (:func:`launch.authorize_launch`),
+    which runs the §10 Ollama guard for guard-gated providers and the Task 8
+    real Landlock confinement.
+
+    Task 9 review B2: the developer's task bytes are re-derived from the
+    committed plan blob at ``head`` (:func:`launch.derive_task_excerpt`) and
+    the auditor's objective bytes are re-derived from the committed
+    audit-objective registry (:func:`_audit_objective_bytes`) when the hidden
+    suite has not supplied them explicitly; the exact bytes and digests are
+    passed to :func:`launch.authorize_launch`, which fails closed on any
+    substitution, paraphrase, or digest drift.  Any :class:`InvocationError`
+    (a refused launch: unbound bytes, unknown provider, guard/quota refusal,
+    unavailable confinement) is caught cleanly and raised as a documented
+    :class:`CampaignPhaseError`, so a refused launch is a clean fail-closed
+    control-plane outcome and never an unhandled traceback.
+
+    ``_confinement_proof``/``_confinement_spec``/``_sanitized_home`` are the
+    private seams of the hidden suite (mirroring ``launch.py``); the
+    production path builds the real confinement specification and sanitized
+    home exactly like the launch CLI when no seam is supplied.
+    """
+    root = Path(config.root).absolute()
+    if config.backend:
+        backend = Path(config.backend)
+    else:
+        raise CampaignConfigError(
+            "a real launch requires the committed model backend (`backend`)"
+        )
+    plan_blob = _blob_at(root, config.plan_path)
+    try:
+        if role not in config.role_prompt_digests:
+            # Task 9 review LOW: a missing committed role-prompt digest is a
+            # clean fail-closed control-plane error (a launch can never bind
+            # an unverifiable role prompt), never an unhandled KeyError.
+            raise CampaignPhaseError(
+                f"the committed role-prompt digests carry no digest for "
+                f"{role!r}; a launch cannot bind an unverifiable role prompt"
+            )
+        if role == "developer":
+            if task_excerpt is None:
+                task_excerpt, _ = launch_module.derive_task_excerpt(
+                    plan_blob, task_id
+                )
+        elif role == "auditor":
+            if audit_objective is None:
+                audit_objective = _audit_objective_bytes(root, round_number)
+        binding = launch_module.InvocationBinding(
+            role=role,
+            model=config.model,
+            provider=config.provider,
+            backend=backend,
+            workspace=root,
+            bound_commit=head,
+            role_prompt_digest=config.role_prompt_digests[role],
+            prompt_set_digest=config.prompt_set_digest,
+            plan_digest=plan_sha256(plan_blob),
+            policy_digest=plan_sha256(_blob_at(root, "AGENTS.md")),
+            specification_digest=config.specification_digest,
+            task_id=task_id,
+            task_excerpt_digest=(
+                plan_sha256(task_excerpt) if task_excerpt is not None else None
+            ),
+            audit_objective_digest=(
+                plan_sha256(audit_objective) if audit_objective is not None else ""
+            ),
+            runtime_limit=config.runtime_limit,
+            inactivity_limit=config.inactivity_limit,
+        )
+        launch_module.verify_invocation(binding)
+        if _confinement_proof is None and _confinement_spec is None:
+            # Production path: mirror the Task 6 launch CLI — build the fresh
+            # private sanitized home and the exact per-role confinement
+            # specification, then mint the real (Landlock) proof inside
+            # ``authorize_launch``.  The private seam stays exclusive to the
+            # hidden suite and is never evidence of real confinement.
+            sanitized_home = confinement_authority.sanitized_home_directory()
+            try:
+                _confinement_spec = confinement_authority.confinement_spec(
+                    binding, sanitized_home=sanitized_home
+                )
+            except BaseException:
+                shutil.rmtree(sanitized_home, ignore_errors=True)
+                raise
+            _sanitized_home = sanitized_home
+        authority = launch_module.authorize_launch(
+            binding,
+            role_prompt=_blob_at(root, f".factory/prompts/{role}.md"),
+            agents=_blob_at(root, "AGENTS.md"),
+            spec=_blob_at(root, config.spec_path),
+            plan=plan_blob,
+            audit_objective=audit_objective,
+            task_excerpt=task_excerpt,
+            usage_guard_cookie_file=config.usage_guard_cookie_file,
+            usage_guard_cookie_stdin=config.usage_guard_cookie_stdin,
+            usage_guard_settings_url=config.usage_guard_settings_url,
+            usage_guard_poll_interval=config.usage_guard_poll_interval,
+            usage_guard_max_wait=config.usage_guard_max_wait,
+            usage_guard_max_polls=config.usage_guard_max_polls,
+            _confinement_proof=_confinement_proof,
+            _confinement_spec=_confinement_spec,
+            _sanitized_home=_sanitized_home,
+        )
+    except launch_module.InvocationError as exc:
+        # Task 9 review B2: every refused launch — unbound or missing bytes,
+        # an unknown provider, a guard/quota refusal, an unavailable
+        # confinement, or a malformed invocation binding — is a clean
+        # fail-closed campaign outcome (CampaignPhaseError), never an
+        # unhandled InvocationError traceback.
+        raise CampaignPhaseError(f"launch refused for {role}: {exc}") from exc
+    supervisor = launch_module.LaunchSupervision(binding)
+    try:
+        result = supervisor.run(authority)
+    except launch_module.InvocationError as exc:
+        # A bounded supervision fail-closed (invariant, reap, or interrupted
+        # group) is a clean campaign fail-closed error, never a traceback.
+        raise CampaignPhaseError(
+            f"supervision fail-closed for {role}: {exc}"
+        ) from exc
+    if result.outcome == "terminated":
+        return RoleOutcome(
+            role, result.returncode, interrupted=True, signal=result.signal
+        )
+    return RoleOutcome(role, result.returncode or 0, interrupted=False)
+
+
+# ---------------------------------------------------------------------------
+# Phase steps
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Step:
+    """One trusted phase-step result."""
+
+    record: PhaseRecord
+    state: Optional[state_module.FactoryState] = None
+    terminal: Optional[str] = None
+    retry: bool = False
+
+
+class Campaign:
+    """The trusted phase/campaign orchestrator (one writer, serialized).
+
+    ``run()`` acquires the exclusive root-descriptor lock with the mandatory
+    identity/branch/spec/plan bindings and drives the §11 state machine to a
+    §14 terminal.  Every Git operation goes through :class:`TrustedGit`
+    behind the lock; every untrusted phase is guarded by the before/after
+    state-digest ledger; every transition is written through the established
+    no-follow control-state authority.  ``role_runner`` is the phase driver
+    seam (the embedded fixture driver when ``config.role_driver`` is set,
+    otherwise the real launch authority).
+    """
+
+    def __init__(
+        self,
+        config: CampaignConfig,
+        *,
+        role_runner: Optional[object] = None,
+    ) -> None:
+        config.validate()
+        self._config = config
+        self._root = Path(config.root).absolute()
+        self._lock: Optional[lock_module.RootLock] = None
+        self._git: Optional[TrustedGit] = None
+        self._role_runner = role_runner
+        self._planning_attempts_used = 0
+        self._rounds_completed = 0
+
+    # -- acquisition ------------------------------------------------------------
+
+    def _acquire(self) -> None:
+        spec = lock_module.SpecBinding(
+            self._config.spec_path, self._config.spec_commit, self._config.spec_blob
+        )
+        spec.validate()
+        head = _live_head(self._root)
+        plan = lock_module.PlanBinding(
+            self._config.plan_path,
+            head,
+            plan_sha256(_blob_at(self._root, self._config.plan_path)),
+        )
+        plan.validate()
+        self._lock = lock_module.RootLock(
+            self._root,
+            expected_identity=state_module.repository_identity(self._root),
+            expected_branch=self._config.branch,
+            spec=spec,
+            plan=plan,
+        )
+        self._git = TrustedGit(self._lock, self._config.plan_path)
+
+    # -- control-state recovery (Git + plan + state) -----------------------------
+
+    def _state_file_exists(self) -> bool:
+        return (self._root / ".factory-state" / state_module.STATE_FILE_NAME).exists()
+
+    def _load_or_init_state(self):
+        """Load or initialize the control state; return ``(state, recovered)``.
+
+        ``recovered`` is the phase-history record of a trusted transition
+        that was reconciled from Git after a crash (a committed plan or task
+        completion whose state write was lost); the campaign records it in
+        the phase history exactly like a live phase step.  ``None`` when no
+        recovery occurred.
+        """
+        state_module.recover_state(self._root)
+        if self._state_file_exists():
+            state = state_module.load_state(
+                self._root,
+                expected_branch=self._config.branch,
+                expected_campaign_id=self._config.campaign_id,
+                expected_rounds_requested=self._config.rounds_requested,
+                expected_specification_digest=self._config.specification_digest,
+                expected_audit_objectives_digest=self._config.audit_objectives_digest,
+                expected_role_prompt_digests=dict(self._config.role_prompt_digests),
+            )
+            return self._reconcile_head(state)
+        state = state_module.init_state(
+            self._root,
+            campaign_id=self._config.campaign_id,
+            rounds_requested=self._config.rounds_requested,
+            specification_digest=self._config.specification_digest,
+            plan_digest=self._config.plan_digest,
+            role_prompt_digests=dict(self._config.role_prompt_digests),
+            audit_objectives_digest=self._config.audit_objectives_digest,
+            phase_base_commit=self._config.phase_base_commit,
+            branch=self._config.branch,
+        )
+        return state, None
+
+    def _reconcile_head(self, state: state_module.FactoryState):
+        """Recover from a crash between a trusted commit and the state write.
+
+        Returns ``(state, recovered_phase_record_or_None)``.  A terminal
+        control state is returned untouched: it accepts no transition and the
+        run loop refuses to re-run it (an operator resolution, never a
+        re-execution).  Otherwise the state file is authoritative for
+        bindings, but a trusted commit
+        that landed before its ``advance`` was written is recovered
+        deterministically from Git + plan + state:
+
+        * ``planning`` with a committed plan blob at HEAD (only the plan path
+          changed since the phase base): bind the new plan digest/base and
+          advance ``planned``;
+        * ``implementation`` with the selected task complete at HEAD's plan
+          and a committed, acceptance-passing change: advance
+          ``task_completed``;
+        * ``implementation`` with committed in-progress work: resume the same
+          task without discarding it.
+
+        Any other Git/state divergence — HEAD behind the base, a foreign
+        commit, an unparsable committed plan, a changed binding, or an
+        ambiguous selected task — fails closed for operator inspection.
+        """
+        git = self._git
+        if state.current_phase in TERMINAL_PHASES:
+            return state, None
+        head = git.head()
+        base = state.phase_base_commit
+        if head == base:
+            return state, None
+        if not git.is_ancestor(base, head):
+            raise CampaignRecoveryError(
+                f"HEAD {head} is not a descendant of the phase base {base}; "
+                "the checkout was rewound or rebased and fails closed"
+            )
+        if state.current_phase == "planning":
+            return self._reconcile_planning(state, base, head)
+        if state.current_phase == "implementation":
+            return self._reconcile_implementation(state, base, head)
+        raise CampaignRecoveryError(
+            f"HEAD {head} advanced past the phase base {base} during the "
+            f"{state.current_phase!r} phase with no recorded transition"
+        )
+
+    def _reconcile_planning(
+        self, state: state_module.FactoryState, base: str, head: str
+    ) -> state_module.FactoryState:
+        git = self._git
+        changed = git.diff_paths(base)
+        if changed != [self._config.plan_path]:
+            raise CampaignRecoveryError(
+                f"HEAD {head} advanced past the planning base {base} with a "
+                f"non-plan commit scope {changed}"
+            )
+        plan_data = git.blob_at(head, self._config.plan_path)
+        # The plan binding is the committed plan at the phase base (the same
+        # anchor ``_step_planning`` validates the worktree against); the
+        # recovered plan must keep that spec/base binding exactly.
+        base_plan = git.plan_at(base)
+        valid, reason = validate_plan_worktree(
+            plan_data,
+            spec_path=self._config.spec_path,
+            spec_commit=self._config.spec_commit,
+            spec_blob=self._config.spec_blob,
+            base_commit=base_plan.base_commit,
+        )
+        if not valid:
+            raise CampaignRecoveryError(
+                f"the recovered committed plan at {head} is invalid: {reason}"
+            )
+        self._planning_attempts_used = 0
+        state2 = state_module.advance(
+            state, "planned",
+            plan_digest=plan_sha256(plan_data),
+            phase_base_commit=head,
+        )
+        return state2, self._record(state, 1, "planned", "")
+
+    def _reconcile_implementation(
+        self, state: state_module.FactoryState, base: str, head: str
+    ) -> state_module.FactoryState:
+        git = self._git
+        task_id = state.selected_task_id
+        if task_id is None:
+            raise CampaignRecoveryError(
+                "HEAD advanced during implementation but no task was selected"
+            )
+        try:
+            plan = plan_parser.Plan.from_bytes(git.blob_at(head, self._config.plan_path))
+        except plan_parser.PlanError as exc:
+            raise CampaignRecoveryError(
+                f"the committed plan at {head} does not parse: {exc}"
+            ) from exc
+        # Task 9 review M2: the committed plan must keep the authoritative
+        # plan base anchored at the state's phase base — a plan whose front
+        # matter base drifted (stale) fails closed before any completion
+        # claim is accepted.
+        if plan.base_commit != self._authoritative_plan_base(state):
+            raise CampaignRecoveryError(
+                f"the committed plan at {head} is stale: its base_commit "
+                f"{plan.base_commit!r} differs from the authoritative plan "
+                f"base at the state phase base"
+            )
+        task = next((t for t in plan.tasks if t.number == task_id), None)
+        if task is None:
+            raise CampaignRecoveryError(
+                f"the selected task {task_id} is absent from the committed plan"
+            )
+        changed = git.diff_paths(base)
+        violation = scope_violation(
+            changed, phase="implementation",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+        )
+        if violation:
+            raise CampaignRecoveryError(
+                f"the committed implementation scope is invalid: {violation}"
+            )
+        if task.status == "complete":
+            ok, detail = self._acceptance_gate(task_id, plan)
+            if not ok:
+                raise CampaignRecoveryError(
+                    f"the committed completion of task {task_id} does not pass "
+                    f"its acceptance gate: {detail}"
+                )
+            state2 = state_module.advance(state, "task_completed")
+            return state2, self._record(state, 1, "task_completed", "")
+        if task.status == "in_progress" and changed:
+            return state, None
+        raise CampaignRecoveryError(
+            f"HEAD advanced during implementation of task {task_id} with status "
+            f"{task.status!r} and a non-progress scope"
+        )
+
+    # -- before/after untrusted-phase digest ledger ------------------------------
+
+    def _phase_tag(self, state: state_module.FactoryState, seq: int) -> str:
+        # The attempt sequence resets to 1 whenever the selector moves to a
+        # new task within the same implementation phase; the tag therefore
+        # anchors the selected task so two tasks can never reuse the same
+        # before/after digest-ledger tag.
+        task = (
+            f".t{state.selected_task_id}"
+            if state.selected_task_id is not None
+            else ""
+        )
+        return (
+            f"r{state.current_round}.{state.current_phase}{task}."
+            f"{state.phase_started_at_monotonic}.a{seq}"
+        )
+
+    def _begin_untrusted(self, state: state_module.FactoryState, seq: int) -> str:
+        tag = self._phase_tag(state, seq)
+        try:
+            state_module.verify_phase_digest(self._root, tag)
+        except state_module.StateDigestError as exc:
+            if "no recorded digest" in str(exc):
+                state_module.record_phase_digest(self._root, tag)
+                return tag
+            raise
+        return tag
+
+    def _end_untrusted(self, tag: str) -> None:
+        state_module.verify_phase_digest(self._root, tag)
+
+    # -- role execution -----------------------------------------------------------
+
+    def _run_role(
+        self,
+        role: str,
+        state: state_module.FactoryState,
+        head: str,
+        *,
+        task_id: Optional[int] = None,
+        attempt: int = 1,
+    ) -> RoleOutcome:
+        if self._role_runner is not None:
+            return self._role_runner(role, state, head, task_id, attempt)
+        if self._config.role_driver:
+            return self._run_driver(role, state, head, task_id=task_id, attempt=attempt)
+        return launch_role_attempt(
+            self._config,
+            role=role,
+            head=head,
+            task_id=task_id,
+            round_number=state.current_round,
+        )
+
+    def _run_driver(
+        self, role, state, head, *, task_id, attempt
+    ) -> RoleOutcome:
+        config = self._config
+        driver_rel = config.role_driver
+        committed = self._git.blob_at(head, driver_rel)
+        worktree = _bounded_read(self._root, driver_rel, "role driver", MAX_RESULT_FILE * 4)
+        if plan_sha256(worktree) != plan_sha256(committed):
+            raise CampaignBindingError(
+                f"the role driver {driver_rel!r} is not the exact committed "
+                "blob at the bound commit"
+            )
+        env = dict(os.environ)
+        env[CAMPAIGN_ENV_PREFIX + "ROOT"] = str(self._root)
+        env[CAMPAIGN_ENV_PREFIX + "PLAN"] = config.plan_path
+        env[CAMPAIGN_ENV_PREFIX + "ROLE"] = role
+        env[CAMPAIGN_ENV_PREFIX + "ROUND"] = str(state.current_round)
+        env[CAMPAIGN_ENV_PREFIX + "ATTEMPT"] = str(attempt)
+        env[CAMPAIGN_ENV_PREFIX + "TASK_ID"] = str(task_id) if task_id is not None else ""
+        env[CAMPAIGN_ENV_PREFIX + "BOUND_COMMIT"] = head
+        env[CAMPAIGN_ENV_PREFIX + "SCENARIO"] = config.scenario_path
+        # The structured-result handoff is role-specific: the tester may only
+        # write the verification result path and the auditor only the audit
+        # result path; the other roles carry no result channel at all.
+        env[CAMPAIGN_ENV_PREFIX + "RESULT_FILE"] = (
+            config.phase_result_path
+            if role == "tester"
+            else config.audit_result_path if role == "auditor" else ""
+        )
+        try:
+            result = self._lock.spawn_child(
+                [str(self._root / driver_rel), role],
+                env=env,
+                timeout=config.role_timeout,
+            )
+        except lock_module.RootLockTimeoutError:
+            return RoleOutcome(role, -1, interrupted=True, signal="SIGTERM")
+        except lock_module.RootLockUnsafeError as exc:
+            raise CampaignPhaseError(f"unsafe role boundary: {exc}") from exc
+        except lock_module.EscapedDescendantError as exc:
+            raise CampaignPhaseError(f"escaped descendant during {role}: {exc}") from exc
+        if result.returncode < 0:
+            return RoleOutcome(
+                role, result.returncode, interrupted=True,
+                signal=f"SIG{-result.returncode}",
+            )
+        return RoleOutcome(role, result.returncode)
+
+    # -- deterministic gates -------------------------------------------------------
+
+    def _authoritative_plan_base(
+        self, state: state_module.FactoryState
+    ) -> str:
+        """The authoritative plan front-matter base for the current phase.
+
+        The plan front-matter ``base_commit`` never changes during a
+        campaign; its authoritative anchor is the committed plan at the
+        state's ``phase_base_commit`` (the commit the current phase started
+        from, which predates every later role commit of the phase).  The
+        implementation selector and the implementation recovery validate the
+        current plan against this anchor, so a stale plan whose front matter
+        drifted is rejected deterministically (Task 9 review M2).
+        """
+        try:
+            return self._git.plan_at(state.phase_base_commit).base_commit
+        except CampaignGitError as exc:
+            raise CampaignRecoveryError(
+                f"the committed plan at the state phase base "
+                f"{state.phase_base_commit} cannot be resolved: {exc}"
+            ) from exc
+
+    def _acceptance_gate(
+        self, task_id: int, plan: plan_parser.Plan
+    ) -> Tuple[bool, str]:
+        """Deterministic acceptance gate for the selected task.
+
+        A configured ``acceptance_command`` is executed behind the lock
+        (bounded, new session); its exit status is the gate.  The default
+        gate verifies that every ``- Verification:`` line of the **exact
+        newly validated plan** (the worktree plan the orchestrator is about
+        to commit, or the freshly committed plan at HEAD in the recovery/
+        resume paths) that names a repository-relative path exists in the
+        worktree — a deterministic, machine-checkable completion check.  The
+        gate never reads the stale plan of the pre-commit head (Task 9
+        review M1).
+
+        Task 9 review L2: a verification reference must be a safe
+        repository-relative path — an absolute path, an empty/dot-segment
+        path, a ``..`` traversal, or any other path that would resolve
+        outside the repository fails closed instead of being probed.
+        """
+        config = self._config
+        if config.acceptance_command:
+            try:
+                result = self._lock.spawn_child(
+                    list(config.acceptance_command),
+                    env=dict(os.environ),
+                    timeout=config.gate_timeout,
+                )
+            except lock_module.RootLockTimeoutError:
+                return False, "acceptance gate timed out"
+            if result.returncode == 0:
+                return True, "acceptance gate passed"
+            return False, "acceptance gate failed"
+        task = next((t for t in plan.tasks if t.number == task_id), None)
+        if task is None:
+            return False, f"task {task_id} is absent from the validated plan"
+        verification = task.fields.get("Verification", "")
+        missing: List[str] = []
+        unsafe: List[str] = []
+        for line in verification.splitlines():
+            token = line.strip().strip("`")
+            if not token:
+                # An empty line contributes no reference and is skipped.
+                continue
+            if any(ch in token for ch in " \t"):
+                # Task 9 review LOW: a verification reference containing
+                # whitespace cannot name one unambiguous repository-relative
+                # path — reject it as unsafe instead of silently skipping it.
+                unsafe.append(token)
+                continue
+            unsafe_path, reason = _unsafe_repo_relative(token)
+            if unsafe_path:
+                unsafe.append(unsafe_path)
+                continue
+            if not (self._root / token).exists():
+                missing.append(token)
+        if unsafe:
+            return False, (
+                "unsafe verification reference(s) must be single-token "
+                "repository-relative regular paths: "
+                f"{', '.join(sorted(unsafe))}"
+            )
+        if missing:
+            return False, f"missing verification references: {', '.join(missing)}"
+        return True, "all verification references exist"
+
+    def _run_gate(self, command: Sequence[str], label: str) -> Tuple[bool, int, str]:
+        if not command:
+            return False, 0, ""
+        try:
+            result = self._lock.spawn_child(
+                list(command), env=dict(os.environ), timeout=self._config.gate_timeout
+            )
+        except lock_module.RootLockTimeoutError:
+            return True, -1, f"{label} gate timed out"
+        return True, result.returncode, (result.stdout or "")[:4000]
+
+    def _preservable_dirty_paths(self) -> List[str]:
+        """Dirty paths that are preserved product work.
+
+        The developer's plan path is the regenerable harness document the
+        planner re-derives every round; an unparsable/unbound plan is never
+        committed product work and never forces a dirty interruption.  Every
+        other dirty path (product code, tests, evidence, a scope violation)
+        is preservable work that stays untouched and interrupts on budget
+        exhaustion.
+        """
+        return [
+            path
+            for path in self._git.role_dirty_paths()
+            if path != self._config.plan_path
+        ]
+
+    def _restore_plan_worktree(self) -> None:
+        """Restore the regenerable plan path to the committed HEAD.
+
+        Called only when the budget exhausted cleanly with an unparsable or
+        unbound developer plan and no preservable work: the invalid plan is
+        never committed, the next verification/audit is read-only and must
+        see the last coherent committed plan, and the planner re-derives the
+        plan in a later round.
+        """
+        self._git.restore([self._config.plan_path])
+
+    # -- records -------------------------------------------------------------------
+
+    def _record(
+        self, state: state_module.FactoryState, attempt: int, outcome: str, detail: str
+    ) -> PhaseRecord:
+        head = self._git.head() if self._git is not None else "0" * 40
+        try:
+            digest = plan_sha256(self._git.blob_at(head, self._config.plan_path))
+        except CampaignGitError:
+            digest = "0" * 64
+        return PhaseRecord(
+            round=state.current_round,
+            phase=state.current_phase,
+            attempt=attempt,
+            outcome=outcome,
+            head_commit=head,
+            plan_digest=digest,
+            detail=detail,
+        )
+
+    # -- phase steps ----------------------------------------------------------------
+
+    def _step(self, state: state_module.FactoryState):
+        phase = state.current_phase
+        if phase == "planning":
+            return self._step_planning(state)
+        if phase == "implementation":
+            return self._step_implementation(state)
+        if phase == "verification":
+            return self._step_verification(state)
+        if phase == "audit":
+            return self._step_audit(state)
+        raise CampaignPhaseError(f"unknown live phase {phase!r}")
+
+    def _step_planning(self, state: state_module.FactoryState) -> _Step:
+        seq = self._planning_attempts_used
+        tag = self._begin_untrusted(state, seq)
+        head = self._git.head()
+        attempt = seq + 1
+        role = self._run_role("planner", state, head, attempt=attempt)
+        plan_worktree = _bounded_read(self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX)
+        plan_committed = self._git.blob_at(head, self._config.plan_path)
+        plan_changed = plan_worktree != plan_committed
+        try:
+            committed_plan = plan_parser.Plan.from_bytes(plan_committed)
+            base_commit = committed_plan.base_commit
+        except plan_parser.PlanError as exc:
+            raise CampaignGitError(
+                f"the committed plan at {head} does not parse: {exc}"
+            ) from exc
+        valid, reason = validate_plan_worktree(
+            plan_worktree,
+            spec_path=self._config.spec_path,
+            spec_commit=self._config.spec_commit,
+            spec_blob=self._config.spec_blob,
+            base_commit=base_commit,
+        )
+        dirty = self._git.role_dirty_paths()
+        violation = scope_violation(
+            dirty, phase="planning",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+        )
+        outcome = classify_planning(
+            role=role, plan_changed=plan_changed,
+            plan_valid=valid, scope_ok=violation is None,
+        )
+        self._end_untrusted(tag)
+        if outcome == "planned":
+            new_head = self._git.commit(
+                [self._config.plan_path],
+                f"factory-campaign: planning round {state.current_round}",
+            )
+            plan_digest = plan_sha256(self._git.blob_at(new_head, self._config.plan_path))
+            state2 = state_module.advance(
+                state, "planned",
+                plan_digest=plan_digest,
+                phase_base_commit=new_head,
+            )
+            state_module.write_state(self._root, state2)
+            self._planning_attempts_used = 0
+            return _Step(self._record(state, attempt, "planned", ""), state=state2)
+        detail = reason or (
+            f"planner exit={role.exit_status}"
+            + (" (interrupted)" if role.interrupted else "")
+            + (f" scope={violation}" if violation else "")
+        )
+        if outcome == "interrupted":
+            if attempt < self._config.planning_attempts:
+                state2 = state_module.record_retry(state, "interrupted")
+                state_module.write_state(self._root, state2)
+                self._planning_attempts_used = attempt
+                return _Step(self._record(state, attempt, "interrupted", detail),
+                             state=state2, retry=True)
+            state2 = state_module.advance(state, "interrupted")
+            state_module.write_state(self._root, state2)
+            return _Step(self._record(state, attempt, "interrupted", detail), state=state2)
+        if attempt >= self._config.planning_attempts:
+            state2 = state_module.advance(state, "failed")
+            state_module.write_state(self._root, state2)
+            return _Step(self._record(state, attempt, "failed", detail), state=state2)
+        self._planning_attempts_used = attempt
+        return _Step(self._record(state, attempt, "failed", detail), retry=True)
+
+    def _step_implementation(self, state: state_module.FactoryState) -> _Step:
+        head = self._git.head()
+        plan = self._git.plan_at(head)
+        # Task 9 review M2: the selector is bound to the authoritative plan
+        # base anchored at the state's phase base (never the plan's own
+        # self-declared base), so a stale committed plan fails closed before
+        # any task is selected.
+        try:
+            selection = selector_module.select_task(
+                plan, bound_base_commit=self._authoritative_plan_base(state)
+            )
+        except selector_module.SelectorError as exc:
+            raise CampaignRecoveryError(
+                f"the committed plan at HEAD is stale or ambiguous: {exc}"
+            ) from exc
+        if not selection.selected:
+            outcome = (
+                "work_exhausted" if selection.classification == "work_exhausted"
+                else "blocked"
+            )
+            state2 = state_module.advance(state, outcome)
+            state_module.write_state(self._root, state2)
+            return _Step(self._record(state, 1, outcome, ""), state=state2)
+        task_id = selection.task_id
+        # ``begin_attempt`` increments the attempt counter for a retry of the
+        # same task and resets it on a trusted task transition (§11); the
+        # attempt sequence is therefore monotonic and durable.
+        state = state_module.begin_attempt(state, task_id)
+        state_module.write_state(self._root, state)
+        attempt = state.attempt_number
+        seq = attempt
+        tag = self._begin_untrusted(state, seq)
+        # Resume path: a crashed attempt left dirty work.  Commit coherent
+        # work as a progress checkpoint (preserving it) before launching;
+        # incoherent work (unparsable plan, foreign scope) is a deterministic
+        # task failure and stays dirty.
+        dirty = self._git.role_dirty_paths()
+        if dirty:
+            plan_worktree = _bounded_read(
+                self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX
+            )
+            valid, reason = validate_plan_worktree(
+                plan_worktree,
+                spec_path=self._config.spec_path,
+                spec_commit=self._config.spec_commit,
+                spec_blob=self._config.spec_blob,
+                base_commit=plan.base_commit,
+            )
+            violation = scope_violation(
+                dirty, phase="implementation",
+                plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            )
+            if valid and violation is None:
+                work_plan = plan_parser.Plan.from_bytes(plan_worktree)
+                resumed_task = next(
+                    (t for t in work_plan.tasks if t.number == task_id), None
+                )
+                # A crashed attempt may have left the selected task already
+                # complete in the dirty work.  The resume commit is then the
+                # task's coherent completion commit (never discarded, §17);
+                # otherwise it is an in-progress checkpoint and the fresh
+                # role attempt continues the work.
+                resumed_complete = bool(
+                    resumed_task is not None
+                    and resumed_task.status == "complete"
+                )
+                head = self._git.commit(
+                    [path for path in dirty if not scope_violation(
+                        [path], phase="implementation",
+                        plan_path=self._config.plan_path,
+                        spec_path=self._config.spec_path,
+                    )],
+                    (
+                        f"factory-campaign: task {task_id} complete"
+                        if resumed_complete
+                        else f"factory-campaign: resume task {task_id} progress"
+                    ),
+                )
+                plan = self._git.plan_at(head)
+                if resumed_complete:
+                    acceptance_pass, acceptance_detail = self._acceptance_gate(
+                        task_id, plan
+                    )
+                    self._end_untrusted(tag)
+                    if acceptance_pass:
+                        state2 = state_module.advance(state, "task_completed")
+                        state_module.write_state(self._root, state2)
+                        return _Step(
+                            self._record(state, attempt, "task_completed", ""),
+                            state=state2,
+                        )
+                    return self._implementation_outcome(
+                        state, attempt, "task_failed",
+                        detail=acceptance_detail
+                        or "resumed completion failed its acceptance gate",
+                        dirty_work=False,
+                    )
+            else:
+                self._end_untrusted(tag)
+                return self._implementation_outcome(
+                    state, attempt, "task_failed",
+                    detail=reason or violation or "unrecoverable dirty work",
+                    dirty_work=bool(self._preservable_dirty_paths()),
+                )
+        head = self._git.head()
+        role = self._run_role(
+            "developer", state, head, task_id=task_id, attempt=attempt
+        )
+        plan_worktree = _bounded_read(
+            self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX
+        )
+        valid, reason = validate_plan_worktree(
+            plan_worktree,
+            spec_path=self._config.spec_path,
+            spec_commit=self._config.spec_commit,
+            spec_blob=self._config.spec_blob,
+            base_commit=plan.base_commit,
+        )
+        dirty = self._git.role_dirty_paths()
+        violation = scope_violation(
+            dirty, phase="implementation",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+        )
+        scope_ok = violation is None
+        had_changes = bool(dirty)
+        task_complete = False
+        if valid:
+            work_plan = plan_parser.Plan.from_bytes(plan_worktree)
+            task = next((t for t in work_plan.tasks if t.number == task_id), None)
+            task_complete = bool(task is not None and task.status == "complete")
+        acceptance_pass = False
+        if task_complete:
+            # M1: the gate validates the exact newly validated worktree plan
+            # that is about to be committed, never the stale pre-commit head.
+            acceptance_pass, _ = self._acceptance_gate(task_id, work_plan)
+        outcome = classify_implementation(
+            role=role,
+            plan_valid=valid,
+            task_complete=task_complete,
+            acceptance_pass=acceptance_pass,
+            had_changes=had_changes,
+            scope_ok=scope_ok,
+        )
+        self._end_untrusted(tag)
+        if outcome == "task_completed":
+            allowed = [
+                path for path in dirty
+                if not scope_violation(
+                    [path], phase="implementation",
+                    plan_path=self._config.plan_path,
+                    spec_path=self._config.spec_path,
+                )
+            ]
+            new_head = self._git.commit(
+                allowed, f"factory-campaign: task {task_id} complete"
+            )
+            state2 = state_module.advance(state, "task_completed")
+            state_module.write_state(self._root, state2)
+            return _Step(self._record(state, attempt, "task_completed", ""), state=state2)
+        if outcome == "task_progress":
+            allowed = [
+                path for path in dirty
+                if not scope_violation(
+                    [path], phase="implementation",
+                    plan_path=self._config.plan_path,
+                    spec_path=self._config.spec_path,
+                )
+            ]
+            if allowed:
+                self._git.commit(
+                    allowed, f"factory-campaign: progress task {task_id}"
+                )
+            return self._implementation_outcome(
+                state, attempt, "task_progress", "", dirty_work=False
+            )
+        return self._implementation_outcome(
+            state, attempt, outcome,
+            reason or f"developer exit={role.exit_status}",
+            dirty_work=bool(self._preservable_dirty_paths()),
+        )
+
+    def _implementation_outcome(
+        self,
+        state: state_module.FactoryState,
+        attempt: int,
+        outcome: str,
+        detail: str,
+        *,
+        dirty_work: bool,
+    ) -> _Step:
+        budget_exhausted = attempt >= self._config.implementation_attempts
+        if outcome == "interrupted":
+            if budget_exhausted:
+                state2 = state_module.advance(state, "interrupted")
+                state_module.write_state(self._root, state2)
+                return _Step(
+                    self._record(state, attempt, "interrupted", detail), state=state2
+                )
+            state2 = state_module.record_retry(state, "interrupted")
+            state_module.write_state(self._root, state2)
+            return _Step(
+                self._record(state, attempt, "interrupted", detail),
+                state=state2, retry=True,
+            )
+        # task_failed / task_progress
+        if budget_exhausted:
+            if dirty_work or self._preservable_dirty_paths():
+                # §13.2: budget expiry with dirty work terminates interrupted
+                # (dirty work preserved); verification does not run.
+                state2 = state_module.advance(state, "interrupted")
+                state_module.write_state(self._root, state2)
+                return _Step(
+                    self._record(state, attempt, "interrupted", detail), state=state2
+                )
+            # Clean deterministic exhaustion: record a finding and proceed to
+            # verification at the last coherent committed state.  A broken
+            # (unparsable/unbound) plan left in the worktree is regenerable
+            # harness state, never preserved product work; restore it so the
+            # read-only verification/audit phases see the committed plan.
+            if self._git.role_dirty_paths():
+                self._restore_plan_worktree()
+            state2 = state_module.advance(state, "task_failed")
+            state_module.write_state(self._root, state2)
+            return _Step(
+                self._record(state, attempt, "task_failed", detail), state=state2
+            )
+        state2 = state_module.record_retry(state, outcome)
+        state_module.write_state(self._root, state2)
+        return _Step(
+            self._record(state, attempt, outcome, detail),
+            state=state2, retry=True,
+        )
+
+    def _step_verification(self, state: state_module.FactoryState) -> _Step:
+        tag = self._begin_untrusted(state, 1)
+        head = self._git.head()
+        role = self._run_role("tester", state, head, attempt=1)
+        dirty = self._git.role_dirty_paths()
+        allow_paths = [self._config.phase_result_path] if self._config.phase_result_path else []
+        violation = scope_violation(
+            dirty, phase="verification",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            allow_paths=allow_paths,
+        )
+        gate_ran, gate_exit, gate_detail = self._run_gate(
+            self._config.verification_command, "verification"
+        )
+        result_data = read_phase_result(
+            self._root, self._config.phase_result_path, "verification"
+        )
+        result_valid = bool(result_data is not None)
+        result_outcome = result_data.get("outcome") if result_data else None
+        blocked_refs = (
+            list(result_data.get("blocked_on", [])) if result_data else []
+        )
+        capability_ran, capability_exit, _ = self._run_gate(
+            self._config.capability_command, "capability"
+        )
+        capability_available = True
+        if capability_ran:
+            capability_available = capability_exit == 0
+        outcome = classify_verification(
+            role=role,
+            scope_ok=violation is None,
+            gate_ran=gate_ran,
+            gate_exit=gate_exit,
+            tester_result_valid=result_valid,
+            tester_result_outcome=result_outcome,
+            blocked_refs=blocked_refs,
+            capability_available=capability_available,
+        )
+        self._end_untrusted(tag)
+        detail = violation or gate_detail or ""
+        state2 = state_module.advance(state, outcome)
+        state_module.write_state(self._root, state2)
+        return _Step(self._record(state, 1, outcome, detail), state=state2)
+
+    def _step_audit(self, state: state_module.FactoryState) -> _Step:
+        tag = self._begin_untrusted(state, 1)
+        head = self._git.head()
+        role = self._run_role("auditor", state, head, attempt=1)
+        dirty = self._git.role_dirty_paths()
+        allow_paths = [self._config.audit_result_path] if self._config.audit_result_path else []
+        violation = scope_violation(
+            dirty, phase="audit",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            allow_paths=allow_paths,
+        )
+        result_data = read_phase_result(
+            self._root, self._config.audit_result_path, "audit"
+        )
+        result_valid = bool(result_data is not None)
+        outcome = classify_audit(
+            role=role,
+            scope_ok=violation is None,
+            result_valid=result_valid,
+            outcome=result_data.get("outcome") if result_data else None,
+            findings=list(result_data.get("findings", [])) if result_data else [],
+            blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
+        )
+        self._end_untrusted(tag)
+        if outcome in ("interrupted", "infrastructure_failure"):
+            # Task 9 review B1: an interrupted audit and an untrusted audit
+            # are terminal fail-closed closes with no nonfinal edge; the
+            # outcome is persisted in the authoritative control state
+            # through the dedicated §11 terminal edge so a later run refuses
+            # to re-execute it (the round never advances).
+            state2 = state_module.advance(state, outcome)
+            state_module.write_state(self._root, state2)
+            return _Step(
+                self._record(state, 1, outcome, violation or "audit untrusted"),
+                state=state2, terminal=outcome,
+            )
+        state2 = state_module.advance(state, outcome)
+        state_module.write_state(self._root, state2)
+        if state2.current_phase == "planning":
+            self._rounds_completed = state2.current_round - 1
+            self._planning_attempts_used = 0
+        elif state2.current_phase in TERMINAL_PHASES:
+            # The final round completed: its audit ended the campaign, so the
+            # completed-round counter reaches the current round.
+            self._rounds_completed = state2.current_round
+        return _Step(self._record(state, 1, outcome, ""), state=state2)
+
+    # -- campaign loop ---------------------------------------------------------
+
+    def run(self) -> CampaignResult:
+        self._acquire()
+        try:
+            state, recovered = self._load_or_init_state()
+            if state.current_phase in TERMINAL_PHASES:
+                raise CampaignPhaseError(
+                    "the loaded control state is already terminal; the campaign "
+                    "must be resolved by the operator, not re-run"
+                )
+            history: List[PhaseRecord] = []
+            if recovered is not None:
+                history.append(recovered)
+            terminal_outcome: Optional[str] = None
+            terminal_phase: str = state.current_phase
+            while state.current_phase not in TERMINAL_PHASES:
+                step = self._step(state)
+                history.append(step.record)
+                if step.terminal is not None:
+                    terminal_outcome = step.record.outcome
+                    terminal_phase = step.terminal
+                    break
+                if step.state is not None:
+                    state = step.state
+                    if state.current_phase in TERMINAL_PHASES:
+                        terminal_outcome = step.record.outcome
+                        terminal_phase = state.current_phase
+                        break
+                # A retry keeps the same live phase for the next attempt; an
+                # advanced live phase (planning -> implementation, ...) is the
+                # same trusted state machine.  Both resume the loop.
+                if step.retry or step.state is not None:
+                    continue
+                raise CampaignPhaseError(
+                    f"step outcome {step.record.outcome!r} neither retried "
+                    "nor advanced the campaign"
+                )
+            head = self._git.head()
+            result = CampaignResult(
+                campaign_id=self._config.campaign_id,
+                rounds_requested=self._config.rounds_requested,
+                rounds_completed=self._rounds_completed,
+                terminal_phase=terminal_phase,
+                terminal_outcome=terminal_outcome,
+                head_commit=head,
+                phase_history=tuple(history),
+            )
+            result.validate()
+            validate_campaign_result(result)
+            self._publish_result(result)
+            return result
+        finally:
+            if self._lock is not None:
+                self._lock.release()
+
+    def _publish_result(self, result: CampaignResult) -> None:
+        """Publish the machine result under the ignored evidence namespace."""
+        name = f"campaign-result-{self._config.campaign_id}.json"
+        state_module.atomic_write_json(self._root, name, result.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# Binding derivation (CLI)
+# ---------------------------------------------------------------------------
+
+
+def derive_campaign_config(
+    root: Path,
+    *,
+    campaign_id: str,
+    rounds: int,
+    branch: str,
+    plan_path: str,
+    planning_attempts: int,
+    implementation_attempts: int,
+    provider: str,
+    model: str,
+    backend: str,
+    role_driver: Optional[str],
+    scenario_path: str,
+    acceptance_command: Sequence[str],
+    verification_command: Sequence[str],
+    capability_command: Sequence[str],
+    phase_result_path: str,
+    audit_result_path: str,
+    role_timeout: float,
+    gate_timeout: float,
+) -> CampaignConfig:
+    """Derive every binding from the committed state at the current HEAD.
+
+    The spec path/commit/blob and the cycle base come from the committed
+    canonical plan's front matter; every digest (spec, plan, prompt set, and
+    per-role prompts) is re-derived from the committed blobs at the bound
+    HEAD, never from operator claims.
+    """
+    root = Path(root).absolute()
+    head = _live_head(root)
+    plan_data = _blob_at(root, plan_path)
+    try:
+        plan = plan_parser.Plan.from_bytes(plan_data)
+    except plan_parser.PlanError as exc:
+        raise CampaignConfigError(f"the canonical plan does not parse: {exc}") from exc
+    spec_path = plan.spec_path
+    spec_commit = plan.spec_commit
+    spec_blob = plan.spec_blob
+    spec_data = _blob(root, spec_path)
+    prompt_digests: Dict[str, str] = {}
+    for role in launch_module.ROLES:
+        prompt_digests[role] = plan_sha256(
+            _blob(root, f".factory/prompts/{role}.md")
+        )
+    prompt_set = hashlib.sha256()
+    for role in sorted(launch_module.ROLES):
+        prompt_set.update(role.encode("utf-8"))
+        prompt_set.update(b"\x00")
+        prompt_set.update(_blob(root, f".factory/prompts/{role}.md"))
+        prompt_set.update(b"\x00")
+    audit_digest = plan_sha256(_blob(root, ".factory/audit-objectives/registry.json"))
+    return CampaignConfig(
+        root=root,
+        campaign_id=campaign_id,
+        rounds_requested=rounds,
+        branch=branch,
+        spec_path=spec_path,
+        spec_commit=spec_commit,
+        spec_blob=spec_blob,
+        plan_path=plan_path,
+        phase_base_commit=head,
+        planning_attempts=planning_attempts,
+        implementation_attempts=implementation_attempts,
+        specification_digest=plan_sha256(spec_data),
+        plan_digest=plan_sha256(plan_data),
+        role_prompt_digests=prompt_digests,
+        prompt_set_digest=prompt_set.hexdigest(),
+        audit_objectives_digest=audit_digest,
+        provider=provider,
+        model=model,
+        backend=backend,
+        role_driver=role_driver,
+        scenario_path=scenario_path,
+        acceptance_command=tuple(acceptance_command),
+        verification_command=tuple(verification_command),
+        capability_command=tuple(capability_command),
+        phase_result_path=phase_result_path,
+        audit_result_path=audit_result_path,
+        role_timeout=role_timeout,
+        gate_timeout=gate_timeout,
+    )
+
+
+def _blob(root: Path, relpath: str) -> bytes:
+    return _blob_at(root, relpath)
+
+
+# ---------------------------------------------------------------------------
+# Trusted control-plane CLI
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="factory-campaign",
+        description=(
+            "Trusted phase/campaign orchestrator (FACTORY-LOOP-SPEC §13/§14/§15; "
+            "Task 9). Never invoked by a model role."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        metavar="ROOT",
+        default=str(Path(__file__).resolve().parent.parent.parent),
+        help="canonical repository root (default: this repository)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_run = sub.add_parser("run", help="run the campaign to a §14 terminal")
+    p_run.add_argument("--campaign-id", required=True)
+    p_run.add_argument("--rounds", type=int, required=True)
+    p_run.add_argument("--branch", required=True)
+    p_run.add_argument("--plan-path", default=".factory/artifacts/implementation-plan.md")
+    p_run.add_argument("--planning-attempts", type=int, default=3)
+    p_run.add_argument("--implementation-attempts", type=int, default=3)
+    p_run.add_argument("--provider", default="synthetic")
+    p_run.add_argument("--model", default="fixture-model")
+    p_run.add_argument("--backend", default="")
+    p_run.add_argument("--role-driver", default=None, metavar="RELPATH")
+    p_run.add_argument("--scenario", default=None, metavar="RELPATH")
+    p_run.add_argument("--phase-result", default=None, metavar="RELPATH")
+    p_run.add_argument("--audit-result", default=None, metavar="RELPATH")
+    p_run.add_argument("--acceptance-command", action="append", default=[])
+    p_run.add_argument("--verification-command", action="append", default=[])
+    p_run.add_argument("--capability-command", action="append", default=[])
+    p_run.add_argument("--role-timeout", type=float, default=DEFAULT_ROLE_TIMEOUT)
+    p_run.add_argument("--gate-timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
+
+    p_show = sub.add_parser("show", help="print the current control state and result")
+    p_show.add_argument("--campaign-id", default=None)
+
+    args = parser.parse_args(argv)
+    root = Path(args.root)
+    if args.command == "run":
+        try:
+            config = derive_campaign_config(
+                root,
+                campaign_id=args.campaign_id,
+                rounds=args.rounds,
+                branch=args.branch,
+                plan_path=args.plan_path,
+                planning_attempts=args.planning_attempts,
+                implementation_attempts=args.implementation_attempts,
+                provider=args.provider,
+                model=args.model,
+                backend=args.backend,
+                role_driver=args.role_driver,
+                scenario_path=args.scenario or "",
+                acceptance_command=_flatten(args.acceptance_command),
+                verification_command=_flatten(args.verification_command),
+                capability_command=_flatten(args.capability_command),
+                phase_result_path=args.phase_result or "",
+                audit_result_path=args.audit_result or "",
+                role_timeout=args.role_timeout,
+                gate_timeout=args.gate_timeout,
+            )
+        except (CampaignError, gitutil.GitBoundaryError) as exc:
+            print(f"factory-campaign: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        try:
+            result = Campaign(config).run()
+        except (CampaignError, state_module.StateError, lock_module.RootLockError,
+                gitutil.GitBoundaryError) as exc:
+            print(f"factory-campaign: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
+        return TERMINAL_EXIT_CODES[result.terminal_phase]
+    # show
+    try:
+        state = state_module.load_state(root)
+        print(json.dumps(state.to_dict(), sort_keys=True, separators=(",", ":")))
+    except (state_module.StateError, OSError) as exc:
+        print(f"factory-campaign: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_SUCCESS
+
+
+def _flatten(groups: Sequence[Sequence[str]]) -> List[str]:
+    """Flatten one layer of ``--command`` argument groups.
+
+    ``argparse`` with ``action="append"`` yields a list where each element is
+    one command token (``["/bin/false"]``); a programmatic caller may pass a
+    list of token lists.  Each token is preserved exactly — never split into
+    characters — so a command can never be mangled into per-character argv.
+    """
+    flattened: List[str] = []
+    for group in groups:
+        if isinstance(group, str):
+            flattened.append(group)
+        else:
+            flattened.extend(str(item) for item in group)
+    return flattened
+
+
+if __name__ == "__main__":
+    sys.exit(main())

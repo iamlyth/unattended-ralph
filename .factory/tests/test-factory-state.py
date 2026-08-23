@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,7 @@ STATE_SCRIPT = LOOP / "state.py"
 sys.path.insert(0, str(LOOP))
 import state as state_module  # noqa: E402  (module object for internal race hooks)
 from state import (  # noqa: E402
+    AUDIT_ABORT_TARGETS,
     AUDIT_FINAL_TARGETS,
     BINDING_FIELDS,
     DIGEST_LEDGER_NAME,
@@ -72,6 +74,7 @@ from state import (  # noqa: E402
     atomic_write_json,
     begin_attempt,
     init_state,
+    live_branch,
     load_state,
     owner_tamper_gate,
     parse_state,
@@ -216,6 +219,10 @@ ADVANCE_EDGES = {
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
+    # Task 9 review B1: an interrupted audit and an untrusted audit are
+    # terminal campaign ends with no nonfinal edge; the round never advances.
+    ("audit", "interrupted"): "interrupted",
+    ("audit", "infrastructure_failure"): "infrastructure_failure",
 }
 ALLOWED_ADVANCE_OUTCOMES = {
     "planning": ("planned", "failed", "interrupted"),
@@ -224,7 +231,8 @@ ALLOWED_ADVANCE_OUTCOMES = {
         "interrupted",
     ),
     "verification": ("pass", "findings", "blocked", "infrastructure_failure"),
-    "audit": ("pass", "findings", "blocked"),
+    "audit": ("pass", "findings", "blocked", "interrupted",
+               "infrastructure_failure"),
 }
 
 
@@ -824,7 +832,12 @@ class TransitionTableTest(StateConformanceCase):
                 self.assertEqual(result.last_outcome, terminal)
                 self.assertEqual(result.current_round, 1)
 
-    def test_audit_accepts_only_final_outcomes(self) -> None:
+    def test_audit_accepts_only_final_or_abort_outcomes(self) -> None:
+        # Task 9 review B1: only the two final/abort outcome families close
+        # an audit — ``pass | findings | blocked`` (round-finality resolved)
+        # and the terminal aborts ``interrupted`` / ``infrastructure_failure``
+        # (no nonfinal edge, the round never advances).  Every other trusted
+        # outcome is not an audit edge and fails closed.
         audit = make_state(current_phase="audit", last_outcome="pass")
         for outcome in ("task_completed", "planned", "work_exhausted"):
             with self.subTest(outcome=outcome):
@@ -832,6 +845,36 @@ class TransitionTableTest(StateConformanceCase):
                     StateTransitionError, "no §11 audit transition"
                 ):
                     advance(audit, outcome)
+        for outcome, terminal in AUDIT_ABORT_TARGETS.items():
+            with self.subTest(abort_outcome=outcome):
+                result = advance(audit, outcome, now=MONOTONIC2)
+                self.assertEqual(result.current_phase, terminal)
+                self.assertEqual(result.last_outcome, terminal)
+                # An abort close never advances the round.
+                self.assertEqual(result.current_round, audit.current_round)
+
+    def test_audit_abort_edges_are_documented_and_terminal(self) -> None:
+        # The two audit abort edges are part of the documented advance edge
+        # set, terminal, and never advance a nonfinal round.
+        self.assertEqual(
+            ADVANCE_EDGES[("audit", "interrupted")], "interrupted")
+        self.assertEqual(
+            ADVANCE_EDGES[("audit", "infrastructure_failure")],
+            "infrastructure_failure",
+        )
+        nonfinal = make_state(
+            current_phase="audit", last_outcome="pass", current_round=1,
+            rounds_requested=3,
+        )
+        for outcome in AUDIT_ABORT_TARGETS:
+            result = advance(nonfinal, outcome, now=MONOTONIC2)
+            self.assertIn(result.current_phase, TERMINAL_PHASES)
+            self.assertEqual(result.current_round, 1)
+        # A terminal abort state validates (the persisted form is coherent).
+        for outcome, terminal in AUDIT_ABORT_TARGETS.items():
+            result = advance(nonfinal, outcome, now=MONOTONIC2)
+            parse_state(result.to_dict())
+            self.assertEqual(result.to_dict()["last_outcome"], terminal)
 
     def test_illegal_transitions_are_rejected(self) -> None:
         for phase in ("planning", "implementation", "verification", "audit"):
@@ -1321,6 +1364,37 @@ class SecureIoTamperTest(StateConformanceCase):
         self.assertEqual(
             state.repository_identity, repository_identity(root)
         )
+
+    def test_live_branch_git_call_is_finite_bounded(self) -> None:
+        # Task 9 review MED: the trusted live-branch resolution is finite
+        # bounded — the pinned Git executable may never wait forever.
+        root = self.new_repo()
+        recorded: list = []
+        real_run = state_module._git.git_run
+
+        def recording_run(argv, *, timeout=None, **kwargs):
+            recorded.append(timeout)
+            return real_run(argv, timeout=timeout, **kwargs)
+
+        with mock.patch.object(
+            state_module._git, "git_run", side_effect=recording_run,
+        ):
+            self.assertEqual(live_branch(root), "boilerplate-develop")
+        self.assertEqual(len(recorded), 1)
+        self.assertIsNotNone(recorded[0])
+        self.assertGreater(recorded[0], 0)
+        self.assertLessEqual(recorded[0], state_module._git.GIT_TIMEOUT)
+
+    def test_live_branch_git_boundary_error_is_a_state_error(self) -> None:
+        # The pinned-Git failure (timeout / missing binary / broken pipe) is
+        # routed into the state contract; no bare GitBoundaryError escapes.
+        root = self.new_repo()
+        with mock.patch.object(
+            state_module._git, "git_run",
+            side_effect=state_module._git.GitBoundaryError("pinned Git hung"),
+        ):
+            with self.assertRaisesRegex(StateError, "pinned Git hung"):
+                live_branch(root)
 
 
 class LedgerTest(StateConformanceCase):
@@ -2137,6 +2211,43 @@ class TrustedCliTest(StateConformanceCase):
                           "--role-digest", "planner=zz", "--branch", "x")
         self.assertEqual(result.returncode, 1)
         self.assertIn("--role-digest expects ROLE=64-hex", result.stderr)
+
+    def test_cli_audit_abort_is_terminal_and_refuses_rerun(self) -> None:
+        # Task 9 review B1: an interrupted audit is persisted in the
+        # authoritative control state as a terminal close — the round never
+        # advances and a later transition is refused (the campaign is never
+        # re-executed).
+        root = self.new_repo()
+        self.assertEqual(
+            self.cli(root, "init", "--campaign-id", "cli", "--rounds", "2",
+                     "--base-commit", BASE_COMMIT, "--spec-digest", SHA,
+                     "--plan-digest", PLAN_SHA, "--audit-digest", AUDIT_SHA,
+                     "--role-digest", f"planner={ROLE_SHA}",
+                     "--branch", "boilerplate-develop").returncode, 0)
+        for step in (
+            ("advance", "planned", "--plan-digest", PLAN_SHA,
+             "--base-commit", BASE_COMMIT),
+            ("begin-attempt", "4"),
+            ("advance", "task_completed"),
+            ("advance", "pass"),
+        ):
+            result = self.cli(root, *step)
+            self.assertEqual(result.returncode, 0, f"{step}: {result.stderr}")
+        # Non-final round 1: an interrupted audit is a terminal close; the
+        # round never advances to round 2 and the terminal is persisted.
+        result = self.cli(root, "advance", "interrupted")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = load_state(root)
+        self.assertEqual(state.current_phase, "interrupted")
+        self.assertEqual(state.last_outcome, "interrupted")
+        self.assertEqual(state.current_round, 1)
+        # The persisted terminal accepts no further transition (rerun refused).
+        refused = self.cli(root, "advance", "pass")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("accepts no transition", refused.stderr)
+        show = self.cli(root, "show")
+        self.assertEqual(show.returncode, 0, show.stderr)
+        self.assertIn('"current_phase":"interrupted"', show.stdout)
 
     def test_cli_init_refuses_overwrite(self) -> None:
         root = self.new_repo()
