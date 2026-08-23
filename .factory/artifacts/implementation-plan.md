@@ -371,32 +371,69 @@ completes with evidence.
 
 - Status: pending
 - Dependencies: Task 3, Task 5
-- Scope: Implement `.factory/loop/launch.py`: every role starts in a new
-  fresh process via the existing secure wrapper (`scripts/pi2-secure-exec.py`)
-  in one-shot mode with disabled session resume and memory injection; the
-  invocation binds exact model/provider, static role prompt digest,
-  campaign-bound prompt-set digest, deterministic audit-objective digest,
-  canonical workspace and bound commit, selected task ID with an excerpt whose
-  bytes are re-derived from the committed plan blob and digest-matched (fail
-  closed on substitution/paraphrase), allowed tools, and runtime/inactivity
-  bounds. Supervision maintains a descendant-scoped handle scan (F6): it
-  snapshots and re-enumerates only the role's own live descendants and supplies
-  that captured descendant scope to the Task 5 lock-detector API so descendant
-  accounting is never stale. Supervision delivers TERM, INT, and HUP to the
-  full process group, then reaps with a bounded grace escalating to KILL,
-  guarding the launch snapshot against PID reuse and crash-before-snapshot
-  windows and installing a subreaper so an escaped descendant cannot orphan
-  and is always reaped (F7); escaped children are detected; dirty or
-  interrupted work is preserved and never silently overwritten; the
-  machine-readable exit status is the only completion signal.
-- Acceptance criteria: process invariants (new session, no inherited lock/env,
-  no resume) verified per launch; excerpt digest match/mismatch fixtures pass;
-  signal delivery and reap fixtures pass; the descendant-scoped scan covers
-  exactly the launch snapshot with no stale handles (F6); PID-reuse,
-  crash-before-snapshot, and subreaper fixtures pass and an escaped orphan is
-  always reaped (F7); a crashed attempt leaves its dirty work intact.
-- Verification: `tests/test-factory-launch.py`;
-  `tests/test-factory-supervision.sh`.
+- Scope: Reconcile the Task 6 supervisor review (findings F1-F5): implement
+  `.factory/loop/launch.py` as a hidden control-plane module exposed only via
+  `python -m factory.loop.launch` and, when installed, the external-prefix
+  launcher entry point (no visible bare `scripts/` wrapper); the launch API
+  and result types are exported from the hidden `.factory.loop` package
+  surface. Every role starts in a new fresh process via the existing secure
+  wrapper (`scripts/pi2-secure-exec.py`) in one-shot mode with disabled
+  session resume and memory injection; the invocation binds exact
+  model/provider, static role prompt digest, campaign-bound prompt-set digest,
+  optional audit-objective digest, canonical workspace and bound commit,
+  selected task ID with an excerpt whose bytes are re-derived from the
+  committed spec and plan blobs and digest-matched (fail closed on
+  substitution/paraphrase), allowed tools, and runtime/inactivity bounds. The
+  CLI re-derives every authoritative byte for the backend, spec/plan, role
+  prompt, policy, and wrapper through fd-anchored, nofollow, size-bounded
+  reads of the committed blobs and accepts no operator-claimed or
+  caller-supplied path, blob, digest, or binding (F5). The secure wrapper and
+  model backend run from their exact bound-commit blobs (digest-verified) or
+  an external trusted executable; an operator-claimed or caller-controlled
+  path never qualifies (F2). Every PID is pinned to its `/proc` starttime and
+  parent identity before any group signal, so a reused PID is never signaled
+  or reaped (F4). Any exception, `KeyboardInterrupt`, or signal received after
+  spawn still takes the bounded terminate-then-reap path, so no path can
+  leave a child running (F1). Supervision delivers TERM, INT, and HUP to the
+  full process group (F3), then reaps with a bounded grace escalating to
+  KILL, guarding the launch snapshot against PID reuse and
+  crash-before-snapshot windows and installing a subreaper whose lifetime is
+  scoped to the active attempt, so an escaped descendant cannot orphan and is
+  always reaped (F7); orphan/reap handling is scoped to children spawned
+  after the snapshot and explicitly excludes pre-existing children. The
+  supervisor maintains a descendant-scoped handle scan (F6): it snapshots and
+  re-enumerates only the role's own live descendants and supplies that
+  captured descendant scope to the Task 5 lock-detector API so descendant
+  accounting is never stale; escaped children are detected; dirty or
+  interrupted work is preserved and never silently overwritten. The only
+  completion signal is a machine-readable exit-status whose field set is a
+  fixed result schema (role, model/provider, outcome, returncode, signal,
+  reason, terminated-by signals, bounded per-stream digest/tail, snapshot
+  counts). Output content redaction of child/tool output is assigned to
+  Task 11, and HOME/XDG/filesystem confinement is assigned to Tasks 8/11;
+  Task 6 retains its own parent-secret boundary (no credentials, cookies, or
+  legacy lock tokens in child argv/environment, no inherited descriptors).
+- Acceptance criteria: the CLI is reachable only via `python -m
+  factory.loop.launch` or the external-prefix launcher, and no visible bare
+  script exposes it; the CLI re-derives every authoritative byte from bound
+  blobs with nofollow bounded fd-anchored reads and rejects any
+  operator-claimed override (F5); wrapper/backend run only from the bound
+  commit or an external trusted executable (F2); starttime identity is pinned
+  before any group signal so a reused PID is never signaled or reaped (F4); a
+  synthetic exception/`KeyboardInterrupt`/signal raised after spawn still
+  bounded-terminates and reaps with no survivor (F1); TERM/INT/HUP reach the
+  full group and escalate to KILL within a bound (F3); process invariants
+  (new session, no inherited lock/env, no resume) are verified per launch;
+  excerpt digest match/mismatch fixtures pass; the descendant-scoped scan
+  covers exactly the launch snapshot with no stale handles and excludes
+  pre-existing children (F6); PID-reuse, crash-before-snapshot, and subreaper
+  fixtures pass and an escaped orphan is reaped within the bounded subreaper
+  lifetime (F7); the machine-result schema is validated; the launch and
+  result exports appear on the hidden package surface; a crashed attempt
+  leaves its dirty work intact.
+- Verification: `.factory/tests/test-factory-launch.py`;
+  `.factory/tests/test-factory-supervision.sh` (hidden-namespace actual test
+  path; no visible `tests/` runner for Task 6).
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 7: Ollama usage guard retention and credential hardening
@@ -433,11 +470,17 @@ completes with evidence.
   stores, memory stores, and migration archives are unavailable through model
   tools; the plan, spec, code/tests, and allowlisted `.factory/` inputs are
   readable, and role write allowlists are honored. No memory, conversation, or
-  context-summary authority is injected.
+  context-summary authority is injected. Own HOME/XDG and broader filesystem
+  confinement (assigned from the Task 6 review, shared with Task 11): the
+  fresh process runs under a sanitized HOME and an explicit `XDG_*` set so
+  model tools cannot reach host credentials, the operator's real home or
+  caches, `.ollama-usage-env`, secrets, or any path outside the allowlist,
+  while the role read/write allowlists remain honored.
 - Acceptance criteria: each role launch proves it can read the allowlisted
   inputs and cannot read any forbidden path; the role-prompt digests match the
   campaign binding; no completion claim from a previous attempt is present in
-  the fresh context.
+  the fresh context; the process's HOME/XDG/filesystem scope is confined and
+  cannot reach host credentials or any path outside the allowlist.
 - Verification: `tests/test-factory-confinement.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
@@ -490,14 +533,23 @@ completes with evidence.
   model tool can
   dump environment, authentication files, private keys, or secrets; tool-result
   redaction, stdin bounded command checks, and sanitized logs remain active.
+  Own output content redaction (assigned from the Task 6 review): every
+  child/tool output channel — tool results, command output, and bounded
+  captures — is redacted so credentials or secrets never appear in results,
+  logs, receipts, or repository state; this complements, without replacing,
+  Task 6's parent-secret environment/argv/descriptor boundary. With Task 8,
+  retain HOME/XDG/filesystem confinement so the credential guard cannot be
+  bypassed through host files visible to model tools.
   Ralph lifecycle topics, `ralph emit`, completion-token handling, event
   snapshots, launch handshakes, and Ralph CLI shims are removed from the new
   path and never reimplemented.
 - Acceptance criteria: adversarial fixture attempts to exfiltrate secrets
-  through tools, results, logs, argv, or environment all fail closed; the
-  secure wrapper and credential-guard behavior remain unchanged in contract;
-  a caller-controlled PATH cannot redirect the model-facing git shim or
-  bare-git selection.
+  through tools, results, logs, argv, or environment all fail closed; a
+  synthetic credential rendered into child/tool output is redacted from
+  results, logs, receipts, and repository state; the secure wrapper and
+  credential-guard behavior remain unchanged in contract; a caller-controlled
+  PATH cannot redirect the model-facing git shim or bare-git selection; HOME/
+  XDG/filesystem confinement keeps host credentials out of model reach.
 - Verification: `tests/test-credential-extension.sh`;
   `tests/test-credential-guard.sh`.
 - Documentation impact: `docs/OPERATIONS.md`.
