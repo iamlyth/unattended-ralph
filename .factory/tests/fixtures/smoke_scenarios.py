@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]  # /workspace/controller-box
+ROOT = Path(__file__).resolve().parents[3]  # canonical project root
 GIT = "git"
 
 

@@ -76,6 +76,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package import (the hidden `.factory/loop/` package)
     from . import audit_objectives as audit_objectives_module
+    from . import findings as findings_module
     from . import gitutil
     from . import lock as lock_module
     from . import plan_parser
@@ -85,6 +86,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import workspace_confinement as confinement_authority
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
+    import findings as findings_module  # type: ignore[no-redef]
     import gitutil  # type: ignore[no-redef]
     import lock as lock_module  # type: ignore[no-redef]
     import plan_parser  # type: ignore[no-redef]
@@ -213,6 +215,17 @@ class CampaignPhaseError(CampaignError):
     """A phase step is invoked outside its transition-table contract."""
 
 
+class CampaignFindingsError(CampaignError):
+    """Fail-closed findings-flow error (Task 10, §16, FIND-01).
+
+    Raised when the receipt-backed findings of a verification/audit phase
+    cannot be minted or consumed for the next planner: malformed, stale,
+    synthetic, foreign, or receipt-only findings claims, or a receipt that
+    the hardened no-follow bounded reader rejects, all fail the campaign
+    closed before the next planner launches.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Machine models
 # ---------------------------------------------------------------------------
@@ -238,7 +251,16 @@ class RoleOutcome:
 
 @dataclass(frozen=True)
 class PhaseRecord:
-    """One trusted phase-step record of the campaign result history."""
+    """One trusted phase-step record of the campaign result history.
+
+    ``result_digest`` is the SHA-256 of the exact structured phase-result
+    bytes the orchestrator consumed (verification/audit only; empty for
+    every other phase).  Task 10 §16: it is the digest the orchestrator
+    mints into the findings receipt, so the next-round findings authority
+    can re-bind every receipt to the exact result bytes this run read — a
+    tampered receipt whose digest contradicts the recorded run fails
+    closed.
+    """
 
     round: int
     phase: str
@@ -247,6 +269,7 @@ class PhaseRecord:
     head_commit: str
     plan_digest: str
     detail: str = ""
+    result_digest: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -257,6 +280,7 @@ class PhaseRecord:
             "head_commit": self.head_commit,
             "plan_digest": self.plan_digest,
             "detail": self.detail,
+            "result_digest": self.result_digest,
         }
 
 
@@ -333,6 +357,13 @@ class CampaignResult:
             if not SHA256_RE.fullmatch(record.plan_digest):
                 raise CampaignResultError(
                     "phase record plan_digest must be a 64-hex SHA-256 digest"
+                )
+            if record.result_digest and not SHA256_RE.fullmatch(
+                record.result_digest
+            ):
+                raise CampaignResultError(
+                    "phase record result_digest must be a 64-hex SHA-256 "
+                    "digest or empty"
                 )
             if record.attempt < 1:
                 raise CampaignResultError("phase record attempt must be positive")
@@ -925,6 +956,29 @@ def _is_harness_runtime(path: str) -> bool:
     return False
 
 
+def _safe_result_relpath(relpath: str) -> bool:
+    """True when ``relpath`` is a safe repository-relative transient path.
+
+    The transient phase-result handoff channel must stay inside the
+    repository: no absolute path, no dot-segment/``..`` traversal, no empty
+    path, and no control characters.  The symlink-component check is done by
+    the caller against the real repository root (a symlink in any parent
+    component redirects the transient write outside the repository and fails
+    closed; REQ 4).
+    """
+    if not relpath or relpath.startswith("/"):
+        return False
+    path = Path(relpath)
+    if path.is_absolute():
+        return False
+    if not path.parts or any(part in ("", ".", "..") for part in path.parts):
+        return False
+    for part in path.parts:
+        if any(ord(char) < 0x20 for char in part):
+            return False
+    return True
+
+
 def _bounded_read(root: Path, relpath: str, label: str, maximum: int) -> bytes:
     """Bounded no-follow read of a worktree file."""
     path = Path(root) / relpath
@@ -1263,14 +1317,22 @@ def phase_result_schema() -> Dict[str, object]:
     return _PHASE_RESULT_SCHEMA
 
 
-def read_phase_result(root: Path, relpath: str, label: str) -> Optional[Dict[str, object]]:
+def read_phase_result(
+    root: Path, relpath: str, label: str
+) -> Optional[Tuple[Dict[str, object], str, bytes]]:
     """Bounded no-follow read + schema validation of one role result file.
 
-    ``None`` when the result file does not exist; any unsafe, oversized,
-    malformed, or non-conforming file raises :class:`CampaignResultError` —
-    the untrusted phase's structured output is only ever interpreted through
-    this gate.  The file is removed after it is consumed: it is the
-    orchestrator's own transient handoff channel, never product state.
+    Returns ``(data, raw_digest, raw_bytes)`` where ``raw_digest`` is the
+    SHA-256 of the exact result bytes the orchestrator read, or ``None``
+    when the result file does not exist or is empty (a pre-created transient
+    handoff the role never filled carries no structured result).  Any
+    unsafe, oversized, malformed, or non-conforming file raises
+    :class:`CampaignResultError` — the untrusted phase's structured output
+    is only ever interpreted through this gate, and the digest is what the
+    Task 10 findings receipt binds.  The file is removed after it is
+    consumed: it is the orchestrator's own transient handoff channel, never
+    product state.  The raw bytes are what the Task 10 authority preserves
+    as the exact trusted content a findings receipt authenticates (REQ 3).
     """
     if not relpath:
         return None
@@ -1304,18 +1366,24 @@ def read_phase_result(root: Path, relpath: str, label: str) -> Optional[Dict[str
             raise CampaignResultError(f"{label} result {path} changed while being read")
     finally:
         os.close(descriptor)
+    raw_bytes = bytes(raw)
+    if not raw_bytes:
+        # A pre-created transient handoff file the role never filled is
+        # exactly the same as an absent result (no structured output).
+        return None
     try:
-        data = json.loads(bytes(raw).decode("utf-8"))
+        data = json.loads(raw_bytes.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise CampaignResultError(f"{label} result {path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise CampaignResultError(f"{label} result {path} is not an object")
     _schema_check(data, phase_result_schema(), "")
+    raw_digest = plan_sha256(raw_bytes)
     try:
         os.unlink(path)
     except OSError:
         pass
-    return data
+    return data, raw_digest, raw_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -1383,6 +1451,7 @@ def launch_role_attempt(
     round_number: int = 1,
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
+    findings_payload: Optional[bytes] = None,
     _confinement_proof: Optional[object] = None,
     _confinement_spec: Optional[Mapping[str, object]] = None,
     _sanitized_home: Optional[Path] = None,
@@ -1407,6 +1476,11 @@ def launch_role_attempt(
     unavailable confinement) is caught cleanly and raised as a documented
     :class:`CampaignPhaseError`, so a refused launch is a clean fail-closed
     control-plane outcome and never an unhandled traceback.
+
+    Task 10 §16: ``findings_payload`` is the deterministic receipt-backed
+    findings payload of the previous round, delivered only to the planner
+    role as a digest-bound input (never to the developer, tester, or
+    auditor, and never read by the deterministic selector).
 
     ``_confinement_proof``/``_confinement_spec``/``_sanitized_home`` are the
     private seams of the hidden suite (mirroring ``launch.py``); the
@@ -1457,6 +1531,11 @@ def launch_role_attempt(
             audit_objective_digest=(
                 plan_sha256(audit_objective) if audit_objective is not None else ""
             ),
+            findings_digest=(
+                plan_sha256(findings_payload)
+                if findings_payload is not None
+                else ""
+            ),
             runtime_limit=config.runtime_limit,
             inactivity_limit=config.inactivity_limit,
         )
@@ -1469,8 +1548,29 @@ def launch_role_attempt(
             # hidden suite and is never evidence of real confinement.
             sanitized_home = confinement_authority.sanitized_home_directory()
             try:
+                # Task 10 review (REQ 4): the confined tester/auditor
+                # receives exact write access to exactly its configured
+                # phase/audit result file through the confinement
+                # specification — never the ``.factory-state/`` breadth — so
+                # the untrusted role can rewrite its transient structured
+                # result while every sibling (the state file, the digest
+                # ledger, receipts, other result names) stays denied.  The
+                # file is pre-created by the trusted orchestrator before the
+                # launch (``_prepare_phase_result_file``) because Landlock
+                # cannot grant the creation of a not-yet-existing file
+                # through an exact-file rule.
+                result_write = []
+                if role == "tester" and config.phase_result_path:
+                    result_write = [
+                        str(Path(root) / config.phase_result_path)
+                    ]
+                elif role == "auditor" and config.audit_result_path:
+                    result_write = [
+                        str(Path(root) / config.audit_result_path)
+                    ]
                 _confinement_spec = confinement_authority.confinement_spec(
-                    binding, sanitized_home=sanitized_home
+                    binding, sanitized_home=sanitized_home,
+                    extra_write=result_write,
                 )
             except BaseException:
                 shutil.rmtree(sanitized_home, ignore_errors=True)
@@ -1490,6 +1590,7 @@ def launch_role_attempt(
             usage_guard_poll_interval=config.usage_guard_poll_interval,
             usage_guard_max_wait=config.usage_guard_max_wait,
             usage_guard_max_polls=config.usage_guard_max_polls,
+            findings=findings_payload,
             _confinement_proof=_confinement_proof,
             _confinement_spec=_confinement_spec,
             _sanitized_home=_sanitized_home,
@@ -1559,6 +1660,10 @@ class Campaign:
         self._role_runner = role_runner
         self._planning_attempts_used = 0
         self._rounds_completed = 0
+        # Task 10 §16: the phase records of THIS run, consumed by the findings
+        # authority to bind every previous-round receipt to a phase that
+        # actually ran and classified findings/blocked.
+        self._records: List[PhaseRecord] = []
 
     # -- acquisition ------------------------------------------------------------
 
@@ -1662,9 +1767,196 @@ class Campaign:
             return self._reconcile_planning(state, base, head)
         if state.current_phase == "implementation":
             return self._reconcile_implementation(state, base, head)
+        if state.current_phase in ("verification", "audit"):
+            # Task 10 review (REQ 1): the read-only verification/audit phases
+            # never commit, so HEAD advanced past the phase base only through
+            # this round's own trusted planning/implementation commits.  A
+            # crash in the receipt-mint window (receipt and preserved result
+            # published, state advance lost) leaves exactly this state; the
+            # rerun re-validates the committed scope and completes the
+            # transition from the already-published trusted artifacts
+            # WITHOUT re-running the untrusted role, so it never wedges on
+            # its own previously published receipt.
+            return self._reconcile_verification_audit(state, base, head)
         raise CampaignRecoveryError(
             f"HEAD {head} advanced past the phase base {base} during the "
             f"{state.current_phase!r} phase with no recorded transition"
+        )
+
+    def _reconcile_verification_audit(
+        self, state: state_module.FactoryState, base: str, head: str
+    ):
+        """Resume a crashed verification/audit phase (REQ 1 crash window).
+
+        The phase itself never commits, so ``base -> head`` must contain
+        exactly implementation-scope work (the round's own trusted task
+        commits plus the canonical plan), with a valid, correctly anchored
+        committed plan at ``head`` — the same checks the implementation
+        recovery applies.  Any foreign scope, stale plan, or unparsable plan
+        fails closed for operator inspection.
+
+        Task 10 REQ 1: when this phase already published its findings
+        receipt **and** preserved phase-result artifact (a crash after the
+        mint, before the state transition), the transition is completed
+        from those trusted artifacts without re-running the untrusted
+        role — the phase already ran, its exact result bytes were read,
+        preserved, and receipted, and a re-execution could only produce a
+        changed result that the byte-exact no-replace preserve would then
+        reject (a wedge).  When no receipt was published the phase is
+        re-run at ``head`` exactly as before (the state digest ledger
+        re-validates the recorded pre-phase digest; the byte-idempotent
+        preserve/mint accept a rerun that reproduces the same result).
+        """
+        git = self._git
+        try:
+            plan = plan_parser.Plan.from_bytes(
+                git.blob_at(head, self._config.plan_path)
+            )
+        except plan_parser.PlanError as exc:
+            raise CampaignRecoveryError(
+                f"the committed plan at {head} does not parse: {exc}"
+            ) from exc
+        if plan.base_commit != self._authoritative_plan_base(state):
+            raise CampaignRecoveryError(
+                f"the committed plan at {head} is stale: its base_commit "
+                f"{plan.base_commit!r} differs from the authoritative plan "
+                f"base at the state phase base"
+            )
+        changed = git.diff_paths(base)
+        violation = scope_violation(
+            changed, phase="implementation",
+            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+        )
+        if violation:
+            raise CampaignRecoveryError(
+                f"the committed scope during the {state.current_phase!r} "
+                f"phase is invalid: {violation}"
+            )
+        recovered = self._reconcile_published_findings(state, head)
+        if recovered is not None:
+            return recovered
+        return state, None
+
+    def _reconcile_published_findings(
+        self, state: state_module.FactoryState, head: str
+    ):
+        """Complete a crashed verification/audit transition from the receipt.
+
+        Called after the committed-scope validation when the state file
+        still records the ``verification``/``audit`` phase but the round's
+        findings receipt and preserved phase-result were already published
+        (the crash was in the mint window, after the receipt, before the
+        state advance was written).  Every binding is re-validated —
+        campaign, round, phase, the exact phase-base commit (``head``), the
+        outcome, the phase tag recorded in the state digest ledger, and the
+        preserved result bytes digest — and a valid, intact pair completes
+        the §11 transition deterministically.  Any torn, tampered, foreign,
+        or missing-pair artifact fails closed for operator inspection;
+        ``None`` when no receipt was published (the crash predates the
+        mint and the phase re-runs normally).
+        """
+        phase = state.current_phase
+        round_no = state.current_round
+        try:
+            receipt_data = findings_module.read_receipt(
+                self._root, round_no, phase
+            )
+            preserved = findings_module.read_preserved_phase_result(
+                self._root, round_no, phase
+            )
+        except findings_module.FindingsError as exc:
+            raise CampaignRecoveryError(
+                f"cannot reconcile the round {round_no} {phase} findings "
+                f"artifacts: {exc}"
+            ) from exc
+        if receipt_data is None:
+            if preserved is not None:
+                raise CampaignRecoveryError(
+                    f"round {round_no} {phase} has a preserved phase-result "
+                    "without its findings receipt; a torn mint fails closed "
+                    "for operator inspection"
+                )
+            return None
+        receipt, _raw_digest = receipt_data
+        if str(receipt["campaign_id"]) != self._config.campaign_id:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt belongs to "
+                f"campaign {receipt['campaign_id']!r}, not "
+                f"{self._config.campaign_id!r}; a foreign receipt fails "
+                "closed during recovery"
+            )
+        if int(receipt["round"]) != round_no or str(receipt["phase"]) != phase:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt is bound to "
+                f"round {receipt['round']} {receipt['phase']}; a stale "
+                "receipt fails closed during recovery"
+            )
+        if str(receipt["phase_base_commit"]) != head:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt binds the "
+                f"phase base {receipt['phase_base_commit']} but the phase "
+                f"ran at {head}; a forged receipt fails closed during "
+                "recovery"
+            )
+        outcome = str(receipt["outcome"])
+        if outcome not in ("findings", "blocked"):
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt claims "
+                f"outcome {outcome!r}; only findings|blocked may carry a "
+                "receipt"
+            )
+        try:
+            ledger = state_module.read_phase_digest_ledger(self._root)
+        except state_module.StateError as exc:
+            raise CampaignRecoveryError(
+                f"cannot read the state digest ledger during recovery: {exc}"
+            ) from exc
+        tag = str(receipt["phase_tag"])
+        if tag not in ledger:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt binds the "
+                f"phase tag {tag!r} that the state digest ledger never "
+                "recorded; a synthetic receipt fails closed during recovery"
+            )
+        if preserved is None:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt has no "
+                "preserved phase-result artifact; a torn or tampered mint "
+                "fails closed during recovery"
+            )
+        result_data, result_digest = preserved
+        if str(receipt["result_digest"]) != result_digest:
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt binds "
+                f"result_digest {receipt['result_digest']} but the preserved "
+                f"phase-result bytes digest to {result_digest}; a tampered "
+                "receipt or artifact fails closed during recovery"
+            )
+        try:
+            findings_module.validate_receipt_content(
+                receipt, result_data,
+                findings_module.receipt_name(round_no, phase),
+            )
+        except findings_module.FindingsError as exc:
+            # A schema-valid but contradictory receipt (findings/blocked
+            # references or outcome rewritten after the mint) fails closed
+            # during recovery as a clean operator-facing campaign error,
+            # never a raw findings-authority exception.
+            raise CampaignRecoveryError(
+                f"the round {round_no} {phase} findings receipt content "
+                f"contradicts the preserved phase-result bytes: {exc}"
+            ) from exc
+        state2 = state_module.advance(state, outcome)
+        state_module.write_state(self._root, state2)
+        if state2.current_phase == "planning":
+            self._rounds_completed = state2.current_round - 1
+            self._planning_attempts_used = 0
+        elif state2.current_phase in TERMINAL_PHASES:
+            self._rounds_completed = state2.current_round
+        return state2, self._record(
+            state, 1, outcome,
+            "reconciled from the published findings receipt",
+            result_digest=result_digest,
         )
 
     def _reconcile_planning(
@@ -1797,21 +2089,27 @@ class Campaign:
         *,
         task_id: Optional[int] = None,
         attempt: int = 1,
+        findings_payload: Optional[bytes] = None,
     ) -> RoleOutcome:
         if self._role_runner is not None:
             return self._role_runner(role, state, head, task_id, attempt)
         if self._config.role_driver:
-            return self._run_driver(role, state, head, task_id=task_id, attempt=attempt)
+            return self._run_driver(
+                role, state, head,
+                task_id=task_id, attempt=attempt,
+                findings_payload=findings_payload,
+            )
         return launch_role_attempt(
             self._config,
             role=role,
             head=head,
             task_id=task_id,
             round_number=state.current_round,
+            findings_payload=findings_payload,
         )
 
     def _run_driver(
-        self, role, state, head, *, task_id, attempt
+        self, role, state, head, *, task_id, attempt, findings_payload=None
     ) -> RoleOutcome:
         config = self._config
         driver_rel = config.role_driver
@@ -1831,6 +2129,18 @@ class Campaign:
         env[CAMPAIGN_ENV_PREFIX + "TASK_ID"] = str(task_id) if task_id is not None else ""
         env[CAMPAIGN_ENV_PREFIX + "BOUND_COMMIT"] = head
         env[CAMPAIGN_ENV_PREFIX + "SCENARIO"] = config.scenario_path
+        # Task 10 §16: the planner role receives the deterministic
+        # receipt-backed findings payload of the previous round as its only
+        # findings channel (the fixture seam mirrors the digest-bound
+        # prompt section of the production launch).  Other roles carry none.
+        if role == "planner" and findings_payload is not None:
+            if len(findings_payload) > 64 * 1024:
+                raise CampaignFindingsError(
+                    "the findings payload exceeds the driver-channel bound"
+                )
+            env[CAMPAIGN_ENV_PREFIX + "FINDINGS"] = findings_payload.decode(
+                "utf-8"
+            )
         # The structured-result handoff is role-specific: the tester may only
         # write the verification result path and the auditor only the audit
         # result path; the other roles carry no result channel at all.
@@ -1857,6 +2167,151 @@ class Campaign:
                 signal=f"SIG{-result.returncode}",
             )
         return RoleOutcome(role, result.returncode)
+
+    def _publish_findings(
+        self,
+        state: state_module.FactoryState,
+        *,
+        phase: str,
+        phase_tag: str,
+        phase_base_commit: str,
+        outcome: str,
+        result_digest: str,
+        findings: Sequence[str],
+        blocked_on: Sequence[str],
+        gate_ran: bool,
+        gate_exit: Optional[int],
+        capability_ran: bool,
+        capability_exit: Optional[int],
+    ) -> None:
+        """Mint one orchestrator-owned findings receipt (Task 10, §16).
+
+        Runs only after the trusted phase classification produced
+        ``findings`` or ``blocked`` and after the before/after digest-ledger
+        validation of the untrusted phase passed.  The receipt binds the
+        exact commit the phase ran at (``phase_base_commit``), the digest of
+        the exact structured result bytes the orchestrator read, the phase
+        tag recorded in the state digest ledger, and the deterministic-gate
+        evidence.  Publication is write-only no-replace evidence under the
+        ignored ``.factory-state/`` namespace; a pre-planted or forged
+        receipt fails the mint closed.
+        """
+        try:
+            findings_module.publish_receipt(
+                self._root,
+                findings_module.build_receipt(
+                    campaign_id=self._config.campaign_id,
+                    round_number=state.current_round,
+                    phase=phase,
+                    phase_tag=phase_tag,
+                    phase_base_commit=phase_base_commit,
+                    outcome=outcome,
+                    result_digest=result_digest,
+                    findings=findings,
+                    blocked_on=blocked_on,
+                    gate_ran=gate_ran,
+                    gate_exit=gate_exit,
+                    capability_ran=capability_ran,
+                    capability_exit=capability_exit,
+                ),
+            )
+        except findings_module.FindingsError as exc:
+            raise CampaignFindingsError(
+                f"cannot publish the round {state.current_round} {phase} "
+                f"findings receipt: {exc}"
+            ) from exc
+
+    def _prepare_phase_result_file(self, relpath: str, label: str) -> None:
+        """Pre-create the transient phase-result handoff file (Task 10, REQ 4).
+
+        The read-only verification/audit phases run under real Landlock
+        confinement whose write grant covers exactly the configured result
+        file — never the ``.factory-state/`` breadth.  Landlock cannot grant
+        the creation of a not-yet-existing file through an exact-file rule,
+        so the trusted orchestrator pre-creates the mode-0600 transient file
+        before the role launches; the confined role then holds exact
+        read/write rights on that file and can truncate/rewrite it, while
+        every sibling in ``.factory-state/`` stays denied.  An empty file the
+        role never fills is treated as no structured result by
+        :func:`read_phase_result`.
+        """
+        if not relpath:
+            return
+        path = Path(self._root) / relpath
+        if not _safe_result_relpath(relpath):
+            raise CampaignResultError(
+                f"unsafe {label} result path {relpath!r}; the transient "
+                "result channel must stay inside the repository with no "
+                "traversal and no absolute path"
+            )
+        # A symlink in any parent component would redirect the transient
+        # write outside the repository; fail closed (REQ 4).
+        current = Path(".")
+        for part in Path(relpath).parts[:-1]:
+            current = current / part
+            probe = Path(self._root) / current
+            try:
+                info = os.lstat(str(probe))
+            except OSError:
+                break
+            if stat.S_ISLNK(info.st_mode):
+                raise CampaignResultError(
+                    f"the {label} result path {relpath!r} has a symlink "
+                    "component; the transient result channel fails closed"
+                )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = (
+            os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise CampaignResultError(
+                f"cannot pre-create the {label} result file {path}: {exc}"
+            ) from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise CampaignResultError(
+                    f"the {label} result file {path} is not a regular file"
+                )
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise CampaignResultError(
+                    f"the {label} result file {path} is not owned/private; "
+                    "the transient result channel fails closed"
+                )
+            # A stale transient file from a crashed attempt is truncated so
+            # the fresh role starts from an empty handoff channel.
+            os.ftruncate(descriptor, 0)
+        finally:
+            os.close(descriptor)
+
+    def _preserve_phase_result(
+        self, state: state_module.FactoryState, phase: str, raw_bytes: bytes
+    ) -> None:
+        """Preserve the exact structured phase-result bytes as evidence.
+
+        Task 10 review (REQ 3): before the findings receipt of a
+        findings/``blocked`` verification/audit phase is minted, the exact
+        bytes of the structured result the orchestrator read are preserved
+        under the ignored ``.factory-state/`` namespace (deterministic
+        name ``factory-phase-result-round-{r}-{phase}.json``, atomic
+        no-replace with byte-exact crash idempotency), so the next-round
+        findings authority authenticates every receipt against the exact
+        trusted content — ``result_digest`` and parsed ``findings``/
+        ``blocked_on`` — never a self-digest only.
+        """
+        try:
+            findings_module.preserve_phase_result(
+                self._root,
+                state.current_round, phase, raw_bytes,
+            )
+        except findings_module.FindingsError as exc:
+            raise CampaignFindingsError(
+                f"cannot preserve the round {state.current_round} {phase} "
+                f"phase-result bytes: {exc}"
+            ) from exc
 
     # -- deterministic gates -------------------------------------------------------
 
@@ -1988,13 +2443,16 @@ class Campaign:
     # -- records -------------------------------------------------------------------
 
     def _record(
-        self, state: state_module.FactoryState, attempt: int, outcome: str, detail: str
+        self, state: state_module.FactoryState, attempt: int, outcome: str,
+        detail: str, *, result_digest: str = "",
     ) -> PhaseRecord:
         head = self._git.head() if self._git is not None else "0" * 40
         try:
             digest = plan_sha256(self._git.blob_at(head, self._config.plan_path))
         except CampaignGitError:
             digest = "0" * 64
+        if result_digest and not SHA256_RE.fullmatch(result_digest):
+            raise CampaignError("phase result digest must be 64-hex or empty")
         return PhaseRecord(
             round=state.current_round,
             phase=state.current_phase,
@@ -2003,6 +2461,7 @@ class Campaign:
             head_commit=head,
             plan_digest=digest,
             detail=detail,
+            result_digest=result_digest,
         )
 
     # -- phase steps ----------------------------------------------------------------
@@ -2024,7 +2483,33 @@ class Campaign:
         tag = self._begin_untrusted(state, seq)
         head = self._git.head()
         attempt = seq + 1
-        role = self._run_role("planner", state, head, attempt=attempt)
+        # Task 10 §16: the next planner is the only role that may receive
+        # the receipt-backed findings of the previous round, as a
+        # deterministic digest-bound payload.  The findings authority
+        # validates every receipt (malformed/stale/synthetic/foreign/
+        # receipt-only claims fail closed) and returns ``None`` when no
+        # findings flowed (round 1, or a round whose verification/audit
+        # passed).  The deterministic selector never reads this payload.
+        findings_payload = None
+        if state.current_round > 1:
+            try:
+                findings_payload = findings_module.consume_next_round_findings(
+                    self._root,
+                    campaign_id=self._config.campaign_id,
+                    source_round=state.current_round - 1,
+                    head=head,
+                    is_ancestor=self._git.is_ancestor,
+                    phase_records=tuple(self._records),
+                )
+            except findings_module.FindingsError as exc:
+                raise CampaignFindingsError(
+                    f"cannot consume the previous round's findings for the "
+                    f"next planner: {exc}"
+                ) from exc
+        role = self._run_role(
+            "planner", state, head, attempt=attempt,
+            findings_payload=findings_payload,
+        )
         plan_worktree = _bounded_read(self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX)
         plan_committed = self._git.blob_at(head, self._config.plan_path)
         plan_changed = plan_worktree != plan_committed
@@ -2324,6 +2809,9 @@ class Campaign:
     def _step_verification(self, state: state_module.FactoryState) -> _Step:
         tag = self._begin_untrusted(state, 1)
         head = self._git.head()
+        self._prepare_phase_result_file(
+            self._config.phase_result_path, "verification"
+        )
         role = self._run_role("tester", state, head, attempt=1)
         dirty = self._git.role_dirty_paths()
         allow_paths = [self._config.phase_result_path] if self._config.phase_result_path else []
@@ -2335,9 +2823,12 @@ class Campaign:
         gate_ran, gate_exit, gate_detail = self._run_gate(
             self._config.verification_command, "verification"
         )
-        result_data = read_phase_result(
+        result = read_phase_result(
             self._root, self._config.phase_result_path, "verification"
         )
+        result_data = result[0] if result is not None else None
+        result_digest = result[1] if result is not None else ""
+        result_bytes = result[2] if result is not None else b""
         result_valid = bool(result_data is not None)
         result_outcome = result_data.get("outcome") if result_data else None
         blocked_refs = (
@@ -2360,14 +2851,43 @@ class Campaign:
             capability_available=capability_available,
         )
         self._end_untrusted(tag)
+        if outcome in ("findings", "blocked"):
+            # Task 10 §16: verification findings/blocked become next-round
+            # planner input through an orchestrator-minted receipt that binds
+            # the exact phase-base commit, the exact structured result digest,
+            # the phase tag, and the deterministic-gate evidence.  The exact
+            # structured result bytes are preserved as evidence first (REQ 3)
+            # so the next-round authority authenticates every receipt against
+            # the exact trusted content, never a self-digest only.  External
+            # blockers remain structured findings in that input.
+            self._preserve_phase_result(state, "verification", result_bytes)
+            self._publish_findings(
+                state, phase="verification", phase_tag=tag,
+                phase_base_commit=head, outcome=outcome,
+                result_digest=result_digest if result_data else "0" * 64,
+                findings=(
+                    list(result_data.get("findings", [])) if result_data else []
+                ),
+                blocked_on=blocked_refs,
+                gate_ran=gate_ran, gate_exit=gate_exit,
+                capability_ran=capability_ran,
+                capability_exit=capability_exit,
+            )
         detail = violation or gate_detail or ""
         state2 = state_module.advance(state, outcome)
         state_module.write_state(self._root, state2)
-        return _Step(self._record(state, 1, outcome, detail), state=state2)
+        return _Step(
+            self._record(state, 1, outcome, detail,
+                         result_digest=result_digest or ("0" * 64)),
+            state=state2,
+        )
 
     def _step_audit(self, state: state_module.FactoryState) -> _Step:
         tag = self._begin_untrusted(state, 1)
         head = self._git.head()
+        self._prepare_phase_result_file(
+            self._config.audit_result_path, "audit"
+        )
         role = self._run_role("auditor", state, head, attempt=1)
         dirty = self._git.role_dirty_paths()
         allow_paths = [self._config.audit_result_path] if self._config.audit_result_path else []
@@ -2376,9 +2896,12 @@ class Campaign:
             plan_path=self._config.plan_path, spec_path=self._config.spec_path,
             allow_paths=allow_paths,
         )
-        result_data = read_phase_result(
+        result = read_phase_result(
             self._root, self._config.audit_result_path, "audit"
         )
+        result_data = result[0] if result is not None else None
+        result_digest = result[1] if result is not None else ""
+        result_bytes = result[2] if result is not None else b""
         result_valid = bool(result_data is not None)
         outcome = classify_audit(
             role=role,
@@ -2389,6 +2912,28 @@ class Campaign:
             blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
         )
         self._end_untrusted(tag)
+        if outcome in ("findings", "blocked"):
+            # Task 10 §16: audit findings/blocked become next-round planner
+            # input through an orchestrator-minted receipt; a non-final
+            # blocked advances to the next planner exactly like findings with
+            # the blocker explicit in the plan, and a final-round receipt is
+            # preserved as evidence.  The exact structured result bytes are
+            # preserved first (REQ 3) so the receipt is authenticated against
+            # the exact trusted content at consumption.
+            self._preserve_phase_result(state, "audit", result_bytes)
+            self._publish_findings(
+                state, phase="audit", phase_tag=tag,
+                phase_base_commit=head, outcome=outcome,
+                result_digest=result_digest if result_data else "0" * 64,
+                findings=(
+                    list(result_data.get("findings", [])) if result_data else []
+                ),
+                blocked_on=(
+                    list(result_data.get("blocked_on", [])) if result_data else []
+                ),
+                gate_ran=False, gate_exit=None,
+                capability_ran=False, capability_exit=None,
+            )
         if outcome in ("interrupted", "infrastructure_failure"):
             # Task 9 review B1: an interrupted audit and an untrusted audit
             # are terminal fail-closed closes with no nonfinal edge; the
@@ -2410,7 +2955,11 @@ class Campaign:
             # The final round completed: its audit ended the campaign, so the
             # completed-round counter reaches the current round.
             self._rounds_completed = state2.current_round
-        return _Step(self._record(state, 1, outcome, ""), state=state2)
+        return _Step(
+            self._record(state, 1, outcome, "",
+                         result_digest=result_digest or ("0" * 64)),
+            state=state2,
+        )
 
     # -- campaign loop ---------------------------------------------------------
 
@@ -2418,38 +2967,50 @@ class Campaign:
         self._acquire()
         try:
             state, recovered = self._load_or_init_state()
-            if state.current_phase in TERMINAL_PHASES:
-                raise CampaignPhaseError(
-                    "the loaded control state is already terminal; the campaign "
-                    "must be resolved by the operator, not re-run"
-                )
             history: List[PhaseRecord] = []
             if recovered is not None:
                 history.append(recovered)
+            self._records = list(history)
             terminal_outcome: Optional[str] = None
             terminal_phase: str = state.current_phase
-            while state.current_phase not in TERMINAL_PHASES:
-                step = self._step(state)
-                history.append(step.record)
-                if step.terminal is not None:
-                    terminal_outcome = step.record.outcome
-                    terminal_phase = step.terminal
-                    break
-                if step.state is not None:
-                    state = step.state
-                    if state.current_phase in TERMINAL_PHASES:
+            if state.current_phase in TERMINAL_PHASES:
+                # Task 10 REQ 1: a crash-window reconciliation may complete a
+                # final audit directly into a terminal (its findings receipt
+                # was published before the transition write was lost).  The
+                # recovered record carries the terminal outcome; a terminal
+                # state loaded without a recovered record is an operator
+                # resolution, never a re-run.
+                if recovered is None:
+                    raise CampaignPhaseError(
+                        "the loaded control state is already terminal; the "
+                        "campaign must be resolved by the operator, not "
+                        "re-run"
+                    )
+                terminal_outcome = recovered.outcome
+            else:
+                while state.current_phase not in TERMINAL_PHASES:
+                    step = self._step(state)
+                    history.append(step.record)
+                    self._records.append(step.record)
+                    if step.terminal is not None:
                         terminal_outcome = step.record.outcome
-                        terminal_phase = state.current_phase
+                        terminal_phase = step.terminal
                         break
-                # A retry keeps the same live phase for the next attempt; an
-                # advanced live phase (planning -> implementation, ...) is the
-                # same trusted state machine.  Both resume the loop.
-                if step.retry or step.state is not None:
-                    continue
-                raise CampaignPhaseError(
-                    f"step outcome {step.record.outcome!r} neither retried "
-                    "nor advanced the campaign"
-                )
+                    if step.state is not None:
+                        state = step.state
+                        if state.current_phase in TERMINAL_PHASES:
+                            terminal_outcome = step.record.outcome
+                            terminal_phase = state.current_phase
+                            break
+                    # A retry keeps the same live phase for the next attempt; an
+                    # advanced live phase (planning -> implementation, ...) is the
+                    # same trusted state machine.  Both resume the loop.
+                    if step.retry or step.state is not None:
+                        continue
+                    raise CampaignPhaseError(
+                        f"step outcome {step.record.outcome!r} neither retried "
+                        "nor advanced the campaign"
+                    )
             head = self._git.head()
             result = CampaignResult(
                 campaign_id=self._config.campaign_id,

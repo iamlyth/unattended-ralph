@@ -136,6 +136,33 @@ per-phase contracts are
 `--role-driver` and scenario/result-file options are deterministic hidden-suite
 fixtures only; they are not production confinement or acceptance evidence.
 
+## Findings flow (Task 10)
+
+Tester and auditor outcomes never create runtime tasks. When the trusted
+classifier derives `findings` or `blocked`, the orchestrator publishes one
+write-once `factory-findings-receipt/v1` under the private `.factory-state/`
+evidence namespace. The bounded, no-follow receipt binds the campaign, source
+round, phase and phase tag, exact phase-base commit, exact result digest,
+trusted gate/capability outcomes, and the state digest-ledger tag. The exact
+phase-result bytes are separately preserved and revalidated; receipt outcome,
+findings, and blockers must match those bytes. Publication is idempotent only
+for byte-identical crash recovery, while any conflicting pre-existing artifact
+fails closed. A pass cannot mint findings, and malformed, missing, stale,
+foreign, synthetic, torn, tampered, or unreachable-commit evidence fails
+closed.
+
+At the next round only, the fresh planner receives a canonical
+`factory-findings/v1` payload whose bytes and digest are part of its launch
+binding. External blockers remain structured findings. The planner must revise
+the canonical implementation plan; developers receive no receipt, tester or
+auditor result, prior prompt, or findings payload. Selection continues to read
+only the canonical plan and minimal control state, so evidence can never become
+a competing task authority. Production tester and auditor launches receive a
+real Landlock write grant for only their pre-created exact result file; sibling
+`.factory-state` access remains denied. Contracts are
+`.factory/schemas/factory-findings-receipt-v1.schema.json` and
+`.factory/schemas/factory-findings-v1.schema.json`.
+
 ## Root-descriptor lock and Git writer boundary (LOCK-01, GIT-01, PROC-01)
 
 The writer boundary is an exclusive Linux `flock` on the *already-open

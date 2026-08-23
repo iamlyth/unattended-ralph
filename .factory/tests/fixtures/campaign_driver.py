@@ -8,8 +8,14 @@ lock boundary as a fresh process with a ``FACTORY_LOOP_CAMPAIGN_*``
 environment describing the phase.  It acts as a deterministic "model" for
 synthetic fixture repos — writing the exact plan templates, code files, and
 structured phase results the scenario prescribes, then exiting with the
-scenario's exit status (or crashing, for interruption fixtures).  It never
-runs Git: every commit in a campaign is made by the trusted orchestrator.
+scenario's exit status (or crashing, for interruption fixtures).  The Task 10
+``findings-revised`` planner behavior additionally consumes the deterministic
+receipt-backed ``factory-findings/v1`` payload of the previous round from its
+environment (``FACTORY_LOOP_CAMPAIGN_FINDINGS``) and fails closed when the
+payload is absent or malformed, so a fixture can prove that
+verification/audit findings reached the next planner before any development
+continued.  It never runs Git: every commit in a campaign is made by the
+trusted orchestrator.
 
 It is not evidence of real model acceptance or real confinement; production
 campaigns launch real roles through the launch authority.
@@ -104,6 +110,85 @@ def main() -> int:
             return 0
         if behavior == "planned-unbound":
             copy_template("planner-unbound.md", plan_rel, root)
+            return 0
+        if behavior == "findings-revised":
+            # Task 10 (FIND-01, §16): this is the *only* planner behavior that
+            # consumes the previous round's findings.  The deterministic
+            # receipt-backed ``factory-findings/v1`` payload must be present
+            # in the planner's environment, must parse, and must carry at
+            # least one structured entry (phase, outcome, exact phase-base
+            # commit, phase tag, result digest, and the receipt digest); any
+            # missing/malformed payload fails the planner closed so the
+            # campaign never lets a planner that ignored its findings pass.
+            findings = os.environ.get(PREFIX + "FINDINGS", "")
+            if not findings:
+                raise SystemExit(
+                    "campaign driver: findings-revised requires the "
+                    "receipt-backed findings payload"
+                )
+            try:
+                payload = json.loads(findings)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"campaign driver: findings payload is not JSON: {exc}"
+                )
+            if not isinstance(payload, dict) or payload.get("schema") != "factory-findings/v1":
+                raise SystemExit(
+                    "campaign driver: findings payload has the wrong schema"
+                )
+            entries = payload.get("entries")
+            if not isinstance(entries, list) or not entries:
+                raise SystemExit(
+                    "campaign driver: findings payload carries no entries"
+                )
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("phase") not in (
+                    "verification", "audit",
+                ):
+                    raise SystemExit(
+                        "campaign driver: findings payload has an invalid entry"
+                    )
+                if not isinstance(entry.get("findings"), list) or not isinstance(
+                    entry.get("blocked_on"), list
+                ):
+                    raise SystemExit(
+                        "campaign driver: findings payload entry is not structured"
+                    )
+                # The deterministic-gate evidence fields (Task 10 REQ 2) are
+                # part of the payload contract; a payload that omits them is
+                # malformed and never reaches a planner.
+                for field in ("gate_ran", "capability_ran"):
+                    if not isinstance(entry.get(field), bool):
+                        raise SystemExit(
+                            "campaign driver: findings payload entry is "
+                            f"missing the {field} gate field"
+                        )
+                for field in ("gate_exit", "capability_exit"):
+                    value = entry.get(field)
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, int)
+                    ):
+                        raise SystemExit(
+                            "campaign driver: findings payload entry has an "
+                            f"invalid {field} gate value"
+                        )
+            # The canonical revised plan template of this round incorporates
+            # the accepted findings as new/revised tasks (the fixture seam
+            # mirrors the production planner's digest-bound prompt section).
+            # External blockers (blocked_on references) stay explicit in the
+            # plan as blocked tasks; other findings revise the next task.
+            has_blockers = any(
+                entry.get("blocked_on") for entry in entries
+            )
+            if has_blockers:
+                copy_template(
+                    f"planner-findings-blocked-revised-{round_no}.md",
+                    plan_rel, root,
+                )
+            else:
+                copy_template(
+                    f"planner-findings-revised-{round_no}.md", plan_rel, root
+                )
             return 0
         if behavior == "no-change":
             return 0

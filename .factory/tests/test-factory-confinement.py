@@ -76,6 +76,17 @@ Coverage:
   the full ``python -m factory.loop.launch`` CLI runs the model child through
   the staged confine launcher so the leaf's own environment and forbidden-path
   probes prove real confinement at the production boundary;
+* **Task 10 exact-file result handoff** (REQ 4): the confined tester/auditor
+  holds exact read/write access to exactly its configured transient
+  phase/audit result file — never the ``.factory-state/`` breadth.  Real
+  kernel probes prove the pre-created exact file is writable/readable while
+  every sibling (create, read, write) stays denied, with an unconfined
+  control proving the same fixture is accessible without confinement; the
+  extra-write validation rejects symlink, missing, non-regular, and foreign
+  extra paths; the handoff digest is the SHA-256 of the exact transient
+  bytes; and the campaign launch authority grants the result channel only to
+  the role that owns it (tester -> phase result, auditor -> audit result,
+  planner/developer -> none);
 * **role-prompt set and audit-objective registry**: the four committed static
   role prompts have fixed bytes and deterministic per-role/prompt-set digests,
   and the committed audit-objective registry is parsed strictly and selects
@@ -93,7 +104,9 @@ is removed.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
+import importlib.util
 import inspect
 import io
 import json
@@ -115,12 +128,24 @@ SCHEMAS = ROOT / ".factory" / "schemas"
 
 sys.path.insert(0, str(LOOP))
 import audit_objectives  # noqa: E402
+import campaign as campaign_module  # noqa: E402
 import confine_launcher  # noqa: E402
 import confinement  # noqa: E402  (Task 7 private synthetic seam)
 import launch  # noqa: E402
 import promptset  # noqa: E402
 import usage  # noqa: E402
 import workspace_confinement as wc  # noqa: E402
+
+# Load the sibling hidden campaign suite so the committed fixture workspace
+# and helper conventions are reused, never copied (the Task 10 role-scoped
+# result-channel tests drive the production launch authority through the
+# same committed fixture the campaign suite uses).
+_CAMPAIGN_SUITE = ROOT / ".factory" / "tests" / "test-factory-campaign.py"
+_campaign_spec = importlib.util.spec_from_file_location(
+    "factory_campaign_suite", _CAMPAIGN_SUITE)
+FACTORY_CAMPAIGN = importlib.util.module_from_spec(_campaign_spec)
+assert _campaign_spec.loader is not None
+_campaign_spec.loader.exec_module(FACTORY_CAMPAIGN)
 
 PY = sys.executable
 GIT = "git"
@@ -1156,6 +1181,94 @@ class ConfinementSpecTests(_Base):
         os.symlink(str(inside), link)
         with self.assertRaises(wc.ConfinementError):
             wc.confinement_spec(binding, sanitized_home=home)
+
+
+class Task10ResultHandoffConfinementTests(_Base):
+    """Task 10 production result channels are exact-file Landlock grants."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not wc.confinement_primitive_available():
+            raise unittest.SkipTest(
+                "real Landlock is required for exact result-channel evidence"
+            )
+
+    def test_tester_and_auditor_write_only_their_exact_result_file(self) -> None:
+        for role, filename in (
+            ("tester", "phase-result.json"),
+            ("auditor", "audit-result.json"),
+        ):
+            with self.subTest(role=role):
+                state_dir = self.workspace / ".factory-state"
+                exact = state_dir / filename
+                sibling = state_dir / f"{role}-sibling.json"
+                exact.write_bytes(b"{}")
+                sibling.write_bytes(b"secret")
+                os.chmod(exact, 0o600)
+                os.chmod(sibling, 0o600)
+
+                targets = [
+                    {"op": "write", "path": str(exact)},
+                    {"op": "read", "path": str(sibling)},
+                    {"op": "write", "path": str(sibling)},
+                    {"op": "write", "path": str(state_dir / "new.json")},
+                ]
+                control = self.run_unconfined(targets)
+                for target in targets:
+                    self.assertProbe(control, target["op"], target["path"], "ok")
+                (state_dir / "new.json").unlink()
+                exact.write_bytes(b"{}")
+
+                binding = self.binding(role=role)
+                home = wc.sanitized_home_directory()
+                self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+                spec = wc.confinement_spec(
+                    binding,
+                    sanitized_home=home,
+                    extra_write=(str(exact),),
+                )
+                wc.validate_confinement_spec(spec, binding)
+                confined = self.run_confined(role, targets, spec=spec)
+                self.assertProbe(confined, "write", str(exact), "ok")
+                self.assertProbe(
+                    confined, "read", str(sibling), "PermissionError"
+                )
+                self.assertProbe(
+                    confined, "write", str(sibling), "PermissionError"
+                )
+                self.assertProbe(
+                    confined,
+                    "write",
+                    str(state_dir / "new.json"),
+                    "PermissionError",
+                )
+                self.assertEqual(exact.read_bytes(), b"{}x")
+                self.assertFalse((state_dir / "new.json").exists())
+
+    def test_extra_write_rejects_missing_directory_symlink_and_foreign(self) -> None:
+        binding = self.binding(role="tester")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        state_dir = self.workspace / ".factory-state"
+        target = state_dir / "target.json"
+        target.write_bytes(b"{}")
+        link = state_dir / "link.json"
+        link.symlink_to(target)
+        foreign = self.diag / "foreign.json"
+        foreign.write_bytes(b"{}")
+        for invalid in (
+            state_dir / "missing.json",
+            state_dir,
+            link,
+            foreign,
+        ):
+            with self.subTest(path=str(invalid)):
+                with self.assertRaises(wc.ConfinementError):
+                    wc.confinement_spec(
+                        binding,
+                        sanitized_home=home,
+                        extra_write=(str(invalid),),
+                    )
 
 
 # ---------------------------------------------------------------------------

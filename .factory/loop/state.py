@@ -337,6 +337,8 @@ _git = _load_gitutil()
 _fio = _load_factory_state_io()
 read_json = _fio.read_json
 read_bytes = _fio.read_bytes
+atomic_write = _fio.atomic_write
+atomic_write_text = _fio.atomic_write_text
 atomic_write_json = _fio.atomic_write_json
 StateIOError = _fio.StateIOError
 
@@ -1726,6 +1728,20 @@ def _read_ledger(root: Path) -> Dict[str, str]:
     if raw is None:
         return {}
     return _parse_ledger_lines(raw)
+
+
+def read_phase_digest_ledger(root: Path) -> Dict[str, str]:
+    """The phase-digest ledger through the authoritative strict state parser.
+
+    ``tag -> recorded state digest`` for every phase tag the trusted control
+    plane recorded, read through the hardened no-follow bounded reader and
+    the exact strict line parser (Task 19 hardening L4: a present-but-empty
+    ledger, a non-UTF-8 ledger, a malformed line, a repeated tag, or an
+    unsafe marker all fail closed).  The Task 10 findings authority consumes
+    the ledger only through this function, never through a private tolerant
+    re-parse, so a tampered ledger can never be silently tolerated.
+    """
+    return _read_ledger(root)
 
 
 def record_phase_digest(root, tag: str) -> str:

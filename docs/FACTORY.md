@@ -59,6 +59,12 @@ while trusted Git operations remain outside Landlock. Work exhaustion still
 runs verification and audit. Campaigns are finite and publish one of the six
 specified terminal outcomes rather than retrying empty work indefinitely.
 
+Findings are evidence, not tasks. Trusted findings/blocked outcomes produce an
+exact-commit, digest-bound, write-once receipt. The next fresh planner alone
+receives the deterministic findings payload and may convert it into canonical
+plan work. Developers see a finding only after it appears in a revised plan;
+no receipt, result file, event stream, or memory participates in selection.
+
 ## Relationship to Huntley's playbook
 
 The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at commit `88d488a148af97e4a3f22b11b4c3598c79d6a577`). This boilerplate adopts the playbook's highest-value context and backpressure patterns:

@@ -399,6 +399,7 @@ class InvocationBinding:
     task_id: Optional[int] = None
     task_excerpt_digest: Optional[str] = None
     audit_objective_digest: str = ""
+    findings_digest: str = ""
     runtime_limit: float = DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = DEFAULT_INACTIVITY_LIMIT
 
@@ -444,6 +445,15 @@ def verify_invocation(binding: InvocationBinding) -> None:
             raise InvocationError(
                 "`audit_objective_digest` must be a 64-hex SHA-256 digest"
             )
+    if binding.findings_digest:
+        if not SHA256_RE.fullmatch(binding.findings_digest):
+            raise InvocationError(
+                "`findings_digest` must be a 64-hex SHA-256 digest"
+            )
+    if binding.role != "planner" and binding.findings_digest:
+        raise InvocationError(
+            "`findings_digest` is allowed only for the planner role"
+        )
     if binding.role == "auditor" and not binding.audit_objective_digest:
         raise InvocationError("the auditor role requires an audit-objective digest")
     if binding.role != "auditor" and binding.audit_objective_digest:
@@ -657,17 +667,20 @@ def compose_prompt(
     plan: bytes,
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
+    findings: Optional[bytes] = None,
 ) -> bytes:
     """Assemble the fresh-context prompt from the allowlisted inputs only.
 
     The prompt is a bounded deterministic document that contains exactly the
     authoritative §5.1 inputs: the static role prompt, ``AGENTS.md``, the
     canonical product specification, the canonical implementation plan, the
-    audit objective (auditor only), and the exact selected task excerpt
-    (developer only).  Every input's bytes are digest-verified against the
-    binding (a substituted or paraphrased input fails closed) and every
-    input is independently bounded.  No session id, memory, scratchpad,
-    task-queue, or historical-conversation content is ever composed.
+    audit objective (auditor only), the exact selected task excerpt
+    (developer only), and the deterministic receipt-backed findings payload
+    of the previous round (planner only, Task 10 §16).  Every input's bytes
+    are digest-verified against the binding (a substituted or paraphrased
+    input fails closed) and every input is independently bounded.  No
+    session id, memory, scratchpad, task-queue, or historical-conversation
+    content is ever composed.
     """
     verify_invocation(binding)
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
@@ -748,6 +761,27 @@ def compose_prompt(
             + b")"
         )
         sections.append(audit_objective)
+    if binding.role == "planner" and findings is not None:
+        if not binding.findings_digest:
+            raise InvocationError(
+                "the planner findings payload requires a findings digest"
+            )
+        _verify_input_digest("findings", findings, binding.findings_digest)
+        sections.append(b"")
+        sections.append(
+            b"## Findings from the previous round (digest "
+            + binding.findings_digest.encode("ascii")
+            + b")"
+        )
+        sections.append(b"")
+        sections.append(
+            b"These structured, receipt-bound findings and blocked references "
+            b"from the previous verification/audit rounds must be incorporated "
+            b"into this revised plan as new or revised tasks before "
+            b"development starts; the next developer sees only this revised "
+            b"plan."
+        )
+        sections.append(findings)
     prompt = b"\n".join(sections)
     if len(prompt) > PROMPT_MAX_BYTES:
         raise InvocationError(
@@ -2308,6 +2342,19 @@ def _add_common_binding(parser: argparse.ArgumentParser) -> None:
         help="(optional) claimed audit-objective digest; verified against the "
         "re-derived committed blob, never authoritative",
     )
+    parser.add_argument(
+        "--findings", metavar="FILE", default=None,
+        help="(planner only) the deterministic receipt-backed findings payload "
+        "of the previous round (Task 10, FIND-01, §16); unlike the committed "
+        "blobs it is ephemeral evidence under the ignored .factory-state/ "
+        "namespace, so it is read anchored and bounded but never bound to a "
+        "commit",
+    )
+    parser.add_argument(
+        "--findings-digest", metavar="HEX", default=None,
+        help="(optional, planner only) claimed findings-payload digest; "
+        "verified against the re-derived payload bytes, never authoritative",
+    )
     # Ollama usage-guard driver knobs (QUOTA-01/QUOTA-02, §10): for a
     # guard-gated provider the §10 decision table runs inside the mint
     # (authorize_launch) before any model invocation.  These options only
@@ -2983,6 +3030,7 @@ def authorize_launch(
     plan: bytes,
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
+    findings: Optional[bytes] = None,
     usage_guard_cookie_file: Optional[str] = None,
     usage_guard_cookie_stdin: bool = False,
     usage_guard_settings_url: Optional[str] = None,
@@ -3146,6 +3194,16 @@ def authorize_launch(
             "audit objective", audit_objective, binding.audit_objective_digest
         )
         blobs["audit_objective"] = audit_objective
+    if binding.role == "planner" and findings is not None:
+        # Task 10 §16: the receipt-backed findings payload is a digest-bound
+        # planner input (never a developer/tester/auditor input, never a
+        # runtime task ledger).
+        if not binding.findings_digest:
+            raise InvocationError(
+                "the planner findings payload requires a findings digest"
+            )
+        _verify_input_digest("findings", findings, binding.findings_digest)
+        blobs["findings"] = findings
     # ---- staging/prompt/session creation FIRST (Task 8 reorder) ----
     # The private per-launch paths must exist before the confinement
     # specification is finalized, because the specification's
@@ -3182,6 +3240,7 @@ def authorize_launch(
             plan=blobs["plan"],
             audit_objective=blobs.get("audit_objective"),
             task_excerpt=blobs.get("task_excerpt"),
+            findings=blobs.get("findings"),
         )
         prompt_dir = _prompt_directory()
         private_dirs.append(prompt_dir)
@@ -3522,6 +3581,34 @@ def _run_cli(args: argparse.Namespace) -> int:
             _claimed_digest_matches(
                 "task-excerpt", task_excerpt_digest, args.task_excerpt_digest
             )
+        # Task 10 §16 (FIND-01): the deterministic receipt-backed findings
+        # payload of the previous round is a planner-only input.  Unlike the
+        # committed authoritative blobs it is ephemeral evidence under the
+        # ignored ``.factory-state/`` namespace, so it is read through the
+        # anchored no-follow bounded reader (never by name, never a commit
+        # binding) and digest-verified against the claimed digest; a
+        # substituted or paraphrased payload fails closed, and any findings
+        # argument on a non-planner role is rejected outright.
+        findings = None
+        findings_digest = ""
+        if args.findings or args.findings_digest:
+            if args.role != "planner":
+                raise InvocationError(
+                    "--findings/--findings-digest are allowed only for the "
+                    "planner role; the findings payload never reaches the "
+                    "developer, tester, or auditor"
+                )
+            if not args.findings:
+                raise InvocationError(
+                    "the planner findings payload requires --findings"
+                )
+            findings = _read_blob_anchored(
+                args.findings, "findings payload", PROMPT_INPUT_MAX
+            )
+            findings_digest = _claimed_digest_matches(
+                "findings", hashlib.sha256(findings).hexdigest(),
+                args.findings_digest,
+            )
         binding = InvocationBinding(
             role=args.role,
             model=args.model,
@@ -3538,6 +3625,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             task_id=args.task_id,
             task_excerpt_digest=task_excerpt_digest,
             audit_objective_digest=audit_objective_digest,
+            findings_digest=findings_digest,
             runtime_limit=args.runtime_limit,
             inactivity_limit=args.inactivity_limit,
         )
@@ -3575,6 +3663,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             plan=plan,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
+            findings=findings,
             usage_guard_cookie_file=args.usage_guard_cookie_file,
             usage_guard_cookie_stdin=args.usage_guard_cookie_stdin,
             usage_guard_settings_url=args.usage_guard_settings_url,

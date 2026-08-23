@@ -815,8 +815,48 @@ def confinement_spec(
     for path in backend_read:
         add_rule(path, (ACCESS_READ, ACCESS_EXECUTE))
     for path in extra_read:
+        # Task 10 review (REQ 4): every extra allowlist entry is validated
+        # exactly like the role allowlists (no symlink in any component,
+        # resolved containment), so an extra grant can never smuggle a
+        # symlink or an escaping alias.
+        _validate_allowlist_path(path, workspace, "extra read path")
         add_rule(path, (ACCESS_READ,))
     for path in extra_write:
+        # The exact transient phase/audit result file of the confined
+        # tester/auditor (REQ 4): an extra write grant is an *exact-file*
+        # rule on one existing regular file inside the repository.  The
+        # trusted orchestrator pre-creates the mode-0600 result file before
+        # the launch — Landlock cannot grant the creation of a
+        # not-yet-existing file through an exact-file rule — so a missing
+        # extra write path fails closed at specification build.  The
+        # no-follow component walk rejects any symlink component; a path
+        # outside the workspace (a foreign transient channel) and a
+        # non-regular file (a directory grant would cover every sibling
+        # under ``.factory-state/``) fail closed too.
+        _validate_allowlist_path(path, workspace, "extra write path")
+        extra = Path(path).absolute()
+        if not extra.is_relative_to(workspace):
+            raise ConfinementError(
+                f"extra write path {path} is outside the model workspace "
+                f"{workspace}; the transient result channel stays inside "
+                "the repository (fail closed)"
+            )
+        try:
+            info = os.lstat(str(extra))
+        except OSError:
+            raise ConfinementError(
+                f"extra write path {path} does not exist; the trusted "
+                "orchestrator must pre-create the exact result file before "
+                "the launch (Landlock cannot grant the creation of a "
+                "not-yet-existing file through an exact-file rule, fail "
+                "closed)"
+            ) from None
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfinementError(
+                f"extra write path {path} is not a regular file; an "
+                "exact-file write grant must name one transient result "
+                "file, never a directory or special file (fail closed)"
+            )
         add_rule(path, (ACCESS_READ, ACCESS_EXECUTE, ACCESS_WRITE))
 
     # The exact per-launch private home (Task 8 review, finding 4): the

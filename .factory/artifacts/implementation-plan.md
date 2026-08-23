@@ -100,7 +100,7 @@ completes with evidence.
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11 |
 | PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
 | COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
-| FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10 |
+| FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12 |
@@ -798,7 +798,7 @@ completes with evidence.
 
 ## Task 10: Findings flow
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 9
 - Scope: Structure tester/auditor findings as exact-commit, receipt-backed
   findings that are incorporated into the canonical plan only by the next
@@ -809,8 +809,19 @@ completes with evidence.
 - Acceptance criteria: a fixture finding reaches the next developer only via
   a revised plan task; no code path reads a separate task ledger; receipts are
   the only acceptance evidence.
-- Verification: `tests/test-factory-findings.sh`.
-- Documentation impact: `docs/FACTORY.md`.
+- Verification: `.factory/tests/test-factory-findings.py` and the real
+  Landlock result-handoff cases in
+  `.factory/tests/test-factory-confinement.py`.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+- Evidence: findings 61/61, campaign 66/66, real confinement 74/74,
+  launch 76/76, state 129/129, lock 38/38, selector 32/32, parser 13/13,
+  and hidden shell supervision pass warning-clean. Fixtures prove exact-byte
+  idempotent receipt recovery for verification/audit crash windows, preserved
+  result authentication, strict ledger and receipt bindings, actionable gate
+  evidence, planner-only digest-bound delivery, no selector authority, and
+  real exact-file tester/auditor writes with sibling `.factory-state` denial.
+  Independent security review accepted the checkpoint after those production
+  and crash-recovery remediations.
 
 ## Task 11: Credential and security boundary retention
 
@@ -826,10 +837,12 @@ completes with evidence.
   dump environment, authentication files, private keys, or secrets; tool-result
   redaction, stdin bounded command checks, and sanitized logs remain active.
   Own output content redaction (assigned from the Task 6 review): every
-  child/tool output channel — tool results, command output, and bounded
-  captures — is redacted so credentials or secrets never appear in results,
-  logs, receipts, or repository state; this complements, without replacing,
-  Task 6's parent-secret environment/argv/descriptor boundary. With Task 8,
+  child/tool output channel — tool results, command output, deterministic
+  gate output, and bounded captures — is redacted so credentials or secrets
+  never appear in results, logs, receipts, or repository state; deterministic
+  gates and acceptance commands receive a stripped allowlisted environment
+  rather than the full parent environment. This complements, without
+  replacing, Task 6's parent-secret environment/argv/descriptor boundary. With Task 8,
   retain HOME/XDG/filesystem confinement so the credential guard cannot be
   bypassed through host files visible to model tools. Co-own the Task 7
   review's guard-source binding jointly with Task 8: the Ollama usage-guard
@@ -869,7 +882,10 @@ completes with evidence.
 - Dependencies: Task 5, Task 9
 - Scope: Retain exact-commit signed runner receipts, capability contracts,
   visual provenance, atomic publication, installed and human evidence tiers,
-  and the receipt wrapper (`scripts/machine-receipt.py`). The verifier
+  and the receipt wrapper (`scripts/machine-receipt.py`). Harden adjacent
+  stdout/stderr artifacts with owner, mode, link-count, and inode checks, and
+  require same-tag coordinator receipt publication to fail closed rather than
+  silently replace an existing receipt. The verifier
   entrypoint is opened and bound to its committed blob/identity before
   untrusted execution, and later pathname substitution fails closed. PASS
   requires exit 0 and verified identity/commit/digests; any BLOCKED evidence
