@@ -27,17 +27,35 @@ must run as an unprivileged user.  (An immutable root-owned store alone
 does not make the chain safe for root: a root caller could chmod/chown the
 very store entries it must not control.)
 
-The runner also strips a documented set of Git override environment
-variables — including the *complete* ``GIT_CONFIG*`` family
-(``GIT_CONFIG``, ``GIT_CONFIG_SYSTEM``, ``GIT_CONFIG_GLOBAL``,
-``GIT_CONFIG_NOSYSTEM``, ``GIT_CONFIG_COUNT``, ``GIT_CONFIG_KEY_*``,
-``GIT_CONFIG_VALUE_*``, ``GIT_CONFIG_PARAMETERS``) and the object-store /
-index / work-tree / helper redirectors — so the pinned executable cannot be
-pointed at a different object store, index, work tree, or configuration set
-behind the boundary (finding F5).  Only the *read-only* state/branch calls
-of the trusted control plane use this module; the committed
-``scripts/git-commit-guard.sh`` boundary remains the authority for commit
-creation and is preserved untouched.
+The runner also strips a deterministic replace refs pin and a documented set
+of Git override environment variables — including the *complete*
+``GIT_CONFIG*`` family (``GIT_CONFIG``, ``GIT_CONFIG_SYSTEM``,
+``GIT_CONFIG_GLOBAL``, ``GIT_CONFIG_NOSYSTEM``, ``GIT_CONFIG_COUNT``,
+``GIT_CONFIG_KEY_*``, ``GIT_CONFIG_VALUE_*``, ``GIT_CONFIG_PARAMETERS``),
+the object-store / index / work-tree / helper redirectors, and
+``GIT_NO_REPLACE_OBJECTS`` itself — so the pinned executable cannot be
+pointed at a different object store, index, work tree, configuration set, or
+replace-refs behavior behind the boundary (finding F5; replace refs could
+otherwise swap an object behind ``git cat-file``).  Every trusted invocation
+re-pins ``GIT_NO_REPLACE_OBJECTS=1`` in its sanitized environment, so object
+resolution can never consult ``refs/replace/*``.  Only the *read-only*
+state/branch calls of the trusted control plane use this module; the
+committed ``scripts/git-commit-guard.sh`` boundary remains the authority for
+commit creation and is preserved untouched.
+
+Bounded byte capture: :func:`git_bytes_bounded` consumes a trusted Git
+child's output through the pipes with ``select``-bounded ``read1`` chunks,
+draining **stdout and stderr fairly** (both streams are selected together, so
+a child that floods one pipe while the other stalls can never deadlock the
+capture into a spurious timeout), and fails closed the moment a stream
+exceeds its cap, so a blob read is never an unbounded ``subprocess.run``
+capture even when a pre-checked size is the primary defense (Task 15 F1).
+The child runs in its **own process group** (``start_new_session=True``) and
+a wedged, over-bound, or timed-out capture terminates and reaps the child's
+*entire* group (TERM, full bounded grace, unconditional KILL, bounded leader
+reap), so no git helper survives and no zombie is left behind (Task 15).  The
+stdin pipe is written with the same shared bounded deadline, so a child that
+never reads its input cannot stall the capture either.
 
 Every invocation failure (missing binary, broken pipe, bounded timeout) is
 routed through the single fail-closed :class:`GitBoundaryError` contract
@@ -51,8 +69,11 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import select
+import signal
 import stat
 import subprocess
+import time
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
@@ -103,12 +124,21 @@ GIT_ENV_STRIP = (
     "GIT_CONFIG_PARAMETERS",
     "GIT_EXEC_PATH",
     "GIT_TEMPLATE_DIR",
+    # A caller environment can never re-enable replace refs (a replace
+    # ref could swap an object hash behind a trusted blob read); the
+    # boundary re-pins ``GIT_NO_REPLACE_OBJECTS=1`` itself on every call.
+    "GIT_NO_REPLACE_OBJECTS",
 )
 # The complete ``GIT_CONFIG`` family is matched by prefix (F5): every key
 # whose name is exactly ``GIT_CONFIG`` or starts with ``GIT_CONFIG_`` is
 # removed, covering the well-known enumerated keys and any future sibling.
 GIT_CONFIG_PREFIX = "GIT_CONFIG"
 GIT_CONFIG_PREFIX_PATTERN = (GIT_CONFIG_PREFIX, GIT_CONFIG_PREFIX + "_")
+# The exact no-replace pin every trusted invocation re-applies after the
+# environment strip: a caller environment can never re-enable replace refs,
+# so a replace ref can never swap an object hash behind a trusted blob read
+# (finding F5).
+GIT_NO_REPLACE_OBJECTS = "GIT_NO_REPLACE_OBJECTS"
 
 
 def _is_git_config_key(key: str) -> bool:
@@ -330,6 +360,11 @@ def git_run(
     fail-closed binding failures.
     """
     environment = sanitize_git_environment(env)
+    # Replace refs are never consulted: a caller-controlled environment cannot
+    # re-enable them (the key is stripped above), and the boundary itself pins
+    # the no-replace behavior on every trusted invocation so an object hash
+    # can never be swapped behind a blob read (Task 15 F1).
+    environment[GIT_NO_REPLACE_OBJECTS] = "1"
     try:
         return subprocess.run(
             [GIT_EXECUTABLE, *argv],
@@ -366,8 +401,13 @@ def git_bytes(
 
     The canonical plan digest is the SHA-256 of the exact committed plan
     bytes, so blob reads must not round-trip through a text decoding.
+
+    This plain variant captures whatever the child writes; callers that need
+    a hard-bounded capture (migration blob reads) use
+    :func:`git_bytes_bounded` instead.
     """
     environment = sanitize_git_environment(env)
+    environment[GIT_NO_REPLACE_OBJECTS] = "1"
     try:
         return subprocess.run(
             [GIT_EXECUTABLE, *argv],
@@ -388,6 +428,306 @@ def git_bytes(
             f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
             f"bounded timeout: {exc}"
         ) from exc
+
+
+def _close_pinned_git_streams(proc: subprocess.Popen) -> None:
+    """Close every pipe end of a pinned-Git child (never raises)."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _set_pipe_nonblocking(stream) -> None:
+    """Make one child pipe end non-blocking so a select wakeup never blocks.
+
+    ``select`` reporting a pipe readable is a strong signal, but a spurious
+    wakeup (for example EINTR) can still leave the pipe empty; a non-blocking
+    pipe makes the subsequent ``read1`` raise ``BlockingIOError`` instead of
+    blocking forever, so the bounded drain stays strictly non-blocking.
+    """
+    try:
+        os.set_blocking(stream.fileno(), False)
+    except OSError:
+        pass
+
+
+def _signal_process_group(proc: subprocess.Popen, signum: int) -> None:
+    """Send ``signum`` to the child's whole process group (best effort).
+
+    The bounded runner starts every child in its own new session/process
+    group, so the group is addressed by the child's pid.  If the group is
+    already gone (``ProcessLookupError``) and the leader still lives, the
+    leader is signalled directly; a reaped leader means there is nothing to
+    signal.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signum)
+            return
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    if proc.poll() is None:
+        try:
+            os.kill(proc.pid, signum)
+        except OSError:
+            pass
+
+
+def _reap_leader_bounded(proc: subprocess.Popen, timeout: float) -> None:
+    """Reap the group leader within a bounded deadline after KILL.
+
+    SIGKILL cannot be ignored, so the leader either dies (becoming a zombie
+    that ``wait()`` immediately reaps) or is stuck in an unrecoverable
+    kernel wait; the loop keeps calling ``wait()`` up to the bounded
+    deadline so a normal death is always reaped (never left as a zombie of
+    the caller), and gives up only on the pathological uninterruptible case
+    (which is not a zombie and is documented rather than spun on).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            proc.wait(timeout=max(0.05, deadline - time.monotonic()))
+            return
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                return
+
+
+def _terminate_pinned_git(proc: subprocess.Popen) -> None:
+    """Terminate and reap a wedged pinned-Git child's entire process group.
+
+    The child runs in its own process group (``start_new_session``), so the
+    bounded escalation — TERM to the group, the full grace, unconditional
+    KILL of the group, and the bounded leader reap — applies to every git
+    helper the child spawned: no grandchild survives and no zombie is left
+    behind.  The KILL is sent even when the leader exited on TERM, so a
+    TERM-ignoring grandchild holding a pipe cannot outlive the capture.
+    """
+    _signal_process_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_process_group(proc, signal.SIGKILL)
+    _reap_leader_bounded(proc, timeout=5.0)
+
+
+def _bounded_write_stdin(
+    proc: subprocess.Popen, input: bytes, deadline: float, argv: Sequence[str]
+) -> None:
+    """Write ``input`` to the child with the shared bounded deadline.
+
+    The stdin pipe is made non-blocking and written in ``select``-bounded
+    chunks, so a child that never reads its stdin cannot stall the capture
+    past the finite deadline (a wedged pipe fails closed with the same
+    ``GitBoundaryError`` contract and the group-termination path reaps the
+    child).  The write end is always closed, whether the input was fully
+    delivered, cut short by a broken pipe, or abandoned on failure.
+    """
+    try:
+        fd = proc.stdin.fileno()
+    except (AttributeError, OSError):
+        return
+    try:
+        if not input:
+            return
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            pass
+        view = memoryview(input)
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GitBoundaryError(
+                    f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+                    f"bounded timeout while writing stdin: {' '.join(argv)}"
+                )
+            ready, _, _ = select.select([], [fd], [], remaining)
+            if not ready:
+                raise GitBoundaryError(
+                    f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+                    f"bounded timeout while writing stdin: {' '.join(argv)}"
+                )
+            try:
+                written = os.write(fd, view)
+            except BlockingIOError:
+                continue
+            except (BrokenPipeError, OSError):
+                return  # the child closed its stdin; nothing more to deliver
+            if written <= 0:
+                raise GitBoundaryError(
+                    f"the pinned Git executable {GIT_EXECUTABLE!r} made no "
+                    f"stdin progress: {' '.join(argv)}"
+                )
+            view = view[written:]
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+
+def _bounded_drain_pair(
+    proc: subprocess.Popen,
+    out: bytearray,
+    err: bytearray,
+    maximum: int,
+    deadline: float,
+    argv: Sequence[str],
+) -> None:
+    """Fairly drain the child's stdout and stderr with a shared deadline.
+
+    Both streams are selected together and drained as data arrives, so a
+    child that floods one pipe while the other stays silent can never
+    deadlock the capture into a spurious timeout: the stalled stream is
+    simply not ready while the flooded one keeps being consumed.  Each
+    stream accumulates at most ``maximum`` bytes; an over-bound stream fails
+    closed instead of being captured unboundedly, and a stream that reached
+    EOF is removed while its sibling keeps draining.  The pipes are
+    non-blocking (``read1`` raises ``BlockingIOError`` on a spurious wakeup
+    instead of blocking) and the shared deadline bounds the whole call.
+    """
+    pending = {
+        proc.stdout: (out, "stdout", maximum),
+        proc.stderr: (err, "stderr", maximum),
+    }
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitBoundaryError(
+                f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+                f"bounded timeout while capturing output: {' '.join(argv)}"
+            )
+        try:
+            ready, _, _ = select.select(list(pending), [], [], remaining)
+        except (OSError, ValueError) as exc:
+            raise GitBoundaryError(
+                f"cannot select the pinned Git executable pipes "
+                f"{GIT_EXECUTABLE!r}: {exc}"
+            ) from exc
+        if not ready:
+            raise GitBoundaryError(
+                f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+                f"bounded timeout while capturing output: {' '.join(argv)}"
+            )
+        for stream in ready:
+            buffer, label, cap = pending[stream]
+            try:
+                chunk = stream.read1(min(65536, cap + 1 - len(buffer)))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                del pending[stream]
+                continue
+            buffer.extend(chunk)
+            if len(buffer) > cap:
+                raise GitBoundaryError(
+                    f"the pinned Git executable {GIT_EXECUTABLE!r} wrote more "
+                    f"than {cap} bytes of {label}: {' '.join(argv)}"
+                )
+
+
+def git_bytes_bounded(
+    argv: Sequence[str],
+    *,
+    maximum: int,
+    cwd: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+    input: Optional[bytes] = None,
+    timeout: Optional[float] = None,
+    pass_fds: Sequence[int] = (),
+) -> subprocess.CompletedProcess[bytes]:
+    """Pinned-Git byte read whose captured stdout is hard-capped (no unbounded capture).
+
+    ``subprocess.run(capture_output=True)`` collects whatever the child
+    writes; for a blob that is only *post-hoc* size-checked that is an
+    unbounded capture.  This bounded variant consumes the child's output
+    through the pipes with ``select``-bounded ``read1`` chunks — stdout and
+    stderr **drained fairly** against one shared deadline, so a child that
+    floods one pipe while the other stalls can never deadlock the capture —
+    accumulates at most ``maximum`` bytes per stream, and fails closed —
+    terminating and reaping the child's *entire* process group, leaving no
+    zombie — the moment a stream exceeds its cap, so an over-bound or
+    swapped object can never be captured unboundedly and a stalled child can
+    never be waited on forever (the finite ``timeout``, default
+    :data:`GIT_TIMEOUT`, bounds the whole call).  The child runs in its own
+    new session/process group and the stdin pipe is written with the same
+    shared bounded deadline.  The sanitized environment carries the
+    ``GIT_NO_REPLACE_OBJECTS=1`` no-replace pin of the other trusted
+    invocations.
+    """
+    if maximum < 0:
+        raise GitBoundaryError(
+            "bounded Git capture requires a non-negative maximum"
+        )
+    environment = sanitize_git_environment(env)
+    environment[GIT_NO_REPLACE_OBJECTS] = "1"
+    try:
+        proc = subprocess.Popen(
+            [GIT_EXECUTABLE, *argv],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=tuple(pass_fds),
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise GitBoundaryError(
+            f"cannot execute the pinned Git executable {GIT_EXECUTABLE!r}: {exc}"
+        ) from exc
+    _set_pipe_nonblocking(proc.stdout)
+    _set_pipe_nonblocking(proc.stderr)
+    out = bytearray()
+    err = bytearray()
+    deadline = time.monotonic() + (GIT_TIMEOUT if timeout is None else timeout)
+    try:
+        _bounded_write_stdin(proc, input or b"", deadline, argv)
+        _bounded_drain_pair(proc, out, err, maximum, deadline, argv)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitBoundaryError(
+                f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+                f"bounded timeout: {' '.join(argv)}"
+            )
+        proc.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_pinned_git(proc)
+        raise GitBoundaryError(
+            f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
+            f"bounded timeout: {exc}"
+        ) from exc
+    except GitBoundaryError:
+        _terminate_pinned_git(proc)
+        raise
+    except (OSError, ValueError) as exc:
+        _terminate_pinned_git(proc)
+        raise GitBoundaryError(
+            f"cannot execute the pinned Git executable {GIT_EXECUTABLE!r}: {exc}"
+        ) from exc
+    except BaseException:
+        # Signals and memory pressure must not leave a pinned Git process or
+        # descendant running after the trusted caller unwinds.
+        _terminate_pinned_git(proc)
+        raise
+    finally:
+        _close_pinned_git_streams(proc)
+    return subprocess.CompletedProcess(
+        [GIT_EXECUTABLE, *argv], proc.returncode, bytes(out), bytes(err)
+    )
 
 
 def resolve_head(root: Path) -> Optional[str]:

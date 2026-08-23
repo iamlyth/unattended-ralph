@@ -22,6 +22,24 @@ while (( $# > 0 )); do
 done
 
 cd -- "$PROJECT_ROOT"
+# Task 15 migration: the legacy Ralph control plane is frozen by the tracked
+# .factory/ralph-freeze marker; the hidden .factory/loop control plane is
+# authoritative. FACTORY_RALPH_FREEZE_OVERRIDE=1 is the documented
+# operator-only escape for recovering an already in-flight legacy cycle.
+if [[ ${FACTORY_RALPH_FREEZE_OVERRIDE:-0} != 1 ]]; then
+    freeze_marker="$PROJECT_ROOT/.factory/ralph-freeze"
+    if [[ -f "$freeze_marker" && ! -L "$freeze_marker" ]]; then
+        echo "ralph-run: frozen: the legacy Ralph control plane is deprecated (Task 15 migration)" >&2
+        echo "ralph-run: the hidden .factory/loop control plane replaces it" >&2
+        echo "ralph-run: set FACTORY_RALPH_FREEZE_OVERRIDE=1 only to recover an in-flight cycle" >&2
+        exit 2
+    fi
+    if [[ -e "$freeze_marker" || -L "$freeze_marker" ]]; then
+        echo "ralph-run: frozen: the freeze marker exists but is not a regular file; refusing a legacy launch" >&2
+        echo "ralph-run: inspect .factory/ralph-freeze; FACTORY_RALPH_FREEZE_OVERRIDE=1 is only for bounded recovery" >&2
+        exit 2
+    fi
+fi
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-run.sh" "${ORIGINAL_ARGS[@]}"
@@ -43,12 +61,10 @@ factory_lock_acquire "$PROJECT_ROOT"
 ralph_supervision_prepare_state_directory
 "$SCRIPT_DIR/factory-state-file.py" write loop-mode implementation
 ralph_supervision_initialize implementation "$RESUME"
-# A fresh implementation context receives only the durable context summary:
-# the active task, open tasks, unresolved facts, blocked/partial rows, and
-# exact receipt refs. Regenerate and validate it before every launch so the
-# worker never inherits stale completion prose or drifted claims.
-factory_lock_run_untrusted ./scripts/ralph-context-summary.py
-factory_lock_run_untrusted ./scripts/check-context-summary.py
+# Task 15 migration: no persisted context summary is generated, read, or
+# validated by the new control flow (FACTORY-LOOP-SPEC §5.2); the canonical
+# plan is the sole task authority, so a plan-mirror drift can never surface
+# as an acceptance failure.
 CONTINUE=false
 if $RESUME && ralph_supervision_should_continue implementation; then CONTINUE=true; fi
 

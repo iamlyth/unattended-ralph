@@ -66,7 +66,6 @@ PY
         # receipt/artifact or an explicit human decision.
         ./scripts/validate-conformance.py complete .factory/artifacts/conformance.json
         ./scripts/validate-blocked-facts.py complete .factory/artifacts/blocked-facts.json
-        ./scripts/check-context-summary.py
         ./scripts/check-golden-policy.py
         ./scripts/check-capability-contracts.py
         ./scripts/check-capability-evidence.py

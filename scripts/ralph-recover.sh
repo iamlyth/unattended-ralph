@@ -36,6 +36,14 @@ EOF
 die() { echo "ralph-recover: $*" >&2; exit 1; }
 warn() { echo "ralph-recover: warning: $*" >&2; }
 
+# Task 15 migration: recovery of an already in-flight legacy cycle remains
+# the documented exception to the Ralph launch freeze (it is not a new
+# launch); completing full recovery resumes the frozen visible launchers, so
+# the operator must set the exact override FACTORY_RALPH_FREEZE_OVERRIDE=1
+# (any other value leaves them frozen, fail closed).
+echo "ralph-recover: note: the legacy Ralph control plane is deprecated (Task 15 migration);" >&2
+echo "ralph-recover: the hidden .factory/loop control plane is authoritative" >&2
+
 while (( $# > 0 )); do
     case "$1" in
         --loop-id) (( $# >= 2 )) || die "--loop-id requires a value"; EXPLICIT_LOOP_ID=$2; shift 2 ;;

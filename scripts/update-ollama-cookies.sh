@@ -3,8 +3,26 @@
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-ENV_FILE="$PROJECT_ROOT/.ollama-usage-env"
+# Task 15 migration: the operator store lives OUTSIDE the model workspace —
+# $OLLAMA_USAGE_ENV_FILE when set, otherwise $XDG_CONFIG_HOME/
+# unattended-ralph/ollama-usage-env or ~/.config/unattended-ralph/
+# ollama-usage-env.  The legacy workspace store is detected (metadata only)
+# and never sourced as a credential authority.
+if [[ -n "${OLLAMA_USAGE_ENV_FILE:-}" ]]; then
+    ENV_FILE=${OLLAMA_USAGE_ENV_FILE}
+elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    ENV_FILE="$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env"
+else
+    ENV_FILE="${HOME:-}/.config/unattended-ralph/ollama-usage-env"
+fi
 
+if [[ -e "$PROJECT_ROOT/.ollama-usage-env" || -L "$PROJECT_ROOT/.ollama-usage-env" ]]; then
+    echo "update-ollama-cookies: DEPRECATED legacy store $PROJECT_ROOT/.ollama-usage-env;" >&2
+    echo "update-ollama-cookies: credentials now live in the operator store outside the workspace" >&2
+    echo "update-ollama-cookies: (migrate it; the legacy store is never sourced as an authority)" >&2
+fi
+
+mkdir -p "$(dirname -- "$ENV_FILE")"
 if [[ -r "$ENV_FILE" && -z ${OLLAMA_COOKIE:-} ]]; then
     # shellcheck source=/dev/null
     source "$ENV_FILE"

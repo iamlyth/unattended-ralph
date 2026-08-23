@@ -1,0 +1,11 @@
+# Task 15 migration: the legacy Ralph Orchestrator control plane is frozen.
+#
+# The presence of this tracked marker freezes NEW legacy Ralph campaign,
+# planning, implementation, audit, and maintenance launches: the deprecated
+# visible `scripts/ralph-*` entry points refuse to start a new Ralph
+# control-plane cycle.  The hidden `.factory/loop/` control plane
+# (`.factory/loop/campaign.py`, `.factory/loop/migration.py`) is
+# authoritative.  Recovery of an already in-flight legacy cycle during
+# migration is the documented operator-only exception
+# (`FACTORY_RALPH_FREEZE_OVERRIDE=1`); `scripts/ralph-recover.sh` itself is
+# not a new launch and remains usable.  See docs/OPERATIONS.md.

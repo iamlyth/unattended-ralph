@@ -1,6 +1,13 @@
 # Ralph Software Factory Boilerplate
 
-A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum development technique using Ralph Orchestrator, jailed Pi, Ollama, adaptive read-only subagents, Git checkpoints, quota waiting, and crash recovery.
+A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum development technique using fresh planner, developer, tester, and auditor processes, jailed Pi, Ollama, deterministic Git checkpoints, quota waiting, and crash recovery.
+
+> **Migration status:** Ralph Orchestrator launches are frozen. The hidden
+> Python control plane uses the canonical plan plus `factory-state/v1`; it does
+> not import Ralph tasks, memories, events, completion tokens, scratchpads, or
+> persisted context summaries. Visible `scripts/ralph-*` commands are deprecated
+> compatibility forwarders and are not required by the new loop. See
+> [Factory Operations](docs/OPERATIONS.md) for metadata-only migration.
 
 `docs/SPEC.md` is retained as the first trial specification. Product implementation is intentionally absent on this branch.
 

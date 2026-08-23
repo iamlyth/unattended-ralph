@@ -131,6 +131,8 @@ set -e
 [[ $direct_reserved_rc -eq 2 && $direct_topic_rc -eq 2 ]]
 [[ $direct_missing_rc -eq 2 && $direct_extra_rc -eq 2 && $direct_unknown_rc -eq 2 ]]
 [[ $(wc -l < "$RALPH_EVENTS_FILE") -eq $events_before ]]
+guard_digest=$(sha256sum "$PROJECT_ROOT/scripts/credential-guard.py" | awk '{print $1}')
+PI_RALPH_GUARD_DIGEST=$guard_digest \
 node --input-type=module - "$PROJECT_ROOT/scripts/pi-ralph-emit-extension.mjs" <<'EOF'
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -397,7 +399,7 @@ for _ in $(seq 1 200); do
 done
 [[ -f "$probe_dir/seen" ]] || { echo "test: curl never reached the probe server" >&2; exit 1; }
 
-python3 - "$guard_pid" "$PROBE_SESS" "$PROBE_AID" <<'PY'
+if ! python3 - "$guard_pid" "$PROBE_SESS" "$PROBE_AID" <<'PY'
 import os, pathlib, sys, time
 parent = int(sys.argv[1])
 tokens = [sys.argv[2].encode(), sys.argv[3].encode()]
@@ -443,7 +445,10 @@ for token in tokens:
     assert token not in environ, f'cookie token leaked into curl environment: {token!r}'
 assert b'OLLAMA_COOKIE' not in environ, 'OLLAMA_COOKIE leaked into curl environment'
 PY
-[[ $? -eq 0 ]] || { echo "test: legacy guard credential leaked to curl /proc" >&2; exit 1; }
+then
+    echo "test: legacy guard credential leaked to curl /proc" >&2
+    exit 1
+fi
 received=$(cat "$probe_dir/cookie")
 [[ "$received" == "$PROBE_SESS; $PROBE_AID" ]] || \
     { echo "test: cookie header not delivered via private stdin config" >&2; exit 1; }

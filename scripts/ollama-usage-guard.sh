@@ -4,7 +4,28 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-ENV_FILE="$PROJECT_ROOT/.ollama-usage-env"
+# Task 15 migration: the operator store lives OUTSIDE the model workspace
+# (Task 7 review) — $OLLAMA_USAGE_ENV_FILE when set by the operator,
+# otherwise $XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env or
+# ~/.config/unattended-ralph/ollama-usage-env.  The legacy workspace store
+# (<repository root>/.ollama-usage-env) is detected below with metadata only
+# and is never read, sourced, or parsed as a credential authority.
+if [[ -n "${OLLAMA_USAGE_ENV_FILE:-}" ]]; then
+    ENV_FILE=${OLLAMA_USAGE_ENV_FILE}
+elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    ENV_FILE="$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env"
+else
+    ENV_FILE="${HOME:-}/.config/unattended-ralph/ollama-usage-env"
+fi
+
+# Legacy workspace-scoped store detection (metadata only; never a credential
+# authority).  The operator must migrate it to the external operator store;
+# the guard does not read a single byte of the legacy store.
+if [[ -e "$PROJECT_ROOT/.ollama-usage-env" || -L "$PROJECT_ROOT/.ollama-usage-env" ]]; then
+    echo "ollama-guard: DEPRECATED legacy store $PROJECT_ROOT/.ollama-usage-env;" >&2
+    echo "ollama-guard: the operator credential store lives outside the model workspace" >&2
+    echo "ollama-guard: (migrate it; the legacy store is never read as a credential authority)" >&2
+fi
 
 # Resolve every setting into a *private non-exported* shell variable and scrub
 # the complete OLLAMA/credential environment (QUOTA-02, §10): the operator

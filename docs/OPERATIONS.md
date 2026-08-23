@@ -498,6 +498,19 @@ The hermetic suite reaches the loopback transport only through a private
 authority seam that additionally requires a synthetic confinement proof — a
 diagnostics/test facility, never a production feature.
 
+### Operator credential store (Task 15 migration)
+
+The operator credential store lives **outside the model workspace**: the
+guard resolves ``$OLLAMA_USAGE_ENV_FILE`` when the operator sets it,
+otherwise ``$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`` (or
+``~/.config/unattended-ralph/ollama-usage-env``).  The legacy workspace store
+``<repository root>/.ollama-usage-env`` is **detected with metadata only**
+and is never read, sourced, or parsed as a credential authority; the
+operator must migrate it to the external store (the migration reports its
+presence in the flat evidence report ``.factory-state/migration.json``).  This also applies to the
+retained shell guard and ``scripts/update-ollama-cookies.sh``, which warn on
+the legacy store without reading it.
+
 ### Allowed
 
 The session and weekly percentages are below `OLLAMA_THRESHOLD`; Ralph starts the next iteration.
@@ -567,6 +580,70 @@ The model-facing Git shim selects only fixed absolute trusted Git candidates
 refuses bypass flags and root execution. External backends are accepted only
 when their exact immutable executable/source paths are bound into a real
 Landlock confinement proof; the synthetic-proof seam cannot authorize them.
+
+## Ralph migration and freeze (Task 15)
+
+The tracked `.factory/ralph-freeze` marker blocks every new legacy Ralph
+launcher before it acquires the factory lock. `--help` remains available and
+legacy recovery reports deprecation, but the new Python campaign does not call
+these scripts. The marker is trusted only as a regular non-symlink file: a
+present marker that is a symlink, FIFO, socket, device, or directory fails
+closed (the launchers and the hidden migration authority both refuse), and a
+missing marker preserves the legacy not-frozen semantics.
+
+A documented operator-only override exists solely for bounded legacy recovery;
+it is never part of normal orchestration. Completing **full** legacy recovery
+(resuming an already in-flight legacy cycle through the frozen launcher that
+`scripts/ralph-recover.sh` execs) requires the exact override value — set
+`FACTORY_RALPH_FREEZE_OVERRIDE=1` into the recovery environment. The value must
+be exactly `1`; any other value (unset, `0`, `2`, `yes`) leaves the launchers
+frozen. `ralph-recover.sh` itself is not a new launch and runs without the
+override to repair/validate markers (`--prepare-only`/`--dry-run`).
+
+The hidden migration authority is metadata-only:
+
+```bash
+python3 .factory/loop/migration.py --root "$PWD" status
+python3 .factory/loop/migration.py --root "$PWD" derive
+# Explicit operator action after reviewing the report:
+python3 .factory/loop/migration.py --root "$PWD" migrate \
+  --campaign-id ID --rounds 5
+```
+
+It binds the canonical plan and HEAD, preserves dirty path metadata,
+receipt/evidence metadata, and blocked facts, then initializes the single
+`factory-state/v1` authority with no-replace semantics. It never opens `.ralph`
+content, imports task/memory/event/completion state, reads the removed context
+summary, or reads legacy credential bytes. The report lives only as the flat
+evidence artifact `.factory-state/migration.json` inside the ignored
+`.factory-state/` namespace (never a second mutable control authority).
+
+### Migration blob bounds (Task 15)
+
+The migration digests exactly the committed blobs a real launch would
+consume, each under a hard per-kind cap: the specification, the plan, every
+role prompt, and the audit-objectives registry are all capped at **1 MiB**
+(matching the launch prompt-input limit).  Each blob is resolved to a strict
+40-hex object ID through the pinned no-replace Git boundary and is exact-size
+pre-checked with `git cat-file -s` *before any body byte is read*; an
+oversized, non-hex, replace-ref, or size-mutating object fails closed and the
+body read is never issued.  The bounded byte capture itself (`git_bytes_bounded`)
+runs the pinned Git child in its own process group, drains stdout/stderr
+fairly against one shared deadline (a child that floods one pipe cannot
+deadlock the capture), and terminates/reaps the whole group (TERM, bounded
+grace, KILL, leader reap) on a wedged or over-bound run, leaving no zombie.
+
+### Accepted shell-level freeze race (Task 16)
+
+The shell freeze gates in the deprecated `scripts/ralph-*` launchers are
+best-effort presence checks: a same-uid local writer can delete the tracked
+`.factory/ralph-freeze` marker between a shell's `[ -f ]` check and the launch
+it guards, so a shell gate can never be a strong tamper boundary.  The hidden
+migration authority (`is_ralph_frozen`) re-stats the marker no-follow and
+fails closed on an unsafe marker, and the tracked marker itself is the
+authoritative launch boundary of the new control plane.  This residual is
+documented and **accepted for the Task 16 adversarial pass**, never silently
+relied on.
 
 ## Clean stop
 

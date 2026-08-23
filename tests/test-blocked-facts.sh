@@ -16,9 +16,10 @@ CONTRACT_CHECKER="$PROJECT_ROOT/scripts/check-capability-contracts.py"
 
 setup_repo() {
     local dir=$1
-    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory-state/runner-evidence/probe-runner" \
-        "$dir/tests" "$dir/docs"
+    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory/loop" \
+        "$dir/.factory-state/runner-evidence/probe-runner" "$dir/tests" "$dir/docs"
     cp "$VALIDATOR" "$CONFORMANCE" "$EVIDENCE_CHECKER" "$CONTRACT_CHECKER" "$dir/scripts/"
+    cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$dir/.factory/loop/"
     chmod +x "$dir/scripts/"*.py
     cat > "$dir/.factory/environment.toml" <<'EOF'
 schema_version = 1

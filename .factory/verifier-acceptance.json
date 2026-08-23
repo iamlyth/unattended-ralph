@@ -25,7 +25,6 @@
     {"name": "test-audit-receipts.sh", "args": []},
     {"name": "test-blocked-facts.sh", "args": []},
     {"name": "test-campaign-objectives.sh", "args": []},
-    {"name": "test-context-summary.sh", "args": []},
     {"name": "test-golden-policy.sh", "args": []},
     {"name": "test-visual-audit.sh", "args": []},
     {"name": "test-credential-guard.sh", "args": []},

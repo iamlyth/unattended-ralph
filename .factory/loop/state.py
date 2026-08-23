@@ -1143,7 +1143,8 @@ def owner_tamper_gate(root) -> Dict[str, object]:
         with _fio.state_dir(root, create=True) as directory_fd:
             descriptor = os.open(
                 probe,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
                 0o600,
                 dir_fd=directory_fd,
             )
@@ -1574,7 +1575,8 @@ def _append_ledger_line_fd(
         descriptor = os.open(
             DIGEST_LEDGER_NAME,
             os.O_WRONLY | os.O_APPEND | os.O_CREAT
-            | getattr(os, "O_NOFOLLOW", 0),
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             0o600,
             dir_fd=directory_fd,
         )
@@ -1673,7 +1675,8 @@ def _read_ledger_fd(
     try:
         descriptor = os.open(
             DIGEST_LEDGER_NAME,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_fd,
         )
     except FileNotFoundError:

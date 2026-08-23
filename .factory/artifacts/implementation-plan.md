@@ -112,7 +112,7 @@ exact-commit evidence.
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16 |
 | RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16 |
 | HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16 |
-| MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
+| MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
 
@@ -989,7 +989,7 @@ exact-commit evidence.
 
 ## Task 15: Migration and deprecation of the Ralph control plane
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 9, Task 10
 - Scope: Freeze new Ralph Orchestrator campaign launches; preserve existing
   `.ralph/` and campaign artifacts as read-only recovery history outside the
@@ -1037,15 +1037,22 @@ exact-commit evidence.
   an acceptance failure; the legacy workspace `.ollama-usage-env` store is
   migrated/deprecated and no new-path code reads a workspace- or
   repository-scoped Ollama credential store.
-- Verification: `tests/test-factory-migration.sh` proves the new path has no
-  context-summary dependency (no new-path code generates or reads
-  `.factory/artifacts/context-summary.md`, and
-  `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py` /
-  `tests/test-context-summary.sh` are absent from or unreachable in the new
-  control flow); the legacy `tests/test-context-summary.sh` suite is not
-  invoked by the new loop; no new-path code reads a workspace- or
-  repository-scoped `.ollama-usage-env` Ollama credential store.
-- Documentation impact: `docs/OPERATIONS.md`, `README.md`.
+- Verification: `.factory/tests/test-factory-migration.py`,
+  `.factory/tests/test-factory-migration.sh`, and the complete
+  `scripts/verify-boilerplate.sh` gate. The suites prove the new path has no
+  context-summary dependency, imports no Ralph runtime authority, and reads no
+  workspace/repository-scoped `.ollama-usage-env` credential bytes.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`, `README.md`.
+- Evidence: migration 67/67, state 129/129, and every retained hidden factory
+  regression passes; `scripts/verify-boilerplate.sh` exits 0. The migration
+  binds plan/HEAD/dirty/evidence/blocker metadata, publishes only the single
+  no-replace `factory-state/v1` authority, freezes all six Ralph launchers,
+  removes and unwires the persisted context-summary authority, and detects
+  legacy credential stores metadata-only. Blob reads are pre-sized and bounded,
+  blocker reads are anchored no-follow identity-checked, and state descriptors
+  are close-on-exec. Independent security review accepted the final checkpoint
+  with no blockers; the shell freeze-marker local-writer race and legacy
+  maintenance verifier routing remain Task 16 adversarial/deletion work.
 
 ## Task 16: Adversarial conformance suite and verification gate
 
@@ -1060,7 +1067,9 @@ exact-commit evidence.
   closed, Ollama check/wait before invocation with quota errors blocking,
   credential enforcement and redaction active, exact-commit receipt/manifest
   trust, harness-removal privileged bind-mount swap/TOCTOU refusal (the Task 13
-  accepted residual), no completion-token bypass, finite termination fixtures
+  accepted residual), deprecated shell freeze-marker local-writer races and
+  legacy maintenance verifier routing through the retained descriptor authority
+  (Task 15 residuals), no completion-token bypass, finite termination fixtures
   for every
   outcome, migration without Ralph imports, lock non-inheritance, setsid
   escape, task-excerpt byte binding, context confinement, mid-phase mutation

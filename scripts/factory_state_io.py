@@ -17,13 +17,20 @@ T = TypeVar("T")
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+# Close-on-exec on every descriptor the state authority opens (F2): the
+# directory, marker, and temporary descriptors must never be inherited
+# across an exec boundary into a model/verifier process, even by a child
+# spawned with ``close_fds=False``.
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
 
 class StateIOError(RuntimeError):
     pass
 
 
 def require_linux_primitives() -> None:
-    required = ("O_NOFOLLOW", "O_DIRECTORY")
+    """Fail closed when any no-follow/dirfd/close-on-exec primitive is unavailable."""
+    required = ("O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
     missing = [name for name in required if not hasattr(os, name)]
     dirfd_functions = (os.open, os.stat, os.unlink, os.rename, os.link)
     if (
@@ -111,7 +118,7 @@ def state_dir(
     require_linux_primitives()
     expected = _resolve_expected_uid(_expected_uid)
     root = root.absolute()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
     root_fd = os.open(root, flags)
     directory_fd: int | None = None
     try:
@@ -155,7 +162,7 @@ def read_bytes(
         try:
             descriptor = os.open(
                 name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | _CLOEXEC,
                 dir_fd=directory_fd,
             )
         except FileNotFoundError:
@@ -278,7 +285,7 @@ def atomic_write(
         temporary = f".{name}.{secrets.token_hex(16)}"
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC,
             0o600,
             dir_fd=directory_fd,
         )
@@ -361,7 +368,10 @@ def consume_json(
     with state_dir(root) as directory_fd:
         descriptor: int | None = None
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | _CLOEXEC,
+                dir_fd=directory_fd,
+            )
             before = os.fstat(descriptor)
             named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             _validate_file(before, _expected_uid=os.getuid(), maximum=maximum)
@@ -427,7 +437,10 @@ def remove(
         descriptor: int | None = None
         try:
             try:
-                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | _CLOEXEC,
+                    dir_fd=directory_fd,
+                )
             except FileNotFoundError:
                 if missing_ok:
                     return

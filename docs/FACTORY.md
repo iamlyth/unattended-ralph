@@ -77,6 +77,20 @@ signature, digest, tier, or coordinator state. Machine evidence can add
 findings but cannot elevate installed/real-system/human acceptance tiers or
 become task authority.
 
+## Ralph migration boundary
+
+`.factory/ralph-freeze` prevents new legacy campaign launches. The hidden
+`.factory/loop/migration.py` authority derives migration only from the committed
+plan, HEAD, dirty-path metadata, current evidence/blocker metadata, and the
+single `factory-state/v1` file. It never opens or imports `.ralph` tasks,
+memories, events, completion tokens, scratchpads, or the removed persisted
+context summary. Legacy presence and workspace `.ollama-usage-env` are detected
+with `lstat` metadata only; credential bytes are never read or moved. An
+operator may migrate to the external XDG store explicitly after validating the
+legacy file, but the workspace file is never new-path credential authority.
+Visible `scripts/ralph-*` entrypoints are frozen deprecated compatibility
+surfaces and the new campaign has no dependency on them.
+
 ## Relationship to Huntley's playbook
 
 The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at commit `88d488a148af97e4a3f22b11b4c3598c79d6a577`). This boilerplate adopts the playbook's highest-value context and backpressure patterns:

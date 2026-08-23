@@ -24,6 +24,24 @@ while (( $# > 0 )); do
 done
 
 cd -- "$PROJECT_ROOT"
+# Task 15 migration: the legacy Ralph control plane is frozen by the tracked
+# .factory/ralph-freeze marker; the hidden .factory/loop control plane is
+# authoritative. FACTORY_RALPH_FREEZE_OVERRIDE=1 is the documented
+# operator-only escape for recovering an already in-flight legacy cycle.
+if [[ ${FACTORY_RALPH_FREEZE_OVERRIDE:-0} != 1 ]]; then
+    freeze_marker="$PROJECT_ROOT/.factory/ralph-freeze"
+    if [[ -f "$freeze_marker" && ! -L "$freeze_marker" ]]; then
+        echo "ralph-maintenance-plan: frozen: the legacy Ralph control plane is deprecated (Task 15 migration)" >&2
+        echo "ralph-maintenance-plan: the hidden .factory/loop control plane replaces it" >&2
+        echo "ralph-maintenance-plan: set FACTORY_RALPH_FREEZE_OVERRIDE=1 only to recover an in-flight cycle" >&2
+        exit 2
+    fi
+    if [[ -e "$freeze_marker" || -L "$freeze_marker" ]]; then
+        echo "ralph-maintenance-plan: frozen: the freeze marker exists but is not a regular file; refusing a legacy launch" >&2
+        echo "ralph-maintenance-plan: inspect .factory/ralph-freeze; FACTORY_RALPH_FREEZE_OVERRIDE=1 is only for bounded recovery" >&2
+        exit 2
+    fi
+fi
 # shellcheck source=scripts/factory-lock.sh
 source "$SCRIPT_DIR/factory-lock.sh"
 factory_lock_bootstrap "$PROJECT_ROOT" "$PROJECT_ROOT/scripts/ralph-maintenance-plan.sh" "${ORIGINAL_ARGS[@]}"

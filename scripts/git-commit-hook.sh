@@ -124,12 +124,11 @@ if git diff --cached --quiet; then
     exit 0
 fi
 
-# An implementation checkpoint may never commit completion prose or stale
-# lifecycle claims: the durable context summary must stay contamination-free
-# while the plan advances during the active cycle.
-if [[ "$MODE" == implementation && "$FINAL_HANDOFF" != true && -f .factory/artifacts/context-summary.md && -f scripts/check-context-summary.py ]]; then
-    ./scripts/check-context-summary.py --contamination-only
-fi
+# An implementation checkpoint never reads or validates a persisted
+# context summary: the context-summary authority was removed and deprecated
+# by the Task 15 migration (FACTORY-LOOP-SPEC §5.2 forbids persisted context
+# summaries as a competing task authority); the canonical plan is the sole
+# task ledger.
 
 # An ordinary iteration checkpoint must not turn recovery metadata into Git
 # progress. Keep the newest non-empty scratchpad in the worktree for --resume.

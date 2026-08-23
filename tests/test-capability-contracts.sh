@@ -24,9 +24,10 @@ must_fail() {
 
 setup_repo() {
     local dir=$1 capability=$2
-    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/docs" \
-        "$dir/.factory-state/runner-evidence/probe-runner"
+    mkdir -p "$dir/scripts" "$dir/.factory/artifacts" "$dir/.factory/loop" \
+        "$dir/docs" "$dir/.factory-state/runner-evidence/probe-runner"
     cp "$CONTRACT_CHECKER" "$EVIDENCE_CHECKER" "$dir/scripts/"
+    cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$dir/.factory/loop/"
     chmod +x "$dir/scripts/"*.py
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/scripts/verify-project.sh"
     chmod +x "$dir/scripts/verify-project.sh"

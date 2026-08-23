@@ -120,8 +120,7 @@ required = [
     'scripts/validate-conformance.py', 'scripts/check-capability-contracts.py',
     'scripts/check-capability-evidence.py', 'scripts/machine-receipt.py',
     'scripts/check-audit-receipts.py',
-    'scripts/validate-blocked-facts.py', 'scripts/check-context-summary.py',
-    'scripts/ralph-context-summary.py', 'scripts/check-campaign-objectives.py',
+    'scripts/validate-blocked-facts.py', 'scripts/check-campaign-objectives.py',
     'scripts/check-golden-policy.py',
     '.factory/visual-audit.toml', '.factory/visual-audit-inventory.json',
     '.factory/visual-audit-calibration.json',
@@ -137,21 +136,72 @@ required = [
     'tests/test-credential-guard.sh',
     'tests/test-credential-extension.sh',
     '.factory/artifacts/blocked-facts.json', '.factory/artifacts/conformance.json',
-    '.factory/artifacts/context-summary.md',
     '.factory/campaign-objectives.json', '.factory/golden-policy.json',
     '.factory/golden-review.json', '.factory/schemas/blocked-facts.schema.json',
     '.factory/schemas/golden-review.schema.json',
     'tests/test-conformance.sh', 'tests/test-capability-contracts.sh',
     'tests/test-audit-receipts.sh',
     'tests/test-blocked-facts.sh', 'tests/test-campaign-objectives.sh',
-    'tests/test-context-summary.sh', 'tests/test-golden-policy.sh',
+    'tests/test-golden-policy.sh',
     'tests/test-runner-signer.sh', 'scripts/check-spec-provided.sh',
     'scripts/check-generic-leakage.sh', '.factory/generic-leak-allowlist',
     '.factory/signer-trust.json', '.factory/requirement-policy.json',
     '.factory/campaign-receipt-policy.json',
+    '.factory/loop/migration.py', '.factory/ralph-freeze',
+    '.factory/tests/test-factory-migration.py',
+    '.factory/tests/test-factory-migration.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
+# Task 15 migration: the persisted context-summary authority is removed from
+# the tracked tree and unwired from every new-path control step, so the stale
+# mirror can never compete with the canonical plan as a task authority.  The
+# deprecated visible forwarders may remain (marked, optional) but are never a
+# new-path dependency.
+assert not pathlib.Path('.factory/artifacts/context-summary.md').exists(), \
+    'the stale context-summary mirror must not be tracked'
+for script in ('scripts/final-gate.sh', 'scripts/git-commit-hook.sh',
+               'scripts/ralph-run.sh'):
+    text = pathlib.Path(script).read_text(encoding='utf-8')
+    for token in ('check-context-summary', 'ralph-context-summary'):
+        assert token not in text, f'{script} still wires the deprecated {token} authority'
+for gate in gates:
+    assert gate['name'] != 'test-context-summary.sh', \
+        'the verifier gate list must not run the deprecated context-summary suite'
+# The new migration authority must exist and be stdlib-only; a Ralph runtime
+# import in the hidden control plane fails the generic suite.
+assert pathlib.Path('.factory/loop/migration.py').is_file()
+# Task 15 freeze surface: the tracked marker is a regular file (a symlink is
+# never trusted) and every frozen legacy launcher implements the freeze gate
+# with the operator-only recovery escape.
+migration_text = pathlib.Path('.factory/loop/migration.py').read_text(encoding='utf-8')
+assert pathlib.Path('.factory/ralph-freeze').is_file()
+marker_info = pathlib.Path('.factory/ralph-freeze').stat()
+assert pathlib.Path('.factory/ralph-freeze').is_symlink() is False
+for launcher in (
+    'scripts/ralph-campaign.sh', 'scripts/ralph-plan.sh',
+    'scripts/ralph-run.sh', 'scripts/ralph-audit.sh',
+    'scripts/ralph-maintenance-plan.sh', 'scripts/ralph-maintenance-run.sh',
+):
+    text = pathlib.Path(launcher).read_text(encoding='utf-8')
+    assert '.factory/ralph-freeze' in text, f'{launcher} lacks the freeze gate'
+    assert 'FACTORY_RALPH_FREEZE_OVERRIDE' in text, \
+        f'{launcher} lacks the recovery override escape'
+    assert launcher in migration_text, \
+        f'the migration freeze authority does not name {launcher}'
+# Recovery of an already in-flight legacy cycle is the documented exception,
+# not a new launch: ralph-recover.sh must not be frozen.
+recover_text = pathlib.Path('scripts/ralph-recover.sh').read_text(encoding='utf-8')
+assert 'ralph-recover: note: the legacy Ralph control plane is deprecated' in recover_text
+assert '.factory/ralph-freeze' not in recover_text, \
+    'ralph-recover.sh must not implement the freeze gate as a new launch'
+# The deprecated visible context-summary forwarders fail closed and the stale
+# suite marks itself; neither is ever a new-path dependency.
+for script in ('scripts/ralph-context-summary.py',
+               'scripts/check-context-summary.py'):
+    text = pathlib.Path(script).read_text(encoding='utf-8')
+    assert 'DEPRECATED' in text and 'Task 15 migration' in text
+assert 'DEPRECATED' in pathlib.Path('tests/test-context-summary.sh').read_text(encoding='utf-8')
 forbidden_root_factory_files = {
     'PROMPT.md', 'IMPLEMENTATION_PLAN.md', 'MAINTENANCE_PLAN.md',
     'CAMPAIGN_AUDIT.md', 'factory.toml', 'factory-environment.toml',
@@ -198,10 +248,10 @@ grep -q 'machine-receipt.py --tag' .factory/prompts/implementation.md
 grep -q 'requirement-policy.json' .factory/prompts/implementation.md
 grep -q 'signer-trust.json' .factory/prompts/implementation.md
 grep -q 'out-of-band and non-automatable' .factory/prompts/implementation.md
-# Unavailable evidence must be fact-bound; fresh contexts receive only the
-# durable context summary; golden baselines are protected by review manifests.
+# Unavailable evidence must be fact-bound; the canonical plan is the sole
+# task authority (no persisted context summary competes with it); golden
+# baselines are protected by review manifests.
 grep -q 'blocked-facts.json' .factory/prompts/implementation.md
-grep -q 'context-summary' .factory/prompts/implementation.md
 grep -q 'golden-policy' .factory/prompts/implementation.md
 for role in visual-reviewer runner-reviewer evidence-reviewer spec-reviewer; do
     grep -q 'no runtime-certification authority' ".pi/agents/$role.md"
@@ -275,6 +325,7 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
 ./.factory/tests/test-factory-footprint.sh
+./.factory/tests/test-factory-migration.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by
 # default, defaults no vision model (consumer-configured placeholder), and keeps
 # every mutable capture/review/calibration/probe path under the ignored
@@ -301,7 +352,6 @@ fi
 ./scripts/check-capability-contracts.py
 ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json
 ./scripts/check-golden-policy.py
-./scripts/check-context-summary.py
 cmp -s .github/ISSUE_TEMPLATE/bug_report.md .forgejo/ISSUE_TEMPLATE/bug_report.md
 ./scripts/bug-ledger.py validate
 
@@ -342,7 +392,6 @@ PY
 ./tests/test-audit-receipts.sh
 ./tests/test-blocked-facts.sh
 ./tests/test-campaign-objectives.sh
-./tests/test-context-summary.sh
 ./tests/test-golden-policy.sh
 ./tests/test-visual-audit.sh
 ./tests/test-visual-audit-sdk-authority.sh
