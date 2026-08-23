@@ -508,6 +508,36 @@ print('untrusted-clean')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("untrusted-clean", result.stdout)
 
+    def test_bounded_capture_flooded_stdout_stays_bounded_during_read(self) -> None:
+        """Task 11 review: gate stdout is bounded *during* the read, not
+        after communicate — a child flooding its pipes can never blow up
+        the holder's memory, and the retained text is the bounded head."""
+        root = self.make_repo()
+        flood = root / "flood.py"
+        flood.write_text(
+            "import sys\n"
+            "for index in range(400000):\n"
+            "    sys.stdout.write(f'flood-{index:06d} ' * 8 + '\\n')\n"
+            "sys.stderr.write('stderr marker 0815\\n')\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        with self.acquire(root) as lock:
+            result = lock.spawn_child(
+                [sys.executable, str(flood)],
+                cwd=self.tmp,
+                stdout_limit=8192,
+                stderr_limit=8192,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(len(result.stdout), 8192)
+        self.assertLessEqual(len(result.stderr), 8192)
+        self.assertIn("stderr marker 0815", result.stderr)
+        # The retained stdout is the bounded head (what the deterministic
+        # gates consume); the flood that follows is drained, never retained.
+        self.assertIn("flood-000000 ", result.stdout)
+        self.assertNotIn("flood-399999 ", result.stdout)
+
     def test_boundary_refuses_to_pass_the_lock_descriptor(self) -> None:
         root = self.make_repo()
         with self.acquire(root) as lock:

@@ -105,6 +105,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
@@ -139,6 +140,14 @@ _DIRECTORY_FLAGS = (
 DEFAULT_KILL_GRACE = 1.0
 REAP_TIMEOUT = 2.0
 PIPE_COLLECT_TIMEOUT = 2.0
+
+# Per-stream capture bound for :meth:`RootLock.spawn_child` (Task 11 review):
+# the child's stdout/stderr are read *during* the run, bounded per stream, so
+# a gate or acceptance command that floods its pipes can never blow up the
+# holder's memory.  A stream that exceeds the bound is truncated; the child is
+# never blocked (the reader keeps draining and discarding) and the returncode
+# stays authoritative.
+DEFAULT_CAPTURE_LIMIT = 1 << 20
 
 
 class RootLockError(RuntimeError):
@@ -180,6 +189,67 @@ class RootLockCommandError(RootLockError):
 
 class EscapedDescendantError(RootLockError):
     """A double-fork/setsid descendant survives; recovery must fail closed."""
+
+
+@dataclass(frozen=True)
+class _CaptureResult:
+    """One bounded stream capture: the retained text, total bytes, truncation flag.
+
+    ``text`` holds at most the configured per-stream limit (the *first*
+    characters of the stream, matching the head-slice the deterministic
+    gates consume), ``total`` counts every character the child wrote to the
+    pipe, and ``truncated`` is True when the stream exceeded the limit (the
+    extra output was drained and discarded, never retained, so the child is
+    never blocked on a full pipe and the holder's memory stays bounded —
+    Task 11 review).
+    """
+
+    text: str = ""
+    total: int = 0
+    truncated: bool = False
+
+
+def _capture_stream_bounded(
+    stream: object,
+    limit: int,
+    results: Dict[str, _CaptureResult],
+    name: str,
+) -> None:
+    """Drain one text pipe, retaining at most ``limit`` chars (task seam).
+
+    Runs in a daemon reader thread per stream.  The reader reads in bounded
+    chunks, appends up to ``limit`` characters, then keeps draining and
+    discarding so a flood never blocks the child on a full pipe and never
+    grows the retained memory.  ``results[name]`` is published exactly once.
+    Any read error (EOF, closed pipe, decoding failure) ends the reader;
+    the exit status of the child is authoritative regardless.
+    """
+    captured = []
+    total = 0
+    kept = 0
+    truncated = False
+    try:
+        while True:
+            chunk = stream.read(65536)  # type: ignore[attr-defined]
+            if not chunk:
+                break
+            total += len(chunk)
+            if kept < limit:
+                take = min(limit - kept, len(chunk))
+                captured.append(chunk[:take])
+                kept += take
+                if take < len(chunk):
+                    truncated = True
+            else:
+                truncated = True
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()  # type: ignore[attr-defined]
+        except OSError:
+            pass
+    results[name] = _CaptureResult("".join(captured), total, truncated)
 
 
 def require_linux_primitives() -> None:
@@ -756,6 +826,8 @@ class RootLock:
         timeout: Optional[float] = None,
         kill_grace: float = DEFAULT_KILL_GRACE,
         check: bool = False,
+        stdout_limit: int = DEFAULT_CAPTURE_LIMIT,
+        stderr_limit: int = DEFAULT_CAPTURE_LIMIT,
     ) -> subprocess.CompletedProcess[str]:
         """Run ``argv`` behind the lock boundary.
 
@@ -774,6 +846,17 @@ class RootLock:
         leaf therefore can neither inherit the lock nor unlock it, cannot
         see lock metadata, and cannot outlive a bounded run
         (FACTORY-LOOP-SPEC §12, §9).
+
+        **Bounded during-read capture** (Task 11 review): the child's
+        stdout/stderr are drained by bounded reader threads *while the run
+        proceeds*, never collected wholesale after ``communicate``.  Each
+        stream is capped to its own ``*_limit`` (default
+        :data:`DEFAULT_CAPTURE_LIMIT`), the reader keeps draining the pipe
+        past the cap so the child is never blocked on a full pipe, the
+        captured text is the most recent tail within the cap, and the
+        stream's total byte count and truncated flag are reported through
+        :data:`_CaptureResult`.  A child that floods its pipes therefore
+        cannot grow the holder's memory without bound.
         """
         if self._closed or not self._locked:
             raise RootLockUnsafeError(
@@ -798,38 +881,64 @@ class RootLock:
             raise RootLockUnsafeError(
                 f"cannot spawn child boundary {argv!r}: {exc}"
             ) from exc
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        captures: Dict[str, _CaptureResult] = {}
+        readers = []
+        for name, stream, limit in (
+            ("stdout", process.stdout, stdout_limit),
+            ("stderr", process.stderr, stderr_limit),
+        ):
+            if stream is None:
+                continue
+            thread = threading.Thread(
+                target=_capture_stream_bounded,
+                args=(stream, limit, captures, name),
+                name=f"factory-lock-{name}",
+                daemon=True,
+            )
+            thread.start()
+            readers.append(thread)
+        timed_out = False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if process.poll() is not None and all(
+                not reader.is_alive() for reader in readers
+            ):
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.02)
+        if timed_out:
             self._kill_process_group(process, kill_grace)
-            # Bounded trailing pipe collection: a group member that ignored
-            # the group termination may have held the pipe write ends open,
-            # so the final read is itself bounded and the pipe ends are
-            # force-closed afterwards — a bounded spawn can never hang the
-            # holder on a pipe held by a survivor.
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=PIPE_COLLECT_TIMEOUT
-                )
-            except subprocess.TimeoutExpired:
-                stdout, stderr = None, None
-                for stream in (process.stdout, process.stderr):
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except OSError:
-                            pass
+        # Bounded trailing pipe collection: a group member that ignored the
+        # group termination may have held the pipe write ends open, so the
+        # reader joins are themselves bounded and the pipe ends are
+        # force-closed afterwards — a bounded spawn can never hang the
+        # holder on a pipe held by a survivor.
+        for reader in readers:
+            reader.join(timeout=PIPE_COLLECT_TIMEOUT)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        for reader in readers:
+            reader.join(timeout=PIPE_COLLECT_TIMEOUT)
+        if timed_out:
             raise RootLockTimeoutError(
                 f"child boundary {argv!r} exceeded its bounded timeout "
                 f"({timeout}s); the whole process group was terminated "
                 "and reaped"
             )
+        stdout = captures.get("stdout", _CaptureResult("", 0, False))
+        stderr = captures.get("stderr", _CaptureResult("", 0, False))
         if check and process.returncode != 0:
             raise RootLockCommandError(
-                process.returncode, argv, output=stdout, stderr=stderr
+                process.returncode, argv, output=stdout.text, stderr=stderr.text
             )
         return subprocess.CompletedProcess(
-            argv, process.returncode, stdout, stderr
+            argv, process.returncode, stdout.text, stderr.text
         )
 
     # -- release ---------------------------------------------------------------

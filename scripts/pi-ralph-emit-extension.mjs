@@ -1,9 +1,17 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  createReadStream,
+  createWriteStream,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { chmod, lstat, rename, truncate, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SHIM = "./scripts/pi-cli-shims/ralph";
@@ -201,7 +209,9 @@ export function rewriteGitCommitCommand(command) {
 // to the lifetime of one bash tool result, but it is not zero.
 // ---------------------------------------------------------------------------
 
-const GUARD_PYTHON = "python3";
+// The guard interpreter is *never* an unqualified PATH-resolved ``python3``:
+// every guard subprocess runs under ``resolveTrustedPython()`` — a pinned
+// absolute interpreter whose immutable chain is validated (Task 11 review).
 const CREDENTIAL_GUARD_SCHEMA = "credential-guard/v1";
 const CREDENTIAL_GUARD_TOOL = "credential-guard";
 const CREDENTIAL_GUARD_MODES = new Set(["check-command-stdin", "check-path-stdin"]);
@@ -215,6 +225,176 @@ const OVERFLOW_REDACT_TIMEOUT_MS = 30000; // bounded streaming redaction of the 
 const BASH_OVERFLOW_RE = /^pi-bash-([0-9a-f]{16})\.log$/;
 const TOOLCALL_BLOCK_PREFIX = "credential guard blocked unsafe tool input: ";
 const REDACTION_FAILED = "[REDACTION FAILED]";
+
+// ---------------------------------------------------------------------------
+// Exact-commit guard binding and the pinned trusted interpreter (Task 11).
+//
+// The extension runs inside the model process and has **no Git access**
+// (Landlock denies it), so it cannot re-derive the committed guard blob
+// itself.  The trusted pre-spawn authority (the launch control plane) reads
+// the exact committed ``scripts/credential-guard.py`` blob through its own
+// descriptor-anchored Git and forwards the SHA-256 through the sanitized
+// launch environment (``PI_RALPH_GUARD_DIGEST``).  Every production guard
+// invocation hashes the *worktree* guard it is about to run and fails
+// closed on a missing or mismatched digest — a swapped, tampered, or
+// uncommitted guard never executes inside the model.
+// ---------------------------------------------------------------------------
+
+const GUARD_DIGEST_ENV = "PI_RALPH_GUARD_DIGEST";
+export { GUARD_DIGEST_ENV };
+const GUARD_DIGEST_RE = /^[0-9a-f]{64}$/;
+
+// Fixed absolute trusted interpreter candidates (mirrors the control plane's
+// ``gitutil._immutable_chain`` authority): an unqualified ``python3`` from a
+// caller-controlled PATH could substitute a different interpreter behind the
+// credential boundary, so only validated immutable absolute candidates run
+// the guard.  The store scan is ``/nix/store/<32-hex>-<name>/bin/python3``
+// only (deterministic lexicographic first valid candidate).
+const TRUSTED_PYTHON_CANDIDATES = [
+  "/usr/bin/python3",
+  "/bin/python3",
+  "/run/current-system/sw/bin/python3",
+];
+const NIX_STORE_PYTHON_GLOB = "/nix/store/*/bin/python3";
+const NIX_STORE_PATH_RE = /^\/nix\/store\/[0-9a-z]{32}-[^/]+\/bin\/python3$/;
+
+let _trustedPython = undefined;
+
+function isStickyDirectory(stat) {
+  return typeof stat.isDirectory === "function" && stat.isDirectory()
+    && (stat.mode & 0o1000) !== 0;
+}
+
+/** Fail-closed immutable chain: the caller (the model user, the same uid that
+ * runs the extension) must not be able to replace the candidate or any
+ * directory that names it. Mirrors ``gitutil._immutable_chain``: every
+ * component up to the containment boundary (the store root for
+ * ``/nix/store/...`` paths, the filesystem root otherwise) must be
+ * non-group/other-writable and owned by a uid that differs from the caller,
+ * with the single sticky-foreign-owned-directory exception (the Nix store
+ * is mode 1775 owned by root). A candidate resolved through a symlink is
+ * validated at its real target. */
+export function immutableChainValid(path) {
+  let resolved;
+  try {
+    resolved = realpathSync(path);
+  } catch {
+    return false;
+  }
+  const uid = currentUid();
+  const boundary = resolved.startsWith("/nix/store/") ? "/nix/store" : "/";
+  let current = resolved;
+  for (;;) {
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.uid === uid && !isStickyDirectory(stat)) {
+      return false; // caller-owned non-sticky component is replaceable
+    }
+    if ((stat.mode & 0o022) !== 0 && !isStickyDirectory(stat)) {
+      return false; // group/other-writable component is replaceable
+    }
+    if (current === boundary) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return true;
+}
+
+function isTrustedRegularExecutable(path) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return false;
+  }
+  return typeof stat.isFile === "function" && stat.isFile()
+    && (stat.mode & 0o111) !== 0
+    && stat.uid !== currentUid()
+    && (stat.mode & 0o022) === 0;
+}
+
+function storePythonCandidates() {
+  let entries = [];
+  try {
+    entries = readdirSync("/nix/store").sort();
+  } catch {
+    return [];
+  }
+  const candidates = [];
+  for (const entry of entries) {
+    const candidate = `/nix/store/${entry}/bin/python3`;
+    if (NIX_STORE_PATH_RE.test(candidate)) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+/** Resolve the absolute trusted interpreter the guard runs under. Fixed
+ *  absolute candidates only (never ``PATH``), each validated as a regular
+ *  executable with an immutable chain; when no candidate validates the
+ *  resolver returns null and the guard fails closed (``guard-unavailable``).
+ *  The boundary refuses to resolve as root: under uid 0 every component is
+ *  caller-owned and no candidate can be proven immutable. */
+export function resolveTrustedPython() {
+  if (currentUid() === 0) return null;
+  if (_trustedPython !== undefined) return _trustedPython;
+  let chosen = null;
+  for (const candidate of TRUSTED_PYTHON_CANDIDATES) {
+    if (isTrustedRegularExecutable(candidate) && immutableChainValid(candidate)) {
+      chosen = candidate;
+      break;
+    }
+  }
+  if (chosen === null) {
+    for (const candidate of storePythonCandidates()) {
+      if (isTrustedRegularExecutable(candidate) && immutableChainValid(candidate)) {
+        chosen = candidate;
+        break;
+      }
+    }
+  }
+  _trustedPython = chosen;
+  return chosen;
+}
+
+/** Verify the worktree guard the extension is about to run against the
+ *  expected exact-commit digest the trusted pre-spawn authority forwarded
+ *  through the sanitized launch environment. Missing or malformed digest,
+ *  unreadable guard, and byte mismatch all fail closed. */
+export function verifyGuardDigest(env, guardPath) {
+  const expected =
+    env && typeof env[GUARD_DIGEST_ENV] === "string" ? env[GUARD_DIGEST_ENV] : "";
+  if (!GUARD_DIGEST_RE.test(expected)) {
+    return { ok: false, reason: "guard-digest-missing" };
+  }
+  let bytes;
+  try {
+    bytes = readFileSync(guardPath);
+  } catch {
+    return { ok: false, reason: "guard-digest-unreadable" };
+  }
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (actual !== expected) {
+    return { ok: false, reason: "guard-digest-mismatch" };
+  }
+  return { ok: true, reason: "" };
+}
+
+/** The production guard-binding gate: whenever the guard path about to run
+ *  IS the tracked sibling (the runtime immutable resolver), the exact
+ *  committed digest must be present in the environment and match the
+ *  worktree bytes. A fixture that explicitly swapped ``guardPath`` owns its
+ *  own authority and bypasses the digest requirement. */
+export function guardBindingStatus(env, guardPath) {
+  if (guardPath !== resolveGuardPath()) {
+    return { ok: true, reason: "" };
+  }
+  return verifyGuardDigest(env, guardPath);
+}
 
 /** Resolve the immutable tracked credential guard executable. */
 export function resolveGuardPath() {
@@ -271,6 +451,25 @@ export function parseStrictGuardLine(stdout) {
   return { verdict: parsed.verdict, reason: parsed.reason, reasons: parsed.reasons };
 }
 
+/** One guard invocation's authority: the pinned trusted interpreter plus
+ * (for the tracked guard) the exact-commit digest binding.  Any failure
+ * carries ``ok:false`` so the caller fails closed before a byte reaches the
+ * guard.  A fixture that explicitly swapped ``guardPath`` owns its own
+ * authority and bypasses the digest requirement. */
+function guardAuthority(options) {
+  const env = options.env ?? process.env;
+  const guardPath = options.guardPath ?? resolveGuardPath();
+  const python = resolveTrustedPython();
+  if (python === null) {
+    return { ok: false, reason: "guard-unavailable" };
+  }
+  const binding = guardBindingStatus(env, guardPath);
+  if (!binding.ok) {
+    return { ok: false, reason: binding.reason };
+  }
+  return { ok: true, reason: "", python, env, guardPath };
+}
+
 /** Run one stdin-based guard subcommand (check-command-stdin or
  * check-path-stdin) with the input piped through stdin. A missing guard,
  * crash, timeout, oversized/invalid input, and invalid output all fail
@@ -285,15 +484,17 @@ export function runGuardCheck(mode, input, options = {}) {
   if (Buffer.byteLength(input, "utf8") > GUARD_STDIN_LIMIT) {
     return { allowed: false, verdict: "block", reason: "oversized-input" };
   }
-  const env = options.env ?? process.env;
-  const guardPath = options.guardPath ?? resolveGuardPath();
-  const result = spawnSync(GUARD_PYTHON, [guardPath, mode], {
+  const authority = guardAuthority(options);
+  if (!authority.ok) {
+    return { allowed: false, verdict: "block", reason: authority.reason };
+  }
+  const result = spawnSync(authority.python, [authority.guardPath, mode], {
     input,
     encoding: "utf8",
     timeout: options.timeout ?? GUARD_CHECK_TIMEOUT_MS,
     maxBuffer: options.maxBuffer ?? GUARD_CHECK_MAX_BUFFER,
     killSignal: "SIGKILL",
-    env,
+    env: authority.env,
   });
   if (result.error || result.signal || result.status === null) {
     return { allowed: false, verdict: "block", reason: "guard-unavailable" };
@@ -314,15 +515,17 @@ export function redactText(text, options = {}) {
   if (Buffer.byteLength(text, "utf8") > REDACT_INPUT_LIMIT) {
     return { ok: false, text: null };
   }
-  const env = options.env ?? process.env;
-  const guardPath = options.guardPath ?? resolveGuardPath();
-  const result = spawnSync(GUARD_PYTHON, [guardPath, "redact"], {
+  const authority = guardAuthority(options);
+  if (!authority.ok) {
+    return { ok: false, text: null };
+  }
+  const result = spawnSync(authority.python, [authority.guardPath, "redact"], {
     input: text,
     encoding: "utf8",
     timeout: options.timeout ?? REDACT_TIMEOUT_MS,
     maxBuffer: options.maxBuffer ?? REDACT_MAX_BUFFER,
     killSignal: "SIGKILL",
-    env,
+    env: authority.env,
   });
   if (result.error || result.signal || result.status === null || result.status !== 0) {
     return { ok: false, text: null };
@@ -342,15 +545,17 @@ export function redactDeep(value, options = {}) {
   if (typeof input !== "string" || Buffer.byteLength(input, "utf8") > REDACT_INPUT_LIMIT) {
     return { ok: false, value: null };
   }
-  const env = options.env ?? process.env;
-  const guardPath = options.guardPath ?? resolveGuardPath();
-  const result = spawnSync(GUARD_PYTHON, [guardPath, "redact-json-stdin"], {
+  const authority = guardAuthority(options);
+  if (!authority.ok) {
+    return { ok: false, value: null };
+  }
+  const result = spawnSync(authority.python, [authority.guardPath, "redact-json-stdin"], {
     input,
     encoding: "utf8",
     timeout: options.timeout ?? REDACT_TIMEOUT_MS,
     maxBuffer: options.maxBuffer ?? REDACT_MAX_BUFFER,
     killSignal: "SIGKILL",
-    env,
+    env: authority.env,
   });
   if (result.error || result.signal || result.status !== 0) {
     return { ok: false, value: null };
@@ -369,13 +574,15 @@ function guardTempPath(id) {
 /** Stream the recognized overflow file through the guard's redact filter into
  * an exclusive-creation, owner-only (0600) temp in the same directory. The
  * promise settles only after the child exits AND the temp stream has flushed
- * (or any error/timeout fires), so the caller can rename safely. */
-function redactFileViaGuard(originalPath, tempPath, env, guardPath) {
+ * (or any error/timeout fires), so the caller can rename safely.  ``authority``
+ * is the pinned-interpreter + exact-commit binding gate of
+ * :func:`guardAuthority`; the guard runs only under that trusted interpreter. */
+function redactFileViaGuard(originalPath, tempPath, authority) {
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
-    const child = spawn(GUARD_PYTHON, [guardPath ?? resolveGuardPath(), "redact"], {
+    const child = spawn(authority.python, [authority.guardPath, "redact"], {
       stdio: ["pipe", "pipe", "pipe"],
-      env,
+      env: authority.env,
       windowsHide: true,
     });
     const timer = setTimeout(() => {
@@ -472,7 +679,6 @@ async function unlinkQuiet(pathToUnlink) {
  * truncated to zero and { ok:false } is returned so the tool result is
  * fail-redacted. Never touches arbitrary paths. */
 export async function sanitizeBashOverflowPath(fullOutputPath, options = {}) {
-  const env = options.env ?? process.env;
   const parsed = parseBashOverflowPath(fullOutputPath);
   if (!parsed) return { ok: false, reason: "non-canonical-overflow-path" };
   const original = parsed.canonical;
@@ -485,6 +691,15 @@ export async function sanitizeBashOverflowPath(fullOutputPath, options = {}) {
   if (!isOwnedRegularFile(firstStats)) {
     return { ok: false, reason: "overflow-file-identity" };
   }
+  // The pinned trusted interpreter + exact-commit binding gate runs before
+  // any guard byte touches the recognized owned file: an unavailable
+  // interpreter or a missing/mismatched expected digest truncates the file
+  // (fail closed) and never lets raw bytes survive (Task 11 review).
+  const authority = guardAuthority(options);
+  if (!authority.ok) {
+    await truncateOwnedOverflowFile(original);
+    return { ok: false, reason: authority.reason };
+  }
   try {
     await chmod(original, 0o600);
   } catch {
@@ -493,7 +708,7 @@ export async function sanitizeBashOverflowPath(fullOutputPath, options = {}) {
   }
   const tempPath = guardTempPath(parsed.id);
   try {
-    await redactFileViaGuard(original, tempPath, env, options.guardPath);
+    await redactFileViaGuard(original, tempPath, authority);
   } catch {
     await unlinkQuiet(tempPath);
     await truncateOwnedOverflowFile(original);

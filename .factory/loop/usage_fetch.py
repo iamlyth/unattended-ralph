@@ -115,11 +115,22 @@ def _origin_of(url: str) -> Optional[Tuple[str, str, str]]:
 
 
 def _validate_request_url(url: str) -> None:
-    """HTTPS-only plus the explicit loopback seam (defense-in-depth)."""
+    """HTTPS-only plus the explicit loopback seam (defense-in-depth).
+
+    Also rejects URL userinfo (``user:password@``): the requested URL is
+    never a credential carrier, so a settings/redirect URL with embedded
+    credentials fails the fetch closed (Task 11 review; the parent
+    ``usage._validate_settings_url`` applies the same rule at the source).
+    """
     try:
         parsed = urllib.parse.urlsplit(url)
     except ValueError:
         raise ValueError(f"invalid settings URL {url!r}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            f"settings URL {url!r} carries a username/password userinfo; "
+            "credentials in the request URL are forbidden"
+        )
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
     if scheme == "https":

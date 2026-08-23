@@ -1,36 +1,96 @@
 #!/usr/bin/env bash
 # Fail-closed Git argv boundary for model-invoked commits.
 #
-# Ralph's tool-call extension rewrites simple direct `git <commit-verb>`
-# commands to this shim, and any environment that places the shims directory
-# before git on PATH also resolves here. Commit-creating operations are
-# enforced before delegation: hook-bypass flags (`--no-verify`, commit `-n`)
-# and hooksPath/config redirections are rejected, and the fail-closed
-# pre-commit boundary must be installed for the target repository. Content
-# enforcement itself remains in scripts/git-commit-guard.sh (the pre-commit
-# hook), which fires for every repository commit no matter how git is invoked.
+# The Pi tool-call extension rewrites simple direct `git <commit-verb>`
+# commands to this shim. Commit-creating operations are enforced before
+# delegation: hook-bypass flags (`--no-verify`, commit `-n`) and
+# hooksPath/config redirections are rejected, and the fail-closed pre-commit
+# boundary must be installed for the target repository. Content enforcement
+# itself remains in scripts/git-commit-guard.sh (the pre-commit hook), which
+# fires for every repository commit no matter how git is invoked.
+#
+# The real Git executable is resolved from **fixed absolute candidates only**
+# (Task 11, GIT-01): `/usr/bin/git`, `/bin/git`, the NixOS system profile,
+# and the immutable root-owned Nix store. `PATH` is never consulted, so a
+# caller-controlled PATH cannot redirect `git` behind the model boundary —
+# the same PATH-pinned authority as the trusted control plane's
+# `.factory/loop/gitutil.py` selection.  Every candidate additionally passes
+# the same **immutable-chain validation** as that Python authority: the
+# realpath of the binary and every directory that names it must be owned by a
+# uid that differs from the caller with no group/other write bits (sticky
+# foreign-owned store directories excepted), so a caller-owned or writable
+# candidate — including a symlink that redirects into a caller-writable
+# directory — can never replace the pinned Git. The boundary refuses to run
+# as root: under uid 0 every candidate path component is caller-owned, so no
+# candidate can be proven immutable without weakening the ownership check.
 set -euo pipefail
 
-SHIM_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
-
-resolve_real() {
-    local name=$1 dir candidate
-    local IFS=:
-    for dir in $PATH; do
-        dir=${dir:-.}
-        candidate="$dir/$name"
-        if [[ -x "$candidate" && -f "$candidate" ]]; then
-            if [[ "$(readlink -f -- "$candidate")" != "$SHIM_SELF" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
+resolve_pinned_git() {
+    local candidate
+    for candidate in /usr/bin/git /bin/git /run/current-system/sw/bin/git /nix/store/*/bin/git; do
+        # Only the immutable Nix-store path shape is a store candidate.
+        if [[ "$candidate" == /nix/store/* && ! "$candidate" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/bin/git$ ]]; then
+            continue
         fi
+        validate_pinned_candidate "$candidate" || continue
+        printf '%s\n' "$candidate"
+        return 0
     done
     return 1
 }
 
-REAL_GIT=$(resolve_real git) || {
-    echo "git-shim: cannot resolve the real Git executable" >&2
+validate_pinned_candidate() {
+    # Mirror the control plane's gitutil._immutable_chain authority (F4): a
+    # candidate is trusted only when the caller (the same uid the model runs
+    # under) can neither replace it nor replace any directory that names it.
+    # Every component of the realpath chain up to the containment boundary
+    # (the store root for /nix/store/... paths, the filesystem root
+    # otherwise) must be owned by a uid that differs from the caller and
+    # carry no group/other write bits, with the single sticky foreign-owned
+    # directory exception (the Nix store is mode 1775 owned by root).  The
+    # binary itself must be a regular executable with the same
+    # ownership/writability properties; a root-owned symlink that redirects
+    # into a caller-writable directory is rejected through the realpath.
+    local candidate=$1 resolved current boundary info uid hex mode parent
+    resolved=$(readlink -f -- "$candidate" 2>/dev/null) || return 1
+    [[ -f "$resolved" && -x "$resolved" ]] || return 1
+    case "$resolved" in
+        /nix/store/*) boundary=/nix/store ;;
+        *) boundary=/ ;;
+    esac
+    current=$resolved
+    while :; do
+        info=$(stat -Lc '%u %f' -- "$current" 2>/dev/null) || return 1
+        uid=${info%% *}
+        hex=${info##* }
+        mode=$((16#${hex:-0}))
+        if [[ "$uid" -eq "$UID" ]]; then
+            # caller-owned component: only a sticky directory may be accepted
+            if [[ ! -d "$current" || $((mode & 0x200)) -eq 0 ]]; then
+                return 1
+            fi
+        fi
+        if ((mode & 0x12)); then
+            # group/other-writable: only a sticky directory may be accepted
+            if [[ ! -d "$current" || $((mode & 0x200)) -eq 0 ]]; then
+                return 1
+            fi
+        fi
+        [[ "$current" == "$boundary" ]] && break
+        parent=${current%/*}
+        [[ "$current" == "$parent" ]] && break
+        current=$parent
+    done
+    return 0
+}
+
+if [[ ${UID:-0} -eq 0 ]]; then
+    echo "git-shim: the pinned Git boundary refuses to run as root; run the trusted control plane as an unprivileged user" >&2
+    exit 2
+fi
+
+REAL_GIT=$(resolve_pinned_git) || {
+    echo "git-shim: cannot resolve the pinned absolute Git executable; refusing to fall back to a PATH-resolved `git`" >&2
     exit 2
 }
 

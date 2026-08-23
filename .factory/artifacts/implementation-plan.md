@@ -93,15 +93,15 @@ completes with evidence.
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16 |
-| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11 |
+| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16 |
 | STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16 |
 | LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
-| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16 |
 | PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
 | COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
 | FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
-| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11 |
+| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12 |
 | RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12 |
@@ -825,7 +825,7 @@ completes with evidence.
 
 ## Task 11: Credential and security boundary retention
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 6, Task 8
 - Scope: Preserve the existing Pi tool-call/tool-result credential guard and
   trusted SDK authority; the retained extension contains only required
@@ -872,9 +872,20 @@ completes with evidence.
   credential-guard behavior remain unchanged in contract; a caller-controlled
   PATH cannot redirect the model-facing git shim or bare-git selection; HOME/
   XDG/filesystem confinement keeps host credentials out of model reach.
-- Verification: `tests/test-credential-extension.sh`;
-  `tests/test-credential-guard.sh`.
-- Documentation impact: `docs/OPERATIONS.md`.
+- Verification: `.factory/tests/test-factory-redaction.py`,
+  `tests/test-credential-extension.sh`, `tests/test-credential-guard.sh`, and
+  the launch/campaign/usage/lock/confinement regressions.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+- Evidence: redaction 67 tests with two honest root-only skips; launch 77/77,
+  campaign 66/66, usage 106/106 (one honest ownership skip), lock 39/39,
+  confinement 74/74, state 129/129, findings 61/61, selector 32/32, hidden
+  shell supervision, and visible credential guard/extension suites pass.
+  Synthetic-secret fixtures verify exact-commit guard binding, Pi tool-call/
+  tool-result masking, bounded split-marker and mid-line stream handling,
+  sanitized model/gate/fixture environments, bounded gate pipes, URL-userinfo
+  rejection, pinned interpreter/Git resolution, and real-confinement-only
+  external backends. Independent security review accepted the remediated
+  checkpoint with no blockers.
 
 ## Task 12: Evidence, verifier, and runner machinery retention
 

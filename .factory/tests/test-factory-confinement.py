@@ -308,6 +308,13 @@ class _Base(unittest.TestCase):
         ws = self.workspace
         (ws / "scripts").mkdir()
         shutil.copy2(REAL_WRAPPER, ws / "scripts" / WRAPPER_BASENAME)
+        # Task 11: every fixture repo commits the exact credential guard so
+        # the launch authority can verify and bind the guard source before
+        # any child output channel is redacted.
+        shutil.copy2(
+            ROOT / "scripts" / "credential-guard.py",
+            ws / "scripts" / "credential-guard.py",
+        )
         (ws / "src").mkdir()
         (ws / "src" / "main.py").write_text("def main(): pass\n", encoding="utf-8")
         # An *existing* developer-allowlisted test artifact directory: the

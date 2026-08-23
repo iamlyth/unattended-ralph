@@ -84,6 +84,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import state as state_module
     from . import launch as launch_module
     from . import workspace_confinement as confinement_authority
+    from . import redaction as output_redaction
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
     import findings as findings_module  # type: ignore[no-redef]
@@ -94,6 +95,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import state as state_module  # type: ignore[no-redef]
     import launch as launch_module  # type: ignore[no-redef]
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
+    import redaction as output_redaction  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -169,6 +171,24 @@ DEFAULT_GATE_TIMEOUT = 1800.0
 # Finite bound for every trusted Git call of the orchestrator (Task 9
 # review L4): no trusted Git invocation may wait forever behind the lock.
 GIT_TIMEOUT = 120.0
+
+# Deterministic gates and acceptance commands run with a *stripped
+# allowlisted environment* — never the full parent environment — so a
+# credential in the operator's environment can never reach a gate child
+# (Task 11).  The allowlist mirrors the fresh-child launch allowlist
+# (``launch.ENV_ALLOWLIST``); every lock key and Git redirector is stripped
+# as defense in depth and any surviving credential-shaped key fails closed.
+GATE_ENV_ALLOWLIST = (
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
+    "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+    "TERM", "TZ", "SHELL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME", "XDG_DATA_HOME", "NO_COLOR", "CLICOLOR",
+    "CLICOLOR_FORCE",
+)
+
+# Gate output is bounded to this many bytes before redaction (the same
+# bound the previous full-capture path applied).
+GATE_DETAIL_MAX = 4000
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -661,9 +681,23 @@ class TrustedGit:
                     "a dirty path requires quoting; refusing to interpret "
                     "ambiguous porcelain output"
                 )
+            decoded = path_bytes.decode("utf-8", "replace")
+            if any(
+                ord(char) < 0x20 or ord(char) == 0x7F for char in decoded
+            ):
+                # Task 11 (Task 9 residual): a control-character path is
+                # never explicit trusted commit scope — the orchestrator
+                # cannot stage, name, or reason about a filename with a
+                # control byte deterministically, and the exact staged-scope
+                # equality in ``commit`` must never match an ambiguous byte
+                # sequence.  Reject it at the porcelain layer before any
+                # allowlist/commit decision.
+                raise CampaignGitError(
+                    "a dirty path contains control characters; refusing to "
+                    "interpret unsafe porcelain output"
+                )
             entries.append(
-                (flags.decode("ascii", "replace"),
-                 path_bytes.decode("utf-8", "replace"))
+                (flags.decode("ascii", "replace"), decoded)
             )
             index = end + 1
         if entries:
@@ -890,6 +924,17 @@ def scope_violation(
     for path in paths:
         if path in allowed:
             continue
+        if path == ".factory":
+            # Task 11 (Task 9 residual): a *bare* ``.factory`` dirty path is
+            # never role work — the hidden harness namespace root may not be
+            # created, renamed, or committed by any role (a bare entry would
+            # shadow or replace the committed control-plane surface).  Even
+            # though Landlock already prevents model creation, the trusted
+            # commit-scope layer rejects it as defense in depth.
+            return (
+                f"{path!r} is the hidden harness namespace root; no role may "
+                "create or commit a bare .factory entry"
+            )
         for prefix in FORBIDDEN_SCOPE_PREFIXES:
             if path == prefix or path.startswith(prefix + "/"):
                 return f"{path!r} is inside the forbidden {prefix!r} namespace"
@@ -977,6 +1022,39 @@ def _safe_result_relpath(relpath: str) -> bool:
         if any(ord(char) < 0x20 for char in part):
             return False
     return True
+
+
+def sanitized_gate_environment(
+    environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """The stripped allowlisted environment deterministic gates receive.
+
+    Deterministic gates and acceptance commands never receive the full
+    parent environment (Task 11): only the documented benign keys of
+    :data:`GATE_ENV_ALLOWLIST` are copied, every lock metadata key and Git
+    redirector is stripped as defense in depth, and any surviving
+    credential-shaped key fails closed — a credential in the operator's
+    environment can never reach a gate child.
+    """
+    parent = os.environ if environ is None else environ
+    environment: Dict[str, str] = {}
+    for key in GATE_ENV_ALLOWLIST:
+        if key in parent:
+            environment[key] = parent[key]
+    environment = lock_module.stripped_child_env(environment)
+    environment = gitutil.sanitize_git_environment(environment)
+    for key in environment:
+        upper = key.upper()
+        if any(
+            token in upper
+            for token in ("COOKIE", "TOKEN", "PASSWORD", "PASSWD", "API_KEY",
+                          "SECRET", "CREDENTIAL", "PRIVATE_KEY", "AUTH")
+        ):
+            raise CampaignError(
+                f"refusing to spawn a deterministic gate with credential-shaped "
+                f"environment key {key!r}"
+            )
+    return environment
 
 
 def _bounded_read(root: Path, relpath: str, label: str, maximum: int) -> bytes:
@@ -1660,6 +1738,10 @@ class Campaign:
         self._role_runner = role_runner
         self._planning_attempts_used = 0
         self._rounds_completed = 0
+        # Task 11: the verified credential-guard redactor for deterministic
+        # gate output, built lazily on the first gate run (fail closed when
+        # the exact committed guard cannot be verified).
+        self._redactor: Optional[object] = None
         # Task 10 §16: the phase records of THIS run, consumed by the findings
         # authority to bind every previous-round receipt to a phase that
         # actually ran and classified findings/blocked.
@@ -2120,7 +2202,7 @@ class Campaign:
                 f"the role driver {driver_rel!r} is not the exact committed "
                 "blob at the bound commit"
             )
-        env = dict(os.environ)
+        env = sanitized_gate_environment()
         env[CAMPAIGN_ENV_PREFIX + "ROOT"] = str(self._root)
         env[CAMPAIGN_ENV_PREFIX + "PLAN"] = config.plan_path
         env[CAMPAIGN_ENV_PREFIX + "ROLE"] = role
@@ -2342,14 +2424,18 @@ class Campaign:
         """Deterministic acceptance gate for the selected task.
 
         A configured ``acceptance_command`` is executed behind the lock
-        (bounded, new session); its exit status is the gate.  The default
-        gate verifies that every ``- Verification:`` line of the **exact
-        newly validated plan** (the worktree plan the orchestrator is about
-        to commit, or the freshly committed plan at HEAD in the recovery/
-        resume paths) that names a repository-relative path exists in the
-        worktree — a deterministic, machine-checkable completion check.  The
-        gate never reads the stale plan of the pre-commit head (Task 9
-        review M1).
+        (bounded, new session, **stripped allowlisted environment** — Task
+        11: a credential in the operator's environment can never reach a
+        gate child); its exit status is the gate.  Any captured failure
+        output is bounded and redacted through the exact committed
+        credential guard before it can enter a result, log, receipt, or
+        repository state.  The default gate verifies that every
+        ``- Verification:`` line of the **exact newly validated plan** (the
+        worktree plan the orchestrator is about to commit, or the freshly
+        committed plan at HEAD in the recovery/resume paths) that names a
+        repository-relative path exists in the worktree — a deterministic,
+        machine-checkable completion check.  The gate never reads the stale
+        plan of the pre-commit head (Task 9 review M1).
 
         Task 9 review L2: a verification reference must be a safe
         repository-relative path — an absolute path, an empty/dot-segment
@@ -2361,14 +2447,16 @@ class Campaign:
             try:
                 result = self._lock.spawn_child(
                     list(config.acceptance_command),
-                    env=dict(os.environ),
+                    env=sanitized_gate_environment(),
                     timeout=config.gate_timeout,
                 )
             except lock_module.RootLockTimeoutError:
                 return False, "acceptance gate timed out"
             if result.returncode == 0:
                 return True, "acceptance gate passed"
-            return False, "acceptance gate failed"
+            return False, self._redact_gate_detail(
+                result.stdout, result.stderr
+            ) or "acceptance gate failed"
         task = next((t for t in plan.tasks if t.number == task_id), None)
         if task is None:
             return False, f"task {task_id} is absent from the validated plan"
@@ -2407,11 +2495,57 @@ class Campaign:
             return False, 0, ""
         try:
             result = self._lock.spawn_child(
-                list(command), env=dict(os.environ), timeout=self._config.gate_timeout
+                list(command),
+                env=sanitized_gate_environment(),
+                timeout=self._config.gate_timeout,
             )
         except lock_module.RootLockTimeoutError:
             return True, -1, f"{label} gate timed out"
-        return True, result.returncode, (result.stdout or "")[:4000]
+        return True, result.returncode, self._redact_gate_detail(
+            result.stdout, result.stderr
+        )
+
+    def _redact_gate_detail(
+        self, stdout: Optional[str], stderr: Optional[str]
+    ) -> str:
+        """Bound, then mask one deterministic gate's output through the guard.
+
+        The retained gate detail is bounded first (never feeding the guard
+        unbounded input) and then redacted **through the exact committed
+        credential guard** (Task 11) before it can enter a result, log,
+        receipt, or repository state.  The redactor is verified and bound to
+        ``(root, head)`` on the first gate run and fails closed when the
+        exact committed guard cannot be verified; a redaction failure never
+        exposes raw gate output and carries the fixed
+        ``[REDACTION FAILED]`` marker instead.
+        """
+        if self._redactor is None:
+            try:
+                worktree = output_redaction.read_worktree_guard_source(
+                    self._root
+                )
+                committed = self._git.blob_at(
+                    self._git.head(),
+                    output_redaction.REDACTION_GUARD_RELPATH,
+                )
+                self._redactor = output_redaction.redactor_from_bytes(
+                    worktree, committed, self._git.head()
+                )
+            except (output_redaction.OutputRedactionError, CampaignGitError) as exc:
+                raise CampaignError(
+                    "deterministic gate output redaction is unavailable "
+                    f"because the credential guard cannot be verified: {exc}; "
+                    "no gate output may reach results, logs, receipts, or "
+                    "repository state (Task 11)"
+                ) from exc
+        combined = (stdout or "") + (stderr or "")
+        combined = combined[:GATE_DETAIL_MAX]
+        try:
+            return self._redactor.redact_text(combined)  # type: ignore[union-attr]
+        except output_redaction.OutputRedactionError:
+            # Fail closed: a redaction failure never exposes the raw gate
+            # output; it carries the fixed marker instead.
+            return output_redaction.REDACTION_FAILED
 
     def _preservable_dirty_paths(self) -> List[str]:
         """Dirty paths that are preserved product work.

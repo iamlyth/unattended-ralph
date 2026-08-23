@@ -359,11 +359,23 @@ def _validate_settings_url(url: str) -> None:
     (``127.0.0.1``/``localhost``) seam used exclusively by the hermetic
     hidden suite.  The fetch child re-checks the same rule defensively
     before connecting.
+
+    **No URL userinfo** (Task 11 review): a settings URL carrying a
+    ``user:password@`` authority component is rejected outright — the URL
+    is passed structurally on the fetch child's argv, so an embedded
+    credential would land in ``/proc/<pid>/cmdline`` and could reach logs;
+    the guard's own URL-userinfo classification already blocks command
+    input, and the settings boundary rejects it at the source.
     """
     try:
         parsed = urllib.parse.urlsplit(url)
     except ValueError as exc:
         raise UsageConfigError(f"invalid settings URL {url!r}") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise UsageConfigError(
+            f"settings URL {url!r} carries a username/password userinfo; "
+            "credentials in the settings URL are forbidden"
+        )
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
     if scheme == "https":

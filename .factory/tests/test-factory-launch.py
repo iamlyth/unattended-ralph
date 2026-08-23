@@ -101,6 +101,7 @@ from launch import (  # noqa: E402
     child_environment,
     compose_prompt,
     derive_task_excerpt,
+    PI_RALPH_GUARD_DIGEST_ENV,
     secure_wrapper_path,
     task_excerpt_bytes,
     task_excerpt_digest,
@@ -352,6 +353,14 @@ class _Base(unittest.TestCase):
         self.marker_dir = self.workspace / "src" / ".factory-test-output"
         self.marker_dir.mkdir(parents=True)
         shutil.copy2(REAL_WRAPPER, scripts / WRAPPER_BASENAME)
+        # Task 11: the exact committed credential guard is a fixture blob too
+        # — the launch authority verifies the working-tree guard equals the
+        # committed blob at the bound commit before any child output channel
+        # is redacted, so every fixture repository commits the exact guard.
+        shutil.copy2(
+            ROOT / "scripts" / "credential-guard.py",
+            scripts / "credential-guard.py",
+        )
         self.backend = self.workspace / "backend.py"
         self.backend.write_text(BACKEND_SOURCE, encoding="utf-8")
         os.chmod(self.backend, 0o700)
@@ -843,6 +852,29 @@ class ArgvEnvironmentTests(_Base):
         self.assertEqual(env[INVOCATION_ENV_PREFIX + "TASK_ID"], "1")
         self.assertEqual(
             env[INVOCATION_ENV_PREFIX + "TASK_EXCERPT_DIGEST"], digest
+        )
+
+    def test_child_environment_forwards_guard_digest(self) -> None:
+        # Task 11 review: the trusted pre-spawn authority forwards the exact
+        # committed credential-guard digest through the sanitized launch env
+        # so the model-side Pi extension can bind its worktree guard without
+        # any Git access.  A malformed digest fails closed.
+        binding, _, _, _, _ = self.make_binding()
+        digest = hashlib.sha256(b"exact-committed-guard-bytes").hexdigest()
+        env = child_environment(binding, guard_digest=digest)
+        self.assertEqual(env[PI_RALPH_GUARD_DIGEST_ENV], digest)
+        # The digest key itself carries no credential shape and survives the
+        # defense-in-depth strips.
+        self.assertEqual(env[PI_RALPH_GUARD_DIGEST_ENV], digest)
+        for bad in ("not-hex", "0" * 63, "0" * 65, 123):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InvocationError):
+                    child_environment(
+                        binding, guard_digest=bad  # type: ignore[arg-type]
+                    )
+        # Without a digest the key is absent entirely.
+        self.assertNotIn(
+            PI_RALPH_GUARD_DIGEST_ENV, child_environment(binding)
         )
 
     def test_verify_child_env_rejects_credential_and_lock_keys(self) -> None:
@@ -1735,6 +1767,13 @@ class CliTests(_Base):
         (repo / "scripts").mkdir()
         (repo / "src" / ".factory-test-output").mkdir(parents=True)
         shutil.copy2(REAL_WRAPPER, repo / "scripts" / WRAPPER_BASENAME)
+        # Task 11: commit the exact credential guard into every fixture repo
+        # (the launch redacts every child output channel through the exact
+        # committed guard before any result is produced).
+        shutil.copy2(
+            ROOT / "scripts" / "credential-guard.py",
+            repo / "scripts" / "credential-guard.py",
+        )
         # Task 8 confined launch: the fixture repo commits the exact
         # confine-launcher blob (F2/F5) so the production CLI can stage it
         # from the bound commit, plus the committed confinement schema doc

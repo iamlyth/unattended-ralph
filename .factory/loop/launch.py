@@ -88,6 +88,7 @@ try:  # package-import mode (the hidden control-plane package)
     from . import confinement as confinement_authority
     from . import workspace_confinement as real_confinement_authority
     from . import usage as usage_guard
+    from . import redaction as output_redaction
     from .gitutil import (
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -114,6 +115,7 @@ except ImportError:  # flat-import mode used by the hidden harness test suite
     import confinement as confinement_authority  # type: ignore[no-redef]
     import workspace_confinement as real_confinement_authority  # type: ignore[no-redef]
     import usage as usage_guard  # type: ignore[no-redef]
+    import redaction as output_redaction  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -273,6 +275,14 @@ RESULT_SCHEMA_FILE = "factory-launch-result-v1.schema.json"
 # from nothing — the child environment is *rebuilt* from the allowlist plus
 # exactly these fields, never inherited).
 INVOCATION_ENV_PREFIX = "FACTORY_LOOP_LAUNCH_"
+
+# The environment key the trusted pre-spawn authority uses to forward the
+# exact committed credential-guard digest to the model-side Pi extension
+# (Task 11 review).  The extension hashes the *worktree* guard and fails
+# closed on a missing or mismatched digest — it has no Git access inside
+# the model Landlock, so the exact-commit binding is transported through
+# this sanitized launch-env channel instead.
+PI_RALPH_GUARD_DIGEST_ENV = "PI_RALPH_GUARD_DIGEST"
 
 # Explicit environment allowlist for model children.  The child environment
 # is *constructed* from these benign keys only (when present in the parent)
@@ -850,7 +860,11 @@ def write_prompt_file(directory: Path, prompt: bytes) -> Path:
 # Exact child argv and environment
 # --------------------------------------------------------------------------
 
-def child_environment(binding: InvocationBinding) -> Dict[str, str]:
+def child_environment(
+    binding: InvocationBinding,
+    *,
+    guard_digest: Optional[str] = None,
+) -> Dict[str, str]:
     """The exact child environment: allowlist plus the invocation fields.
 
     The environment is *built*, never inherited: only the documented
@@ -861,12 +875,29 @@ def child_environment(binding: InvocationBinding) -> Dict[str, str]:
     variable, and no credential/session variable can reach the leaf — this
     is the exact-env allowlist (§9, §20).  The lock strip is applied again
     as defense in depth.
+
+    ``guard_digest`` (when given) is the SHA-256 of the exact committed
+    credential guard the pre-spawn authority verified: it is forwarded to
+    the model-side Pi extension as ``PI_RALPH_GUARD_DIGEST`` so the
+    extension can bind its worktree guard to the exact committed bytes
+    without any Git access (Task 11 review).  A 64-hex digest is required
+    when the key is carried at all.
     """
     verify_invocation(binding)
     environment: Dict[str, str] = {}
     for key in ENV_ALLOWLIST:
         if key in os.environ:
             environment[key] = os.environ[key]
+    if guard_digest is not None:
+        if (
+            not isinstance(guard_digest, str)
+            or not SHA256_RE.fullmatch(guard_digest)
+        ):
+            raise InvocationError(
+                "the forwarded credential-guard digest must be a 64-hex "
+                "SHA-256 of the exact committed guard blob"
+            )
+        environment[PI_RALPH_GUARD_DIGEST_ENV] = guard_digest
     prefix = INVOCATION_ENV_PREFIX
     environment[prefix + "ROLE"] = binding.role
     environment[prefix + "MODEL"] = binding.model
@@ -1186,16 +1217,50 @@ def verify_child_invariants(
 # --------------------------------------------------------------------------
 
 class _BoundedStream:
-    """Bounded output capture: a digest over a prefix and a bounded tail."""
+    """Bounded output capture: a digest over a prefix and a bounded tail.
 
-    __slots__ = ("_digest", "_digested", "_tail", "_total", "truncated")
+    The digest covers the bounded raw prefix (a deterministic hash of the
+    child's exact output); the retained tail is redacted through the
+    committed credential guard before it can enter a result, so credentials
+    or secrets rendered into child output never appear in results, logs,
+    receipts, or repository state (Task 11).  The private-key block state at
+    the tail boundary is tracked incrementally so a block that straddles the
+    retained window is still masked; whether the retained tail begins
+    mid-line is tracked so the incomplete first line is conservatively
+    dropped before redaction (a >window opaque token value cut at the
+    boundary can never leak a raw fragment); a redaction failure fails the
+    tail closed to the fixed ``[REDACTION FAILED]`` marker.
+    """
 
-    def __init__(self) -> None:
+    __slots__ = (
+        "_digest", "_digested", "_tail", "_total", "truncated",
+        "_tail_start_block", "_tail_partial", "_tail_mid_line",
+        "_redactor",
+    )
+
+    def __init__(
+        self,
+        redactor: Optional["output_redaction.Redactor"] = None,
+    ) -> None:
         self._digest = hashlib.sha256()
         self._digested = 0
         self._tail = bytearray()
         self._total = 0
         self.truncated = False
+        # Private-key block state at the start of the retained tail window
+        # (and the trailing partial line at that boundary), updated whenever
+        # the tail is trimmed so a block opened before the window is still
+        # masked.  ``None`` means no redactor is bound (the stream is not
+        # part of a production capture).
+        self._tail_start_block = False
+        self._tail_partial = ""
+        # True when the retained tail's first byte is not at a line start
+        # (the eviction boundary cut through a line), so the incomplete
+        # first line is conservatively dropped before redaction (Task 11
+        # review: a >KEY_BLOCK_WINDOW opaque TOKEN value straddling the
+        # boundary must never leak a raw fragment).
+        self._tail_mid_line = False
+        self._redactor = redactor
 
     def feed(self, chunk: bytes) -> None:
         if not chunk:
@@ -1211,14 +1276,40 @@ class _BoundedStream:
             self._digested += len(take)
         self._tail.extend(chunk)
         if len(self._tail) > OUTPUT_TAIL_CAP:
+            excess = len(self._tail) - OUTPUT_TAIL_CAP
+            trimmed = bytes(self._tail[:excess])
+            del self._tail[:excess]
             self.truncated = True
-            del self._tail[: len(self._tail) - OUTPUT_TAIL_CAP]
+            # Advance the block state to the new tail boundary so a
+            # private-key block that opened before the retained window is
+            # still seeded when the tail is redacted; the non-empty trailing
+            # partial line marks a boundary that cut through a line (the
+            # retained tail begins mid-line).
+            in_block, partial = output_redaction.scan_key_block_state(
+                self._tail_start_block, self._tail_partial, trimmed
+            )
+            self._tail_start_block, self._tail_partial = in_block, partial
+            self._tail_mid_line = bool(partial)
 
     def result(self) -> "StreamResult":
+        tail = self._tail.decode("utf-8", "replace")
+        if self._redactor is not None and (tail or self._tail_partial):
+            try:
+                tail = self._redactor.redact_tail(
+                    tail,
+                    self._tail_start_block,
+                    self._tail_partial,
+                    bound_bytes=OUTPUT_TAIL_CAP,
+                    mid_line=self._tail_mid_line,
+                )
+            except output_redaction.OutputRedactionError:
+                # Fail closed: a redaction failure never exposes the raw
+                # tail; it carries the fixed marker instead.
+                tail = output_redaction.REDACTION_FAILED
         return StreamResult(
             bytes=self._total,
             digest=self._digest.hexdigest(),
-            tail=self._tail.decode("utf-8", "replace"),
+            tail=tail,
             truncated=self.truncated,
         )
 
@@ -1373,6 +1464,15 @@ class LaunchSupervision:
         self._confinement_proof: Optional[object] = None
         self._sanitized_home: Optional[Path] = None
         self._confined_launcher: Optional[Path] = None
+        # Task 11: the verified credential-guard redactor, built by :meth:`run`
+        # before the child is spawned so no launch can capture child output
+        # without a verified redaction authority (fail closed).  ``_guard_digest``
+        # is the SHA-256 of the exact committed guard bytes, forwarded to the
+        # model-side Pi extension through the sanitized launch env
+        # (``PI_RALPH_GUARD_DIGEST``) so the extension binds its worktree guard
+        # to the same exact-commit authority without any Git access.
+        self._redactor: Optional["output_redaction.Redactor"] = None
+        self._guard_digest: Optional[str] = None
 
     # -- subreaper lifecycle (F7) --------------------------------------------
 
@@ -1602,7 +1702,7 @@ class LaunchSupervision:
                     f"external trusted executable {external} changed or is "
                     f"no longer immutable before exec: {exc} (F2)"
                 ) from exc
-        env = child_environment(self.binding)
+        env = child_environment(self.binding, guard_digest=self._guard_digest)
         argv = child_argv(
             self.binding, self.prompt_path, self.session_dir,
             secure_wrapper=self._staged_wrapper,
@@ -1689,8 +1789,8 @@ class LaunchSupervision:
         deadline: float,
         inactivity_limit: float,
     ) -> Tuple[_BoundedStream, _BoundedStream, Optional[str], float]:
-        stdout = _BoundedStream()
-        stderr = _BoundedStream()
+        stdout = _BoundedStream(redactor=self._redactor)
+        stderr = _BoundedStream(redactor=self._redactor)
         streams = {child.stdout.fileno(): stdout, child.stderr.fileno(): stderr}
         files = {
             child.stdout.fileno(): child.stdout,
@@ -2065,6 +2165,22 @@ class LaunchSupervision:
                 "the authority's prompt file does not match the composed "
                 "prompt bytes; refusing a substituted prompt file (F5)"
             )
+        # Task 11: every child/tool output channel is redacted through the
+        # exact committed credential guard.  The redactor is verified and
+        # bound to ``(workspace, bound_commit)`` *before* the child is
+        # spawned, so a missing, uncommitted, or substituted guard fails
+        # closed and no model can start with an unredacted capture channel.
+        try:
+            self._redactor = output_redaction.redactor_for(
+                self.binding.workspace, self.binding.bound_commit
+            )
+            self._guard_digest = self._redactor.digest
+        except output_redaction.OutputRedactionError as exc:
+            raise SupervisionError(
+                "child output redaction is unavailable because the "
+                f"credential guard cannot be verified: {exc}; no model may "
+                "start with an unredacted output channel (Task 11)"
+            ) from exc
         try:
             self.install_subreaper()
             self.install_signal_handlers()
@@ -2871,6 +2987,30 @@ def _stage_launch_executables(
     return (stage_wrapper(), staged_backend, staged_digests, external_paths, exec_dir)
 
 
+def _backend_is_external(binding: "InvocationBinding") -> bool:
+    """True when the model backend resolves outside the canonical workspace.
+
+    A backend path outside the workspace (or a workspace symlink whose
+    resolved target is outside) is an external trusted executable whose
+    configuration must be confined and transported under the same
+    mandatory real-confinement and credential/source boundary as the
+    Ollama provider (Task 11).
+    """
+    workspace = Path(binding.workspace).absolute()
+    backend = Path(binding.backend).absolute()
+    try:
+        backend.relative_to(workspace)
+    except ValueError:
+        return True
+    if os.path.islink(str(backend)):
+        resolved = os.path.realpath(str(backend))
+        try:
+            Path(resolved).relative_to(workspace)
+        except ValueError:
+            return True
+    return False
+
+
 def _reject_production_loopback(
     settings_url: Optional[str], *, allow_loopback: bool
 ) -> None:
@@ -3158,6 +3298,22 @@ def authorize_launch(
         raise InvocationError(
             "a real confined launch requires the fresh sanitized home "
             "the specification binds"
+        )
+    # ---- Task 11 external backend configuration authority ----
+    # Configuration for an external (non-workspace) model backend or trusted
+    # external executable is confined and transported under the same
+    # mandatory real-confinement and credential/source boundary as the
+    # Ollama provider: the private synthetic-proof seam proves nothing real,
+    # so no external backend config is accepted while Task 8 real
+    # confinement is unproven.  The immutable-chain authority (F2) is
+    # additionally enforced on the resolved path inside
+    # ``_stage_launch_executables`` before any external bytes can run.
+    if _confinement_spec is None and _backend_is_external(binding):
+        raise InvocationError(
+            "an external (non-workspace) model backend is not accepted while "
+            "Task 8 real confinement is unproven: the private synthetic seam "
+            "never proves confinement, so no external backend config is "
+            "confined or transported under this authority (Task 11)"
         )
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
@@ -3510,7 +3666,16 @@ def validate_launch_result(result: object) -> None:
 
 
 def _verify_commit(workspace: Path, bound_commit: str) -> None:
-    head = resolve_head(workspace)
+    try:
+        head = resolve_head(workspace)
+    except GitBoundaryError as exc:
+        # Task 11 (Task 9 residual): a pinned-Git failure (timeout, missing
+        # binary, broken pipe) is a clean fail-closed invocation error, never
+        # a raw GitBoundaryError traceback escaping the launch CLI.
+        raise InvocationError(
+            f"cannot resolve the workspace HEAD through the pinned Git "
+            f"boundary: {exc}"
+        ) from exc
     if head != bound_commit:
         raise InvocationError(
             f"workspace HEAD {head!r} does not match the bound commit "
@@ -3708,6 +3873,15 @@ def _run_cli(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 128 + exc.signum
+    except GitBoundaryError as exc:
+        # Task 11 (Task 9 residual): a pinned Git failure during pre-flight
+        # (HEAD resolution, committed-blob reads) is a clean fail-closed CLI
+        # error, never a traceback.
+        print(
+            f"factory-launch: pinned Git boundary fail-closed: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_INVOCATION
     except InvocationError as exc:
         print(f"factory-launch: {exc}", file=sys.stderr)
         return EXIT_INVOCATION

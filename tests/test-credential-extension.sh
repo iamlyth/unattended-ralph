@@ -42,11 +42,21 @@ mkdir -p "$tmp/tmpdir"
 # hooks are proven to ignore hostile CREDENTIAL_GUARD and
 # RALPH_CREDENTIAL_GUARD_TESTING variables because the runtime resolver is
 # immutable.
+#
+# The expected exact-commit guard digest is forwarded by the trusted
+# pre-spawn authority through the sanitized launch environment; the fixture
+# exports it so the registered runtime hooks (the production path) bind the
+# tracked guard to the exact committed bytes, and so every tracked-guard
+# helper call exercises the digest gate honestly.
+PI_RALPH_GUARD_DIGEST=$(sha256sum "$GUARD" | awk '{print $1}')
+export PI_RALPH_GUARD_DIGEST
+
 TMPDIR="$tmp/tmpdir" \
     node --input-type=module - "$EXTENSION" "$tmp" <<'EOF'
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
-  chmodSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -243,6 +253,45 @@ assert.deepEqual(extension.parseStrictGuardLine(goodLine + '\n'), { verdict: 'bl
 for (const bad of ['', 'not json', '{"verdict":"allow"}', '{"schema":"credential-guard/v1","tool":"credential-guard","version":"1","verdict":"partial","reason":"x","reasons":[]}', '{"schema":"credential-guard/v1","tool":"credential-guard","version":"1","verdict":"allow","reason":"ok","reasons":"nope"}', '42']) {
   assert.equal(extension.parseStrictGuardLine(bad), null, bad);
 }
+
+// ---------------------------------------------------------------------------
+// 2b. Exact-commit guard binding and the pinned trusted interpreter
+//     (Task 11 review). The extension has no Git access, so the trusted
+//     pre-spawn authority forwards the exact committed guard digest through
+//     the sanitized launch environment; the extension hashes the worktree
+//     guard and fails closed on a missing or mismatched digest. The guard
+//     interpreter is pinned to a validated immutable absolute python3 and
+//     never resolves from a caller-controlled PATH.
+// ---------------------------------------------------------------------------
+const realDigest = createHash('sha256').update(readFileSync(trackedGuard)).digest('hex');
+assert.equal(process.env[extension.GUARD_DIGEST_ENV], realDigest, 'fixture env must carry the exact committed guard digest');
+assert.deepEqual(
+  extension.verifyGuardDigest({ [extension.GUARD_DIGEST_ENV]: realDigest }, trackedGuard),
+  { ok: true, reason: '' },
+);
+assert.equal(extension.verifyGuardDigest({ [extension.GUARD_DIGEST_ENV]: '0'.repeat(64) }, trackedGuard).ok, false, 'mismatched digest accepted');
+assert.equal(extension.verifyGuardDigest({}, trackedGuard).ok, false, 'missing digest accepted');
+assert.equal(extension.verifyGuardDigest({ [extension.GUARD_DIGEST_ENV]: 'short' }, trackedGuard).ok, false, 'malformed digest accepted');
+// The tracked guard fails closed on a missing/mismatched digest; a fixture
+// swap (explicit guardPath) owns its own authority.
+assert.equal(extension.runGuardCheck('check-command-stdin', 'echo hi', { env: {} }).reason, 'guard-digest-missing');
+assert.equal(extension.runGuardCheck('check-command-stdin', 'echo hi', { env: { [extension.GUARD_DIGEST_ENV]: '0'.repeat(64) } }).reason, 'guard-digest-mismatch');
+
+// Pinned trusted interpreter: a fake python3 on PATH that would exfiltrate
+// stdin (the raw overflow/redaction payload) must never run.
+const fakeBin = join(work, 'fake-bin');
+mkdirSync(fakeBin);
+const fakePythonMarker = join(work, 'fake-python-ran');
+writeFileSync(join(fakeBin, 'python3'), `#!/bin/sh\n: > ${fakePythonMarker}\nexit 9\n`);
+chmodSync(join(fakeBin, 'python3'), 0o755);
+const trustedPython = extension.resolveTrustedPython();
+assert(trustedPython !== null && trustedPython.startsWith('/'), 'no trusted absolute interpreter resolved');
+assert.notEqual(trustedPython, join(fakeBin, 'python3'));
+const fakePathEnv = { ...TEST_ENV, PATH: `${fakeBin}:${TEST_ENV.PATH ?? ''}` };
+assert.equal(extension.runGuardCheck('check-command-stdin', 'cmake --build build-check', { env: fakePathEnv }).allowed, true, 'fake PATH python replaced the pinned interpreter');
+assert.equal(extension.redactText('TOKEN=FAKE_X\n', { env: fakePathEnv }).ok, true, 'redaction failed under the fake python PATH');
+assert.equal(existsSync(fakePythonMarker), false, 'the fake python executed behind the pinned interpreter');
+assert.equal(extension.immutableChainValid(join(fakeBin, 'python3')), false, 'a caller-owned fake python passes the immutable chain');
 
 // ---------------------------------------------------------------------------
 // 3. Tool-result redaction: content items and nested details mask

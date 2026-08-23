@@ -47,6 +47,11 @@ host configuration, and credential stores; only role-specific current inputs,
 existing write targets, and per-launch private paths are granted. The trusted
 orchestrator performs Git history and commit operations after the role exits.
 Hosts without the required confinement primitive cannot launch a model.
+Credential enforcement and output masking use one exact-commit guard at the
+Pi SDK tool boundary and every retained process/gate output boundary. Child and
+gate environments are rebuilt from allowlists, Git is pinned independently of
+caller `PATH`, and unverifiable guard or external-backend authority fails
+before launch.
 
 ## Finite phase campaign
 

@@ -78,6 +78,10 @@ mkdir -p "$repo/scripts"
 mkdir -p "$repo/.factory/loop"
 mkdir -p "$repo/.factory/schemas"
 cp scripts/pi2-secure-exec.py "$repo/scripts/"
+# Task 11: every fixture repo commits the exact credential guard so the
+# launch authority can verify the guard source before any child output
+# channel is redacted.
+cp scripts/credential-guard.py "$repo/scripts/"
 cp .factory/loop/confine_launcher.py "$repo/.factory/loop/"
 cp .factory/schemas/factory-confinement-v1.schema.json "$repo/.factory/schemas/"
 cp .factory/tests/fixtures/plan-valid-base.md "$repo/plan.md"

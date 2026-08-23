@@ -198,6 +198,7 @@ class FixtureWorkspace:
         ws.mkdir(parents=True)
         for rel in (
             "docs",
+            "scripts",
             ".factory/prompts",
             ".factory/audit-objectives",
             ".factory/artifacts",
@@ -206,6 +207,14 @@ class FixtureWorkspace:
             "src",
         ):
             (ws / rel).mkdir(parents=True)
+        # Task 11: every fixture repository commits the exact credential
+        # guard — deterministic gate output is redacted through the exact
+        # committed guard before it can enter a result, log, receipt, or
+        # repository state.
+        shutil.copy2(
+            ROOT / "scripts" / "credential-guard.py",
+            ws / "scripts" / "credential-guard.py",
+        )
         (ws / "AGENTS.md").write_text(
             "AGENTS.md operational policy\n", encoding="utf-8")
         (ws / "docs" / "SPEC.md").write_text(

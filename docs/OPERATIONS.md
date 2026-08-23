@@ -512,6 +512,31 @@ consumed. Synthetic proofs are hidden test seams and are never acceptance
 evidence. The machine contract is
 `.factory/schemas/factory-confinement-v1.schema.json`.
 
+## Credential and output boundary (Task 11)
+
+Before any model or deterministic gate starts, the trusted control plane binds
+`scripts/credential-guard.py` to its exact committed bytes and compiles its
+redaction API. A missing, changed, symlinked, oversized, writable, or invalid
+guard fails closed. The same guard is the sole masking authority for Pi SDK
+`tool_call` input, `tool_result` patches, model stdout/stderr tails, and gate or
+acceptance-command details. Raw stream digests remain evidence-only; every
+retained text channel is bounded and redacted, including private-key blocks
+split across capture eviction boundaries. Redaction failure publishes only
+`[REDACTION FAILED]`.
+
+Model children and gates receive rebuilt allowlisted environments. Credential-
+shaped variables, Git redirectors, inherited lock metadata, authentication
+paths, and parent-only configuration are stripped. Ollama credential material
+continues through the private bounded usage channel and never through model
+argv/environment/output. Synthetic secret fixtures test these boundaries; no
+real credential value is test input or evidence.
+
+The model-facing Git shim selects only fixed absolute trusted Git candidates
+(or an immutable validated Nix-store executable), never caller `PATH`, and
+refuses bypass flags and root execution. External backends are accepted only
+when their exact immutable executable/source paths are bound into a real
+Landlock confinement proof; the synthetic-proof seam cannot authorize them.
+
 ## Clean stop
 
 In TUI or foreground mode, press `Ctrl+C`. Ralph aborts the backend and leaves durable state for recovery. Do not use `kill -9` unless the process cannot terminate normally.
