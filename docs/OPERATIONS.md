@@ -22,6 +22,47 @@ Volatile, ignored state:
 
 Git checkpoints make the plan, scratchpad, and implementation recoverable. Event/task files improve same-disk recovery but are not treated as portable project history.
 
+## Control-state authority (STATE-01)
+
+The trusted control plane keeps exactly one mutable lifecycle file,
+`.factory-state/factory-loop.json` (schema `factory-state/v1`), carrying only
+the §11 fields: schema, repository identity, branch, campaign id, round
+budget/counters, current phase, spec/plan/prompt-set digests, phase base
+commit, selected task id, attempt counter, monotonic phase/attempt start
+markers, and a trusted `last_outcome` enum. It is the only mutable lifecycle
+file; the append-only `.factory-state/state-digest-ledger.jsonl` records
+evidence only and is never orchestration state. All writes are atomic,
+no-follow, mode-0600, and ownership/mode/link-count/(dev, inode) checked via
+`scripts/factory_state_io.py`; loading re-validates the recorded repository
+identity against the canonical root descriptor and any expected campaign
+binding, so a forged, moved, symlinked, oversized, wrong-owner, or wrong-mode
+file fails closed. The §11 transition table is enforced edge for edge,
+campaign-scoped bindings are write-once, round/attempt counters are
+monotonic, and a terminal phase accepts no further transition.
+
+Trusted control-plane operations only (each prints one machine-readable
+outcome; `ROOT` defaults to the canonical repository):
+
+```bash
+.factory/loop/state.py --root ROOT init --campaign-id C --rounds N \
+  --base-commit H --spec-digest S --plan-digest P --audit-digest A \
+  --role-digest ROLE=HEX
+.factory/loop/state.py --root ROOT show|digest
+.factory/loop/state.py --root ROOT advance OUTCOME \
+  [--plan-digest P --base-commit H]
+.factory/loop/state.py --root ROOT begin-attempt TASK_ID
+.factory/loop/state.py --root ROOT record-retry OUTCOME
+.factory/loop/state.py --root ROOT record-phase-digest TAG
+.factory/loop/state.py --root ROOT verify-phase-digest TAG
+```
+
+Recovery is deterministic: the harness records the state digest before every
+untrusted phase and reopens/revalidates the file after it, so any same-user
+mutation of content, mode, owner, link-count, or pathname identity not
+produced by a trusted transition fails closed. Resume by reloading
+`.factory-state/factory-loop.json` (phase never moves backward, counters are
+monotonic); `init` refuses to overwrite existing state.
+
 ## Branch policy
 
 The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.

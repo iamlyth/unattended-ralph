@@ -1,0 +1,194 @@
+# `factory-state/v1` control-state schema
+
+Status: committed contract (normative for STATE-01, `docs/FACTORY-LOOP-SPEC.md`
+§11/§17). The single mutable control-state authority is the JSON document
+`.factory-state/factory-loop.json`, implemented by the trusted control-plane
+module `.factory/loop/state.py`. The runtime file lives outside Git under the
+ignored `.factory-state/` namespace; the document here is the committed schema
+for exactly what that file may contain and how the trusted harness may
+transition it.
+
+## 1. Contract
+
+- The file is a single JSON object carrying **exactly** the §11 field set of
+  section 2 — no wall-clock timestamp, model prose, task description, memory,
+  evidence claim, or copy of the plan is accepted. Parsing rejects both extra
+  and missing fields.
+- Every parse re-validates every structural invariant; a model that fails any
+  invariant is a tamper (`StateTamperError`) and never reaches a transition,
+  a digest, or a write.
+- All file I/O is atomic, no-follow, and ownership/mode/link-count checked
+  through the established dirfd authority `scripts/factory_state_io.py`
+  (`state_dir`/`read_bytes`/`atomic_write_json`). The file is published
+  through a mode-0600 temporary inode and `linkat`, so a raced pathname is
+  never silently replaced, and every open re-validates the recorded
+  `repository_identity` against the canonical root directory descriptor.
+- A digest is recorded before every untrusted phase in the append-only
+  evidence ledger `.factory-state/state-digest-ledger.jsonl` (evidence, never
+  orchestration state) and re-validated after the phase; any same-UID
+  semantic mutation not produced by the trusted transition fails closed.
+- The state file is the *only* mutable lifecycle file; the ledger is
+  append-only evidence.
+
+## 2. Field set
+
+The object carries exactly these seventeen keys (`FIELD_NAMES`), each
+exactly once, with the §11 type and invariant:
+
+| Field | Type / invariant | Mutable by |
+|-------|------------------|------------|
+| `schema` | exactly the constant `"factory-state/v1"` | write-once |
+| `repository_identity` | `dev:inode` hex pair (`^[0-9a-f]+:[0-9a-f]+$`) of the canonical root directory | write-once |
+| `branch` | non-empty Git branch name | write-once |
+| `campaign_id` | non-empty campaign identifier | write-once |
+| `rounds_requested` | positive integer (campaign round budget) | write-once |
+| `current_round` | positive integer, `1 <= current_round <= rounds_requested`; monotonic, 1-based | only `audit --nonfinal` increments it |
+| `current_phase` | one of `planning, implementation, verification, audit, success, findings, blocked, failed, interrupted, infrastructure_failure` | only §4 transitions |
+| `specification_digest` | 64-character lowercase SHA-256 hex | write-once |
+| `plan_digest` | 64-character lowercase SHA-256 hex; binds a completed planning phase | rebind only on `planning -> implementation` |
+| `role_prompt_digests` | non-empty JSON object mapping each role name to a 64-hex SHA-256 digest | write-once |
+| `audit_objectives_digest` | 64-character lowercase SHA-256 hex | write-once |
+| `phase_base_commit` | 40-character lowercase Git object ID; binds a completed planning phase | rebind only on `planning -> implementation` |
+| `selected_task_id` | positive integer or `null`; present only during `implementation` with `attempt_number >= 1` | only `begin_attempt` |
+| `attempt_number` | non-negative integer; monotonic within the current task, reset to zero only on a trusted task/phase transition | only `begin_attempt` / phase transitions |
+| `phase_started_at_monotonic` | non-negative integer (`time.monotonic_ns`) | only phase transitions |
+| `attempt_started_at_monotonic` | non-negative integer; positive exactly while an attempt is active | only `begin_attempt` / phase transitions |
+| `last_outcome` | `null` before the first trusted outcome, otherwise exactly one trusted outcome enum value (§5) | trusted harness only |
+
+### 2.1 Write-once bindings
+
+`schema`, `repository_identity`, `branch`, `campaign_id`, `rounds_requested`,
+`specification_digest`, `role_prompt_digests`, and
+`audit_objectives_digest` are bound by `init_state` and can never change on a
+transition. `plan_digest` and `phase_base_commit` bind a completed planning
+round and are write-once until the next trusted `planning -> implementation`
+transition. `load_state` additionally fails closed when the recorded identity
+does not match the canonical root directory or when any expected campaign
+binding differs.
+
+## 3. Transition table and outcomes
+
+`last_outcome` is exactly one of the trusted control-plane outcome enum
+`OUTCOMES`; model completion tokens are never control protocol. The §11 edge
+set is enforced exactly as follows (source phase, trusted outcome) → target
+phase; a *terminal* target accepts no further transition:
+
+```text
+planning       planned         -> implementation
+planning       failed          -> failed            (terminal)
+planning       interrupted     -> interrupted       (terminal)
+implementation task_completed  -> verification
+implementation work_exhausted  -> verification
+implementation blocked         -> verification
+implementation task_failed     -> verification
+implementation interrupted     -> interrupted       (terminal)
+verification   pass            -> audit
+verification   findings        -> audit
+verification   blocked         -> audit
+verification   infrastructure_failure -> infrastructure_failure (terminal)
+audit          pass            -> planning (next round) | success      (final)
+audit          findings        -> planning (next round) | findings     (final)
+audit          blocked         -> planning (next round) | blocked      (final)
+```
+
+Round finality resolves at the `audit` phase from `rounds_requested`:
+`current_round < rounds_requested` advances to the next round's `planning`
+and increments `current_round` (the only counter increment); the final round
+ends the campaign in the terminal state named by the outcome. Phase never
+moves backward within a round.
+
+Retry outcomes that keep the same phase and attempt budget are recorded
+through `record_retry` without claiming a transition:
+
+- `planning`: `interrupted` (a step interrupted before a valid checkpoint,
+  §13.1);
+- `implementation`: `task_progress`, `task_failed`, `interrupted` while the
+  same task's bounded attempt budget remains (§13.2).
+
+Attempts begin through `begin_attempt` (implementation phase only):
+`attempt_number` increments while the same `selected_task_id` is selected and
+restarts at 1 on a trusted task transition; `attempt_started_at_monotonic`
+restarts for timeout recovery. `advance` resets the task/attempt fields to
+their inactive form on every phase change.
+
+## 4. Determinism and digest
+
+`state_digest` is the SHA-256 of the canonical JSON encoding
+(`json.dumps(to_dict(), sort_keys=True, separators=(",", ":")).encode()`),
+the same bytes `atomic_write_json` writes without the trailing newline, so
+the digest is a deterministic function of the model and any semantic mutation
+(forged field, rewound counter, changed binding, changed phase, drifted
+task/attempt) changes it. File-metadata mutations (mode, owner, link count,
+pathname identity) are caught by the no-follow dirfd checks before or during
+any open.
+
+The harness records the digest before each untrusted phase and re-validates
+afterwards:
+
+- `record_phase_digest(root, tag)` appends one newline-terminated JSON line
+  `{"tag": ..., "digest": ...}` to the append-only ledger (mode 0600, bounded
+  1 MiB, single link, same-UID); a repeated tag, unsafe tag, malformed line,
+  or substituted file fails closed.
+- `verify_phase_digest(root, tag)` reopens/re-validates the state, recomputes
+  the digest, and fails closed on any mismatch or missing/malformed record.
+
+## 5. Secure file I/O
+
+- `.factory-state` is a private (0700) owned directory; a world-accessible,
+  foreign-owned, or symlinked directory fails closed.
+- The state file is a regular same-UID file, mode 0600, link count 1, size
+  bounded (`STATE_FILE_MAX`); reads hold one descriptor and re-validate the
+  (dev, inode) and size before/after reading.
+- Writes publish through a mode-0600 temporary inode and `linkat`; a raced
+  pathname is never silently replaced; the previous validated inode is
+  quarantined on failure, never destroyed silently.
+
+## 6. Defect classes and fixtures
+
+Every static defect class below is rejected with `StateTamperError` and has
+an exact fixture under `.factory/tests/fixtures/state-*.json`; unsafe-I/O and
+ledger tamper classes have runtime probes plus seeded content fixtures
+(`state-unsafe-*.json`, `state-ledger-*.jsonl`). The committed corpus is
+inventoried verbatim by the hidden conformance suite.
+
+| Defect class | Fixture |
+| ------------ | ------- |
+| wrong schema constant | `state-schema-wrong.json` |
+| missing `schema` | `state-schema-missing.json` |
+| extra (non-§11) field | `state-field-extra.json` |
+| missing §11 field | `state-field-missing.json` |
+| empty control-state object | `state-empty-object.json` |
+| malformed repository identity | `state-identity-malformed.json` |
+| empty repository identity | `state-identity-empty.json` |
+| empty branch / campaign | `state-branch-empty.json`, `state-campaign-empty.json` |
+| `rounds_requested` zero/negative/boolean | `state-rounds-requested-zero.json`, `state-rounds-requested-negative.json`, `state-rounds-requested-bool.json` |
+| `current_round` zero/boolean/exceeds budget | `state-current-round-zero.json`, `state-current-round-bool.json`, `state-current-round-exceeds-requested.json` |
+| unknown phase | `state-phase-unknown.json` |
+| negative attempt or monotonic marker | `state-attempt-number-negative.json`, `state-phase-monotonic-negative.json`, `state-attempt-monotonic-negative.json` |
+| boolean attempt number | `state-attempt-number-bool.json` |
+| terminal state without matching outcome | `state-terminal-outcome-mismatch.json`, `state-terminal-outcome-null.json` |
+| task without begun attempt | `state-task-without-attempt.json` |
+| attempt without selected task | `state-attempt-without-task.json` |
+| task/attempt outside implementation | `state-task-outside-implementation.json` |
+| non-positive task id | `state-task-id-zero.json`, `state-task-id-bool.json` |
+| active attempt without timestamp | `state-attempt-without-timestamp.json` |
+| untrusted `last_outcome` | `state-outcome-unknown.json`, `state-outcome-number.json` |
+| invalid digest shape / role digests | `state-spec-digest-invalid.json`, `state-plan-digest-invalid.json`, `state-audit-digest-invalid.json`, `state-role-digest-invalid.json`, `state-role-digest-empty-role.json`, `state-role-digests-empty.json`, `state-role-digests-not-object.json`, `state-digest-uppercase.json` |
+| invalid / uppercase phase base commit | `state-phase-base-commit-invalid.json`, `state-phase-base-commit-uppercase.json` |
+| unsafe I/O content | `state-unsafe-not-json.json`, `state-unsafe-binary.json`, `state-unsafe-oversized.json` |
+| malformed/repeated/bad ledger lines | `state-ledger-malformed.jsonl`, `state-ledger-repeated-tag.jsonl`, `state-ledger-bad-tag.jsonl`, `state-ledger-bad-digest.jsonl`, `state-ledger-extra-key.jsonl`, `state-ledger-empty-line.jsonl` |
+
+Accepted fixtures (must parse with the full invariant set, round-trip through
+`to_dict` without semantic loss, and be write/load-able through the real
+no-follow I/O in a test-owned temporary repository) are the
+`state-valid-*.json` files covering every lifecycle phase, a final-round
+audit, a recorded planning retry, and every terminal state.
+
+## 7. Trusted CLI
+
+`python3 .factory/loop/state.py --root ROOT <command>` is the operator
+entrypoint (never invoked by a model role): `init`, `show`, `digest`,
+`advance OUTCOME [--plan-digest ...] [--base-commit ...]`,
+`begin-attempt TASK_ID`, `record-retry OUTCOME`, `record-phase-digest TAG`,
+`verify-phase-digest TAG`. A fail-closed path prints a single
+`factory-state: <error>` line to stderr and exits 1; argparse misuse exits 2.

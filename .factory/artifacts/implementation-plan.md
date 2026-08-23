@@ -94,7 +94,7 @@ completes with evidence.
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
-| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4 |
+| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9 |
 | LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5 |
@@ -241,7 +241,7 @@ completes with evidence.
 
 ## Task 4: Minimal mutable control state
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 1
 - Scope: Implement the single mutable control-state file
   `.factory-state/factory-loop.json` under schema `factory-state/v1` with
@@ -257,8 +257,36 @@ completes with evidence.
   change, counter rewind, wrong path identity, illegal transition) fails
   closed; every legitimate transition advances exactly as the §11 table
   specifies; the state file is the only mutable lifecycle file.
-- Verification: `tests/test-factory-state.py`; adversarial fixture files under
-  `tests/fixtures/state-*`.
+- Verification: `.factory/tests/test-factory-state.py`; adversarial fixture
+  files under `.factory/tests/fixtures/state-*`.
+- Evidence: `.factory/loop/state.py` implements the single `factory-state/v1`
+  authority `.factory-state/factory-loop.json` with exactly the §11 field set
+  (rejecting both extra and missing fields), the §11 transition table edge
+  for edge, write-once campaign/plan bindings, monotonic round/attempt and
+  monotonic phase/attempt start counters, a trusted `last_outcome` enum, a
+  deterministic canonical state digest, and a before/after untrusted-phase
+  digest ledger (`.factory-state/state-digest-ledger.jsonl`, evidence only).
+  All file I/O reuses the established no-follow authority
+  `scripts/factory_state_io.py` (atomic publication through a mode-0600
+  temporary and `linkat`, with ownership/mode/link-count and (dev, inode)
+  identity checks), and loading re-validates `repository_identity` against the
+  canonical root descriptor and any expected campaign binding, so forged,
+  moved, symlinked, oversized, wrong-mode, or wrong-owner state fails closed.
+  The hidden harness-owned suite `.factory/tests/test-factory-state.py` (91
+  tests, all passing; the owner-tamper test skips unless run as root) proves
+  the committed `state-*.json`/`state-*.jsonl` corpus, the exact §11
+  transition edges, retry/attempt budgets, round finality, write-once
+  bindings, digest determinism, secure atomic I/O, the append-only ledger,
+  and the trusted control-plane CLI (`init`/`show`/`digest`/`advance`/
+  `begin-attempt`/`record-retry`/`record-phase-digest`/`verify-phase-digest`)
+  printing one machine-readable outcome and failing closed on every
+  documented defect class. The public `factory-state/v1` API is exported from
+  the hidden `.factory/loop/__init__.py` control-plane package. STATE-01
+  remains co-owned by pending Task 9 (phase/campaign orchestration) so the §11
+  transition machinery is exercised by the trusted control plane, not only by
+  the unit suite; `scripts/validate-implementation-plan.py planning`,
+  `scripts/check-plan-freshness.sh`, `scripts/check-generic-leakage.sh`, and
+  `scripts/check-docs-sync.sh` still exit 0.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 5: Root-descriptor lock and Git writer boundary

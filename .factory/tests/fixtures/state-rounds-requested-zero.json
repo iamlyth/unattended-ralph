@@ -1,0 +1,22 @@
+{
+  "attempt_number": 0,
+  "attempt_started_at_monotonic": 0,
+  "audit_objectives_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "branch": "boilerplate-develop",
+  "campaign_id": "state-fixture-campaign",
+  "current_phase": "planning",
+  "current_round": 1,
+  "last_outcome": null,
+  "phase_base_commit": "ffffffffffffffffffffffffffffffffffffffff",
+  "phase_started_at_monotonic": 1700000000000000000,
+  "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "repository_identity": "1a2b3c:4d5e6f",
+  "role_prompt_digests": {
+    "developer": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "planner": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "rounds_requested": 0,
+  "schema": "factory-state/v1",
+  "selected_task_id": null,
+  "specification_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
