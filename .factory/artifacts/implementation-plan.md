@@ -512,12 +512,36 @@ completes with evidence.
   generic-only. Legacy mutable control-state files (pre-existing lifecycle
   state) must coexist with or migrate into the single `factory-state/v1`
   authority without conflict, and no second mutable control-state authority
-  may be created.
+  may be created. Explicitly remove and deprecate the legacy persisted
+  context-summary authority from new control flow: because the
+  FACTORY-LOOP-SPEC forbids persisted context summaries and any competing
+  task authority, the new path must never generate, read, inject, or validate
+  `.factory/artifacts/context-summary.md`, nor invoke or depend on
+  `scripts/ralph-context-summary.py` (generator) or
+  `scripts/check-context-summary.py` (verifier), and must strip the
+  context-summary wiring out of the new orchestration/launch/commit path
+  (the `verify-boilerplate.sh`, `final-gate.sh`, `git-commit-hook.sh`, and
+  `ralph-run.sh` invocation/checkpoint lines) so the stale mirror never
+  competes with the canonical plan as a task authority. The visible scripts
+  remain present only as deprecated, non-wired legacy entry points until
+  removed; they are never a new-path dependency.
 - Acceptance criteria: migration fixtures prove plan/commits/dirty-work/
   evidence/blockers survive while no `.ralph/` runtime state is imported;
   deprecation forwarders are marked and optional; the generic suite has no
-  Ralph dependency.
-- Verification: `tests/test-factory-migration.sh`.
+  Ralph dependency; the new control flow generates, checks, or reads no
+  context summary, and the stale
+  `.factory/artifacts/context-summary.md` (with its
+  `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py`
+  verifier and `tests/test-context-summary.sh` wiring) is removed/deprecated
+  from every new-path control step, so a plan-mirror drift cannot surface as
+  an acceptance failure.
+- Verification: `tests/test-factory-migration.sh` proves the new path has no
+  context-summary dependency (no new-path code generates or reads
+  `.factory/artifacts/context-summary.md`, and
+  `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py` /
+  `tests/test-context-summary.sh` are absent from or unreachable in the new
+  control flow); the legacy `tests/test-context-summary.sh` suite is not
+  invoked by the new loop.
 - Documentation impact: `docs/OPERATIONS.md`, `README.md`.
 
 ## Task 16: Adversarial conformance suite and verification gate
