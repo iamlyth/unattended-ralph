@@ -5,7 +5,50 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 ENV_FILE="$PROJECT_ROOT/.ollama-usage-env"
+
+# Resolve every setting into a *private non-exported* shell variable and scrub
+# the complete OLLAMA/credential environment (QUOTA-02, §10): the operator
+# store is parsed, never sourced, and any ambient OLLAMA_*/credential key is
+# unset before any child (curl, python) is spawned, so the cookie never
+# appears in a child argv or child environment.
+COOKIE=${OLLAMA_COOKIE:-}
 SETTINGS_URL=${OLLAMA_SETTINGS_URL:-https://ollama.com/settings}
+
+if [[ -z $COOKIE && -r "$ENV_FILE" ]]; then
+    # Read the store into private shell variables without exporting anything.
+    while IFS= read -r _line; do
+        _line=${_line#export }
+        case "$_line" in
+            OLLAMA_COOKIE=*|OLLAMA_THRESHOLD=*|OLLAMA_WAIT_INTERVAL_SECONDS=*|OLLAMA_WAIT_MAX_SECONDS=*|OLLAMA_WAIT_MAX_POLLS=*|OLLAMA_SETTINGS_URL=*)
+                _key=${_line%%=*}
+                _val=${_line#*=}
+                case "$_val" in
+                    \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
+                    \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
+                esac
+                printf -v "$_key" '%s' "$_val"
+                ;;
+        esac
+    done < "$ENV_FILE"
+    unset _line _key _val
+fi
+
+COOKIE=${OLLAMA_COOKIE:-$COOKIE}
+SETTINGS_URL=${OLLAMA_SETTINGS_URL:-$SETTINGS_URL}
+THRESHOLD=${OLLAMA_THRESHOLD:-80}
+POLL_INTERVAL=${OLLAMA_WAIT_INTERVAL_SECONDS:-300}
+MAX_WAIT=${OLLAMA_WAIT_MAX_SECONDS:-0}
+MAX_POLLS=${OLLAMA_WAIT_MAX_POLLS:-0}
+
+# Scrub every exported OLLAMA_* and the individual cookie-component keys so no
+# child (curl, python) can inherit a credential (QUOTA-02).
+for _k in $(env | sed -n 's/^\(OLLAMA_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$_k" 2>/dev/null || true
+done
+unset OLLAMA_COOKIE OLLAMA_THRESHOLD OLLAMA_WAIT_INTERVAL_SECONDS \
+      OLLAMA_WAIT_MAX_SECONDS OLLAMA_WAIT_MAX_POLLS OLLAMA_SETTINGS_URL \
+      __Secure_session aid cf_clearance
+
 MODE=check
 JSON_OUTPUT=false
 HTML_FILE=${OLLAMA_USAGE_HTML_FILE:-}
@@ -36,18 +79,6 @@ while (( $# > 0 )); do
     esac
 done
 
-if [[ -z ${OLLAMA_COOKIE:-} && -r "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$ENV_FILE"
-    set +a
-fi
-
-THRESHOLD=${OLLAMA_THRESHOLD:-80}
-POLL_INTERVAL=${OLLAMA_WAIT_INTERVAL_SECONDS:-300}
-MAX_WAIT=${OLLAMA_WAIT_MAX_SECONDS:-0}
-MAX_POLLS=${OLLAMA_WAIT_MAX_POLLS:-0}
-
 [[ "$THRESHOLD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "ollama-guard: invalid threshold '$THRESHOLD'" >&2; exit 2; }
 [[ "$POLL_INTERVAL" =~ ^[0-9]+$ ]] || { echo "ollama-guard: invalid poll interval '$POLL_INTERVAL'" >&2; exit 2; }
 [[ "$MAX_WAIT" =~ ^[0-9]+$ ]] || { echo "ollama-guard: invalid max wait '$MAX_WAIT'" >&2; exit 2; }
@@ -59,11 +90,13 @@ fetch_html() {
         return 0
     fi
 
-    [[ -n ${OLLAMA_COOKIE:-} ]] || return 2
-    curl -fsSL --max-time 20 \
-        -H "Cookie: ${OLLAMA_COOKIE}" \
-        -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0" \
-        "$SETTINGS_URL"
+    [[ -n ${COOKIE:-} ]] || return 2
+    # The cookie travels to curl only through its private stdin config pipe
+    # (-K -), never through argv or environment (QUOTA-02 / §22 test 24).
+    printf 'header = "Cookie: %s"\n' "$COOKIE" \
+        | curl -fsSL --max-time 20 -K - \
+              -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0" \
+              "$SETTINGS_URL"
 }
 
 # Prints: classification<TAB>session<TAB>weekly<TAB>reset_hint

@@ -92,8 +92,8 @@ completes with evidence.
 | PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9 |
-| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
-| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
+| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9 |
+| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11 |
 | STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9 |
 | LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
@@ -482,7 +482,7 @@ completes with evidence.
 
 ## Task 7: Ollama usage guard retention and credential hardening
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 6
 - Scope: Retain the `scripts/ollama-usage-guard.sh` `--check`/`--wait`
   contract and the §10 decision table, wired into the control plane before
@@ -584,6 +584,19 @@ completes with evidence.
   `tests/fixtures/usage-ok.html` and `usage-blocked.html` still drive the
   parse path; the production `python -m factory.loop.launch` help exposes no
   `--usage-guard-html-file`.
+- Evidence: `.factory/tests/test-factory-usage.py` passes 106/106 under a
+  90-second outer bound with one honest root-only ownership-tamper skip;
+  `tests/test-pi2-ollama-wrapper.sh` passes the live synthetic curl
+  cmdline/environ probe; launch regressions pass 76/76. The retained shell
+  and hidden Python guards preserve the exact `--check`/`--wait` exit table,
+  transport cookies only through bounded private stdin/config channels, and
+  reject unsafe stores, providers, redirects, parser inputs, control bytes,
+  unbounded polling, and production loopback transport. Independent security
+  review accepted the checkpoint and confirmed production Ollama launch stays
+  fail-closed until Task 8 supplies real confinement proof for every effective
+  credential channel and exact guard source. `verify-boilerplate.sh` remains
+  exit 1 solely on the legacy persisted context-summary authority assigned to
+  pending Task 15; no full-gate pass is claimed.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 8: Role prompts, prompt-set binding, and workspace confinement

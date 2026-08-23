@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 WRAPPER="$PROJECT_ROOT/scripts/pi2-ollama.sh"
+GUARD="$PROJECT_ROOT/scripts/ollama-usage-guard.sh"
 SHIM="$PROJECT_ROOT/scripts/pi-cli-shims/ralph"
 REAL_RALPH=$(command -v ralph || true)
 assert_absent() {
@@ -342,5 +343,120 @@ EOF
 else
     echo 'test-pi2-ollama-wrapper: pinned Ralph 2.10.1 integration probe unavailable; hermetic checks only' >&2
 fi
+
+# Legacy guard credential-transport probe (QUOTA-02 / §22 test 24): a live
+# curl child, held mid-request, must never carry the cookie in argv or
+# environment.  The cookie reaches curl only through its private stdin config
+# pipe (-K -); the server must still receive the full Cookie header.
+probe_dir=$(mktemp -d)
+trap 'rm -rf "$tmp" "$probe_dir"' EXIT
+cp "$SCRIPT_DIR/fixtures/usage-ok.html" "$probe_dir/index.html"
+python3 - "$probe_dir" <<'PY' &
+import http.server, pathlib, sys, socketserver, time
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            body = pathlib.Path(sys.argv[1], 'index.html').read_bytes()
+        except OSError:
+            self.send_response(500); self.end_headers(); return
+        pathlib.Path(sys.argv[1], 'cookie').write_text(self.headers.get('Cookie', ''))
+        pathlib.Path(sys.argv[1], 'seen').touch()
+        for _ in range(400):
+            if pathlib.Path(sys.argv[1], 'release').exists():
+                break
+            time.sleep(0.05)
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+class S(socketserver.TCPServer):
+    allow_reuse_address = True
+srv = S(('127.0.0.1', 0), H)
+pathlib.Path(sys.argv[1], 'port').write_text(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+probe_server_pid=$!
+for _ in $(seq 1 100); do
+    [[ -f "$probe_dir/port" ]] && break
+    sleep 0.05
+done
+[[ -f "$probe_dir/port" ]] || { echo "test: probe server did not start" >&2; exit 1; }
+probe_port=$(cat "$probe_dir/port")
+
+PROBE_SESS='__Secure-session=probe-sess-9f3a1c7b'
+PROBE_AID='aid=probe-aid-77aa99'
+OLLAMA_COOKIE="$PROBE_SESS; $PROBE_AID" \
+    OLLAMA_SETTINGS_URL="http://127.0.0.1:$probe_port/" \
+    "$GUARD" --check >/dev/null 2>"$probe_dir/guard.err" &
+guard_pid=$!
+for _ in $(seq 1 200); do
+    [[ -f "$probe_dir/seen" ]] && break
+    kill -0 "$guard_pid" 2>/dev/null || break
+    sleep 0.05
+done
+[[ -f "$probe_dir/seen" ]] || { echo "test: curl never reached the probe server" >&2; exit 1; }
+
+python3 - "$guard_pid" "$PROBE_SESS" "$PROBE_AID" <<'PY'
+import os, pathlib, sys, time
+parent = int(sys.argv[1])
+tokens = [sys.argv[2].encode(), sys.argv[3].encode()]
+def descendants(pid):
+    children = {}
+    for d in os.listdir('/proc'):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f'/proc/{d}/stat', 'rb') as stream:
+                fields = stream.read().decode('utf-8', 'replace').split()
+            children.setdefault(int(fields[3]), []).append(int(d))
+        except (OSError, IndexError, ValueError):
+            continue
+    out = set()
+    stack = [pid]
+    while stack:
+        p = stack.pop()
+        out.add(p)
+        stack.extend(children.get(p, []))
+    return out
+curl = None
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    for pid in descendants(parent):
+        if pid == parent:
+            continue
+        try:
+            cmdline = pathlib.Path(f'/proc/{pid}/cmdline').read_bytes()
+        except OSError:
+            continue
+        if b'curl' in cmdline:
+            curl = pid
+            break
+    if curl:
+        break
+    time.sleep(0.05)
+assert curl, 'no live curl child was observed'
+cmdline = pathlib.Path(f'/proc/{curl}/cmdline').read_bytes()
+environ = pathlib.Path(f'/proc/{curl}/environ').read_bytes()
+for token in tokens:
+    assert token not in cmdline, f'cookie token leaked into curl argv: {token!r}'
+    assert token not in environ, f'cookie token leaked into curl environment: {token!r}'
+assert b'OLLAMA_COOKIE' not in environ, 'OLLAMA_COOKIE leaked into curl environment'
+PY
+[[ $? -eq 0 ]] || { echo "test: legacy guard credential leaked to curl /proc" >&2; exit 1; }
+received=$(cat "$probe_dir/cookie")
+[[ "$received" == "$PROBE_SESS; $PROBE_AID" ]] || \
+    { echo "test: cookie header not delivered via private stdin config" >&2; exit 1; }
+
+# Release the held request and let the guard finish (allowed -> exit 0).
+touch "$probe_dir/release"
+for _ in $(seq 1 100); do
+    kill -0 "$guard_pid" 2>/dev/null || break
+    sleep 0.05
+done
+wait "$guard_pid" 2>/dev/null
+net_rc=$?
+kill "$probe_server_pid" 2>/dev/null || true
+[[ $net_rc -eq 0 ]] || { echo "test: network usage check returned $net_rc" >&2; exit 1; }
 
 echo 'test: Pi2 Ralph event acknowledgement filtering checks passed'

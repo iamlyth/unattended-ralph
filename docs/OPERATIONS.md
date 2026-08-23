@@ -371,6 +371,38 @@ outside the repository.
 
 ## Quota states
 
+### Guard contract and schema reference (QUOTA-01, QUOTA-02)
+
+The retained `scripts/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
+and §10 decision table are now enforced by the hidden standard-library guard
+``.factory/loop/usage.py`` (with its fetch child ``.factory/loop/usage_fetch.py``)
+run before every model invocation. Exit codes: 0 allowed, 1 quota threshold,
+2 fatal (missing/expired cookies or unparseable settings), 3 transient. A
+single check emits the machine-readable ``ollama-usage/v1`` status object
+(schema ``.factory/schemas/ollama-usage-v1.schema.json``) with only the
+redacted fields ``session_percent``, ``weekly_percent``,
+``threshold_percent``, ``blocked``, and ``reset_hint``.
+
+Credential hardening (QUOTA-02): the cookie reaches the fetch child only on
+its private stdin pipe; child argv is fully structural and the child
+environment is rebuilt from a documented allowlist — never inherited — so
+``/proc/<pid>/cmdline`` and ``/proc/<pid>/environ`` carry no credential
+token. The cookie source and ``.ollama-usage-env`` store are read with
+``O_NOFOLLOW`` and must be a regular single-link current-user-owned file,
+not group/other-writable, and bounded in size. Cookie buffers are zeroized,
+no temporary files are created, every fetch child is reaped, and only
+redacted status leaves the guard. Signals received while waiting terminate
+the wait and the in-flight fetch child and exit ``128 + signum``. The
+synthetic-secret proc probe is in ``tests/test-pi2-ollama-wrapper.sh``.
+
+Loopback usage-settings transport is **diagnostics/test-only** (Task 7
+review, obligations 9 and 14): the ordinary production launch CLI and API
+expose no loopback opt-in and reject an ``http://`` settings URL naming
+``127.0.0.1`` or ``localhost`` in the launch authority *before* any fetch.
+The hermetic suite reaches the loopback transport only through a private
+authority seam that additionally requires a synthetic confinement proof — a
+diagnostics/test facility, never a production feature.
+
 ### Allowed
 
 The session and weekly percentages are below `OLLAMA_THRESHOLD`; Ralph starts the next iteration.

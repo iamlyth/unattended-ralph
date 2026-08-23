@@ -80,10 +80,13 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package-import mode (the hidden control-plane package)
+    from . import confinement as confinement_authority
+    from . import usage as usage_guard
     from .gitutil import (
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -107,6 +110,8 @@ try:  # package-import mode (the hidden control-plane package)
     )
     from .plan_parser import Plan, PlanError, parse_plan
 except ImportError:  # flat-import mode used by the hidden harness test suite
+    import confinement as confinement_authority  # type: ignore[no-redef]
+    import usage as usage_guard  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -157,6 +162,7 @@ __all__ = [
     "StreamResult",
     "SupervisionError",
     "SupervisionSignalInterrupt",
+    "SUPPORTED_PROVIDERS",
     "TASK_HEADING_RE",
     "TERMINATION_SIGNALS",
     "child_argv",
@@ -179,6 +185,22 @@ __all__ = [
 
 # The four static roles (FACTORY-LOOP-SPEC §6); no adaptive subroles exist.
 ROLES = ("planner", "developer", "tester", "auditor")
+
+# Strict known-provider registry (Task 7 review, obligation 5):
+# ``verify_invocation`` rejects any provider outside this set, so an unknown
+# or caller-claimed provider fails closed and can never bypass the per-policy
+# guard.  ``ollama`` is the retained §10 provider (guard + Task 8
+# confinement proof required before invocation); ``synthetic`` is the
+# hermetic test provider used only by the hidden suite (no network, no
+# guard, no real model backend).
+SUPPORTED_PROVIDERS = frozenset({"ollama", "synthetic"})
+
+# Per-provider guard policy: every supported provider/model pair is gated
+# per this table — no provider/model can bypass the guard by relabeling.
+# ``ollama``: the §10 decision table runs inside ``authorize_launch`` and
+# the invocation fails closed without a Task 8 confinement proof.
+# ``synthetic``: hermetic test provider; the guard is not applicable.
+PROVIDER_GUARD_REQUIRED = frozenset({"ollama"})
 
 # The existing secure wrapper — invoked, never reimplemented (§18).
 SECURE_WRAPPER = "scripts/pi2-secure-exec.py"
@@ -373,6 +395,13 @@ def verify_invocation(binding: InvocationBinding) -> None:
     if binding.role not in ROLES:
         raise InvocationError(
             f"role must be one of {ROLES!r}, got {binding.role!r}"
+        )
+    provider = binding.provider.lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise InvocationError(
+            f"provider must be one of {sorted(SUPPORTED_PROVIDERS)!r}, got "
+            f"{binding.provider!r}; an unknown provider fails closed and can "
+            "never bypass the per-policy guard (Task 7 review, obligation 5)"
         )
     for name, value in (
         ("model", binding.model),
@@ -2110,6 +2139,41 @@ def _add_common_binding(parser: argparse.ArgumentParser) -> None:
         help="(optional) claimed audit-objective digest; verified against the "
         "re-derived committed blob, never authoritative",
     )
+    # Ollama usage-guard driver knobs (QUOTA-01/QUOTA-02, §10): for a
+    # guard-gated provider the §10 decision table runs inside the mint
+    # (authorize_launch) before any model invocation.  These options only
+    # *drive* the guard (cookie store/stdin, settings URL); they can never
+    # bypass it.  ``html-file`` is intentionally *absent* from the
+    # production launch CLI: saved-page parsing is diagnostics/test-only,
+    # reachable only through the hidden ``.factory/`` suite (Task 7
+    # review, obligation 4).  An ``ollama``-provider production launch also
+    # fails closed until the Task 8 confinement proof authority exists (the
+    # hermetic suite passes its private synthetic proof only through the
+    # API seam, never through this CLI).
+    parser.add_argument(
+        "--usage-guard-cookie-file", metavar="FILE", default=None,
+        help="mode-0600 owned cookie store for the Ollama usage guard",
+    )
+    parser.add_argument(
+        "--usage-guard-cookie-stdin", action="store_true",
+        help="read the Ollama usage-guard cookie from stdin (private channel)",
+    )
+    parser.add_argument(
+        "--usage-guard-settings-url", metavar="URL", default=None,
+        help="settings endpoint for the Ollama usage guard",
+    )
+    parser.add_argument(
+        "--usage-guard-poll-interval", type=int, default=None, metavar="SECONDS",
+        help="Ollama usage-guard wait poll interval (bounds the wait)",
+    )
+    parser.add_argument(
+        "--usage-guard-max-wait", type=int, default=None, metavar="SECONDS",
+        help="Ollama usage-guard maximum total wait",
+    )
+    parser.add_argument(
+        "--usage-guard-max-polls", type=int, default=None, metavar="N",
+        help="Ollama usage-guard maximum polls before failing closed",
+    )
 
 
 def _read_blob_anchored(path_text: str, label: str, maximum: int) -> bytes:
@@ -2561,6 +2625,136 @@ def _stage_launch_executables(
     return (stage_wrapper(), staged_backend, staged_digests, external_paths, exec_dir)
 
 
+def _reject_production_loopback(
+    settings_url: Optional[str], *, allow_loopback: bool
+) -> None:
+    """The ordinary production launch rejects ``http://`` loopback settings URLs.
+
+    Task 7 review, obligation 14 residual: loopback ``http://`` usage
+    settings transport is a diagnostics/private-test seam only.  It must
+    never be reachable from the ordinary production launch CLI/API, so this
+    boundary is enforced in the launch authority *before* the guard runs.
+
+    When ``allow_loopback`` (the private diagnostics seam) is false, an
+    ``http://`` settings URL naming ``127.0.0.1`` or ``localhost`` fails
+    closed here.  The guard's own HTTPS/loopback rule
+    (``usage._validate_settings_url``) is retained for the direct
+    diagnostics path and as defense-in-depth; it does not weaken this
+    launch-authority boundary.  A malformed URL and a non-loopback
+    ``http://`` URL fall through to the guard, which rejects them with the
+    documented fatal class.
+    """
+    if settings_url is None or allow_loopback:
+        return
+    try:
+        parsed = urllib.parse.urlsplit(settings_url)
+    except ValueError:
+        # Malformed: the guard rejects it; do not duplicate the diagnostic.
+        return
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme == "http" and host in ("127.0.0.1", "localhost"):
+        raise InvocationError(
+            f"the ordinary production launch rejects the http:// loopback "
+            f"settings URL {settings_url!r}: loopback http usage transport "
+            "is a diagnostics/test-only seam reachable only through a "
+            "private authority that is absent from the CLI and requires a "
+            "synthetic confinement proof"
+        )
+
+
+def _gate_ollama_launch(
+    binding: "InvocationBinding",
+    *,
+    _confinement_proof: Optional[object] = None,
+    cookie_file: Optional[str] = None,
+    cookie_stdin: bool = False,
+    settings_url: Optional[str] = None,
+    poll_interval: Optional[int] = None,
+    max_wait: Optional[int] = None,
+    max_polls: Optional[int] = None,
+    _usage_guard_html_file: Optional[str] = None,
+    _usage_guard_allow_loopback: bool = False,
+) -> None:
+    """The Task 7 production gate for guard-gated providers.
+
+    An ``ollama``-provider invocation reaches the §10 guard only after the
+    Task 8 confinement proof authority proves ``.factory/`` and the
+    operator credential store(s) are inaccessible/read-only to model tools
+    and the guard source is exact-commit bound.  Until that authority is
+    available the gate fails closed.  The hermetic hidden suite passes a
+    *private synthetic* proof through ``_confinement_proof`` (validated
+    against the exact invocation and the exact executing guard source); a
+    forged, foreign, or tampered proof fails closed.
+
+    ``_usage_guard_allow_loopback`` is the **private diagnostics/test seam**
+    for loopback ``http://`` usage settings transport (Task 7 review,
+    obligations 9 and 14): it is absent from the CLI and, because it enables
+    a transport the ordinary production launch must reject, it additionally
+    requires a synthetic confinement proof (``_confinement_proof``).  A
+    caller that sets it without a proof fails closed; the ordinary
+    production launch (proof absent and the seam off) always rejects an
+    ``http://`` ``127.0.0.1``/``localhost`` settings URL.
+
+    After the confinement gate, the §10 decision table runs inside the
+    mint.  The operator store is never scoped into the model workspace: the
+    guard resolves its canonical operator-owned store itself and the
+    launch authority passes no workspace-scoped ``env_file`` (Task 7
+    review, obligation 1).
+    """
+    # The private loopback diagnostics seam requires a synthetic confinement
+    # proof: without a validated proof no launch may enable http:// loopback
+    # usage transport (forged/private flag without proof fails closed).
+    if _usage_guard_allow_loopback and _confinement_proof is None:
+        raise InvocationError(
+            "the private loopback diagnostics seam requires a synthetic "
+            "confinement proof; without a validated proof no launch may "
+            "enable http:// loopback usage transport"
+        )
+    # Production launch never inherits an ambient/store URL.  A caller must
+    # provide an explicit trusted URL; otherwise the fixed HTTPS endpoint is
+    # used.  This keeps the direct guard's legacy diagnostics configurability
+    # outside the production launch authority.
+    effective_settings_url = settings_url or usage_guard.DEFAULT_SETTINGS_URL
+    _reject_production_loopback(
+        effective_settings_url, allow_loopback=_usage_guard_allow_loopback
+    )
+    if _confinement_proof is None:
+        try:
+            _confinement_proof = confinement_authority.prove_confinement(binding)
+        except confinement_authority.ConfinementUnavailable as exc:
+            raise InvocationError(
+                "ollama-provider launch fails closed: the Task 8 "
+                f"confinement proof authority is not yet available ({exc})"
+            ) from exc
+    try:
+        confinement_authority.validate_proof(_confinement_proof, binding)
+    except confinement_authority.ConfinementError as exc:
+        raise InvocationError(
+            "ollama-provider launch fails closed: the confinement proof does "
+            f"not bind this invocation ({exc})"
+        ) from exc
+    try:
+        usage_guard.require_quota(
+            cookie_file=cookie_file,
+            cookie_stdin=cookie_stdin,
+            settings_url=effective_settings_url,
+            poll_interval=poll_interval,
+            max_wait=max_wait,
+            max_polls=max_polls,
+            html_file=_usage_guard_html_file,
+        )
+    except usage_guard.WaitInterrupted:
+        # A TERM/INT/HUP during the initial check, the wait, or the final
+        # check already terminated and reaped the fetch child; propagate so
+        # the CLI exits 128+signum (Task 7 review, obligation 12).
+        raise
+    except usage_guard.UsageGuardError as exc:
+        raise InvocationError(
+            f"ollama usage guard blocked the invocation: {exc}"
+        ) from exc
+
+
 def authorize_launch(
     binding: "InvocationBinding",
     *,
@@ -2570,6 +2764,15 @@ def authorize_launch(
     plan: bytes,
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
+    usage_guard_cookie_file: Optional[str] = None,
+    usage_guard_cookie_stdin: bool = False,
+    usage_guard_settings_url: Optional[str] = None,
+    usage_guard_poll_interval: Optional[int] = None,
+    usage_guard_max_wait: Optional[int] = None,
+    usage_guard_max_polls: Optional[int] = None,
+    _confinement_proof: Optional[object] = None,
+    _usage_guard_html_file: Optional[str] = None,
+    _usage_guard_allow_loopback: bool = False,
 ) -> LaunchAuthority:
     """Mint the unforgeable verified-committed authority token (F2/F5).
 
@@ -2582,8 +2785,67 @@ def authorize_launch(
     set fails closed.  The returned :class:`LaunchAuthority` is the only
     value :meth:`LaunchSupervision.run` accepts; it cannot be constructed
     from operator claims.
+
+    ``_usage_guard_html_file`` is a **private test seam only** (Task 7
+    review, obligation 4): saved-page parsing is diagnostics/test-only and
+    must never appear on the production surface, so the *public* signature
+    and the CLI expose no ``html-file`` option.  Only the hidden
+    ``.factory/`` suite reaches this seam.
+
+    ``_usage_guard_allow_loopback`` is the **private diagnostics/test seam**
+    for loopback ``http://`` usage settings transport (Task 7 review,
+    obligations 9 and 14).  The ordinary production launch CLI/API has no
+    such option and always rejects an ``http://`` ``127.0.0.1``/``localhost``
+    settings URL; this underscore-private authority — absent from the CLI —
+    is the only way the hermetic hidden suite can exercise the loopback
+    transport, and it additionally requires a synthetic confinement proof
+    (``_confinement_proof``): setting it without a proof fails closed, and
+    a forged/foreign/tampered proof is never accepted.
+
+    **Ollama production gate (Task 7 review, obligation 2).**  An
+    ``ollama``-provider invocation does not reach the model until the Task
+    8 confinement authority proves ``.factory/`` and the operator
+    credential store(s) are inaccessible/read-only to model tools and the
+    guard source is exact-commit bound.  Until that authority is available
+    the production gate fails closed (no model invocation).  The hermetic
+    hidden suite mints a *private synthetic* proof
+    (``confinement._mint_synthetic_proof``) and passes it through the
+    private ``_confinement_proof`` seam; a forged, foreign, or tampered
+    proof fails closed, and a synthetic proof is never evidence of real
+    confinement.
+
+    **Ollama usage guard (QUOTA-01, QUOTA-02; §10).**  For a guard-gated
+    provider the §10 decision table runs *inside* the mint, before any
+    wrapper/backend staging: ``--check`` exit 0 proceeds; exit 1 or 3 runs
+    ``--wait`` and then one final ``--check`` that must exit 0; any fatal
+    or nonzero ``--wait`` outcome raises :class:`InvocationError` so the
+    campaign terminates without invoking the model.  The guard's cookie
+    never appears in a child argv or child environment (private stdin
+    channel, built child environment, bounded mode-0600/no-follow owned
+    stores outside the model workspace, zeroization, redacted output), and
+    the ``--usage-guard-*`` options are the operator diagnostics/driver
+    knobs (cookie store/stdin, settings URL) — a caller can never bypass
+    the guard for a guard-gated provider.  ``html-file`` is *not* part of
+    the production surface: saved-page parsing is diagnostics/test-only,
+    reachable only through the hidden ``.factory/`` suite (Task 7 review,
+    obligation 4).  A TERM/INT/HUP during the guard propagates
+    :class:`usage_guard.WaitInterrupted` so the CLI exits ``128 + signum``
+    after reaping the credential-holding fetch child.
     """
     verify_invocation(binding)
+    if binding.provider.lower() in PROVIDER_GUARD_REQUIRED:
+        _gate_ollama_launch(
+            binding,
+            _confinement_proof=_confinement_proof,
+            cookie_file=usage_guard_cookie_file,
+            cookie_stdin=usage_guard_cookie_stdin,
+            settings_url=usage_guard_settings_url,
+            poll_interval=usage_guard_poll_interval,
+            max_wait=usage_guard_max_wait,
+            max_polls=usage_guard_max_polls,
+            _usage_guard_html_file=_usage_guard_html_file,
+            _usage_guard_allow_loopback=_usage_guard_allow_loopback,
+        )
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
     _verify_input_digest("specification", spec, binding.specification_digest)
@@ -2926,6 +3188,12 @@ def _run_cli(args: argparse.Namespace) -> int:
             plan=plan,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
+            usage_guard_cookie_file=args.usage_guard_cookie_file,
+            usage_guard_cookie_stdin=args.usage_guard_cookie_stdin,
+            usage_guard_settings_url=args.usage_guard_settings_url,
+            usage_guard_poll_interval=args.usage_guard_poll_interval,
+            usage_guard_max_wait=args.usage_guard_max_wait,
+            usage_guard_max_polls=args.usage_guard_max_polls,
         )
         supervisor = LaunchSupervision(binding)
         result = supervisor.run(authority)
@@ -2950,6 +3218,18 @@ def _run_cli(args: argparse.Namespace) -> int:
     except SupervisionError as exc:
         print(f"factory-launch: supervision fail-closed: {exc}", file=sys.stderr)
         return EXIT_SUPERVISION
+    except usage_guard.WaitInterrupted as exc:
+        # A TERM/INT/HUP during the §10 guard (initial check, wait, or final
+        # check) already terminated and reaped the credential-holding fetch
+        # child; the machine-readable exit is 128 + signum (Task 7 review,
+        # obligation 12).
+        print(
+            f"factory-launch: ollama usage guard interrupted by "
+            f"{signal.Signals(exc.signum).name} after bounded termination "
+            "and reap",
+            file=sys.stderr,
+        )
+        return 128 + exc.signum
     except InvocationError as exc:
         print(f"factory-launch: {exc}", file=sys.stderr)
         return EXIT_INVOCATION
