@@ -632,28 +632,46 @@ completes with evidence.
 
 - Status: pending
 - Dependencies: Task 4
+- Priority: 1
 - Scope: Review and harden the Task 4 `factory-state/v1` authority against the
   documented findings from the Task 4 review: S1 make `init` atomic with
   no-replace semantics so it never clobbers existing state or an existing
   campaign binding; S2 add crash-window and orphan recovery so a torn write
   or an orphaned temporary/leftover state artifact is recovered
   deterministically without data loss and without creating a second
-  authority; S3 reject a zeroed `now=0`/epoch-zero monotonic start marker as
+  authority, failing closed when the existing state directory is unsafe,
+  re-validating the canonical state after linking it into place and before
+  deleting the quarantine, and checking the recovered state against the
+  latest recorded digest-ledger entry when a ledger exists; S3 reject a
+  zeroed `now=0`/epoch-zero monotonic start marker as
   tamper and fail closed; S6 add independent transition and state-digest
   fixtures authored separately from the code path they exercise (not derived
   by the same implementation they test); S7 make the owner-tamper probe
-  non-skipping so a non-root run fails the test rather than silently
-  skipping the owner check; S8 document the `plan_digest` field, its
-  derivation, and its write-once binding in the state schema and OPERATIONS;
-  S9 validate `phase`/`outcome` enum values and enforce the
-  `attempt >= phase` monotonic coupling in the state machine so an attempt
-  can never precede the phase that owns it.
+  always exercise the actual owner-check branch with a deterministic
+  real-stat expected-UID mismatch that requires no `chown`, while
+  separately reporting and exercising a genuine ownership tamper only when
+  the kernel capability exists; the probe never skips and never claims
+  real-system owner-tamper coverage when that capability is unavailable;
+  S8 document the `plan_digest` field, its derivation, and its write-once
+  binding in the state schema and OPERATIONS; S9 validate `phase`/`outcome`
+  enum values and enforce the `attempt >= phase` monotonic coupling in the
+  state machine so an attempt can never precede the phase that owns it, and
+  enforce the inverse marker invariant that an attempt marker is zero
+  whenever no attempt is active (no attempt => marker zero).
 - Acceptance criteria: every finding has a fail-closed fixture and is
   exercised by the trusted control plane, not only the unit suite; init is
-  atomic and no-replace; crash-window/orphan recovery is deterministic;
-  `now=0` is rejected; the owner probe never skips; `plan_digest` is
-  documented and write-once bound; `phase`/`outcome` and `attempt >= phase`
-  are validated with exact adversarial fixtures.
+  atomic and no-replace; crash-window/orphan recovery is deterministic and
+  fails closed on an unsafe existing state directory, re-validates the
+  canonical state after linking and before deleting the quarantine, and
+  matches the latest recorded ledger digest when a ledger exists; `now=0`
+  is rejected; the owner probe always exercises the owner-check branch via
+  a deterministic real-stat expected-UID mismatch without `chown`, and only
+  additionally exercises a genuine ownership tamper when the kernel
+  capability exists, never skipping and never claiming unavailable
+  real-system evidence; `plan_digest` is documented and write-once bound;
+  `phase`/`outcome`, `attempt >= phase`, and the inverse marker invariant
+  (no attempt => attempt zero) are validated with exact adversarial
+  fixtures.
 - Verification: `.factory/tests/test-factory-state.py` extended with the
   independent fixtures; new `.factory/tests/fixtures/state-*` files;
   `scripts/validate-implementation-plan.py planning`;
