@@ -5,9 +5,12 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd -- "$PROJECT_ROOT"
 
-# Planning is hard-blocked until a human supplies and commits a real canonical
-# specification: the neutral placeholder carries SPEC_PENDING_HUMAN_SUPPLY and
-# check-spec-provided.sh refuses to plan against it.
+# Planning is hard-blocked until the canonical specification is bound and
+# real: check-spec-provided.sh gates on `.factory/config.toml [project].spec`
+# (this cycle: docs/FACTORY-LOOP-SPEC.md) and refuses any bound spec that is
+# missing/unsafe or still carries the SPEC_PENDING_HUMAN_SUPPLY placeholder
+# marker. The adopting-product placeholder docs/SPEC.md is never planned
+# against.
 ./scripts/check-spec-provided.sh
 
 mapfile -t CHANGED < <({

@@ -50,6 +50,16 @@ PY
     exit 1
 }
 [[ -n "$SPEC_PATH" && -f "$SPEC_PATH" ]] || { echo "plan-freshness: missing spec '$SPEC_PATH'" >&2; exit 1; }
+# The bound canonical spec must never be a neutral placeholder. In this
+# boilerplate cycle the plan resolves `docs/FACTORY-LOOP-SPEC.md` (commit
+# `2d6a4fd`, blob `ca2334ab…`); `docs/SPEC.md` remains the adopting-product
+# placeholder and is never planned against. The guard stays path-neutral so an
+# adopting repository's real committed spec keeps passing.
+if grep -q 'SPEC_PENDING_HUMAN_SUPPLY' "$SPEC_PATH"; then
+    echo "plan-freshness: canonical spec '$SPEC_PATH' is still a neutral placeholder" >&2
+    echo "plan-freshness: planning never runs against a placeholder specification" >&2
+    exit 1
+fi
 [[ "$RECORDED_COMMIT" != UNPLANNED && "$RECORDED_BLOB" != UNPLANNED ]] || {
     echo "plan-freshness: plan is unplanned; run ./scripts/ralph-plan.sh" >&2
     exit 1

@@ -123,7 +123,7 @@ completes with evidence.
 
 ## Task 1: Bind the canonical specification and baseline harness config
 
-- Status: pending
+- Status: complete
 - Dependencies: None
 - Scope: Point `.factory/config.toml [project].spec` at
   `docs/FACTORY-LOOP-SPEC.md` so plan freshness and planning gates resolve the
@@ -140,6 +140,17 @@ completes with evidence.
   planned against.
 - Verification: `scripts/check-plan-freshness.sh` and
   `scripts/check-spec-provided.sh` run from a clean tree; `git diff HEAD -- docs/SPEC.md` is empty.
+- Evidence: `.factory/config.toml [project].spec` now binds the redesign
+  contract `docs/FACTORY-LOOP-SPEC.md` (commit `2d6a4fd`, blob `ca2334ab…`);
+  `scripts/check-spec-provided.sh` gates on the bound canonical spec and
+  hard-blocks any bound placeholder (missing/unsafe path or
+  `SPEC_PENDING_HUMAN_SUPPLY` marker), so the adopting-product placeholder
+  `docs/SPEC.md` is never planned against; `scripts/check-plan-freshness.sh`
+  resolves the committed plan's binding to `docs/FACTORY-LOOP-SPEC.md` at
+  commit `2d6a4fd` / blob `ca2334ab…` and exits 0 (committed and planning
+  phases), and `scripts/plan-scope-guard.sh` still confines planning writes;
+  `git diff HEAD -- docs/SPEC.md` is empty and the placeholder is byte-
+  unchanged.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
 ## Task 2: `factory-plan/v1` schema and deterministic parser

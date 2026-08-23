@@ -1,5 +1,9 @@
 [project]
-spec = "docs/SPEC.md"
+# This boilerplate cycle plans against the committed redesign specification.
+# docs/SPEC.md remains the adopting-product placeholder and is never planned
+# against; the placeholder-marker guard in scripts/check-spec-provided.sh
+# hard-blocks it regardless of this binding.
+spec = "docs/FACTORY-LOOP-SPEC.md"
 plan = ".factory/artifacts/implementation-plan.md"
 development_branch = "boilerplate-develop"
 release_branch = "main"

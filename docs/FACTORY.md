@@ -1,7 +1,10 @@
 # Factory Boilerplate
 
 This document covers the Ralph Software Factory development infrastructure
-used to implement the product defined by `docs/SPEC.md`. It is not relevant to
+used to implement the product defined by the bound canonical specification. In
+this boilerplate cycle the canonical specification is `docs/FACTORY-LOOP-SPEC.md`
+(`.factory/config.toml` `[project].spec`); `docs/SPEC.md` remains the
+adopting-product placeholder and is never planned against. It is not relevant to
 end users — it documents the autonomous development loop, branch policy, quota
 management, and recovery procedures.
 
@@ -14,14 +17,17 @@ A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum
 development technique using Ralph Orchestrator, jailed Pi, Ollama, adaptive
 read-only subagents, Git checkpoints, quota waiting, and crash recovery.
 
-`docs/SPEC.md` is the source of truth for the product. `.factory/artifacts/implementation-plan.md`
+The canonical bound specification (this cycle: `docs/FACTORY-LOOP-SPEC.md`, per
+`.factory/config.toml` `[project].spec`; `docs/SPEC.md` stays the adopting-product
+placeholder and is never planned against) is the source of truth.
+`.factory/artifacts/implementation-plan.md`
 tracks task status and verification evidence.
 
 ## Operating model
 
 - `main` is the human-controlled release branch.
 - The configured development branch (`.factory/config.toml` `development_branch`) is the autonomous implementation branch.
-- One committed `docs/SPEC.md` is the source of truth; Git versions it.
+- One committed canonical specification is the source of truth; Git versions it. This cycle binds `docs/FACTORY-LOOP-SPEC.md` (`.factory/config.toml` `[project].spec`); the adopting product supplies its own `docs/SPEC.md` later.
 - A planning-only Ralph loop creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
 - Each implementation iteration selects one bounded task and starts with fresh model context.
 - Pi subagents perform parallel read-only planning, research, review, security, and documentation analysis.
@@ -49,7 +55,7 @@ Deliberate safety differences are retained: at most eight adaptive read-only sub
 
 Durable, tracked state:
 
-- `docs/SPEC.md`: approved requirements
+- `docs/FACTORY-LOOP-SPEC.md`: canonical specification for this boilerplate cycle (`docs/SPEC.md` remains the adopting-product placeholder, never planned against)
 - `AGENTS.md`: concise build/run/validation commands and durable operational patterns
 - `.factory/artifacts/implementation-plan.md`: feature task status and verification evidence
 - `.factory/bugs/open.md` / `.factory/bugs/closed.md`: portable canonical defect state

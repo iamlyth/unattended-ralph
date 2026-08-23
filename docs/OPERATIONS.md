@@ -4,7 +4,7 @@
 
 Durable, tracked state:
 
-- `docs/SPEC.md`: approved requirements
+- `docs/FACTORY-LOOP-SPEC.md`: canonical specification for this boilerplate cycle (`docs/SPEC.md` remains the adopting-product placeholder, never planned against)
 - `.factory/artifacts/implementation-plan.md`: task status and verification evidence
 - `.factory/bugs/open.md` / `.factory/bugs/closed.md`: portable canonical defect state
 - `.factory/artifacts/maintenance-plan.md`: one selected bug, fingerprint, tasks, and evidence
