@@ -198,15 +198,8 @@ completes with evidence.
 
 ## Task 3: Deterministic plan-derived task selection
 
-- Status: blocked
+- Status: pending
 - Dependencies: Task 2
-- Blocked on: `factory-plan/v1` untrusted-input gaps recorded by Task 18:
-  byte-exact serialization, verified-row and §24-registry binding, lifecycle
-  consistency, bounded range parsing, structured-field ambiguity, interaction
-  completeness, repository-relative path trust, final-audit/matrix invariants,
-  and exact missing-value/title fixtures. A new planner commit may apply the
-  `blocked -> pending` transition only after every Task 18 adversarial fixture
-  passes with evidence.
 - Scope: implement `.factory/loop/selector.py` for §8: reject an invalid,
   stale, or ambiguously parsed plan; resume the sole `in_progress` task;
   otherwise sort runnable `pending` tasks (dependencies complete) by explicit
