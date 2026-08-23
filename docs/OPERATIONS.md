@@ -99,6 +99,95 @@ produced by a trusted transition fails closed. Resume by reloading
 `.factory-state/factory-loop.json` (phase never moves backward, counters are
 monotonic); `init` refuses to overwrite existing state.
 
+## Root-descriptor lock and Git writer boundary (LOCK-01, GIT-01, PROC-01)
+
+The writer boundary is an exclusive Linux `flock` on the *already-open
+canonical Git top-level directory descriptor* itself — opened with
+`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` — implemented in the hidden
+`.factory/loop/lock.py` (Task 5). There is no replaceable lock-file
+pathname. A second concurrent launcher fails immediately
+(`RootLockHeldError`): exactly one writer.
+
+Acquisition is *mandatory* (review finding F2): the canonical repository
+identity, the required branch, and the bound specification/plan
+commitments (`SpecBinding`/`PlanBinding` from the committed plan front
+matter) must all be supplied and are validated *while the lock is held*, so
+an acquisition without the full binding set, or a moved, rebased, or
+re-bound checkout, fails closed before any launch. Every Git read of the
+holder is *bound to the locked descriptor's inode*: the pinned Git runs
+with `-C /proc/self/fd/<anchor>` where the anchor is a freshly opened
+descriptor resolved *through the lock descriptor itself*, and the canonical
+pathname is re-verified against the locked (device, inode) before and after
+each read — a rename/rebind of the canonical path can never redirect a
+single read and pathname drift fails closed even when the reads stayed on
+the locked inode.
+
+The descriptor is close-on-exec and `RootLock.spawn_child` runs every
+child with `close_fds`, a stripped environment, and always in a **new
+process session**: an untrusted leaf inherits neither the lock descriptor
+nor lock metadata and cannot signal or observe the holder through a shared
+session. `pass_fds` entries that alias the root lock inode — the lock
+descriptor itself, a `dup` of it (same open file description), or a
+separately opened root descriptor — are rejected before exec (F8). Because
+`flock` locks are bound to the open file description, a separately opened
+root descriptor cannot unlock the holder. A bounded child `timeout`
+terminates and reaps the child's *entire* new process group with a
+**TERM → KILL** sequence: TERM to the group, then the *full* bounded grace
+is always observed (the leader exiting on TERM is never taken as “the group
+is gone” — a TERM-ignoring descendant that holds the stdout/stderr write
+ends survives in the group), then KILL to the group *unconditionally*, then
+a bounded group-gone verification and a reaped leader; the trailing pipe
+collection is itself bounded and the pipe ends are force-closed when a
+stubborn member held them open, so a bounded spawn can never hang the
+holder and no live process-group member survives. It surfaces as
+`RootLockTimeoutError`, and a nonzero child exit under `check=True` surfaces
+as `RootLockCommandError` (F3/F9). Every lock/authority failure — including
+the wrapped pinned-Git import/invocation (`GitBoundaryError`) and the
+`flock` `OSError` — routes through the unified `RootLockError` exception
+contract (F9).
+
+The child environment has every `FACTORY_LOOP_LOCK_*` key removed by
+prefix and every *legacy* `FACTORY_LOCK_*` key removed as well (F10), so a
+leaf of the new loop sees neither the current metadata nor the metadata of
+the previous lifecycle machinery.
+
+Escaped-descendant detection snapshots the **full bounded** descendant
+closure from the `/proc/<pid>/stat` parent table
+(`capture_descendants`, F1): an over-bound closure fails closed rather than
+silently truncating. Every captured PID records its **starttime and parent
+PID** (`CapturedProcess`) from the same snapshot, so the captured scope is
+reuse-safe: `live_scope` re-enumerates only the still-live members of a
+captured scope whose recorded identity (start time) still matches the live
+process, so a PID reused by an unrelated process is **excluded** and never
+reported as a live descendant (Task 6 supervision consumes this surface, so
+descendant accounting is never stale). The control plane's own trusted
+ancestor chain is walked per-pid through `_self_ancestry` — following each
+PID's own `/proc/<pid>/stat` parent, not a single `os.getppid()` — so a
+multi-level trusted chain is fully trusted and an escaped double-fork or
+`setsid` descendant that survives bounded termination, or any untrusted
+process that retains the repository-root/lock inode handle, fails closed
+(`detect_escaped_descendants`/`assert_no_escaped_descendants` →
+`EscapedDescendantError`); recovery must not reacquire the writer boundary
+while it raises.
+
+All trusted state/branch Git calls (`state.live_branch`, lock bindings) use
+the pinned absolute executable resolved by `.factory/loop/gitutil.py`
+(`GIT_EXECUTABLE`). Git selection never consults a caller-controlled
+`PATH` (F4): candidates are fixed absolute locations — `/usr/bin/git`,
+`/bin/git`, the NixOS system profile, and immutable root-owned Nix-store
+paths (pattern-validated, foreign-owned, and non-writable by the caller) —
+and an environment with no valid candidate fails closed rather than
+falling back to an unqualified `git`. **Non-root trust requirement:** the
+boundary refuses to resolve as uid 0, because under root every candidate
+path component is caller-owned and no candidate can be proven immutable
+without weakening the ownership check — the trusted control plane must run
+as an unprivileged user. Every trusted Git invocation also
+strips the complete `GIT_CONFIG*` environment family — including
+`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_KEY_*`/
+`GIT_CONFIG_VALUE_*` (F5) — plus the object-store/index/work-tree
+redirectors. The committed `scripts/git-commit-guard.sh` branch boundary is
+preserved untouched.
+
 ## Branch policy
 
 The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.

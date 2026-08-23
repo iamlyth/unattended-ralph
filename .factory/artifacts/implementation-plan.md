@@ -95,9 +95,9 @@ completes with evidence.
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
 | STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9 |
-| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5 |
+| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6 |
-| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11 |
 | PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9 |
 | COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9 |
 | FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10 |
@@ -291,7 +291,7 @@ completes with evidence.
 
 ## Task 5: Root-descriptor lock and Git writer boundary
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 4
 - Scope: Reconcile the Task 5 security review (findings F1-F10): implement
   the lock authority: exclusive `flock` on the already-open canonical Git
@@ -336,6 +336,35 @@ completes with evidence.
   escape, `/proc` ancestor-walk, inode-binding, `GIT_CONFIG*`/legacy lock-key
   strip, alias-fd, unified-exception, and timeout fixtures;
   `tests/test-git-commit-guard.sh` still passes.
+- Evidence: `.factory/loop/lock.py` implements the root-descriptor lock
+  authority with `flock` on the already-open canonical Git top-level
+  directory descriptor opened with `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, binds
+  the descriptor to its canonical path by device+inode, and validates
+  repository identity, required branch, and spec/plan bindings before
+  granting the lock (F2). The full `/proc` ancestor walk detects a
+  double-fork/`setsid` escape and any holder descendant outside the session,
+  reporting against the captured descendant scope supplied by supervision
+  (F1, F6). Passed/inherited fds aliasing the root lock are rejected before
+  exec (F8); every lock/authority failure routes through the unified
+  fail-closed exception contract (F9). The lock descriptor is closed in every
+  child before exec, a new process session is started, every `GIT_CONFIG*`
+  variable and the entire lock-key environment prefix including legacy keys
+  is stripped from the child environment (F5, F10), and a separately opened
+  descriptor cannot unlock the holder; a bounded timeout kills and reaps the
+  holder's full process group (F3). Git is invoked through the PATH-pinned
+  absolute executable in `.factory/loop/gitutil.py` (F4), never an
+  unqualified `git`, and the `git-commit-guard.sh` boundary rejects
+  `--no-verify`, hook-path override, `GIT_CONFIG*`, worktrees,
+  amend/merge/rebase bypasses, and forged handoffs. Evidence from the
+  accepted Task 5 report: `.factory/tests/test-factory-lock.py` passes
+  37/37, `.factory/tests/test-factory-state.py` passes 125/125,
+  `.factory/tests/test-factory-selector.py` passes 32/32, and
+  `.factory/tests/test-factory-plan-parser.py` passes 13/13; legacy lock,
+  git-commit-guard, plan-freshness, and docs checks pass; the security
+  review of the implementation is acceptable; `verify-boilerplate.sh` exits
+  1 solely because the legacy `check-context-summary.py` authority is
+  assigned to Task 15 (context-summary migration/deprecation) and is not
+  part of this task's scope. Documentation impact in `docs/OPERATIONS.md`.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 6: Fresh-context execution, invocation contract, and supervision

@@ -109,7 +109,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 import stat
-import subprocess
 import sys
 import time
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
@@ -290,6 +289,36 @@ def _load_factory_state_io() -> object:
     return module
 
 
+def _load_gitutil() -> object:
+    """Load the PATH-pinned Git executable runner (GIT-01).
+
+    ``gitutil.py`` pins an absolute Git executable at import time and
+    sanitizes the invocation environment; every trusted state/branch Git
+    call in this module goes through it, so an attacker-controlled PATH can
+    never substitute a different ``git`` behind the guarded commit boundary
+    (FACTORY-LOOP-SPEC §12).  It is loaded by committed file path (the same
+    idiom as :func:`_load_factory_state_io`) so the module works both when
+    imported directly from the hidden test suite and as a package member.
+    The import-time resolution failure of the pinned Git executable
+    (``GitBoundaryError``) is routed into the state contract as
+    :class:`StateError`, so no caller of this module ever sees a bare
+    ``GitBoundaryError`` escape.
+    """
+    path = Path(__file__).resolve().parent / "gitutil.py"
+    spec = importlib.util.spec_from_file_location("gitutil", path)
+    if spec is None or spec.loader is None:
+        raise StateError(f"cannot load PATH-pinned Git runner at {path}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise StateError(
+            f"cannot initialize the PATH-pinned Git runner at {path}: {exc}"
+        ) from exc
+    return module
+
+
+_git = _load_gitutil()
 _fio = _load_factory_state_io()
 read_json = _fio.read_json
 read_bytes = _fio.read_bytes
@@ -309,14 +338,20 @@ def repository_identity(root) -> str:
     """Deterministic repository identity of the canonical root directory.
 
     The identity is the ``dev:inode`` pair of the root directory opened
-    with ``O_DIRECTORY`` and ``O_NOFOLLOW``, so a control-state file moved to
-    a different checkout (different pathname or inode) fails closed on load.
+    with ``O_DIRECTORY`` and ``O_NOFOLLOW`` (and close-on-exec so the
+    descriptor is never inherited across an exec boundary), so a
+    control-state file moved to a different checkout (different pathname or
+    inode) fails closed on load.
     """
     root = _as_root(root)
     if sys.platform != "linux" or not hasattr(os, "O_NOFOLLOW"):
         raise StateError("required Linux no-follow primitives are unavailable")
     descriptor = os.open(
-        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root,
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0),
     )
     try:
         info = os.fstat(descriptor)
@@ -326,11 +361,14 @@ def repository_identity(root) -> str:
 
 
 def live_branch(root) -> str:
-    """The live Git branch of ``root`` (used by ``init`` when none is given)."""
-    result = subprocess.run(
-        ["git", "-C", str(_as_root(root)), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
+    """The live Git branch of ``root`` (used by ``init`` when none is given).
+
+    The branch is resolved through the PATH-pinned absolute Git executable
+    (``gitutil.GIT_EXECUTABLE``), never through an unqualified ``git`` that a
+    caller-controlled PATH could substitute (GIT-01).
+    """
+    result = _git.git_run(
+        ["-C", str(_as_root(root)), "rev-parse", "--abbrev-ref", "HEAD"]
     )
     if result.returncode != 0:
         raise StateError(f"cannot resolve the live Git branch of {root}")
