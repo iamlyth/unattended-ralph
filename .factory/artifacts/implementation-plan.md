@@ -89,7 +89,7 @@ completes with evidence.
 | CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6 |
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
-| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2, Task 14, Task 18 |
+| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
@@ -200,14 +200,13 @@ completes with evidence.
 
 - Status: blocked
 - Dependencies: Task 2
-- Blocked on: `factory-plan/v1` parser acceptance-boundary gaps P1-P4
-  (byte-exact BOM round-trip, unbound `verified` conformance rows, missing
-  §24 registry completeness, inconsistent lifecycle status) recorded by
-  Task 18; the remediated parser and its exact fixtures
-  (`.factory/tests/fixtures/plan-bom.md`, `plan-verified-empty-refs.md`,
-  `plan-verified-pending.md`, `plan-matrix-missing-id.md`, and
-  `plan-lifecycle-inconsistent.md`) unblock this task by a new planner
-  commit (`blocked -> pending`) only after Task 18 completes with evidence.
+- Blocked on: `factory-plan/v1` untrusted-input gaps recorded by Task 18:
+  byte-exact serialization, verified-row and §24-registry binding, lifecycle
+  consistency, bounded range parsing, structured-field ambiguity, interaction
+  completeness, repository-relative path trust, final-audit/matrix invariants,
+  and exact missing-value/title fixtures. A new planner commit may apply the
+  `blocked -> pending` transition only after every Task 18 adversarial fixture
+  passes with evidence.
 - Scope: implement `.factory/loop/selector.py` for §8: reject an invalid,
   stale, or ambiguously parsed plan; resume the sole `in_progress` task;
   otherwise sort runnable `pending` tasks (dependencies complete) by explicit
@@ -514,56 +513,55 @@ completes with evidence.
 
 - Status: pending
 - Dependencies: Task 2
-- Scope: Close the four concrete gaps in the Task 2 parser acceptance
-  boundary, each with an exact adversarial fixture under
-  `.factory/tests/fixtures/plan-*.md`:
-  1. byte-exact round-trip: the parser must reject a UTF-8 BOM-prefixed plan
-     (fixture `plan-bom.md`), and the `roundtrip` and `serialize` commands
-     must compare the actual serialized bytes with the input bytes so a
-     byte difference is reported as a failure, never as `byte-exact`;
-  2. `verified` binding: the parser must reject a conformance row classified
-     `verified` whose task cell is empty or `None` (fixture
-     `plan-verified-empty-refs.md`) or whose referenced tasks are not all
-     `complete` (fixture `plan-verified-pending.md`); no `verified` row is
-     valid in an `active` lifecycle plan;
-  3. §24 registry completeness: commit the machine-readable §24 requirement
-     registry `.factory/schemas/factory-plan-v1.requirements.json` (the 24
-     IDs from the §24 table of the committed `docs/FACTORY-LOOP-SPEC.md`),
-     and the parser must reject any conformance matrix whose requirement-ID
-     set differs from the registry (fixture `plan-matrix-missing-id.md`
-     drops one §24 row);
-  4. lifecycle consistency: front-matter `status: complete` must be
-     rejected unless every task is `complete` (fixture
-     `plan-lifecycle-inconsistent.md`).
-  Update `.factory/schemas/factory-plan-v1.schema.md` and the JSON model
-  contract so the documented grammar and defect-class tables name the new
-  fixtures, and extend the harness-owned suite
-  `.factory/tests/test-factory-plan-parser.py` (whose committed shape
-  assertions still expect the 18-task ledger of the Task 2 revision) so it
-  tracks the 19-task ledger and keeps proving byte-exact round-trip,
-  deterministic output, and agreement with
-  `scripts/validate-implementation-plan.py` on the canonical committed plan.
-- Acceptance criteria: every new fixture is rejected by the parser with the
-  documented `PlanError` class; every accepted document (canonical plan and
-  valid fixtures) round-trips with the serialized bytes byte-identical to
-  the input bytes; the canonical matrix requirement-ID set equals the
-  committed §24 registry; the canonical plan lifecycle status and task
-  statuses are consistent; the existing validator still agrees with the
-  parser on the canonical plan.
-- Verification: `.factory/tests/test-factory-plan-parser.py` (harness-owned,
-  grown past the 12 Task 2 tests);
+- Scope: Harden the Task 2 parser boundary with exact adversarial fixtures
+  under `.factory/tests/fixtures/`:
+  1. reject UTF-8 BOM input and make `roundtrip`/`serialize` compare actual
+     input and output bytes, including trailing blank lines
+     (`plan-bom.md`, `plan-trailing-blank-line.md`);
+  2. reject `verified` rows with empty/`None` task refs or any non-complete
+     referenced task (`plan-verified-empty-refs.md`,
+     `plan-verified-pending.md`), and reject `active` plans containing a
+     `verified` row;
+  3. commit `.factory/schemas/factory-plan-v1.requirements.json` from the 24
+     stable §24 IDs and reject missing, extra, or duplicate matrix IDs
+     (`plan-matrix-missing-id.md`, `plan-matrix-extra-id.md`);
+  4. reject lifecycle `complete` unless every task is complete
+     (`plan-lifecycle-inconsistent.md`);
+  5. parse dependency and matrix task references without materializing an
+     attacker-sized range; bound every endpoint to the parsed task count and
+     convert oversized integers/`OverflowError` to `PlanError`
+     (`plan-dependency-range-oversize.md`, `plan-matrix-range-oversize.md`,
+     `plan-range-overflow.md`);
+  6. reject continuation lines on structured lifecycle fields rather than
+     silently interpreting only their first line
+     (`plan-structured-field-continuation.md`);
+  7. reject empty interaction-boundary text so parser output always conforms
+     to the JSON schema (`plan-empty-interaction.md`);
+  8. reject absolute, empty, dot-segment, and `..` traversal specification
+     paths (`plan-front-matter-traversal-path.md`);
+  9. require the final-audit task to be last and depend on every other task,
+     and enforce the existing validator's matrix/task consistency invariants
+     (`plan-final-audit-misplaced.md`, `plan-final-audit-missing-dependency.md`,
+     `plan-matrix-complete-only-pending.md`);
+  10. add exact empty-required-value, missing-title, and duplicate-title
+      fixtures rather than relying on neighboring error branches.
+  Update the Markdown/JSON schema contracts and the hidden parser suite. The
+  parser and existing validator must agree on every accepted fixture, not only
+  the canonical plan.
+- Acceptance criteria: every named invalid fixture raises a bounded documented
+  `PlanError` without traceback, excessive allocation, or schema divergence;
+  every accepted fixture serializes byte-identically and deterministically;
+  the canonical matrix exactly equals the committed §24 registry; lifecycle,
+  final-audit, path, interaction, and matrix invariants agree with the legacy
+  validator; repeated oversized-range probes remain within a fixed memory/time
+  ceiling.
+- Verification: `.factory/tests/test-factory-plan-parser.py`;
   `scripts/validate-implementation-plan.py planning
-  .factory/artifacts/implementation-plan.md`.
-- Evidence: the exact fixtures `plan-bom.md`, `plan-verified-empty-refs.md`,
-  `plan-verified-pending.md`, `plan-matrix-missing-id.md`, and
-  `plan-lifecycle-inconsistent.md` are committed under
-  `.factory/tests/fixtures/` and rejected with documented `PlanError`
-  classes; the byte-level probe compares input and serialized bytes for
-  every accepted plan; the registry
-  `.factory/schemas/factory-plan-v1.requirements.json` matches the 24 §24
-  rows of the canonical plan matrix and the §24 table of the committed spec
-  (commit `2d6a4fd`, blob `ca2334ab…`); the canonical plan round-trips
-  byte-exactly and the harness suite passes.
+  .factory/artifacts/implementation-plan.md`; bounded resource probe for range
+  fixtures; `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`.
+- Evidence: exact fixture/result mapping, byte comparisons, registry digest,
+  bounded range-probe measurements, parser/legacy-validator agreement, and a
+  clean exact-commit test receipt are recorded in this task before completion.
 - Documentation impact: `docs/FACTORY.md`,
   `.factory/schemas/factory-plan-v1.schema.md`.
 
