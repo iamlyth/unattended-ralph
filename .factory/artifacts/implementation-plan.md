@@ -291,9 +291,8 @@ completes with evidence.
 
 ## Task 5: Root-descriptor lock and Git writer boundary
 
-- Status: blocked
+- Status: pending
 - Dependencies: Task 4
-- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the lock authority: exclusive `flock` on the already-open
   canonical Git top-level directory descriptor opened with
   `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`; validate canonical repository identity,
@@ -384,9 +383,8 @@ completes with evidence.
 
 ## Task 9: Phase and campaign state machine with outcomes
 
-- Status: blocked
+- Status: pending
 - Dependencies: Task 4, Task 7, Task 8
-- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the phase/campaign orchestration: `planning ->
   implementation -> verification -> audit` with the §11 transition table,
   §13 phase-outcome classification (planned/failed/interrupted;
@@ -546,9 +544,8 @@ completes with evidence.
 
 ## Task 16: Adversarial conformance suite and verification gate
 
-- Status: blocked
+- Status: pending
 - Dependencies: Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15
-- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the full §22 conformance suite (tests 1-27: fresh roles
   and allowed inputs, memory/session disabled, deterministic selection, no
   runtime ledger, findings only via plan, empty work reaches verification/
