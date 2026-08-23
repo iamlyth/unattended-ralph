@@ -1,0 +1,44 @@
+{
+  "schema": "audit-objectives/v1",
+  "$id": "factory-schemas/audit-objectives-v1.schema.json",
+  "title": "Audit-objective registry",
+  "description": "Committed registry of product-neutral audit objectives (FACTORY-LOOP-SPEC §6.4). The registry digest is bound at campaign start and immutable during a campaign; the per-round objective is selected deterministically from the round number.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "objectives"],
+  "properties": {
+    "schema": {
+      "const": "audit-objectives/v1"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "objectives": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "objective"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^AUD-[0-9]{2}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "objective": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

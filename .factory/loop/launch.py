@@ -86,6 +86,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package-import mode (the hidden control-plane package)
     from . import confinement as confinement_authority
+    from . import workspace_confinement as real_confinement_authority
     from . import usage as usage_guard
     from .gitutil import (
         GIT_ENV_STRIP,
@@ -111,6 +112,7 @@ try:  # package-import mode (the hidden control-plane package)
     from .plan_parser import Plan, PlanError, parse_plan
 except ImportError:  # flat-import mode used by the hidden harness test suite
     import confinement as confinement_authority  # type: ignore[no-redef]
+    import workspace_confinement as real_confinement_authority  # type: ignore[no-redef]
     import usage as usage_guard  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
@@ -137,6 +139,8 @@ except ImportError:  # flat-import mode used by the hidden harness test suite
 
 __all__ = [
     "BLOB_READ_CHUNK",
+    "CONFINE_LAUNCHER",
+    "CONFINEMENT_SPEC_SCHEMA",
     "DEFAULT_ALLOWED_TOOLS",
     "DEFAULT_INACTIVITY_LIMIT",
     "DEFAULT_RUNTIME_LIMIT",
@@ -185,6 +189,15 @@ __all__ = [
 
 # The four static roles (FACTORY-LOOP-SPEC §6); no adaptive subroles exist.
 ROLES = ("planner", "developer", "tester", "auditor")
+
+# Task 8 confined launch: the child process runs through the committed
+# confine launcher, which applies the exact Landlock confinement specification
+# (schema ``factory-confinement/v1``) before exec'ing the secure wrapper.  The
+# launcher is staged from its exact committed blob like the wrapper (F2).
+CONFINE_LAUNCHER = ".factory/loop/confine_launcher.py"
+STAGED_CONFINE_LAUNCHER_NAME = "confine_launcher.py"
+CONFINEMENT_SPEC_SCHEMA = "factory-confinement/v1"
+MAX_CONFINEMENT_SPEC_BYTES = 1024 * 1024
 
 # Strict known-provider registry (Task 7 review, obligation 5):
 # ``verify_invocation`` rejects any provider outside this set, so an unknown
@@ -950,6 +963,40 @@ def _session_directory() -> Path:
         raise LaunchError(f"cannot create the session directory: {exc}") from exc
 
 
+def _remove_private_directories(directories: Iterable[Optional[Path]]) -> None:
+    """Best-effort removal of private per-launch directories (Task 8, finding 6).
+
+    Removes every private directory the mint or supervisor created — the
+    exec staging directory, the prompt directory, the session directory, and
+    the sanitized home — so no private or credential material survives a
+    failed authorization or a rejected attempt.  Removal is best-effort:
+    a failure never masks the original error.
+    """
+    for directory in directories:
+        if directory is None:
+            continue
+        try:
+            shutil.rmtree(directory)
+        except (OSError, FileNotFoundError):
+            pass
+
+
+def _authority_private_directories(authority: "LaunchAuthority") -> List[Optional[Path]]:
+    """The exact per-launch private directories a minted authority carries.
+
+    ``exec_dir`` (staging), the prompt file's parent directory, the session
+    directory, and the sanitized home — the same four paths the
+    confinement specification's ``private_launch_rules`` bind and the
+    supervisor's cleanup removes.
+    """
+    directories: List[Optional[Path]] = [authority._exec_dir]
+    if authority._prompt_path is not None:
+        directories.append(Path(authority._prompt_path).parent)
+    directories.append(authority._session_dir)
+    directories.append(authority._sanitized_home)
+    return directories
+
+
 # --------------------------------------------------------------------------
 # Child process invariants (per-launch read-back)
 # --------------------------------------------------------------------------
@@ -1285,6 +1332,13 @@ class LaunchSupervision:
         self._staged_digests: Dict[str, str] = {}
         self._external_paths: Tuple[str, ...] = ()
         self._exec_dir: Optional[Path] = None
+        # Task 8 confinement binding carried by the verified authority (the
+        # exact specification, the real proof, the sanitized home, and the
+        # staged confine launcher); ``None`` when the token carries none.
+        self._confinement_spec: Optional[Dict[str, object]] = None
+        self._confinement_proof: Optional[object] = None
+        self._sanitized_home: Optional[Path] = None
+        self._confined_launcher: Optional[Path] = None
 
     # -- subreaper lifecycle (F7) --------------------------------------------
 
@@ -1519,6 +1573,44 @@ class LaunchSupervision:
             self.binding, self.prompt_path, self.session_dir,
             secure_wrapper=self._staged_wrapper,
         )
+        # Task 8 confined launch: when the verified authority carries the
+        # exact confinement specification and a real proof, the model child is
+        # routed through the staged confine launcher.  The proof is
+        # re-validated *immediately before exec* — binding the exact
+        # invocation, the exact executing guard-source bytes, the credential
+        # channels, and the exact specification digest being applied — so no
+        # model is ever started without a proof that matches what will be
+        # enforced (fail closed).
+        if self._confinement_spec is not None:
+            if self._confined_launcher is None or self._confinement_proof is None:
+                raise SupervisionError(
+                    "the verified authority carries a confinement "
+                    "specification without the staged confine launcher or "
+                    "its real confinement proof; no model can be started "
+                    "(fail closed)"
+                )
+            try:
+                real_confinement_authority.validate_proof(
+                    self._confinement_proof,
+                    self.binding,
+                    confinement_spec=self._confinement_spec,
+                    _strict_channels=False,
+                )
+            except real_confinement_authority.ConfinementError as exc:
+                raise SupervisionError(
+                    "the confinement proof does not bind the exact "
+                    "specification being applied at exec time; no model can "
+                    f"be started (fail closed): {exc}"
+                ) from exc
+            spec_path = self._publish_confinement_spec()
+            argv = [
+                sys.executable,
+                str(self._confined_launcher),
+                "--spec-file",
+                str(spec_path),
+                "--",
+                *argv,
+            ]
         if not hasattr(signal, "pthread_sigmask"):
             raise SupervisionError(
                 "pthread_sigmask is unavailable; TERM/INT/HUP cannot be "
@@ -1851,6 +1943,15 @@ class LaunchSupervision:
                 "may mint a verified-committed token (F2/F5)"
             )
         if threading.current_thread() is not threading.main_thread():
+            # A genuine minted token whose attempt is rejected off the main
+            # thread can never be reused (its per-launch private paths belong
+            # to this attempt); remove every private directory it carries so
+            # no private or credential material survives the rejected launch
+            # (Task 8 review, finding 6).
+            if isinstance(authority, LaunchAuthority):
+                _remove_private_directories(
+                    _authority_private_directories(authority)
+                )
             raise SupervisionError(
                 "a fresh-process launch is refused off the main thread: "
                 "TERM/INT/HUP blocking (pthread_sigmask) and the scoped "
@@ -1899,6 +2000,23 @@ class LaunchSupervision:
         self._staged_digests = dict(authority._staged_digests)
         self._external_paths = tuple(authority._external_paths)
         self._exec_dir = Path(authority._exec_dir)
+        self._confinement_spec = dict(authority._confinement_spec) \
+            if authority._confinement_spec else None
+        self._confinement_proof = authority._confinement_proof
+        self._sanitized_home = authority._sanitized_home
+        self._confined_launcher = authority._confined_launcher
+        # Task 8: the mint already created the prompt file and the session
+        # directory and carried their exact paths; ``run`` uses exactly those
+        # paths — the same paths the confinement specification's
+        # ``private_launch_rules`` bind — never re-deriving or re-creating
+        # them (fail closed if the authority carries none).
+        if authority._prompt_path is None or authority._session_dir is None:
+            raise SupervisionError(
+                "the verified authority carries no per-launch prompt/session "
+                "paths; no model can be started (fail closed)"
+            )
+        self.prompt_path = Path(authority._prompt_path)
+        self.session_dir = Path(authority._session_dir)
         prompt = compose_prompt(
             binding,
             role_prompt=blobs["role_prompt"],
@@ -1908,11 +2026,12 @@ class LaunchSupervision:
             audit_objective=blobs.get("audit_objective"),
             task_excerpt=blobs.get("task_excerpt"),
         )
-        prompt_dir = _prompt_directory()
+        if _file_sha256(self.prompt_path) != hashlib.sha256(prompt).hexdigest():
+            raise SupervisionError(
+                "the authority's prompt file does not match the composed "
+                "prompt bytes; refusing a substituted prompt file (F5)"
+            )
         try:
-            self.prompt_path = write_prompt_file(prompt_dir, prompt)
-            if self.session_dir is None:
-                self.session_dir = _session_directory()
             self.install_subreaper()
             self.install_signal_handlers()
             self._pre_existing_children = self._snapshot_pre_existing_children()
@@ -2026,6 +2145,60 @@ class LaunchSupervision:
         except BaseException:
             pass
 
+    def _publish_confinement_spec(self) -> Path:
+        """Publish the exact confinement specification into the staging directory.
+
+        The specification is written as a bounded no-follow single-link file
+        inside the private mode-0700 exec staging directory (removed at
+        cleanup).  The confine launcher reads it through a bounded no-follow
+        descriptor before applying Landlock, so the bytes the launcher
+        applies are exactly the bytes the proof digest binds.
+        """
+        if self._exec_dir is None or self._confinement_spec is None:
+            raise SupervisionError(
+                "cannot publish the confinement specification without a "
+                "staging directory and a specification"
+            )
+        data = json.dumps(
+            self._confinement_spec, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(data) > MAX_CONFINEMENT_SPEC_BYTES:
+            raise SupervisionError(
+                f"the confinement specification exceeds the "
+                f"{MAX_CONFINEMENT_SPEC_BYTES}-byte bound"
+            )
+        path = self._exec_dir / "confinement-spec.json"
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(str(path), flags, 0o600)
+        except OSError as exc:
+            raise SupervisionError(
+                f"cannot create the confinement specification {path}: {exc}"
+            ) from exc
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+        except OSError as exc:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise SupervisionError(
+                f"cannot write the confinement specification {path}: {exc}"
+            ) from exc
+        info = path.stat()
+        if stat.S_ISLNK(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise SupervisionError(
+                f"the confinement specification {path} has unsafe "
+                "ownership/link state"
+            )
+        return path
+
     def _close_streams(self) -> None:
         """Close the child's capture pipes if they are still open.
 
@@ -2049,18 +2222,14 @@ class LaunchSupervision:
                 pass
 
     def _cleanup(self) -> None:
-        """Best-effort removal of the private prompt/session/staging directories."""
+        """Best-effort removal of the private prompt/session/staging/home dirs."""
         self._close_streams()
-        directories: List[Optional[Path]] = [self.session_dir, self._exec_dir]
+        directories: List[Optional[Path]] = [
+            self.session_dir, self._exec_dir, self._sanitized_home,
+        ]
         if self.prompt_path is not None:
             directories.append(self.prompt_path.parent)
-        for directory in directories:
-            if directory is None:
-                continue
-            try:
-                shutil.rmtree(directory)
-            except OSError:
-                pass
+        _remove_private_directories(directories)
 
 
 # --------------------------------------------------------------------------
@@ -2424,6 +2593,12 @@ class LaunchAuthority:
         "_staged_digests",
         "_external_paths",
         "_exec_dir",
+        "_prompt_path",
+        "_session_dir",
+        "_confinement_spec",
+        "_confinement_proof",
+        "_sanitized_home",
+        "_confined_launcher",
         "_mint",
     )
 
@@ -2436,6 +2611,12 @@ class LaunchAuthority:
         staged_digests: Mapping[str, str],
         external_paths: Sequence[str],
         exec_dir: Path,
+        prompt_path: Path,
+        session_dir: Path,
+        confinement_spec: Optional[Mapping[str, object]] = None,
+        confinement_proof: Optional[object] = None,
+        sanitized_home: Optional[Path] = None,
+        confined_launcher: Optional[Path] = None,
         _mint: object,
     ) -> None:
         if _mint is not _MINT_SECRET:
@@ -2450,6 +2631,24 @@ class LaunchAuthority:
         self._staged_digests = dict(staged_digests)
         self._external_paths = tuple(external_paths)
         self._exec_dir = Path(exec_dir)
+        # Task 8: the exact per-launch private paths (the staging directory,
+        # the prompt file, and the session directory) created by the mint are
+        # carried here, so ``run`` applies and cleans up exactly the paths the
+        # confinement specification's ``private_launch_rules`` bind.
+        self._prompt_path = Path(prompt_path)
+        self._session_dir = Path(session_dir)
+        # Task 8 confinement binding: the exact ``factory-confinement/v1``
+        # specification the confined child applies, the real (never synthetic)
+        # confinement proof minted against it, the fresh sanitized home the
+        # proof/spec bind, and the staged confine-launcher executable.  A
+        # token minted without real confinement carries ``None`` for every
+        # field (the hermetic synthetic-proof seam).
+        self._confinement_spec = (
+            dict(confinement_spec) if confinement_spec is not None else None
+        )
+        self._confinement_proof = confinement_proof
+        self._sanitized_home = Path(sanitized_home) if sanitized_home else None
+        self._confined_launcher = Path(confined_launcher) if confined_launcher else None
         self._mint = _mint
 
 
@@ -2727,13 +2926,33 @@ def _gate_ollama_launch(
                 "ollama-provider launch fails closed: the Task 8 "
                 f"confinement proof authority is not yet available ({exc})"
             ) from exc
-    try:
-        confinement_authority.validate_proof(_confinement_proof, binding)
-    except confinement_authority.ConfinementError as exc:
-        raise InvocationError(
-            "ollama-provider launch fails closed: the confinement proof does "
-            f"not bind this invocation ({exc})"
-        ) from exc
+    if isinstance(
+        _confinement_proof, real_confinement_authority.ConfinementProof
+    ):
+        # A *real* Task 8 proof (minted by ``prove_confinement`` when the
+        # exact confinement specification is supplied) is validated against
+        # the exact invocation, the executing guard-source bytes, and the
+        # effective credential channels this invocation consumes.
+        try:
+            real_confinement_authority.validate_proof(
+                _confinement_proof,
+                binding,
+                cookie_file=cookie_file,
+                cookie_stdin=cookie_stdin,
+            )
+        except real_confinement_authority.ConfinementError as exc:
+            raise InvocationError(
+                "ollama-provider launch fails closed: the real confinement "
+                f"proof does not bind this invocation ({exc})"
+            ) from exc
+    else:
+        try:
+            confinement_authority.validate_proof(_confinement_proof, binding)
+        except confinement_authority.ConfinementError as exc:
+            raise InvocationError(
+                "ollama-provider launch fails closed: the confinement proof does "
+                f"not bind this invocation ({exc})"
+            ) from exc
     try:
         usage_guard.require_quota(
             cookie_file=cookie_file,
@@ -2771,6 +2990,8 @@ def authorize_launch(
     usage_guard_max_wait: Optional[int] = None,
     usage_guard_max_polls: Optional[int] = None,
     _confinement_proof: Optional[object] = None,
+    _confinement_spec: Optional[Mapping[str, object]] = None,
+    _sanitized_home: Optional[Path] = None,
     _usage_guard_html_file: Optional[str] = None,
     _usage_guard_allow_loopback: bool = False,
 ) -> LaunchAuthority:
@@ -2785,6 +3006,41 @@ def authorize_launch(
     set fails closed.  The returned :class:`LaunchAuthority` is the only
     value :meth:`LaunchSupervision.run` accepts; it cannot be constructed
     from operator claims.
+
+    **Mandatory real confinement (Task 8 review, finding 5).**  Real model
+    workspace confinement is mandatory for *every* provider and *every*
+    public authorize API, CLI or programmatic: the mint creates the
+    per-launch private staging/prompt/session paths **first**, augments the
+    caller's ``factory-confinement/v1`` specification with the exact
+    ``private_launch_rules`` for those paths, and **then** mints the real
+    confinement proof against the augmented specification — proving the
+    Landlock primitive is applicable and binding the exact specification
+    digest, the exact executing guard-source bytes, and every effective
+    credential channel this invocation consumes.  The only exception is the
+    explicit *private* synthetic-proof seam (``_confinement_proof``),
+    reachable only by the hidden ``.factory/`` suite; a launch carrying
+    neither the real specification nor that seam fails closed for any
+    provider or entry.
+
+    ``_confinement_spec`` is the base ``factory-confinement/v1``
+    specification (Task 8) the caller builds for the binding (the per-role
+    allowlists plus the sanitized home).  The mint augments it with the
+    exact per-launch private rules (staging/prompt/session paths) before the
+    real proof is minted, so the proof's digest binds exactly what the
+    confined child will apply, and the authority carries those exact paths
+    so :meth:`LaunchSupervision.run` uses — and cleans up — exactly the
+    paths the proof binds.  ``_sanitized_home`` is the fresh private
+    mode-0700 home the specification binds; the supervisor removes it after
+    the attempt.  A caller that supplies a confinement specification but no
+    proof fails closed; the hermetic hidden suite's synthetic proof seam
+    (``_confinement_proof``) never produces real confinement and is never
+    evidence of it.
+
+    **Cleanup on authorization failure (Task 8 review, finding 6).**  Any
+    failure to authorize or confine the launch removes and cleans every
+    per-launch private directory the mint created — the staging directory,
+    the prompt directory, the session directory, and the sanitized home —
+    so no private or credential material survives a failed authorization.
 
     ``_usage_guard_html_file`` is a **private test seam only** (Task 7
     review, obligation 4): saved-page parsing is diagnostics/test-only and
@@ -2804,47 +3060,56 @@ def authorize_launch(
 
     **Ollama production gate (Task 7 review, obligation 2).**  An
     ``ollama``-provider invocation does not reach the model until the Task
-    8 confinement authority proves ``.factory/`` and the operator
+    8 confinement authority *proves* that ``.factory/`` and the operator
     credential store(s) are inaccessible/read-only to model tools and the
-    guard source is exact-commit bound.  Until that authority is available
-    the production gate fails closed (no model invocation).  The hermetic
-    hidden suite mints a *private synthetic* proof
-    (``confinement._mint_synthetic_proof``) and passes it through the
-    private ``_confinement_proof`` seam; a forged, foreign, or tampered
-    proof fails closed, and a synthetic proof is never evidence of real
-    confinement.
+    guard source is exact-commit bound.  The hermetic hidden suite mints a
+    *private synthetic* proof (``confinement._mint_synthetic_proof``) and
+    passes it through the private ``_confinement_proof`` seam; a forged,
+    foreign, or tampered proof fails closed, and a synthetic proof is never
+    evidence of real confinement.  The production mint (``_confinement_spec``
+    supplied) proves real confinement before the guard runs.
 
     **Ollama usage guard (QUOTA-01, QUOTA-02; §10).**  For a guard-gated
-    provider the §10 decision table runs *inside* the mint, before any
-    wrapper/backend staging: ``--check`` exit 0 proceeds; exit 1 or 3 runs
-    ``--wait`` and then one final ``--check`` that must exit 0; any fatal
-    or nonzero ``--wait`` outcome raises :class:`InvocationError` so the
-    campaign terminates without invoking the model.  The guard's cookie
-    never appears in a child argv or child environment (private stdin
-    channel, built child environment, bounded mode-0600/no-follow owned
-    stores outside the model workspace, zeroization, redacted output), and
-    the ``--usage-guard-*`` options are the operator diagnostics/driver
-    knobs (cookie store/stdin, settings URL) — a caller can never bypass
-    the guard for a guard-gated provider.  ``html-file`` is *not* part of
-    the production surface: saved-page parsing is diagnostics/test-only,
-    reachable only through the hidden ``.factory/`` suite (Task 7 review,
-    obligation 4).  A TERM/INT/HUP during the guard propagates
-    :class:`usage_guard.WaitInterrupted` so the CLI exits ``128 + signum``
-    after reaping the credential-holding fetch child.
+    provider the §10 decision table runs *inside* the mint (after the real
+    confinement proof binds the augmented specification): ``--check`` exit 0
+    proceeds; exit 1 or 3 runs ``--wait`` and then one final ``--check``
+    that must exit 0; any fatal or nonzero ``--wait`` outcome raises
+    :class:`InvocationError` so the campaign terminates without invoking the
+    model.  The guard's cookie never appears in a child argv or child
+    environment (private stdin channel, built child environment, bounded
+    mode-0600/no-follow owned stores outside the model workspace,
+    zeroization, redacted output), and the ``--usage-guard-*`` options are
+    the operator diagnostics/driver knobs (cookie store/stdin, settings
+    URL) — a caller can never bypass the guard for a guard-gated provider.
+    ``html-file`` is *not* part of the production surface: saved-page
+    parsing is diagnostics/test-only, reachable only through the hidden
+    ``.factory/`` suite (Task 7 review, obligation 4).  A TERM/INT/HUP
+    during the guard propagates :class:`usage_guard.WaitInterrupted` so the
+    CLI exits ``128 + signum`` after reaping the credential-holding fetch
+    child.
     """
     verify_invocation(binding)
-    if binding.provider.lower() in PROVIDER_GUARD_REQUIRED:
-        _gate_ollama_launch(
-            binding,
-            _confinement_proof=_confinement_proof,
-            cookie_file=usage_guard_cookie_file,
-            cookie_stdin=usage_guard_cookie_stdin,
-            settings_url=usage_guard_settings_url,
-            poll_interval=usage_guard_poll_interval,
-            max_wait=usage_guard_max_wait,
-            max_polls=usage_guard_max_polls,
-            _usage_guard_html_file=_usage_guard_html_file,
-            _usage_guard_allow_loopback=_usage_guard_allow_loopback,
+    # ---- Task 8 mandatory confinement contract (every provider, every
+    # public entry; review finding 5) ----
+    # Real model workspace confinement (the exact factory-confinement/v1
+    # specification) is mandatory for every provider and every public
+    # authorize API, CLI or programmatic.  The only exception is the
+    # explicit *private* synthetic-proof test seam (``_confinement_proof``),
+    # reachable only by the hidden ``.factory/`` suite; a launch carrying
+    # neither the real specification nor that seam fails closed for any
+    # provider or entry.
+    if _confinement_spec is None and _confinement_proof is None:
+        raise InvocationError(
+            "every launch must carry a confinement proof for the real model "
+            "workspace confinement (the exact factory-confinement/v1 "
+            "specification) or the explicit private synthetic-proof test seam; "
+            "an unconfined launch is never "
+            "permitted for any provider or entry (Task 8)"
+        )
+    if _confinement_spec is not None and _sanitized_home is None:
+        raise InvocationError(
+            "a real confined launch requires the fresh sanitized home "
+            "the specification binds"
         )
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
@@ -2881,19 +3146,123 @@ def authorize_launch(
             "audit objective", audit_objective, binding.audit_objective_digest
         )
         blobs["audit_objective"] = audit_objective
+    # ---- staging/prompt/session creation FIRST (Task 8 reorder) ----
+    # The private per-launch paths must exist before the confinement
+    # specification is finalized, because the specification's
+    # ``private_launch_rules`` bind the exact staging/prompt/session paths
+    # the confined child will use; the real proof is minted only against
+    # that augmented specification, and the authority carries the exact
+    # paths so ``run`` applies and cleans up exactly what the proof binds.
     wrapper, backend, staged_digests, external_paths, exec_dir = (
         _stage_launch_executables(binding)
     )
-    verified = replace(binding, backend=backend)
-    return LaunchAuthority(
-        verified,
-        blobs,
-        wrapper=wrapper,
-        staged_digests=staged_digests,
-        external_paths=external_paths,
-        exec_dir=exec_dir,
-        _mint=_MINT_SECRET,
-    )
+    private_dirs: List[Path] = [exec_dir]
+    try:
+        # Task 8: stage the committed confine launcher into the same private
+        # staging directory (F2), so the model child always runs through the
+        # exact committed launcher blob when real confinement is bound.
+        confined_launcher: Optional[Path] = None
+        if _confinement_spec is not None:
+            launcher_source = Path(binding.workspace).absolute() / CONFINE_LAUNCHER
+            launcher_bytes = _read_committed_blob(
+                str(launcher_source), Path(binding.workspace).absolute(),
+                binding.bound_commit, "confine launcher", MAX_CONFINEMENT_SPEC_BYTES,
+            )
+            confined_launcher = _stage_bytes(
+                exec_dir, STAGED_CONFINE_LAUNCHER_NAME, launcher_bytes
+            )
+            staged_digests[str(confined_launcher)] = hashlib.sha256(
+                launcher_bytes
+            ).hexdigest()
+        prompt = compose_prompt(
+            binding,
+            role_prompt=blobs["role_prompt"],
+            agents=blobs["policy"],
+            spec=blobs["spec"],
+            plan=blobs["plan"],
+            audit_objective=blobs.get("audit_objective"),
+            task_excerpt=blobs.get("task_excerpt"),
+        )
+        prompt_dir = _prompt_directory()
+        private_dirs.append(prompt_dir)
+        prompt_path = write_prompt_file(prompt_dir, prompt)
+        session_dir = _session_directory()
+        private_dirs.append(session_dir)
+        if _sanitized_home is not None:
+            private_dirs.append(Path(_sanitized_home).absolute())
+        # ---- augment the specification with the exact per-launch private
+        # rules, THEN mint the real proof (the proof digest binds the
+        # augmented spec the confined child will apply) ----
+        confinement_spec: Optional[Dict[str, object]] = None
+        real_proof: Optional[object] = None
+        if _confinement_spec is not None:
+            confinement_spec = real_confinement_authority.with_private_launch_paths(
+                dict(_confinement_spec),
+                staging_dir=exec_dir,
+                prompt_path=prompt_path,
+                session_dir=session_dir,
+            )
+            try:
+                real_proof = real_confinement_authority.prove_confinement(
+                    binding,
+                    confinement_spec=confinement_spec,
+                    cookie_file=usage_guard_cookie_file,
+                    cookie_stdin=usage_guard_cookie_stdin,
+                )
+                real_confinement_authority.validate_proof(
+                    real_proof,
+                    binding,
+                    confinement_spec=confinement_spec,
+                    cookie_file=usage_guard_cookie_file,
+                    cookie_stdin=usage_guard_cookie_stdin,
+                )
+            except real_confinement_authority.ConfinementUnavailable as exc:
+                raise InvocationError(
+                    "the production launch fails closed: the real model "
+                    f"workspace confinement is unavailable on this host ({exc})"
+                ) from exc
+            except real_confinement_authority.ConfinementError as exc:
+                raise InvocationError(
+                    "the production launch fails closed: the real confinement "
+                    f"proof cannot bind this invocation ({exc})"
+                ) from exc
+        if binding.provider.lower() in PROVIDER_GUARD_REQUIRED:
+            _gate_ollama_launch(
+                binding,
+                _confinement_proof=_confinement_proof or real_proof,
+                cookie_file=usage_guard_cookie_file,
+                cookie_stdin=usage_guard_cookie_stdin,
+                settings_url=usage_guard_settings_url,
+                poll_interval=usage_guard_poll_interval,
+                max_wait=usage_guard_max_wait,
+                max_polls=usage_guard_max_polls,
+                _usage_guard_html_file=_usage_guard_html_file,
+                _usage_guard_allow_loopback=_usage_guard_allow_loopback,
+            )
+        verified = replace(binding, backend=backend)
+        return LaunchAuthority(
+            verified,
+            blobs,
+            wrapper=wrapper,
+            staged_digests=staged_digests,
+            external_paths=external_paths,
+            exec_dir=exec_dir,
+            prompt_path=prompt_path,
+            session_dir=session_dir,
+            confinement_spec=confinement_spec,
+            confinement_proof=real_proof,
+            sanitized_home=_sanitized_home,
+            confined_launcher=confined_launcher,
+            _mint=_MINT_SECRET,
+        )
+    except BaseException:
+        # Task 8 review, finding 6: every private per-launch directory this
+        # mint created — the staging directory, the prompt directory, the
+        # session directory, and the sanitized home — is removed on any
+        # authorization failure, so no private or credential material
+        # survives a failed authorization.
+        _remove_private_directories(private_dirs)
+        raise
 
 
 def require_trusted_interpreter() -> str:
@@ -3173,6 +3542,24 @@ def _run_cli(args: argparse.Namespace) -> int:
             inactivity_limit=args.inactivity_limit,
         )
         verify_invocation(binding)
+        # Task 8 production confinement: every ordinary launch is confined.
+        # The control plane creates a fresh private sanitized home and the
+        # exact per-role confinement specification; ``authorize_launch``
+        # mints the real (Landlock) proof against that specification before
+        # the guard runs, and ``LaunchSupervision`` routes the model child
+        # through the committed confine launcher.  A host without the
+        # Landlock primitive fails closed before any model can start.
+        sanitized_home = real_confinement_authority.sanitized_home_directory()
+        try:
+            confinement_spec = real_confinement_authority.confinement_spec(
+                binding, sanitized_home=sanitized_home
+            )
+        except BaseException:
+            try:
+                shutil.rmtree(sanitized_home)
+            except OSError:
+                pass
+            raise
         # F2/F5: mint the unforgeable verified-committed authority.  The mint
         # verifies the wrapper/backend against the committed blobs (or the
         # immutable external authority), stages the exact committed bytes into
@@ -3194,6 +3581,8 @@ def _run_cli(args: argparse.Namespace) -> int:
             usage_guard_poll_interval=args.usage_guard_poll_interval,
             usage_guard_max_wait=args.usage_guard_max_wait,
             usage_guard_max_polls=args.usage_guard_max_polls,
+            _confinement_spec=confinement_spec,
+            _sanitized_home=sanitized_home,
         )
         supervisor = LaunchSupervision(binding)
         result = supervisor.run(authority)

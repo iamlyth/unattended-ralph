@@ -423,6 +423,31 @@ Missing/expired cookies or an unparseable settings page return status 2 and requ
 source scripts/update-ollama-cookies.sh
 ```
 
+## Model workspace confinement (Task 8)
+
+Every planner, developer, tester, and auditor backend runs behind the staged
+exact-commit `.factory/loop/confine_launcher.py`. The launcher applies a real
+Landlock ruleset before executing the secure wrapper. If the required Landlock
+ABI or any rule cannot be installed, launch fails closed.
+
+The model sees only its role's committed plan/spec/code/test inputs and exact
+private HOME, scratch, prompt, session, and staged-executable paths. Shared
+`/tmp`, `/proc`, `/run`, host configuration, `.git`, `.ralph`,
+`.factory-state`, context summaries, migration archives, credential stores,
+and hidden factory source/tests/prompts are not allowlisted. Every allowlist
+component is checked with `lstat`; symlinks, external resolved targets, and
+hardlink aliases of forbidden files fail closed. Git history and commit
+operations belong to the trusted orchestrator, never the model process.
+
+Developer writes are limited to existing product paths and the plan; planner
+writes only the plan; tester writes only existing build/test artifact paths;
+auditor is read-only. No role may create a new top-level workspace directory.
+A production confinement proof binds the exact commit, workspace, provider,
+rule-spec digest, guard-source digests, and every credential channel actually
+consumed. Synthetic proofs are hidden test seams and are never acceptance
+evidence. The machine contract is
+`.factory/schemas/factory-confinement-v1.schema.json`.
+
 ## Clean stop
 
 In TUI or foreground mode, press `Ctrl+C`. Ralph aborts the backend and leaves durable state for recovery. Do not use `kill -9` unless the process cannot terminate normally.

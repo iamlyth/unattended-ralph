@@ -37,6 +37,17 @@ tracks task status and verification evidence.
 
 No Git worktrees are used. `features.parallel` is disabled in both Ralph configurations.
 
+## Fresh role boundary
+
+The replacement control plane starts planner, developer, tester, and auditor
+as separate fresh processes with static digest-bound prompts. A real Landlock
+sandbox is installed before the model wrapper starts. It excludes `.git`,
+legacy/runtime state, hidden factory implementation, shared `/tmp`, `/proc`,
+host configuration, and credential stores; only role-specific current inputs,
+existing write targets, and per-launch private paths are granted. The trusted
+orchestrator performs Git history and commit operations after the role exits.
+Hosts without the required confinement primitive cannot launch a model.
+
 ## Relationship to Huntley's playbook
 
 The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at commit `88d488a148af97e4a3f22b11b4c3598c79d6a577`). This boilerplate adopts the playbook's highest-value context and backpressure patterns:

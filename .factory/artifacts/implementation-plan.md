@@ -85,10 +85,10 @@ completes with evidence.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
-| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8 |
-| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6, Task 8 |
-| CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
-| ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9 |
+| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6, Task 8, Task 16 |
+| CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16 |
+| ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16 |
 | PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9 |
@@ -601,7 +601,7 @@ completes with evidence.
 
 ## Task 8: Role prompts, prompt-set binding, and workspace confinement
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 6
 - Scope: Commit distinct static role prompts for planner, developer, tester,
   and auditor under `.factory/prompts/` with campaign-bound digests (no
@@ -716,7 +716,8 @@ completes with evidence.
   cookie file, stdin provenance) and the exact-commit guard source, proving
   each is outside or inaccessible to model tools, and synthetic proof is never
   evidence.
-- Verification: `tests/test-factory-confinement.sh`, including a real
+- Verification: `.factory/tests/test-factory-confinement.py` and
+  `.factory/tests/test-factory-supervision.sh`, including a real
   production-launch confinement probe that exercises the default operator env
   store, an explicitly specified cookie file, and stdin-provided credential
   provenance against the bound exact commit (no synthetic-only evidence), plus
@@ -731,9 +732,21 @@ completes with evidence.
   the no-`.git` model read boundary, the no-`/proc` grant, the exact
   per-launch private home/scratch/staging paths, the narrow documented
   `/run`/`dev`/`var`/`etc` system-path allowlist, and that Git
-  operations/history/commit are owned by the trusted Task 9 orchestrator; no
-  implementation claim for role prompts or the confinement authority while
-  Task 8 is pending).
+  operations/history/commit are owned by the trusted Task 9 orchestrator).
+- Evidence: `.factory/tests/test-factory-confinement.py` passes 72/72 with
+  real kernel Landlock enforcement and non-vacuous unconfined controls;
+  `.factory/tests/test-factory-launch.py` passes 76/76 warning-clean with no
+  surviving model process; `.factory/tests/test-factory-usage.py` passes
+  106/106 with one honest root-only ownership skip. The hidden shell launch
+  integration passes. Static role prompts, prompt-set digest binding, and
+  deterministic audit-objective selection are covered by the confinement
+  suite. Independent security review accepted the checkpoint after verifying
+  symlink containment, no model `.git` or `/proc` access, exact per-launch
+  private paths, mandatory confinement for every provider/API, cleanup on
+  failure, role write boundaries, and proof binding of every credential
+  channel and guard source. `verify-boilerplate.sh` remains exit 1 solely on
+  the legacy persisted context-summary authority assigned to Task 15; no
+  full-gate pass is claimed.
 
 ## Task 9: Phase and campaign state machine with outcomes
 

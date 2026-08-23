@@ -416,8 +416,8 @@ def _default_env_file() -> str:
     ``<workspace>/.ollama-usage-env`` or ``<repository root>/.ollama-usage-env``.
     It defaults to an operator-owned path outside the model-visible workspace
     (``$OLLAMA_USAGE_ENV_FILE`` when set by the operator, otherwise
-    ``$XDG_CONFIG_HOME/controller-box/ollama-usage-env`` or
-    ``~/.config/controller-box/ollama-usage-env``).  The launch authority
+    ``$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`` or
+    ``~/.config/unattended-ralph/ollama-usage-env``).  The launch authority
     therefore never scopes the store into the model workspace; the store is
     read strictly nofollow with mode exactly ``0600``, owned by the operator,
     single-link, and size-bounded (see :func:`read_secure_file`).
@@ -430,7 +430,7 @@ def _default_env_file() -> str:
         base = Path(config_home)
     else:
         base = Path.home() / ".config"
-    return str(base / "controller-box" / "ollama-usage-env")
+    return str(base / "unattended-ralph" / "ollama-usage-env")
 
 
 def assert_store_outside_workspace(path_text: str, workspace: object) -> None:

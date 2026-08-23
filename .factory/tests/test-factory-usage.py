@@ -1091,7 +1091,10 @@ class LaunchIntegrationTests(_Base):
             )
 
     def test_non_ollama_provider_never_runs_the_guard(self) -> None:
-        authority = self._authorize(self._binding("synthetic"))
+        binding = self._binding("synthetic")
+        authority = self._authorize(
+            binding, _confinement_proof=self._proof(binding)
+        )
         self.assertIsInstance(authority, launch.LaunchAuthority)
 
     def test_guard_cannot_be_bypassed_for_ollama(self) -> None:
@@ -1391,7 +1394,7 @@ class ExternalStoreTests(_Base):
             default = usage._default_env_file()
         self.assertFalse(Path(default).is_relative_to(workspace))
         self.assertEqual(
-            Path(default), self.tmp / "config" / "controller-box" / "ollama-usage-env"
+            Path(default), self.tmp / "config" / "unattended-ralph" / "ollama-usage-env"
         )
         # An explicit operator override is honored verbatim.
         with mock.patch.dict(

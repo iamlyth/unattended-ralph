@@ -72,6 +72,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 
 sys.path.insert(0, str(LOOP))
+import confinement  # noqa: E402
 import gitutil  # noqa: E402
 import launch  # noqa: E402
 import lock as lock_module  # noqa: E402
@@ -160,9 +161,11 @@ _p.add_argument("--tools")
 _args, _extra = _p.parse_known_args(sys.argv[1:])
 
 _WS = os.environ.get("FACTORY_LOOP_LAUNCH_WORKSPACE", ".")
+_MARKERS = os.path.join(_WS, "src", ".factory-test-output")
 
 def marker(name, value):
-    with open(os.path.join(_WS, name), "w") as f:
+    os.makedirs(_MARKERS, exist_ok=True)
+    with open(os.path.join(_MARKERS, name), "w") as f:
         f.write(str(value))
 
 def behavior():
@@ -346,6 +349,8 @@ class _Base(unittest.TestCase):
         self.workspace.mkdir()
         scripts = self.workspace / "scripts"
         scripts.mkdir()
+        self.marker_dir = self.workspace / "src" / ".factory-test-output"
+        self.marker_dir.mkdir(parents=True)
         shutil.copy2(REAL_WRAPPER, scripts / WRAPPER_BASENAME)
         self.backend = self.workspace / "backend.py"
         self.backend.write_text(BACKEND_SOURCE, encoding="utf-8")
@@ -387,7 +392,16 @@ class _Base(unittest.TestCase):
         audit_objective: bytes | None = None,
         task_excerpt: bytes | None = None,
     ) -> launch.LaunchAuthority:
-        """Mint the verified-committed authority from the actual bytes."""
+        """Mint the verified-committed authority from the actual bytes.
+
+        The launch-test suite exercises the Task 6/7 supervision and guard
+        machinery (not Task 8 confinement), so every mint here carries the
+        explicit *private synthetic-proof test seam* (Task 8 review, finding
+        5: confinement is mandatory for every public authorize API unless the
+        hidden suite passes that seam).  A synthetic proof is never evidence
+        of real confinement; real confinement is proven only by the Task 8
+        suite's production mint.
+        """
         return launch.authorize_launch(
             binding,
             role_prompt=role_prompt,
@@ -396,13 +410,14 @@ class _Base(unittest.TestCase):
             plan=plan,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
+            _confinement_proof=confinement._mint_synthetic_proof(binding),
         )
 
     def read_json(self, name: str) -> object:
-        return json.loads((self.workspace / name).read_text(encoding="utf-8"))
+        return json.loads((self.marker_dir / name).read_text(encoding="utf-8"))
 
     def read_text(self, name: str) -> str:
-        return (self.workspace / name).read_text(encoding="utf-8")
+        return (self.marker_dir / name).read_text(encoding="utf-8")
 
     def set_behavior(self, mode: str, **extra) -> None:
         (self.workspace / "behavior.json").write_text(
@@ -1058,19 +1073,17 @@ class SupervisionTerminationTests(_Base):
         self.assertEqual(
             self.read_text("dirty-work.txt"), "half-written work"
         )
-        # Nothing in the workspace was touched by the supervisor: every
-        # committed baseline fixture must still be present, and the only
-        # extra entries are the harness behavior driver and the preserved
-        # dirty work.  This asserts a *superset* (all baseline committed
-        # names remain plus dirty-work) rather than an exact obsolete list,
-        # so a new committed fixture never silently invalidates the check.
+        # Nothing in the workspace was removed by the supervisor: every
+        # committed baseline fixture remains, the behavior driver remains at
+        # the root, and preserved dirty work remains in the role-writable
+        # marker directory asserted above.
         present = {p.name for p in self.workspace.iterdir()}
         self.assertTrue(
             COMMITTED_FIXTURE_NAMES <= present,
             f"committed fixtures missing after a crash: "
             f"{sorted(COMMITTED_FIXTURE_NAMES - present)}",
         )
-        self.assertIn("dirty-work.txt", present)
+        self.assertTrue((self.marker_dir / "dirty-work.txt").is_file())
         self.assertIn("behavior.json", present)
 
     def test_crash_before_snapshot_is_harmless(self) -> None:
@@ -1089,28 +1102,29 @@ class SupervisionTerminationTests(_Base):
         self.assertEqual(result.outcome, "completed")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.live_descendants, 0)
-        # Deterministic crash-before-snapshot branch: kill the leader before
-        # the supervisor snapshots its scope.  The scope must be empty and
-        # the crash must be recorded as such, never a stale closure.
+        # Deterministic crash-before-snapshot branch on the real authority
+        # path: kill the leader immediately when snapshot starts.  This avoids
+        # the obsolete direct-spawn bypass and proves mandatory confinement
+        # still preserves the crash-before-snapshot semantics.
         crashed = LaunchSupervision(binding, kill_grace=0.3)
-        prompt_dir = launch._prompt_directory()
-        crashed.prompt_path = launch.write_prompt_file(
-            prompt_dir,
-            compose_prompt(
-                binding, role_prompt=role, agents=agents, spec=spec, plan=plan
-            ),
+        original_snapshot = crashed.snapshot
+
+        def crash_then_snapshot():
+            child = crashed._child
+            self.assertIsNotNone(child)
+            os.kill(child.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 2.0
+            while not crashed._leader_exited(child) and time.monotonic() < deadline:
+                time.sleep(0.005)
+            return original_snapshot()
+
+        crashed.snapshot = crash_then_snapshot  # type: ignore[method-assign]
+        crashed_result = crashed.run(
+            self.authorize(binding, role, agents, spec, plan)
         )
-        crashed.session_dir = launch._session_directory()
-        crashed.install_subreaper()
-        child = crashed.spawn()
-        child.kill()
-        child.wait()
-        captured = crashed.snapshot()
-        self.assertEqual(captured, frozenset())
+        self.assertEqual(crashed_result.live_descendants, 0)
         self.assertEqual(crashed._capture_error, "crash-before-snapshot")
         self.assertEqual(crashed.live_scope(), frozenset())
-        crashed._finalize(child.pid)
-        crashed._cleanup()
 
     def test_inactivity_limit_delivers_term(self) -> None:
         self.set_behavior("trap-term")
@@ -1441,8 +1455,8 @@ class SupervisionTerminationTests(_Base):
             # emergency group kill is genuinely exercised after leader exit.
             end = time.monotonic() + 5.0
             while time.monotonic() < end:
-                if (self.workspace / "pid").exists() and (
-                    self.workspace / "holder.pid"
+                if (self.marker_dir / "pid").exists() and (
+                    self.marker_dir / "holder.pid"
                 ).exists():
                     break
                 time.sleep(0.01)
@@ -1576,7 +1590,7 @@ class DescendantScopeTests(_Base):
                 supervisor.run(self.authorize(binding, role, agents, spec, plan))
         finally:
             # Recover the escaped survivor for operator inspection.
-            marker = self.workspace / "orphan.pid"
+            marker = self.marker_dir / "orphan.pid"
             if marker.exists():
                 pid = int(marker.read_text(encoding="utf-8"))
                 try:
@@ -1719,7 +1733,24 @@ class CliTests(_Base):
         repo = self.tmp / "repo"
         repo.mkdir()
         (repo / "scripts").mkdir()
+        (repo / "src" / ".factory-test-output").mkdir(parents=True)
         shutil.copy2(REAL_WRAPPER, repo / "scripts" / WRAPPER_BASENAME)
+        # Task 8 confined launch: the fixture repo commits the exact
+        # confine-launcher blob (F2/F5) so the production CLI can stage it
+        # from the bound commit, plus the committed confinement schema doc
+        # the specification is documented against.
+        loop_dir = repo / ".factory" / "loop"
+        loop_dir.mkdir(parents=True)
+        shutil.copy2(
+            ROOT / ".factory" / "loop" / "confine_launcher.py",
+            loop_dir / "confine_launcher.py",
+        )
+        schemas_dir = repo / ".factory" / "schemas"
+        schemas_dir.mkdir(parents=True)
+        shutil.copy2(
+            ROOT / ".factory" / "schemas" / "factory-confinement-v1.schema.json",
+            schemas_dir / "factory-confinement-v1.schema.json",
+        )
         run([GIT, "-C", str(repo), "init", "-q"])
         run([GIT, "-C", str(repo), "config", "user.email", "factory@test"])
         run([GIT, "-C", str(repo), "config", "user.name", "factory"])
@@ -1783,7 +1814,7 @@ class CliTests(_Base):
         err = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             status = launch.main(argv)
-        self.assertEqual(status, 0, err.getvalue())
+        self.assertEqual(status, 0, err.getvalue() + "\nSTDOUT:" + out.getvalue())
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["outcome"], "completed")
         self.assertEqual(payload["returncode"], 0)
@@ -2113,7 +2144,7 @@ class AuthorityTokenTests(_Base):
         # The *committed* backend executed (it wrote its marker in record mode);
         # the swapped working-tree bytes never ran.
         self.assertTrue(
-            (self.workspace / "prompt.digest").exists(),
+            (self.marker_dir / "prompt.digest").exists(),
             "the staged committed backend must have executed, not the swap",
         )
 
