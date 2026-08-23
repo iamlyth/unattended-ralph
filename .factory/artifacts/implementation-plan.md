@@ -413,6 +413,22 @@ completes with evidence.
   Task 11, and HOME/XDG/filesystem confinement is assigned to Tasks 8/11;
   Task 6 retains its own parent-secret boundary (no credentials, cookies, or
   legacy lock tokens in child argv/environment, no inherited descriptors).
+  Emergency cleanup always terminates the full process group even if the
+  leader has already exited, so a group kill is never skipped because its
+  leader is gone. TERM, INT, and HUP are blocked on the launch thread from
+  before the child is spawned until its identity is recorded, and any signal
+  received in that window, or any launch attempted off the main thread, fails
+  loudly rather than silently leaving an unrecorded child running. Runtime
+  and inactivity are bounded by finite authoritative limits with no unbounded
+  wait. The verify-to-exec path is freed of its TOCTOU by executing only the
+  private mode-0500 staged exact committed wrapper/backend bytes or a
+  verified immutable fd; an external trusted executable is accepted only
+  after every directory on its resolved path (including the containing
+  directories of any symlink target) is validated. The exported programmatic
+  launch API cannot bypass F2/F5: it requires an unforgeable verified
+  binding/token or stays private, and the production CLI is the sole public
+  launch authority. Interpreter resolution is bounded to a trusted, verified
+  set and never follows an attacker-controlled path.
 - Acceptance criteria: the CLI is reachable only via `python -m
   factory.loop.launch` or the external-prefix launcher, and no visible bare
   script exposes it; the CLI re-derives every authoritative byte from bound
@@ -430,10 +446,26 @@ completes with evidence.
   fixtures pass and an escaped orphan is reaped within the bounded subreaper
   lifetime (F7); the machine-result schema is validated; the launch and
   result exports appear on the hidden package surface; a crashed attempt
-  leaves its dirty work intact.
+  leaves its dirty work intact; the emergency cleanup path terminates the
+  full group even when the leader already exited and never skips the group
+  kill; TERM/INT/HUP are blocked through child-identity recording and any
+  off-main-thread launch fails loudly; finite runtime/inactivity limits bound
+  every attempt; the verify-to-exec path is TOCTOU-free (mode-0500 staged
+  exact committed bytes or a verified immutable fd); an external trusted
+  executable is accepted only after its resolved containing directories
+  (including symlink-target directories) are validated; an exported
+  programmatic launch API cannot bypass F2/F5 or displace the CLI as the sole
+  public launch authority, and interpreter resolution is bounded to the
+  trusted set.
 - Verification: `.factory/tests/test-factory-launch.py`;
   `.factory/tests/test-factory-supervision.sh` (hidden-namespace actual test
-  path; no visible `tests/` runner for Task 6).
+  path; no visible `tests/` runner for Task 6) plus added tests covering
+  the terminal emergency full-group kill after leader exit, TERM/INT/HUP
+  blocking and off-main-thread rejection, finite runtime/inactivity
+  enforcement, verify-to-exec TOCTOU (mode-0500 staged bytes / verified
+  immutable fd), external trusted-path directory and symlink validation,
+  programmatic-API F2/F5 bypass rejection, and bounded interpreter
+  resolution.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 7: Ollama usage guard retention and credential hardening
