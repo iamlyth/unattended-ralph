@@ -14,6 +14,12 @@ from .plan_parser import (
     parse_plan,
     round_trip,
 )
+from .selector import (
+    CLASSIFICATIONS as SELECTOR_CLASSIFICATIONS,
+    Selection,
+    SelectorError,
+    select_task,
+)
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -24,8 +30,12 @@ __all__ = [
     "Plan",
     "PlanError",
     "SCHEMA_NAME",
+    "SELECTOR_CLASSIFICATIONS",
+    "Selection",
+    "SelectorError",
     "TASK_STATUSES",
     "is_allowed_transition",
     "parse_plan",
     "round_trip",
+    "select_task",
 ]

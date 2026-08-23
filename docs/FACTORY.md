@@ -187,6 +187,29 @@ namespace (`.factory/tests/test-factory-plan-parser.py`, defect fixtures in
 `.factory/tests/fixtures/plan-*.md`) per HIDE-01: harness-only tests never
 land in the adopting product's visible test tree.
 
+### Deterministic task selection
+
+`.factory/loop/selector.py` implements the trusted §8 selection boundary as a
+pure, stdlib-only function of the parsed plan (plus the optional bound base
+commit). It rejects a stale plan (front-matter `base_commit` differs from the
+bound commit) or an ambiguous plan (an `in_progress` task whose dependencies
+are not all `complete`); resumes the sole `in_progress` task; otherwise sorts
+runnable `pending` tasks (every dependency `complete`) by explicit numeric
+priority then lexicographic task identifier; and selects exactly one. When
+none are runnable it classifies the phase `work_exhausted` (no pending or
+`in_progress` task remains) or `blocked` (unfinished tasks remain but none
+can run, each blocked directly or transitively through a blocked
+dependency). The selector performs no I/O, never reads a runtime task ledger,
+control-state file, environment, or process state, and the model never
+chooses among tasks. The harness-owned suite `.factory/tests/test-factory-
+selector.py` (fixtures `.factory/tests/fixtures/plan-select-*.md`) proves the
+exact selection order, tie-breaks, single-task guarantee, and empty-work
+classifications; inspect it at any time with:
+
+```bash
+python3 .factory/loop/selector.py select .factory/artifacts/implementation-plan.md
+```
+
 For a headless planning loop:
 
 ```bash

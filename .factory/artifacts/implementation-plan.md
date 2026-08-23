@@ -90,7 +90,7 @@ completes with evidence.
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
 | PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
-| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3 |
+| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
@@ -198,7 +198,7 @@ completes with evidence.
 
 ## Task 3: Deterministic plan-derived task selection
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 2
 - Scope: implement `.factory/loop/selector.py` for §8: reject an invalid,
   stale, or ambiguously parsed plan; resume the sole `in_progress` task;
@@ -209,8 +209,34 @@ completes with evidence.
 - Acceptance criteria: fixture plans and harness prove the exact selection
   order, single-task guarantee, deterministic tie-breaks, and the empty-work
   classifications; the selection is a pure function of the plan and state.
-- Verification: `tests/test-factory-selector.py`; fixture corpus under
-  `tests/fixtures/plan-*`.
+- Verification: `.factory/tests/test-factory-selector.py`; fixture corpus
+  under `.factory/tests/fixtures/plan-select-*.md`.
+- Evidence: `.factory/loop/selector.py` implements the §8 deterministic
+  selection step as a pure, stdlib-only function of the parsed
+  `factory-plan/v1` plan: it rejects a stale plan (front-matter base commit
+  differs from the bound commit) and an ambiguous plan (an `in_progress`
+  task whose dependencies are not all complete) before selecting; resumes
+  the sole `in_progress` task; otherwise sorts runnable `pending` tasks
+  (every dependency `complete`) by explicit numeric priority then
+  lexicographic task identifier and selects exactly one; when none are
+  runnable it classifies the phase `work_exhausted` (no pending or
+  `in_progress` task remains) or `blocked` (unfinished tasks remain but none
+  can run, each blocked directly or transitively through a blocked
+  dependency). The selector performs no I/O and never reads a runtime task
+  ledger, a control-state file, the environment, or process state, so the
+  outcome is a deterministic function of the plan and the bound base commit.
+  The hidden harness-owned suite `.factory/tests/test-factory-selector.py`
+  (28 tests, all passing) proves the exact selection order, the
+  single-task guarantee, deterministic tie-breaks (lexicographic task
+  identifier, where `"10" < "2"`), dependency gating, stale/ambiguous
+  rejection, and both empty-work classifications against the committed
+  corpus `.factory/tests/fixtures/plan-select-*.md` (8 fixtures, all
+  round-tripping byte-exactly); the canonical plan deterministically
+  selects its first runnable pending task (Task 4 at the evidence commit);
+  `scripts/validate-implementation-plan.py planning` and
+  `scripts/check-plan-freshness.sh` still exit 0. The verification path
+  stays under the hidden `.factory/` namespace per HIDE-01 (the visible
+  `tests/` tree is product-owned).
 - Documentation impact: `docs/FACTORY.md`.
 
 ## Task 4: Minimal mutable control state
@@ -560,8 +586,8 @@ completes with evidence.
   `7d9f502995a7af00c0153093bddb38e2cb948fbe717742ba3d2b6fba9539b402`.
   `scripts/validate-implementation-plan.py planning`,
   `scripts/check-generic-leakage.sh`, and `scripts/check-docs-sync.sh` exit 0;
-  standalone parser round-trip is byte-exact. Task 3 remains blocked pending a
-  separate planner-owned `blocked -> pending` transition.
+  standalone parser round-trip is byte-exact. The planner applied Task 3's
+  `blocked -> pending` transition in commit `21eafd7` after this evidence passed.
 - Documentation impact: `docs/FACTORY.md`,
   `.factory/schemas/factory-plan-v1.schema.md`.
 
