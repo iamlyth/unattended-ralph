@@ -494,12 +494,88 @@ completes with evidence.
   Add a conformance test that inspects a live synthetic child's
   `/proc/<pid>/cmdline` and `/proc/<pid>/environ` and fails if the synthetic
   cookie name or value appears.
+  Reconcile the Task 7 security review:
+  1. **Operator store default is outside the model workspace.** The guard's
+     default credential store is never `<workspace>/.ollama-usage-env` or
+     `<repository root>/.ollama-usage-env`; it defaults to a canonical
+     operator-owned path outside the model-visible workspace and is read
+     strictly nofollow with mode exactly `0600` (owner rw only), owned by the
+     operator, single-link, and size-bounded — a mode other than `0600`, a
+     symlink, a wrong owner, a multi-link, or an oversized store fails closed.
+     The launch authority must not scope the store into the model workspace
+     the way the WIP `env_file_path(workspace)` does.
+  2. **Production Ollama launch fails closed until Task 8 proves
+     confinement.** An `ollama`-provider invocation does not reach the model
+     until the Task 8 confinement authority proves `.factory/` and the
+     operator credential store(s) are inaccessible/read-only to model tools.
+     Until that proof, the production launch gate fails closed (no model
+     invocation) rather than relying on the store location alone.
+  3. **Guard source binding is jointly owned by Task 8 and Task 11.** The
+     guard modules (`usage.py`, `usage_fetch.py`) are staged and executed
+     only from their exact-commit blob or the trusted external executable
+     prefix; an operator-claimed or caller-controlled path never qualifies.
+     Task 8 owns source/executable confinement, Task 11 owns the credential/
+     source authority.
+  4. **Remove `html-file` from the production launch API/CLI.** The
+     `--usage-guard-html-file` option is removed from `python -m
+     factory.loop.launch` and from the `authorize_launch` production surface;
+     saved-page parsing is diagnostics/test-only, reachable only through the
+     hidden `.factory/` test suite, never through the production launch CLI or
+     API.
+  5. **Strict known-provider validation and per-policy gating.**
+     `verify_invocation` validates the provider against the supported known
+     set, and every supported model invocation (each provider/model pair) is
+     gated per the retained policy — no provider/model bypasses the guard.
+  6. **Bounded same-origin HTTPS redirects; 3xx/401/403 auth fatal.** The
+     fetch child follows only bounded (finite hop, same-origin, HTTPS)
+     redirects; any unresolvable redirect and any 3xx/401/403 response is
+     classified as a fatal authentication failure (exit 2), never as a
+     transient retry.
+  7. **Restore the `re.I | re.S` parse path.** The retained session/weekly
+     classification patterns use exactly `re.I | re.S` as the legacy shell
+     guard does, so `usage-ok.html` / `usage-blocked.html` / `login.html`
+     drive the identical parse contract.
+  8. **Ambient `OLLAMA_COOKIE` is ignored and scrubbed, not a crash.** The
+     ambient environment is never a cookie source and never spawns a child
+     with a credential; the guard scrubs every ambient credential-shaped key
+     from the child environment and continues (failing closed only on a
+     genuinely missing private cookie at the fetch boundary), and every
+     exception maps to a documented exit (0/1/2/3 or `128+signum`) with no
+     undocumented exit and no traceback.
+  9. **HTTPS only, except an explicit loopback test seam.** Network fetches
+     accept `https://` only; `http://` is rejected in production and permitted
+     only for an explicit loopback (`127.0.0.1`/`localhost`) seam used
+     exclusively by the hermetic hidden suite.
+  10. **No zero busy loop.** A zero poll interval (unbounded zero-sleep busy
+      loop) is rejected; every `--wait` bound is finite.
+  11. **Reject CRLF / embedded-control legacy cookies.** A cookie value
+      containing CR, LF, or other control characters (the header-injection
+      class) is fatal and never passed to the HTTP request.
+  12. **Signals cover the initial and final checks too.** TERM/INT/HUP during
+      the initial `--check`, the `--wait`, and the final `--check` all
+      terminate and reap the credential-holding fetch child and exit
+      `128+signum`; no `require_quota` path is signal-unsafe.
+  13. **Provider/store tamper tests.** A tampered provider binding and a
+      tampered credential store (mode/owner/link/content/size) fail closed
+      with exact fixtures.
 - Acceptance criteria: the exit table is enforced by fixtures; the
   synthetic-secret probe never leaks into cmdline/environ; waiting aborts
-  cleanly on signal.
-- Verification: `tests/test-pi2-ollama-wrapper.sh` extended with the proc
-  probe; `tests/fixtures/usage-ok.html` and `usage-blocked.html` still drive
-  the parse path.
+  cleanly on a signal at the initial check, the wait, or the final check;
+  the production launch surface has no `html-file` option; provider/model
+  gating is per policy with strict known-provider validation; bounded
+  same-origin HTTPS redirects with 3xx/401/403 fatal; the `re.I | re.S`
+  parser drives the retained fixtures; ambient `OLLAMA_COOKIE` is scrubbed
+  without crashing; HTTPS-only with an explicit loopback seam; a zero poll
+  interval and a CRLF/control legacy cookie are rejected; every exception is
+  a documented exit; an `ollama`-provider launch fails closed until the Task
+  8 confinement proof is present.
+- Verification: the hidden `.factory/tests/test-factory-usage.py` extended
+  with redirect/3xx/401/403, loopback-only HTTPS, ambient-scrub, CRLF, zero
+  poll, provider/store tamper, and initial/final-check signal fixtures;
+  `tests/test-pi2-ollama-wrapper.sh` extended with the proc probe;
+  `tests/fixtures/usage-ok.html` and `usage-blocked.html` still drive the
+  parse path; the production `python -m factory.loop.launch` help exposes no
+  `--usage-guard-html-file`.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 8: Role prompts, prompt-set binding, and workspace confinement
@@ -519,12 +595,23 @@ completes with evidence.
   fresh process runs under a sanitized HOME and an explicit `XDG_*` set so
   model tools cannot reach host credentials, the operator's real home or
   caches, `.ollama-usage-env`, secrets, or any path outside the allowlist,
-  while the role read/write allowlists remain honored.
+  while the role read/write allowlists remain honored. Own the Task 7
+  review's confinement proof and guard-source binding jointly with Task 11:
+  the confinement authority *proves* `.factory/` and the operator Ollama
+  credential store(s) are inaccessible/read-only to model tools, and the
+  Ollama usage-guard source (`usage.py`, `usage_fetch.py`) is staged and
+  executed only from its exact-commit blob or the trusted external
+  executable prefix — a proof that the Task 7 production Ollama launch gate
+  requires before any `ollama`-provider invocation proceeds.
 - Acceptance criteria: each role launch proves it can read the allowlisted
   inputs and cannot read any forbidden path; the role-prompt digests match the
   campaign binding; no completion claim from a previous attempt is present in
   the fresh context; the process's HOME/XDG/filesystem scope is confined and
-  cannot reach host credentials or any path outside the allowlist.
+  cannot reach host credentials or any path outside the allowlist; the
+  confinement authority proves `.factory/` and the operator Ollama
+  credential store(s) are inaccessible/read-only, and the Ollama usage-guard
+  source runs only from its exact-commit blob or the trusted external
+  executable prefix.
 - Verification: `tests/test-factory-confinement.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
@@ -583,7 +670,13 @@ completes with evidence.
   logs, receipts, or repository state; this complements, without replacing,
   Task 6's parent-secret environment/argv/descriptor boundary. With Task 8,
   retain HOME/XDG/filesystem confinement so the credential guard cannot be
-  bypassed through host files visible to model tools.
+  bypassed through host files visible to model tools. Co-own the Task 7
+  review's guard-source binding jointly with Task 8: the Ollama usage-guard
+  source (`usage.py`, `usage_fetch.py`) is executed only from its exact-commit
+  blob or the trusted external executable prefix (never an operator-claimed
+  or caller-controlled path), and the operator Ollama credential store
+  confinement (inaccessible/read-only to model tools, strict nofollow `0600`)
+  is retained as part of the credential/source authority.
   Ralph lifecycle topics, `ralph emit`, completion-token handling, event
   snapshots, launch handshakes, and Ralph CLI shims are removed from the new
   path and never reimplemented.
@@ -685,6 +778,13 @@ completes with evidence.
   competes with the canonical plan as a task authority. The visible scripts
   remain present only as deprecated, non-wired legacy entry points until
   removed; they are never a new-path dependency.
+  Migrate and deprecate the legacy workspace `.ollama-usage-env` store: the
+  new path never reads `<workspace>/.ollama-usage-env` or
+  `<repository root>/.ollama-usage-env` (assigned from the Task 7 review,
+  which moved the operator store default outside the model workspace), and
+  any pre-existing workspace-scoped legacy store is migrated/deprecated to
+  the operator store outside the model workspace without being read as a
+  credential authority.
 - Acceptance criteria: migration fixtures prove plan/commits/dirty-work/
   evidence/blockers survive while no `.ralph/` runtime state is imported;
   deprecation forwarders are marked and optional; the generic suite has no
@@ -694,14 +794,17 @@ completes with evidence.
   `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py`
   verifier and `tests/test-context-summary.sh` wiring) is removed/deprecated
   from every new-path control step, so a plan-mirror drift cannot surface as
-  an acceptance failure.
+  an acceptance failure; the legacy workspace `.ollama-usage-env` store is
+  migrated/deprecated and no new-path code reads a workspace- or
+  repository-scoped Ollama credential store.
 - Verification: `tests/test-factory-migration.sh` proves the new path has no
   context-summary dependency (no new-path code generates or reads
   `.factory/artifacts/context-summary.md`, and
   `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py` /
   `tests/test-context-summary.sh` are absent from or unreachable in the new
   control flow); the legacy `tests/test-context-summary.sh` suite is not
-  invoked by the new loop.
+  invoked by the new loop; no new-path code reads a workspace- or
+  repository-scoped `.ollama-usage-env` Ollama credential store.
 - Documentation impact: `docs/OPERATIONS.md`, `README.md`.
 
 ## Task 16: Adversarial conformance suite and verification gate
