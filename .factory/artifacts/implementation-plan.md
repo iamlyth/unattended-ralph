@@ -604,53 +604,136 @@ completes with evidence.
 - Status: pending
 - Dependencies: Task 6
 - Scope: Commit distinct static role prompts for planner, developer, tester,
-  and auditor under `.factory/prompts/` with campaign-bound digests; commit
-  the audit-objective registry bound at campaign start and selected
-  deterministically per round. Implement model workspace confinement so
-  `.ralph/`, `.factory-state/`, prior scratchpads and handoffs, runtime task
-  stores, memory stores, and migration archives are unavailable through model
-  tools; the plan, spec, code/tests, and allowlisted `.factory/` inputs are
-  readable, and role write allowlists are honored. No memory, conversation, or
-  context-summary authority is injected. Own HOME/XDG and broader filesystem
-  confinement (assigned from the Task 6 review, shared with Task 11): the
-  fresh process runs under a sanitized HOME and an explicit `XDG_*` set so
-  model tools cannot reach host credentials, the operator's real home or
-  caches, `.ollama-usage-env`, secrets, or any path outside the allowlist,
-  while the role read/write allowlists remain honored. Own the Task 7
-  review's confinement proof and guard-source binding jointly with Task 11:
-  the confinement authority *proves* `.factory/` and the operator Ollama
-  credential store(s) are inaccessible/read-only to model tools, and the
-  Ollama usage-guard source (`usage.py`, `usage_fetch.py`) is staged and
-  executed only from its exact-commit blob or the trusted external
-  executable prefix — a proof that the Task 7 production Ollama launch gate
-  requires before any `ollama`-provider invocation proceeds. The confinement
-  proof is a real, effective proof, not a synthetic one: it binds every
-  effective credential channel the guard actually consumes — the default
-  operator env store, any explicitly specified cookie file, and any
-  stdin-provided credential provenance — and proves each such channel,
-  together with the exact-commit guard source, is outside or
-  inaccessible/read-only to model tools at the bound exact commit; a
-  synthetic or simulated probe is never evidence, and only a probe
-  exercising the real production launch path against the real consumed
-  channels can evidence confinement.
+  and auditor under `.factory/prompts/` with campaign-bound digests (no
+  adaptive model roles); the role prompts are not yet committed, and Task 8
+  remains pending until this scope and the reconciled confinement below land.
+  Commit the audit-objective registry bound at campaign start and selected
+  deterministically per round. Implement model workspace and tool confinement
+  so `.ralph/`, `.factory-state/`, prior scratchpads and handoffs, runtime
+  task stores, memory stores, migration archives, host credentials, and the
+  operator Ollama credential store(s) are unavailable through model tools;
+  the plan, spec, code/tests, and allowlisted `.factory/` inputs are readable,
+  and role write allowlists are honored. No memory, conversation, or
+  context-summary authority is injected.
+  Reconcile the Task 8 confinement review:
+  1. **Reject symlinks in every allowlist component and containment-check
+     resolved targets.** Every path in the model read/write/execute
+     allowlists (workspace inputs, allowlisted `.factory/` inputs, the
+     sanitized private HOME, per-launch scratch/staging paths, and any
+     system-path component) is resolved with a bounded no-follow read; a
+     symlink in any component of any allowlisted path is rejected and the
+     confinement fails closed. The containment check validates the fully
+     resolved target against the allowed namespace, so a symlink whose
+     resolved target escapes the allowed subtree or aliases a forbidden path
+     is never permitted.
+  2. **Remove `.git` from the model read allowlist.** The model read
+     allowlist contains no `.git` entry, so the model cannot read repository
+     history, `.git/` objects, reflog, hooks, config, or any old secrets or
+     historical content reachable through Git history or the `.factory/`
+     commit history. Git operations, history, and commit are owned entirely
+     by the trusted Task 9 orchestrator (descriptor-anchored, outside the
+     model) and are never performed by model tools; the model-facing git
+     shim and bare-git selection (Task 11) route through the trusted path and
+     never grant the model direct repository-history read access.
+  3. **Remove `/proc` from the model Landlock allowlist and prove proc
+     credential reads denied.** `/proc` is not granted to model tools; the
+     confinement proof includes a probe asserting a model-tool read of
+     `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/*/fd`, `/proc/*/maps`,
+     or any proc-derived credential path is denied by the *effective*
+     confinement, and the proof fails closed if any such read succeeds.
+  4. **Replace any broad `/tmp` grant with exact per-launch private
+     home/scratch/staging paths.** The model receives no broad `/tmp` access.
+     Each launch is granted only its own private, mode-restricted
+     home/scratch/staging directories under the per-launch private namespace
+     (exact per-launch paths); sibling-launch or cross-launch access to
+     another launch's private directories is denied, and shared or
+     predictable `/tmp` scratch, staging, or credential-carrier locations are
+     never granted.
+  5. **Real confinement is mandatory for every provider and every public
+     authorize API, not CLI-only.** The confinement authority and its real
+     proof gate every model invocation and every public
+     `authorize_launch`/authorize API path for every provider (Ollama and
+     external backends alike); confinement is never optional for, or
+     bypassed by, a non-CLI or programmatic authorize entry point. A launch
+     that cannot apply real confinement fails closed regardless of how it was
+     invoked.
+  6. **Clean up all private directories on authorization failure.** Any
+     failure to authorize or confine a launch (or any rejected probe) removes
+     and cleans every per-launch private home, scratch, staging, and
+     credential-carrier directory the launch created, so no private or
+     credential material survives a failed authorization.
+  7. **Narrow and document the `/run`/`dev`/`var`/`etc` system-path
+     allowlist and test socket/host-config denial.** Any system-path
+     components the model may read are enumerated as the narrowest explicit
+     allowlist with each entry justified and documented; a model read of
+     `/run/...` sockets, `/dev/...` device nodes, host config under
+     `/etc/...`, or `/var/...` state that is not explicitly allowlisted is
+     denied, and a probe asserts socket and host-config denial under the
+     effective confinement.
+  Own HOME/XDG and broader filesystem confinement (assigned from the Task 6
+  review, shared with Task 11): the fresh process runs under a sanitized
+  HOME and an explicit `XDG_*` set so model tools cannot reach host
+  credentials, the operator's real home or caches, `.ollama-usage-env`,
+  secrets, or any path outside the allowlist, while the role read/write
+  allowlists remain honored. Own the Task 7 review's confinement proof and
+  guard-source binding jointly with Task 11: the confinement authority
+  *proves* `.factory/` and the operator Ollama credential store(s) are
+  inaccessible/read-only to model tools, and the Ollama usage-guard source
+  (`usage.py`, `usage_fetch.py`) is staged and executed only from its
+  exact-commit blob or the trusted external executable prefix — a proof that
+  the Task 7 production Ollama launch gate requires before any
+  `ollama`-provider invocation proceeds. The confinement proof is a real,
+  effective proof, not a synthetic one: it binds every effective credential
+  channel the guard actually consumes — the default operator env store, any
+  explicitly specified cookie file, and any stdin-provided credential
+  provenance — and proves each such channel, together with the exact-commit
+  guard source, is outside or inaccessible/read-only to model tools at the
+  bound exact commit; a synthetic or simulated probe is never evidence, and
+  only a probe exercising the real production launch path against the real
+  consumed channels can evidence confinement. No implementation claim for the
+  role prompts or the confinement authority is made in any documentation
+  while Task 8 is pending.
 - Acceptance criteria: each role launch proves it can read the allowlisted
-  inputs and cannot read any forbidden path; the role-prompt digests match the
-  campaign binding; no completion claim from a previous attempt is present in
-  the fresh context; the process's HOME/XDG/filesystem scope is confined and
-  cannot reach host credentials or any path outside the allowlist; the
-  confinement authority proves `.factory/` and the operator Ollama
-  credential store(s) are inaccessible/read-only, and the Ollama usage-guard
-  source runs only from its exact-commit blob or the trusted external
-  executable prefix; the real confinement proof binds every effective
-  credential channel actually consumed (default env store, explicit cookie
-  file, stdin provenance) and the exact-commit guard source, proving each is
-  outside or inaccessible to model tools, and synthetic proof is never
+  inputs and cannot read any forbidden path; every allowlist component is
+  no-follow and any symlink in any component, or any resolved-target escape,
+  fails the containment check; `.git` and repository history are not readable
+  by the model and no model tool performs Git operations; `/proc` is not
+  granted and a proc credential read is denied by the effective confinement;
+  the model has no broad `/tmp` grant and only its own exact per-launch
+  private home/scratch/staging paths with no sibling-launch access; real
+  confinement is applied and proven for every provider and every public
+  authorize API (not CLI-only); all private directories are cleaned up on
+  authorization failure; the `/run`/`dev`/`var`/`etc` system-path allowlist
+  is narrow and documented and socket/host-config reads are denied; the
+  role-prompt digests match the campaign binding; no completion claim from a
+  previous attempt is present in the fresh context; the process's
+  HOME/XDG/filesystem scope is confined and cannot reach host credentials or
+  any path outside the allowlist; the confinement authority proves `.factory/`
+  and the operator Ollama credential store(s) are inaccessible/read-only, and
+  the Ollama usage-guard source runs only from its exact-commit blob or the
+  trusted external executable prefix; the real confinement proof binds every
+  effective credential channel actually consumed (default env store, explicit
+  cookie file, stdin provenance) and the exact-commit guard source, proving
+  each is outside or inaccessible to model tools, and synthetic proof is never
   evidence.
 - Verification: `tests/test-factory-confinement.sh`, including a real
   production-launch confinement probe that exercises the default operator env
   store, an explicitly specified cookie file, and stdin-provided credential
-  provenance against the bound exact commit (no synthetic-only evidence).
-- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+  provenance against the bound exact commit (no synthetic-only evidence), plus
+  symlink-in-every-allowlist-component and resolved-target containment
+  fixtures, a `.git`/history-read denial fixture, a `/proc` credential-read
+  denial fixture, an exact per-launch private home/scratch/staging
+  no-sibling-access fixture, a programmatic (non-CLI) authorize-API
+  confinement-required fixture, a private-directory
+  cleanup-on-authorization-failure fixture, and socket/host-config denial
+  fixtures.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md` (documenting
+  the no-`.git` model read boundary, the no-`/proc` grant, the exact
+  per-launch private home/scratch/staging paths, the narrow documented
+  `/run`/`dev`/`var`/`etc` system-path allowlist, and that Git
+  operations/history/commit are owned by the trusted Task 9 orchestrator; no
+  implementation claim for role prompts or the confinement authority while
+  Task 8 is pending).
 
 ## Task 9: Phase and campaign state machine with outcomes
 
@@ -665,11 +748,28 @@ completes with evidence.
   only on non-final audit; phase never moves backward; counters are
   monotonic; a finite campaign always terminates (success, findings, blocked,
   failed, infrastructure_failure, interrupted) and never spins on empty work.
+  Own the trusted, descriptor-anchored Git/history/commit authority **outside
+  the model** (reconciled from the Task 8 review, which removed `.git` from
+  the model read allowlist): all Git operations, repository-history access,
+  reflog/object/config reads, staging, and the guarded commit boundary are
+  performed by the trusted Task 9 orchestrator through the
+  root-descriptor-anchored authority (Task 5 `lock.py`/`gitutil.py`), never
+  by a model tool. The model receives no direct `.git` read access and no Git
+  history; the orchestrator stages and commits trusted plan/code/evidence, and
+  the model-facing git shim and bare-git selection (Task 11) route every Git
+  request through the trusted path. The orchestrator's commit boundary
+  preserves the Git commit guard so `--no-verify`, hook-path override,
+  `GIT_CONFIG*`, worktrees, and amend/merge/rebase bypasses remain rejected.
 - Acceptance criteria: fixture campaigns for each outcome and the success/
   blocked/findings/failed/interrupted combinations terminate within the
-  configured bounds; no phase transition violates the state machine.
+  configured bounds; no phase transition violates the state machine; all Git
+  operations, history, and commit for the campaign are performed by the
+  trusted orchestrator through the descriptor-anchored authority and no model
+  tool has direct `.git` read or Git-history access.
 - Verification: `tests/test-factory-phase.py`;
-  `tests/test-factory-campaign.sh`.
+  `tests/test-factory-campaign.sh`, including a fixture asserting the trusted
+  orchestrator (not the model) performs every commit and that model tools hold
+  no direct `.git`/history read.
 - Documentation impact: `docs/FACTORY.md`.
 
 ## Task 10: Findings flow
@@ -714,6 +814,13 @@ completes with evidence.
   or caller-controlled path), and the operator Ollama credential store
   confinement (inaccessible/read-only to model tools, strict nofollow `0600`)
   is retained as part of the credential/source authority.
+  The external backend configuration authority remains pending within this
+  task's scope: configuration for external (non-Ollama) model backends and
+  trusted external executables is not finalized and remains pending Task 11
+  work; any external backend config must be confined and transported under the
+  same mandatory real-confinement and credential/source boundary as the Ollama
+  provider, and no external backend config is accepted while Task 8
+  confinement is unproven.
   Ralph lifecycle topics, `ralph emit`, completion-token handling, event
   snapshots, launch handshakes, and Ralph CLI shims are removed from the new
   path and never reimplemented.
