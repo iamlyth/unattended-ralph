@@ -94,7 +94,7 @@ completes with evidence.
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
-| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9 |
+| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9 |
 | LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5 |
 | PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5 |
@@ -108,7 +108,7 @@ completes with evidence.
 | HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13 |
 | MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
-| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19 |
+| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
 
 ## Interaction acceptance inventory
 
@@ -291,8 +291,9 @@ completes with evidence.
 
 ## Task 5: Root-descriptor lock and Git writer boundary
 
-- Status: pending
+- Status: blocked
 - Dependencies: Task 4
+- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the lock authority: exclusive `flock` on the already-open
   canonical Git top-level directory descriptor opened with
   `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`; validate canonical repository identity,
@@ -303,7 +304,10 @@ completes with evidence.
   `setsid` escape and fail closed for operator inspection. Preserve the Git
   command-boundary guard so `--no-verify`, hook-path override,
   `GIT_CONFIG_*`, worktrees, amend/merge/rebase bypasses, and forged handoffs
-  remain rejected.
+  remain rejected. Invoke the Git binary through a PATH-pinned absolute
+  executable (never an unqualified `git` resolved from a caller-controlled
+  PATH) so an attacker-controlled PATH cannot substitute a different `git`
+  behind the guarded commit boundary.
 - Acceptance criteria: concurrent launcher probes prove exactly one writer;
   an untrusted leaf inherits no lock descriptor and no lock environment; the
   escaped-descendant case blocks recovery; commit-boundary bypass tests stay
@@ -380,8 +384,9 @@ completes with evidence.
 
 ## Task 9: Phase and campaign state machine with outcomes
 
-- Status: pending
+- Status: blocked
 - Dependencies: Task 4, Task 7, Task 8
+- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the phase/campaign orchestration: `planning ->
   implementation -> verification -> audit` with the §11 transition table,
   §13 phase-outcome classification (planned/failed/interrupted;
@@ -504,7 +509,10 @@ completes with evidence.
   reject any dependency on `ralph emit`, completion tokens, Ralph event
   streams, runtime task stores, or Ralph memories. Port to the Controller
   product occurs only after generic verification, and this task stays
-  generic-only.
+  generic-only. Legacy mutable control-state files (pre-existing lifecycle
+  state) must coexist with or migrate into the single `factory-state/v1`
+  authority without conflict, and no second mutable control-state authority
+  may be created.
 - Acceptance criteria: migration fixtures prove plan/commits/dirty-work/
   evidence/blockers survive while no `.ralph/` runtime state is imported;
   deprecation forwarders are marked and optional; the generic suite has no
@@ -514,8 +522,9 @@ completes with evidence.
 
 ## Task 16: Adversarial conformance suite and verification gate
 
-- Status: pending
+- Status: blocked
 - Dependencies: Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15
+- Blocked on: Task 19 (Harden factory-state/v1 authority — Task 4 review findings): this task is not runnable until the hardened state authority lands.
 - Scope: Implement the full §22 conformance suite (tests 1-27: fresh roles
   and allowed inputs, memory/session disabled, deterministic selection, no
   runtime ledger, findings only via plan, empty work reaches verification/
@@ -619,10 +628,43 @@ completes with evidence.
 - Documentation impact: `docs/FACTORY.md`,
   `.factory/schemas/factory-plan-v1.schema.md`.
 
-## Task 19: Final documentation and specification audit
+## Task 19: Harden factory-state/v1 authority (Task 4 review findings)
 
 - Status: pending
-- Dependencies: Tasks 1-18
+- Dependencies: Task 4
+- Scope: Review and harden the Task 4 `factory-state/v1` authority against the
+  documented findings from the Task 4 review: S1 make `init` atomic with
+  no-replace semantics so it never clobbers existing state or an existing
+  campaign binding; S2 add crash-window and orphan recovery so a torn write
+  or an orphaned temporary/leftover state artifact is recovered
+  deterministically without data loss and without creating a second
+  authority; S3 reject a zeroed `now=0`/epoch-zero monotonic start marker as
+  tamper and fail closed; S6 add independent transition and state-digest
+  fixtures authored separately from the code path they exercise (not derived
+  by the same implementation they test); S7 make the owner-tamper probe
+  non-skipping so a non-root run fails the test rather than silently
+  skipping the owner check; S8 document the `plan_digest` field, its
+  derivation, and its write-once binding in the state schema and OPERATIONS;
+  S9 validate `phase`/`outcome` enum values and enforce the
+  `attempt >= phase` monotonic coupling in the state machine so an attempt
+  can never precede the phase that owns it.
+- Acceptance criteria: every finding has a fail-closed fixture and is
+  exercised by the trusted control plane, not only the unit suite; init is
+  atomic and no-replace; crash-window/orphan recovery is deterministic;
+  `now=0` is rejected; the owner probe never skips; `plan_digest` is
+  documented and write-once bound; `phase`/`outcome` and `attempt >= phase`
+  are validated with exact adversarial fixtures.
+- Verification: `.factory/tests/test-factory-state.py` extended with the
+  independent fixtures; new `.factory/tests/fixtures/state-*` files;
+  `scripts/validate-implementation-plan.py planning`;
+  `scripts/check-plan-freshness.sh`.
+- Documentation impact: `docs/OPERATIONS.md`,
+  `.factory/schemas/factory-state-v1.schema.md`.
+
+## Task 20: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Tasks 1-19
 - Scope: Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact evidence, the interaction
