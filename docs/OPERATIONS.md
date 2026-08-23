@@ -188,6 +188,81 @@ strips the complete `GIT_CONFIG*` environment family — including
 redirectors. The committed `scripts/git-commit-guard.sh` branch boundary is
 preserved untouched.
 
+## Fresh-context execution, invocation contract, and supervision (Task 6)
+
+Every role attempt of the new loop runs in a **fresh process** behind the
+existing secure wrapper (`scripts/pi2-secure-exec.py`, invoked never
+reimplemented) in one-shot mode: a new process session/group, no resumed
+session, no session storage shared with any previous loop identity, no
+automatic memory injection, and only allowlisted prompt inputs. The hidden
+control-plane module is `.factory/loop/launch.py`; the launch API and the
+`LaunchResult`/`StreamResult` types are exported from the hidden
+`.factory.loop` package surface. The operator CLI is reachable **only** as
+`python -m factory.loop.launch` (through the external-prefix alias that puts
+`factory` on `PYTHONPATH` resolving to the canonical `.factory/` directory)
+and, when installed, the external-prefix launcher entry point; there is no
+visible bare `scripts/` wrapper. `excerpt` derives the exact committed
+`factory-plan/v1` task-section bytes and their SHA-256 digest; `launch` runs
+one supervised attempt and prints the machine-readable `factory-launch-
+result/v1` JSON (`.factory/schemas/factory-launch-result-v1.schema.json`),
+which is validated before it is printed:
+
+```bash
+python -m factory.loop.launch launch --root ROOT --role ROLE \
+  --model MODEL --provider PROVIDER --backend BACKEND \
+  --role-prompt ROLE.md --prompt-set-digest HEX --policy AGENTS.md \
+  --spec SPEC.md --plan PLAN.md --bound-commit SHA \
+  --allowed-tools a,b --runtime-limit N --inactivity-limit M \
+  [--task-id N --task-excerpt-digest HEX] [--audit-objective FILE]
+python -m factory.loop.launch excerpt --plan PLAN.md --task-id N
+```
+
+**Exact invocation contract (§20).** The binding names the exact
+model/provider, the static role-prompt digest, the campaign-bound
+prompt-set digest, the deterministic audit-objective digest (auditor
+only), the canonical workspace and bound commit, and (developer only) the
+exact task id whose excerpt bytes are re-derived from the committed plan
+and digest-matched — a substituted, paraphrased, or foreign task fails
+closed before launch. The CLI re-derives every authoritative byte for the
+backend, spec/plan, role prompt, policy, and wrapper through fd-anchored,
+no-follow, size-bounded reads of the **committed blobs at the bound
+commit** and accepts no operator-claimed or caller-supplied path, blob,
+digest, or binding (F5); the wrapper and model backend run only from their
+exact bound-commit bytes or an external trusted executable (F2). The child
+executes with the canonical workspace as its working directory; its
+environment is rebuilt from the documented `ENV_ALLOWLIST` plus the
+`FACTORY_LOOP_LAUNCH_*` invocation fields — no credential, lock, Git
+redirector, or session variable from the parent is inherited — and the
+per-launch invariants (new session, stripped environment, no root-inode
+descriptor) are re-verified against `/proc` (a crash before the read-back
+window is recorded as `unverifiable-crashed`, never a stale handle).
+
+**Supervision.** The supervisor snapshots the role's *own* live descendant
+closure once (`capture_descendants`), pinning every PID to its `/proc`
+starttime and parent identity (F6), installs itself as a child subreaper
+before spawn (F7) so an escaped double-fork/`setsid` descendant can never
+orphan, and scopes orphan/reap handling to children spawned after the
+snapshot — **pre-existing children keep their exit status with their own
+owner** (F6). A hard runtime limit and an inactivity limit bound every run;
+bounded termination delivers TERM, INT, and HUP to the **full process
+group**, observes a bounded grace, escalates to KILL of the whole group,
+then verifies the group is gone and reaps the leader. Every group signal is
+gated on the leader's pinned starttime identity (F4): the monitor and the
+snapshot use a non-reaping `/proc` liveness check, so a leader that exits
+while a pipe-holding descendant lives is never reaped early — the
+process-group id is never freed before the identity check, and a reused
+PID is never signaled or reaped (fail closed). Any exception,
+`KeyboardInterrupt`, or TERM/INT/HUP received after spawn still takes the
+bounded terminate-then-reap path with no survivor (F1/F3); the scoped
+handlers are restored when the attempt ends. A crashed or interrupted
+attempt leaves its dirty work intact and never overwrites it; an escaped
+descendant that survives bounded termination fails closed
+(`EscapedDescendantError`) for operator inspection. The only completion
+signal is the machine-readable, schema-validated result: role, model/
+provider, outcome, returncode, signal, reason, terminated-by signals,
+bounded per-stream digest/tail captures, and snapshot/live counts — no
+argv or environment ever appears in a result.
+
 ## Branch policy
 
 The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.

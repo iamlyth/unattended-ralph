@@ -86,17 +86,17 @@ completes with evidence.
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
 | AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8 |
-| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6 |
+| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6, Task 8 |
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
 | PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 18 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9 |
-| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
+| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
 | QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
 | STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9 |
-| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6 |
-| PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6 |
+| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
+| PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11 |
 | PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9 |
 | COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9 |
@@ -369,7 +369,7 @@ completes with evidence.
 
 ## Task 6: Fresh-context execution, invocation contract, and supervision
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 3, Task 5
 - Scope: Reconcile the Task 6 supervisor review (findings F1-F5): implement
   `.factory/loop/launch.py` as a hidden control-plane module exposed only via
@@ -466,6 +466,18 @@ completes with evidence.
   immutable fd), external trusted-path directory and symlink validation,
   programmatic-API F2/F5 bypass rejection, and bounded interpreter
   resolution.
+- Evidence: `.factory/tests/test-factory-launch.py` passes 76/76 under
+  `-W error::ResourceWarning`; `.factory/tests/test-factory-supervision.sh`
+  passes its module-entrypoint, result-schema, exact committed executable,
+  and tamper controls; Task 5 lock tests pass 37/37, state tests pass 125/125,
+  selector tests pass 32/32, and parser tests pass 13/13. The final
+  independent security review found no Medium or High issue and accepted the
+  checkpoint after verifying emergency group cleanup, signal-safe spawn,
+  finite bounds, private mode-0500 staged committed executables, immutable
+  external-path checks, and mandatory launch authority. The complete
+  `verify-boilerplate.sh` remains exit 1 solely on the legacy persisted
+  context-summary authority already assigned to pending Task 15; no full-gate
+  pass is claimed here.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 7: Ollama usage guard retention and credential hardening

@@ -203,6 +203,20 @@ def _require_absolute_executable(path: str) -> None:
         )
 
 
+def require_trusted_executable(path: str) -> None:
+    """Public seam: fail closed unless ``path`` is a pinned immutable executable.
+
+    This is the same immutable-chain authority the Git resolver uses (F4): an
+    absolute regular executable owned by a non-caller uid, with every path
+    component non-group/other-writable up to its containment boundary (the
+    Nix store root for store paths, the filesystem root otherwise).  The
+    Task 6 launch boundary reuses it for *external trusted* wrapper/backend
+    executables: an operator-claimed or caller-controlled path is never a
+    trusted executable (F2).
+    """
+    _require_absolute_executable(path)
+
+
 def _validate_candidate(candidate: str) -> None:
     """Validate one fixed absolute candidate (testable seam)."""
     _require_absolute_executable(candidate)

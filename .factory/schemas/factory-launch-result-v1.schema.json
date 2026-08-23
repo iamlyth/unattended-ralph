@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-launch-result/v1",
+  "title": "factory-launch result",
+  "description": "The machine-readable completion signal of one supervised fresh-context launch (FACTORY-LOOP-SPEC section 9/20; Task 6). The only completion signal of a launch is this JSON exit status: role, model/provider, outcome, returncode, signal, reason, the signals the supervisor delivered to the process group, bounded per-stream digest/tail captures (never the raw unbounded stream), and the descendant snapshot/live counts. No environment or argv ever appears in a result. Validated by .factory/loop/launch.py validate_launch_result against this committed schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "role",
+    "model",
+    "provider",
+    "outcome",
+    "returncode",
+    "signal",
+    "reason",
+    "terminated_by",
+    "elapsed",
+    "stdout",
+    "stderr",
+    "descendants_snapshot",
+    "live_descendants",
+    "invariants"
+  ],
+  "properties": {
+    "role": {
+      "type": "string",
+      "enum": ["planner", "developer", "tester", "auditor"]
+    },
+    "model": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "outcome": { "type": "string", "enum": ["completed", "terminated"] },
+    "returncode": { "type": ["integer", "null"] },
+    "signal": { "type": ["string", "null"] },
+    "reason": { "type": ["string", "null"] },
+    "terminated_by": { "type": "array", "items": { "type": "string" } },
+    "elapsed": { "type": "number", "minimum": 0 },
+    "stdout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "digest", "tail", "truncated"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "tail": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "stderr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "digest", "tail", "truncated"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "tail": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "descendants_snapshot": { "type": "integer", "minimum": 0 },
+    "live_descendants": { "type": "integer", "minimum": 0 },
+    "invariants": { "type": "array", "items": { "type": "string" } }
+  }
+}
