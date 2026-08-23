@@ -201,3 +201,65 @@ under `.factory/tests/fixtures/plan-*.md`:
 | unrecognized section heading | `plan-unrecognized-heading.md` |
 | plan without tasks | `plan-no-tasks.md` |
 | missing/duplicated title | `plan-no-title.md` |
+| UTF-8 byte order mark prefix | `plan-bom.md` |
+| verified row with empty task reference | `plan-verified-empty-refs.md` |
+| verified row referencing a non-complete task | `plan-verified-pending.md` |
+| verified row in an `active` plan | `plan-verified-in-active-plan.md` |
+| matrix missing a §24 registry ID | `plan-matrix-missing-id.md` |
+| matrix ID outside the §24 registry | `plan-matrix-extra-id.md` |
+| lifecycle `complete` with an unfinished task | `plan-lifecycle-inconsistent.md` |
+| oversized dependency range endpoint | `plan-dependency-range-oversize.md` |
+| oversized matrix task range endpoint | `plan-matrix-range-oversize.md` |
+| oversized/overflowing dependency number | `plan-range-overflow.md` |
+| continuation lines on a structured field | `plan-structured-field-continuation.md` |
+| empty interaction-boundary text | `plan-empty-interaction.md` |
+| empty/dot-segment/`..` traversal spec path | `plan-front-matter-traversal-path.md` |
+| final-audit task not last | `plan-final-audit-misplaced.md` |
+| final-audit task missing a dependency | `plan-final-audit-missing-dependency.md` |
+| non-verified row referencing only complete tasks | `plan-matrix-complete-only-pending.md` |
+| empty required field value | `plan-empty-required-value.md` |
+| missing plan title | `plan-missing-title.md` |
+| duplicated plan title | `plan-duplicate-title.md` |
+
+Accepted fixtures (must parse, serialize byte-identically, and stay accepted
+by the legacy validator) are `plan-valid-base.md` (a two-task registry-bound
+fixture plan exercising an explicit `Priority` and a final-audit dependency)
+and `plan-trailing-blank-line.md` (a valid plan whose final trailing blank
+line proves `serialize` reproduces the input bytes exactly).
+
+### 10.1 §24 requirement registry
+
+The conformance matrix is machine-bounded to the stable set of 24 normative
+requirement IDs (`docs/FACTORY-LOOP-SPEC.md` §24) recorded in
+`.factory/schemas/factory-plan-v1.requirements.json`. The parser loads this
+registry deterministically at parse time and fails closed when it is missing,
+malformed, duplicated, or divergent from the committed stable set. A matrix
+that misses, duplicates, or exceeds these IDs is rejected, so free-form prose
+can never smuggle an unregistered requirement past the gate.
+
+### 10.2 Range and endpoint bounds
+
+Dependency and matrix task references are parsed into `(start, end)` spans
+and never materialized; every endpoint is bounded to the parsed task count
+before expansion, so an attacker-sized range can never allocate memory or CPU
+proportional to its endpoint. A digit string longer than the documented cap
+(`MAX_ENDPOINT_DIGITS`) or an integer conversion `OverflowError` raises a
+bounded `PlanError`.
+
+### 10.3 Structured-field, path, and lifecycle hardening
+
+- A UTF-8 BOM prefix never parses; `serialize` compares the actual input bytes
+  with the output bytes, preserving trailing blank lines.
+- `Status`, `Dependencies`, and `Priority` are structured single-line
+  fields: any continuation line on them is rejected rather than silently
+  interpreting only the first line. `Blocked on` is intentionally prose that
+  may span lines and is joined, never truncated.
+- The interaction inventory boundary text must be non-empty.
+- `spec_path` must be non-empty, repository-relative, and free of empty,
+  `.`, and `..` segments.
+- The final-audit task must be the last task and depend on every other task
+  and no others.
+- A non-verified conformance row must be owned by a task that is not complete;
+  a row referencing only completed tasks must be `verified`.
+- A `complete` lifecycle plan requires every task `complete`; an `active` plan
+  may not contain a `verified` conformance row.

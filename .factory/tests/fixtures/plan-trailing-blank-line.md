@@ -72,3 +72,4 @@ Plan: Python 3.11 standard library only; the parser never reads process state.
 - Acceptance criteria: the fixture remains parseable.
 - Verification: the fixture suite.
 - Documentation impact: none.
+

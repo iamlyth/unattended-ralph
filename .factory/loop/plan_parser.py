@@ -30,14 +30,26 @@ Contract (see schema for the full grammar):
 The parser is a pure, deterministic function of the plan bytes: identical
 bytes always produce the identical model, JSON dump, and canonical
 serialization.  ``parse -> serialize -> parse`` reproduces the original bytes
-exactly for any document that parses (``roundtrip`` without semantic loss).
+exactly for any document that parses (``roundtrip`` without semantic loss),
+including trailing blank lines; a UTF-8 byte order mark never parses.
 
 Defect classes (each documented with an exact fixture in
 ``.factory/tests/fixtures/plan-*.md``) are rejected with ``PlanError``:
 duplicate headings/keys/IDs, unknown lifecycle states, ambiguous task
 sections, out-of-order or cyclic dependencies, non-contiguous IDs, invalid
 front matter, malformed dependencies, unknown fields, invalid conformance
-rows, and incomplete interaction inventories.
+rows, and incomplete interaction inventories.  The hardened boundary (Task 18)
+additionally rejects: BOM-prefixed input, ``verified`` rows with empty or
+non-complete task references, ``verified`` rows in an ``active`` plan,
+matrices that miss or exceed the committed \u00a724 requirement registry
+(``factory-plan-v1.requirements.json``), a ``complete`` lifecycle with an
+unfinished task, dependency or matrix ranges whose endpoints exceed the
+parsed task count (and oversized endpoints in general), continuation lines on
+structured lifecycle fields, empty interaction-boundary text, spec paths with
+empty/``.``/``..`` segments, a misplaced or under-dependent final audit task,
+non-verified matrix rows that reference only completed tasks, and missing or
+duplicated plan titles.  Every rejected fixture raises a bounded ``PlanError``
+without materializing an attacker-sized range.
 """
 
 from __future__ import annotations
@@ -52,6 +64,33 @@ from typing import Dict, List, Optional, Tuple
 SCHEMA_NAME = "factory-plan/v1"
 PLAN_TITLE = "# Implementation Plan"
 FINAL_AUDIT_TITLE = "Final documentation and specification audit"
+
+# Committed machine registry of the 24 stable FACTORY-LOOP-SPEC \u00a724
+# normative requirement IDs (PLAN-01, Task 18 item 3). The parser loads it
+# deterministically at parse time and fails closed when it is missing,
+# malformed, or diverges from the stable set below.
+REQUIREMENTS_REGISTRY = (
+    Path(__file__).resolve().parent.parent
+    / "schemas" / "factory-plan-v1.requirements.json"
+)
+STABLE_REQUIREMENT_IDS = (
+    "AUTH-01", "CTX-01", "CTX-02", "ROLE-01", "PLAN-01", "TASK-01",
+    "TASK-02", "QUOTA-01", "QUOTA-02", "STATE-01", "LOCK-01", "PROC-01",
+    "GIT-01", "PHASE-01", "COMPLETE-01", "FIND-01", "CRED-01", "EVID-01",
+    "VIS-01", "RUNNER-01", "HIDE-01", "MIG-01", "TEST-01", "ACCEPT-01",
+)
+
+# Structured lifecycle fields are machine-read as single lines; a continuation
+# line on one of them must be rejected instead of silently ignored (Task 18
+# item 6). ``Blocked on`` is intentionally excluded: its exact reference is
+# prose that may span lines, and the parser joins them so nothing is silently
+# truncated.
+STRUCTURED_FIELDS = ("Status", "Dependencies", "Priority")
+
+# An endpoint larger than 10^40 can never reference a task in any plan; this
+# cap keeps int() conversion (and the Python max-str-digits limit) out of the
+# attack surface while remaining far above every real task count.
+MAX_ENDPOINT_DIGITS = 40
 
 # Front matter keys, in canonical order.
 FRONT_KEYS = ("spec_path", "spec_commit", "spec_blob", "base_commit", "status")
@@ -117,29 +156,90 @@ PRIORITY_RE = re.compile(r"^\d+$")
 BOUNDARY_RE = re.compile(r"^- ((?:input|semantic|production|evidence) boundary):\s*(.*?)\s*$")
 
 
-def _parse_dep_items(value: str, what: str) -> List[int]:
-    """Parse a dependency list like ``None``, ``Task 3``, or ``Tasks 1-17``."""
+def _parse_dep_spans(value: str, what: str, *, allow_empty: bool = False) -> List[Tuple[int, int]]:
+    """Parse a dependency/reference list into ``(start, end)`` spans.
+
+    Ranges are never materialized here: an attacker-sized range must not
+    allocate memory proportional to its endpoint. ``_expand_spans`` bounds
+    every endpoint to the parsed task count before expansion (Task 18 item 5).
+    ``allow_empty`` is used by conformance rows, where an empty ``Task`` cell
+    is a row-level defect handled by the caller, not a grammar error.
+    """
     value = value.strip()
     if value.lower() == "none":
         return []
     if not value:
+        if allow_empty:
+            return []
         raise PlanError(f"{what} has an empty dependency list")
-    result: List[int] = []
+    spans: List[Tuple[int, int]] = []
     for item in (part.strip() for part in value.split(",")):
         if not item:
             raise PlanError(f"{what} has malformed dependencies: {value}")
         match = DEP_ITEM_RE.fullmatch(item)
         if not match:
             raise PlanError(f"{what} has malformed dependencies: {value}")
-        start = int(match.group(1))
-        end = int(match.group(2) or start)
+        raw_start, raw_end = match.group(1), (match.group(2) or match.group(1))
+        if len(raw_start) > MAX_ENDPOINT_DIGITS or len(raw_end) > MAX_ENDPOINT_DIGITS:
+            raise PlanError(f"{what} has an out-of-range dependency number: {item}")
+        try:
+            start = int(raw_start)
+            end = int(raw_end)
+        except (ValueError, OverflowError) as exc:
+            raise PlanError(
+                f"{what} has an out-of-range dependency number: {item}"
+            ) from exc
+        if start < 1 or end < 1:
+            raise PlanError(f"{what} has a non-positive dependency number: {item}")
         if end < start:
             raise PlanError(f"{what} has a descending dependency range: {item}")
-        result.extend(range(start, end + 1))
-    if len(result) != len(set(result)):
-        raise PlanError(f"{what} repeats a dependency")
-    return result
+        spans.append((start, end))
+    _check_no_overlapping_spans(spans, what)
+    return spans
 
+
+def _check_no_overlapping_spans(spans: List[Tuple[int, int]], what: str) -> None:
+    """Reject overlapping spans (a repeated number) without materializing them."""
+    ordered = sorted(spans)
+    previous_end: Optional[int] = None
+    for start, end in ordered:
+        if previous_end is not None and start <= previous_end:
+            raise PlanError(f"{what} repeats a dependency")
+        if previous_end is None or end > previous_end:
+            previous_end = end
+
+
+def _expand_spans(
+    spans: List[Tuple[int, int]], max_id: int, what: str, kind: str
+) -> List[int]:
+    """Expand validated spans, bounding every endpoint to the parsed count.
+
+    Any endpoint beyond ``max_id`` is rejected before a range is materialized,
+    so the allocated list can never grow past the number of parsed tasks.
+    ``kind`` selects the documented error wording (``deps`` for dependency
+    lists, ``matrix`` for conformance rows) so the parser and the legacy
+    validator agree on every accepted fixture.
+    """
+    result: List[int] = []
+    for start, end in spans:
+        if end > max_id:
+            if start == end:
+                if kind == "deps":
+                    raise PlanError(
+                        f"{what} references unknown dependencies: Task {end}"
+                    )
+                raise PlanError(f"{what} references an unknown task: Task {end}")
+            if kind == "deps":
+                raise PlanError(
+                    f"{what} has an oversized dependency range "
+                    f"(endpoint {end} exceeds the {max_id} parsed tasks)"
+                )
+            raise PlanError(
+                f"{what} has an oversized task range "
+                f"(endpoint {end} exceeds the {max_id} parsed tasks)"
+            )
+        result.extend(range(start, end + 1))
+    return result
 
 def is_allowed_transition(current: str, next_status: str) -> bool:
     """Return whether ``current -> next_status`` is in the schema transition table."""
@@ -164,6 +264,10 @@ class Task:
     blocked_on: Optional[str]
     fields: Dict[str, str]
     field_order: List[str]
+    # Unmaterialized ``(start, end)`` spans parsed from ``Dependencies``; they
+    # are expanded against the parsed task count before validation so an
+    # attacker-sized range can never be materialized (Task 18 item 5).
+    dep_spans: List[Tuple[int, int]] = dataclass_field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -195,7 +299,6 @@ class Plan:
     matrix: List[MatrixRow] = dataclass_field(default_factory=list)
     interactions: List[Interaction] = dataclass_field(default_factory=list)
     _blocks: List[Block] = dataclass_field(default_factory=list, repr=False)
-    _ends_with_newline: bool = True
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Plan":
@@ -222,10 +325,7 @@ class Plan:
         parts: List[str] = []
         for block in self._blocks:
             parts.extend(block.lines)
-        text = "\n".join(parts)
-        if self._ends_with_newline and not text.endswith("\n"):
-            text += "\n"
-        return text
+        return "\n".join(parts)
 
     def to_dict(self) -> Dict[str, object]:
         """Deterministic JSON-ready model of the parsed plan."""
@@ -269,6 +369,60 @@ class Plan:
         return json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+_REGISTRY_CACHE: Optional[List[str]] = None
+
+
+def _load_requirement_registry() -> List[str]:
+    """Load and validate the committed \u00a724 requirement-ID registry.
+
+    The registry is part of the acceptance boundary (Task 18 item 3): a
+    missing, malformed, or divergent registry fails closed so free-form
+    matrices can never evade the stable ID set.
+    """
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is not None:
+        return _REGISTRY_CACHE
+    try:
+        data = json.loads(REQUIREMENTS_REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PlanError(
+            f"cannot load the committed \u00a724 requirement registry "
+            f"{REQUIREMENTS_REGISTRY}: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("requirement_ids"), list):
+        raise PlanError(
+            "the \u00a724 requirement registry must be an object with a "
+            "`requirement_ids` array"
+        )
+    ids = data["requirement_ids"]
+    seen: set = set()
+    for rid in ids:
+        if not isinstance(rid, str) or not MATRIX_ID_RE.fullmatch(rid):
+            raise PlanError(f"the \u00a724 requirement registry has an invalid ID: {rid!r}")
+        if rid in seen:
+            raise PlanError(f"the \u00a724 requirement registry has a duplicate ID: {rid}")
+        seen.add(rid)
+    if set(ids) != set(STABLE_REQUIREMENT_IDS):
+        raise PlanError(
+            "the \u00a724 requirement registry must contain exactly the stable "
+            "FACTORY-LOOP-SPEC \u00a724 IDs"
+        )
+    _REGISTRY_CACHE = list(ids)
+    return _REGISTRY_CACHE
+
+
+def _validate_spec_path(spec_path: str) -> None:
+    """Reject empty, absolute, dot-segment, and ``..`` traversal spec paths."""
+    if not spec_path:
+        raise PlanError("front matter spec_path must be non-empty and repository-relative")
+    if spec_path.startswith("/"):
+        raise PlanError("front matter spec_path must be repository-relative")
+    if any(segment in ("", ".", "..") for segment in spec_path.split("/")):
+        raise PlanError(
+            "front matter spec_path must not contain empty, `.`, or `..` segments"
+        )
+
+
 def _table_cells(line: str) -> List[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
@@ -278,11 +432,10 @@ def parse_plan(text: str) -> Plan:
     if not isinstance(text, str):
         raise TypeError("parse_plan expects a str")
     if text.startswith("\ufeff"):
-        text = text.lstrip("\ufeff")
-    ends_with_newline = text.endswith("\n")
+        raise PlanError("plan must not start with a UTF-8 byte order mark")
+    # Keep every line, including all trailing empty lines, so that
+    # ``serialize`` reproduces the input bytes exactly (Task 18 item 1).
     lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines = lines[:-1]
 
     # --- front matter ---------------------------------------------------
     if not lines or lines[0] != "---":
@@ -319,8 +472,7 @@ def parse_plan(text: str) -> Plan:
 
     front = dict(front_fields)
     spec_path = front["spec_path"]
-    if not spec_path or Path(spec_path).is_absolute():
-        raise PlanError("front matter spec_path must be repository-relative")
+    _validate_spec_path(spec_path)
     for key in ("spec_commit", "spec_blob", "base_commit"):
         if not SHA_RE.fullmatch(front[key]):
             raise PlanError(f"front matter {key} must be a 40-character Git object ID")
@@ -410,6 +562,8 @@ def parse_plan(text: str) -> Plan:
         heading = block.heading
         match = TASK_HEADING_RE.fullmatch(heading)
         if not match:
+            if re.fullmatch(r"^## Task\s+\d+:\s*$", heading):
+                raise PlanError(f"task heading `{heading}` has no title")
             raise PlanError(f"malformed task heading: `{heading}`")
         number = int(match.group(1))
         title = match.group(2).strip()
@@ -427,16 +581,40 @@ def parse_plan(text: str) -> Plan:
         seen_titles.add(title)
         tasks.append(_parse_task_block(number, title, block))
 
+    # Expand every dependency range against the parsed task count before any
+    # validation or graph traversal; oversized ranges fail here without ever
+    # being materialized (Task 18 item 5).
+    for task in tasks:
+        task.dependencies = _expand_spans(
+            task.dep_spans, len(tasks), what=f"task {task.number}", kind="deps"
+        )
+
     _validate_task_graph(tasks)
     _validate_status_invariants(tasks)
     finals = [task.number for task in tasks if task.title == FINAL_AUDIT_TITLE]
     if len(finals) != 1:
         raise PlanError(f"plan requires exactly one task titled `{FINAL_AUDIT_TITLE}`")
+    final_number = finals[0]
+    if tasks[-1].number != final_number:
+        raise PlanError(f"`{FINAL_AUDIT_TITLE}` must be the last task")
+    expected_deps = set(range(1, len(tasks) + 1))
+    expected_deps.discard(final_number)
+    if set(tasks[final_number - 1].dependencies) != expected_deps:
+        raise PlanError(
+            "the final audit task must depend on every other task and no others"
+        )
+    if front["status"] == "complete":
+        unfinished = sorted(task.number for task in tasks if task.status != "complete")
+        if unfinished:
+            raise PlanError(
+                "lifecycle `complete` requires every task `complete` "
+                f"(found non-complete: {unfinished})"
+            )
 
     # --- conformance matrix ---------------------------------------------------
     matrix_block = next(block for block in section_blocks
                         if block.heading == "## " + CANONICAL_SECTIONS[2])
-    matrix = _parse_matrix(matrix_block, {task.number for task in tasks})
+    matrix = _parse_matrix(matrix_block, tasks, lifecycle_status=front["status"])
 
     # --- interaction inventory ------------------------------------------------
     interactions_block = next(block for block in section_blocks
@@ -453,7 +631,6 @@ def parse_plan(text: str) -> Plan:
         matrix=matrix,
         interactions=interactions,
         _blocks=blocks,
-        _ends_with_newline=ends_with_newline,
     )
 
 
@@ -494,12 +671,18 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
             continue
         if not logical.strip():
             raise PlanError(f"task {number} has an empty `- {label}:` field")
+    for label in order:
+        if label in STRUCTURED_FIELDS and len(values[label]) > 1:
+            raise PlanError(
+                f"task {number} `- {label}:` is a structured field and must not "
+                "have continuation lines"
+            )
 
     status = values["Status"][0].strip()
     if status not in TASK_STATUSES:
         raise PlanError(f"task {number} has invalid status `{status}`")
 
-    dependencies = _parse_dep_items(
+    dep_spans = _parse_dep_spans(
         values["Dependencies"][0], what=f"task {number}"
     )
     if "Priority" in values:
@@ -512,7 +695,10 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
     else:
         priority = number
 
-    blocked_on = values["Blocked on"][0].strip() if "Blocked on" in values else None
+    blocked_on = (
+        "\n".join(part.lstrip(" \t") for part in values["Blocked on"])
+        if "Blocked on" in values else None
+    )
     if status == "blocked" and not blocked_on:
         raise PlanError(
             f"blocked task {number} must name an exact unresolved reference in `- Blocked on:`"
@@ -526,11 +712,12 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
         number=number,
         title=title,
         status=status,
-        dependencies=dependencies,
+        dependencies=[],
         priority=priority,
         blocked_on=blocked_on,
         fields=fields,
         field_order=order,
+        dep_spans=dep_spans,
     )
 
 
@@ -576,7 +763,7 @@ def _validate_status_invariants(tasks: List[Task]) -> None:
         raise PlanError("at most one task may be `in_progress`")
 
 
-def _parse_matrix(block: Block, task_numbers: set) -> List[MatrixRow]:
+def _parse_matrix(block: Block, tasks: List[Task], lifecycle_status: str) -> List[MatrixRow]:
     body = "\n".join(block.lines[1:])
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     table_lines = [line for line in lines if line.startswith("|")]
@@ -592,6 +779,9 @@ def _parse_matrix(block: Block, task_numbers: set) -> List[MatrixRow]:
         not re.fullmatch(r":?-{3,}:?", cell) for cell in separator
     ):
         raise PlanError("conformance matrix separator is malformed")
+
+    task_statuses = {task.number: task.status for task in tasks}
+    max_id = len(tasks)
 
     rows: List[MatrixRow] = []
     seen_ids: set = set()
@@ -611,13 +801,40 @@ def _parse_matrix(block: Block, task_numbers: set) -> List[MatrixRow]:
             raise PlanError(
                 f"conformance row {requirement_id} has invalid classification `{classification}`"
             )
-        refs = _parse_dep_items(task_cell, what=f"conformance row {requirement_id}")
+        spans = _parse_dep_spans(
+            task_cell, what=f"conformance row {requirement_id}", allow_empty=True
+        )
+        refs = _expand_spans(
+            spans, max_id, what=f"conformance row {requirement_id}", kind="matrix"
+        )
         if not refs and classification != "verified":
             raise PlanError(
                 f"non-verified conformance row {requirement_id} must reference an existing task"
             )
-        if not set(refs) <= task_numbers:
-            raise PlanError(f"conformance row {requirement_id} references an unknown task")
+        if classification == "verified":
+            if not refs:
+                raise PlanError(
+                    f"verified conformance row {requirement_id} must reference a "
+                    "completed task"
+                )
+            non_complete = sorted(
+                number for number in refs if task_statuses[number] != "complete"
+            )
+            if non_complete:
+                raise PlanError(
+                    f"verified conformance row {requirement_id} references a task "
+                    f"that is not complete: {non_complete}"
+                )
+        elif refs:
+            complete_refs = sorted(
+                number for number in refs if task_statuses[number] == "complete"
+            )
+            if len(complete_refs) == len(refs):
+                raise PlanError(
+                    f"non-verified conformance row {requirement_id} references only "
+                    f"completed tasks ({complete_refs}); a pending/in_progress/blocked "
+                    "task must own it"
+                )
         rows.append(MatrixRow(
             requirement_id=requirement_id,
             spec_sections=spec_sections,
@@ -627,6 +844,31 @@ def _parse_matrix(block: Block, task_numbers: set) -> List[MatrixRow]:
         ))
     if not rows:
         raise PlanError("conformance matrix has no requirement rows")
+    if lifecycle_status == "active" and any(
+        row.classification == "verified" for row in rows
+    ):
+        raise PlanError(
+            "an `active` plan may not contain a `verified` conformance row"
+        )
+    registry = _load_requirement_registry()
+    extra_ids = sorted(rid for rid in seen_ids if rid not in registry)
+    if extra_ids:
+        raise PlanError(
+            "conformance matrix has a requirement ID outside the \u00a724 registry: "
+            f"{', '.join(extra_ids)}"
+        )
+    missing_ids = sorted(rid for rid in registry if rid not in seen_ids)
+    if missing_ids:
+        raise PlanError(
+            "conformance matrix must cover every ID in the \u00a724 registry "
+            f"(missing: {', '.join(missing_ids)})"
+        )
+    if lifecycle_status == "complete" and any(
+        row.classification != "verified" for row in rows
+    ):
+        raise PlanError(
+            "a `complete` plan requires every conformance row `verified`"
+        )
     return rows
 
 
@@ -640,6 +882,10 @@ def _parse_interactions(block: Block) -> List[Interaction]:
             label = match.group(1)
             if label in found:
                 raise PlanError(f"interaction inventory has a duplicate `{label}`")
+            if not match.group(2).strip():
+                raise PlanError(
+                    f"interaction inventory `{label}` text must not be empty"
+                )
             found[label] = [match.group(2)]
             order.append(label)
             current = label
@@ -731,6 +977,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.write(plan.serialize())
     elif args.command == "roundtrip":
         serialized = plan.serialize()
+        if serialized.encode("utf-8") != data:
+            print("factory-plan: roundtrip changed the plan bytes", file=sys.stderr)
+            return 1
         try:
             rechecked = parse_plan(serialized)
         except PlanError as exc:

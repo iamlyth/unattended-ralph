@@ -40,6 +40,7 @@ from plan_parser import (  # noqa: E402
     Plan,
     PlanError,
     SCHEMA_NAME,
+    STABLE_REQUIREMENT_IDS,
     TASK_STATUSES,
     is_allowed_transition,
     parse_plan,
@@ -62,7 +63,7 @@ FIXTURE_EXPECTATIONS = {
     "plan-unknown-field.md": "unknown field",
     "plan-malformed-dependencies.md": "malformed dependencies",
     "plan-self-dependency.md": "cannot depend on itself",
-    "plan-unknown-dependency.md": "unknown dependencies",
+    "plan-unknown-dependency.md": "references unknown dependencies",
     "plan-two-in-progress.md": "at most one task",
     "plan-blocked-without-reference.md": "Blocked on",
     "plan-bad-priority.md": "priority must be",
@@ -79,7 +80,35 @@ FIXTURE_EXPECTATIONS = {
     "plan-unrecognized-heading.md": "unknown section heading",
     "plan-no-tasks.md": "no numbered tasks",
     "plan-no-title.md": "title",
+    # Task 18 hardened-boundary fixtures: exact adversarial inputs for every
+    # newly closed untrusted-plan acceptance gap.
+    "plan-bom.md": "byte order mark",
+    "plan-verified-empty-refs.md": "must reference a completed task",
+    "plan-verified-pending.md": "not complete",
+    "plan-verified-in-active-plan.md": "`active`",
+    "plan-matrix-missing-id.md": "must cover every",
+    "plan-matrix-extra-id.md": "outside the",
+    "plan-lifecycle-inconsistent.md": "every task",
+    "plan-dependency-range-oversize.md": "oversized dependency range",
+    "plan-matrix-range-oversize.md": "oversized task range",
+    "plan-range-overflow.md": "out-of-range dependency number",
+    "plan-structured-field-continuation.md": "must not have continuation lines",
+    "plan-empty-interaction.md": "must not be empty",
+    "plan-front-matter-traversal-path.md": "`..`",
+    "plan-final-audit-misplaced.md": "must be the last task",
+    "plan-final-audit-missing-dependency.md": "must depend on every other task",
+    "plan-matrix-complete-only-pending.md": "must own it",
+    "plan-empty-required-value.md": "has an empty",
+    "plan-missing-title.md": "has no title",
+    "plan-duplicate-title.md": "exactly one",
 }
+
+# Accepted fixtures that must parse, serialize byte-identically, and stay
+# accepted by the legacy validator (parser/legacy-validator agreement).
+ACCEPTED_FIXTURES = (
+    FIXTURES / "plan-valid-base.md",
+    FIXTURES / "plan-trailing-blank-line.md",
+)
 
 
 class CanonicalPlanAgreementTest(unittest.TestCase):
@@ -89,7 +118,7 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         plan = Plan.from_file(CANONICAL_PLAN)
         self.assertEqual(plan.schema, SCHEMA_NAME)
         self.assertEqual(plan.status, "active")
-        self.assertEqual(len(plan.tasks), 18)
+        self.assertEqual(len(plan.tasks), 19)
         self.assertEqual(len(plan.matrix), 24)
         self.assertEqual(
             [entry.boundary for entry in plan.interactions],
@@ -101,10 +130,10 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         )
         final = [task for task in plan.tasks if task.title == FINAL_AUDIT_TITLE]
         self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].number, 18)
-        self.assertEqual(set(final[0].dependencies), set(range(1, 18)))
+        self.assertEqual(final[0].number, 19)
+        self.assertEqual(set(final[0].dependencies), set(range(1, 19)))
         # Default priority derives from the task id for a stable sort.
-        self.assertEqual([task.priority for task in plan.tasks], list(range(1, 19)))
+        self.assertEqual([task.priority for task in plan.tasks], list(range(1, 20)))
         # Front matter binds the canonical specification.
         self.assertEqual(plan.spec_path, "docs/FACTORY-LOOP-SPEC.md")
 
@@ -217,6 +246,52 @@ class FixtureRejectionTest(unittest.TestCase):
         self.assertEqual(plan.tasks[0].dependencies, [])
         self.assertEqual(plan.tasks[1].dependencies, [1])
         self.assertEqual(plan.tasks[1].title, FINAL_AUDIT_TITLE)
+
+
+class BoundedRangeProbeTest(unittest.TestCase):
+    """Repeated oversized-range probes stay within a fixed time/memory ceiling.
+
+    Task 18 acceptance requires that attacker-sized dependency and matrix task
+    ranges are rejected without being materialized, so that repeated probes of
+    the range fixtures consume a bounded, endpoint-independent slice of CPU and
+    RSS. The parser bounds every range endpoint to the parsed task count before
+    expansion, so a probe loop must stay far below an endpoint-proportional
+    ceiling.
+    """
+
+    RANGE_FIXTURES = (
+        FIXTURES / "plan-dependency-range-oversize.md",
+        FIXTURES / "plan-matrix-range-oversize.md",
+        FIXTURES / "plan-range-overflow.md",
+    )
+    ITERATIONS = 200
+    # Generous fixed ceilings: the parser rejects each probe in microseconds,
+    # so a batch of 600 parses stays well under one CPU second and consumes a
+    # negligible amount of peak RSS regardless of the endpoint magnitude.
+    CPU_CEILING_SECONDS = 10.0
+    RSS_CEILING_KIB = 32 * 1024
+
+    def test_oversized_range_probes_stay_bounded(self) -> None:
+        import resource
+        import time
+
+        rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        start = time.process_time()
+        for _ in range(self.ITERATIONS):
+            for fixture in self.RANGE_FIXTURES:
+                with self.assertRaises(PlanError):
+                    parse_plan(fixture.read_text("utf-8"))
+        elapsed = time.process_time() - start
+        rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        self.assertLess(
+            elapsed, self.CPU_CEILING_SECONDS,
+            f"{self.ITERATIONS} range probes took {elapsed:.3f}s",
+        )
+        self.assertLess(
+            rss_after - rss_before, self.RSS_CEILING_KIB,
+            "range probes grew peak RSS by "
+            f"{rss_after - rss_before} KiB",
+        )
 
 
 class TransitionTableTest(unittest.TestCase):

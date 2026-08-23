@@ -155,6 +155,25 @@ states, ambiguous task sections, out-of-order or cyclic dependencies, and
 non-contiguous IDs. Output is a deterministic function of the plan bytes and
 `parse -> serialize -> parse` round-trips byte-exactly without semantic loss.
 
+The hardened acceptance boundary (Task 18) closes untrusted-input gaps with
+exact adversarial fixtures (`.factory/tests/fixtures/plan-*.md`): a UTF-8 BOM
+prefix never parses and trailing blank lines round-trip byte-exactly; a
+`verified` conformance row must reference only `complete` tasks and may not
+appear in an `active` plan; the matrix must cover every ID in the committed
+§24 registry (`.factory/schemas/factory-plan-v1.requirements.json`), no
+more and no fewer; a `complete` lifecycle requires every task complete;
+dependency and matrix ranges are never materialized and every endpoint is
+bounded to the parsed task count, so oversized/overflowing ranges raise a
+bounded `PlanError`; structured lifecycle fields reject continuation lines;
+interaction-boundary text must be non-empty; `spec_path` must be
+repository-relative and free of `.`/`..` traversal segments; the final-audit
+task must be last and depend on every other task; a non-verified row must be
+owned by a non-complete task; and missing/duplicated titles and empty
+required values are exact defects. Every invalid fixture raises a documented
+`PlanError` with no traceback or excessive allocation; every accepted
+fixture (including `plan-valid-base.md` and `plan-trailing-blank-line.md`)
+serializes byte-identically and stays accepted by the legacy validator.
+
 Inspect or validate the parsed plan at any time:
 
 ```bash

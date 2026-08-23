@@ -511,7 +511,7 @@ completes with evidence.
 
 ## Task 18: Close `factory-plan/v1` untrusted-plan acceptance gaps
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 2
 - Scope: Harden the Task 2 parser boundary with exact adversarial fixtures
   under `.factory/tests/fixtures/`:
@@ -559,9 +559,16 @@ completes with evidence.
   `scripts/validate-implementation-plan.py planning
   .factory/artifacts/implementation-plan.md`; bounded resource probe for range
   fixtures; `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`.
-- Evidence: exact fixture/result mapping, byte comparisons, registry digest,
-  bounded range-probe measurements, parser/legacy-validator agreement, and a
-  clean exact-commit test receipt are recorded in this task before completion.
+- Evidence: `.factory/tests/test-factory-plan-parser.py` passes 13/13,
+  including every named invalid fixture, byte-exact accepted fixtures,
+  parser/legacy-validator agreement, deterministic transitions, and 600
+  repeated oversized-range parses under enforced 10-second CPU and 32 MiB RSS
+  ceilings. The §24 registry SHA-256 is
+  `7d9f502995a7af00c0153093bddb38e2cb948fbe717742ba3d2b6fba9539b402`.
+  `scripts/validate-implementation-plan.py planning`,
+  `scripts/check-generic-leakage.sh`, and `scripts/check-docs-sync.sh` exit 0;
+  standalone parser round-trip is byte-exact. Task 3 remains blocked pending a
+  separate planner-owned `blocked -> pending` transition.
 - Documentation impact: `docs/FACTORY.md`,
   `.factory/schemas/factory-plan-v1.schema.md`.
 
