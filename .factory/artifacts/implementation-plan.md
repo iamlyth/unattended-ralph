@@ -40,7 +40,14 @@ Non-goals:
   is invoked, never reimplemented.
 - Committed schema `factory-plan/v1` (Markdown + schema files under
   `.factory/schemas/`) is the plan contract; the deterministic parser is part
-  of the acceptance boundary and round-trips without semantic loss.
+  of the acceptance boundary, round-trips without semantic loss, and rejects
+  any plan it cannot bind exactly: a UTF-8 BOM prefix never parses; a
+  `verified` conformance row must reference only `complete` tasks and may
+  not appear in an `active` lifecycle plan; the conformance matrix must
+  cover every ID in the committed §24 machine registry
+  (`.factory/schemas/factory-plan-v1.requirements.json`); and the plan
+  lifecycle status must be consistent with the task statuses (Task 2,
+  Task 18).
 - Exactly one minimal mutable control-state file
   `.factory-state/factory-loop.json` (schema `factory-state/v1`) carries only
   the §11 fields and enforces the §11 transition table; append-only evidence
@@ -82,7 +89,7 @@ completes with evidence.
 | CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6 |
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
-| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2, Task 14 |
+| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2, Task 14, Task 18 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
@@ -101,14 +108,17 @@ completes with evidence.
 | HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13 |
 | MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
-| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 18 |
+| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19 |
 
 ## Interaction acceptance inventory
 
 - input boundary: each role receives only its static prompt, the concise
   `AGENTS.md`, the canonical specification, the canonical plan, and the current
   code/tests at the bound Git state; the selected task is byte- and
-  digest-bound to the committed plan (AUTH-01, CTX-01, TASK-02).
+  digest-bound to the committed plan; the plan's machine gate is the
+  committed parser, whose byte-exact round-trip, §24 registry coverage,
+  `verified`-binding, and lifecycle checks make free-form prose unable to
+  alter lifecycle fields (AUTH-01, CTX-01, TASK-02, PLAN-01).
 - semantic boundary: no durable semantic memory, scratchpad prose, prior
   conversations, context summaries, or completion claims are injected or read
   as authority; findings reach later developers only through a planner
@@ -188,9 +198,17 @@ completes with evidence.
 
 ## Task 3: Deterministic plan-derived task selection
 
-- Status: pending
+- Status: blocked
 - Dependencies: Task 2
-- Scope: Implement `.factory/loop/selector.py` for §8: reject an invalid,
+- Blocked on: `factory-plan/v1` parser acceptance-boundary gaps P1-P4
+  (byte-exact BOM round-trip, unbound `verified` conformance rows, missing
+  §24 registry completeness, inconsistent lifecycle status) recorded by
+  Task 18; the remediated parser and its exact fixtures
+  (`.factory/tests/fixtures/plan-bom.md`, `plan-verified-empty-refs.md`,
+  `plan-verified-pending.md`, `plan-matrix-missing-id.md`, and
+  `plan-lifecycle-inconsistent.md`) unblock this task by a new planner
+  commit (`blocked -> pending`) only after Task 18 completes with evidence.
+- Scope: implement `.factory/loop/selector.py` for §8: reject an invalid,
   stale, or ambiguously parsed plan; resume the sole `in_progress` task;
   otherwise sort runnable `pending` tasks (dependencies complete) by explicit
   numeric priority then lexicographic task ID; select exactly one; classify
@@ -492,23 +510,80 @@ completes with evidence.
 - Documentation impact: README.md, `docs/FACTORY.md`, `docs/OPERATIONS.md`,
   `AGENTS.md`, help text.
 
-## Task 18: Final documentation and specification audit
+## Task 18: Close `factory-plan/v1` untrusted-plan acceptance gaps
 
 - Status: pending
-- Dependencies: Tasks 1-17
+- Dependencies: Task 2
+- Scope: Close the four concrete gaps in the Task 2 parser acceptance
+  boundary, each with an exact adversarial fixture under
+  `.factory/tests/fixtures/plan-*.md`:
+  1. byte-exact round-trip: the parser must reject a UTF-8 BOM-prefixed plan
+     (fixture `plan-bom.md`), and the `roundtrip` and `serialize` commands
+     must compare the actual serialized bytes with the input bytes so a
+     byte difference is reported as a failure, never as `byte-exact`;
+  2. `verified` binding: the parser must reject a conformance row classified
+     `verified` whose task cell is empty or `None` (fixture
+     `plan-verified-empty-refs.md`) or whose referenced tasks are not all
+     `complete` (fixture `plan-verified-pending.md`); no `verified` row is
+     valid in an `active` lifecycle plan;
+  3. §24 registry completeness: commit the machine-readable §24 requirement
+     registry `.factory/schemas/factory-plan-v1.requirements.json` (the 24
+     IDs from the §24 table of the committed `docs/FACTORY-LOOP-SPEC.md`),
+     and the parser must reject any conformance matrix whose requirement-ID
+     set differs from the registry (fixture `plan-matrix-missing-id.md`
+     drops one §24 row);
+  4. lifecycle consistency: front-matter `status: complete` must be
+     rejected unless every task is `complete` (fixture
+     `plan-lifecycle-inconsistent.md`).
+  Update `.factory/schemas/factory-plan-v1.schema.md` and the JSON model
+  contract so the documented grammar and defect-class tables name the new
+  fixtures, and extend the harness-owned suite
+  `.factory/tests/test-factory-plan-parser.py` (whose committed shape
+  assertions still expect the 18-task ledger of the Task 2 revision) so it
+  tracks the 19-task ledger and keeps proving byte-exact round-trip,
+  deterministic output, and agreement with
+  `scripts/validate-implementation-plan.py` on the canonical committed plan.
+- Acceptance criteria: every new fixture is rejected by the parser with the
+  documented `PlanError` class; every accepted document (canonical plan and
+  valid fixtures) round-trips with the serialized bytes byte-identical to
+  the input bytes; the canonical matrix requirement-ID set equals the
+  committed §24 registry; the canonical plan lifecycle status and task
+  statuses are consistent; the existing validator still agrees with the
+  parser on the canonical plan.
+- Verification: `.factory/tests/test-factory-plan-parser.py` (harness-owned,
+  grown past the 12 Task 2 tests);
+  `scripts/validate-implementation-plan.py planning
+  .factory/artifacts/implementation-plan.md`.
+- Evidence: the exact fixtures `plan-bom.md`, `plan-verified-empty-refs.md`,
+  `plan-verified-pending.md`, `plan-matrix-missing-id.md`, and
+  `plan-lifecycle-inconsistent.md` are committed under
+  `.factory/tests/fixtures/` and rejected with documented `PlanError`
+  classes; the byte-level probe compares input and serialized bytes for
+  every accepted plan; the registry
+  `.factory/schemas/factory-plan-v1.requirements.json` matches the 24 §24
+  rows of the canonical plan matrix and the §24 table of the committed spec
+  (commit `2d6a4fd`, blob `ca2334ab…`); the canonical plan round-trips
+  byte-exactly and the harness suite passes.
+- Documentation impact: `docs/FACTORY.md`,
+  `.factory/schemas/factory-plan-v1.schema.md`.
+
+## Task 19: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Tasks 1-18
 - Scope: Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
-  matrix and the
-  sidecar is `verified` with exact evidence, the interaction inventory
-  covers input/semantic/production/evidence, all open findings and defects are
-  closed or explicitly documented, the repository is clean at the audit
-  commit, and the documentation (README, FACTORY, OPERATIONS, AGENTS) is in
-  sync. The auditor is a separate fresh process with a distinct static
-  prompt, no developer/tester conversation, and reads only authoritative
-  inputs at the exact commit. An audit finding becomes a next-round planner
-  task; the audit itself never edits product code or the plan.
-- Acceptance criteria: audit report records every §31 requirement verified or
-  an explicit finding; no acceptance-critical audit finding remains; the
+  matrix and the sidecar is `verified` with exact evidence, the interaction
+  inventory covers input/semantic/production/evidence, all open findings and
+  defects are closed or explicitly documented, the repository is clean at
+  the audit commit, and the documentation (README, FACTORY, OPERATIONS,
+  AGENTS) is in sync. The auditor is a separate fresh process with a
+  distinct static prompt, no developer/tester conversation, and reads only
+  authoritative inputs at the exact commit. An audit finding becomes a
+  next-round planner task; the audit itself never edits product code or the
+  plan.
+- Acceptance criteria: audit report records every §24 requirement verified
+  or an explicit finding; no acceptance-critical audit finding remains; the
   campaign does not claim success unless the final audit is clean and the
   conformance sidecar shows all verified.
 - Verification: `scripts/validate-conformance.py`;
