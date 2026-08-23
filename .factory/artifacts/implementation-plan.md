@@ -558,6 +558,12 @@ completes with evidence.
   13. **Provider/store tamper tests.** A tampered provider binding and a
       tampered credential store (mode/owner/link/content/size) fail closed
       with exact fixtures.
+  14. **Loopback HTTP settings seam is diagnostics/private-test only.** The
+      explicit loopback HTTP test seam (item 9) is a diagnostics/private-test
+      settings seam reachable only through the hidden `.factory/` test suite
+      and is absent from the production launch CLI/API unless an explicit
+      trusted diagnostics authority is present; no production invocation may
+      enable `http://` transport.
 - Acceptance criteria: the exit table is enforced by fixtures; the
   synthetic-secret probe never leaks into cmdline/environ; waiting aborts
   cleanly on a signal at the initial check, the wait, or the final check;
@@ -565,10 +571,12 @@ completes with evidence.
   gating is per policy with strict known-provider validation; bounded
   same-origin HTTPS redirects with 3xx/401/403 fatal; the `re.I | re.S`
   parser drives the retained fixtures; ambient `OLLAMA_COOKIE` is scrubbed
-  without crashing; HTTPS-only with an explicit loopback seam; a zero poll
-  interval and a CRLF/control legacy cookie are rejected; every exception is
-  a documented exit; an `ollama`-provider launch fails closed until the Task
-  8 confinement proof is present.
+  without crashing; HTTPS-only with an explicit loopback seam, and that
+  loopback HTTP settings seam is diagnostics/private-test only and absent
+  from the production CLI unless an explicit trusted diagnostics authority
+  is present; a zero poll interval and a CRLF/control legacy cookie are
+  rejected; every exception is a documented exit; an `ollama`-provider
+  launch fails closed until the Task 8 confinement proof is present.
 - Verification: the hidden `.factory/tests/test-factory-usage.py` extended
   with redirect/3xx/401/403, loopback-only HTTPS, ambient-scrub, CRLF, zero
   poll, provider/store tamper, and initial/final-check signal fixtures;
@@ -602,7 +610,16 @@ completes with evidence.
   Ollama usage-guard source (`usage.py`, `usage_fetch.py`) is staged and
   executed only from its exact-commit blob or the trusted external
   executable prefix — a proof that the Task 7 production Ollama launch gate
-  requires before any `ollama`-provider invocation proceeds.
+  requires before any `ollama`-provider invocation proceeds. The confinement
+  proof is a real, effective proof, not a synthetic one: it binds every
+  effective credential channel the guard actually consumes — the default
+  operator env store, any explicitly specified cookie file, and any
+  stdin-provided credential provenance — and proves each such channel,
+  together with the exact-commit guard source, is outside or
+  inaccessible/read-only to model tools at the bound exact commit; a
+  synthetic or simulated probe is never evidence, and only a probe
+  exercising the real production launch path against the real consumed
+  channels can evidence confinement.
 - Acceptance criteria: each role launch proves it can read the allowlisted
   inputs and cannot read any forbidden path; the role-prompt digests match the
   campaign binding; no completion claim from a previous attempt is present in
@@ -611,8 +628,15 @@ completes with evidence.
   confinement authority proves `.factory/` and the operator Ollama
   credential store(s) are inaccessible/read-only, and the Ollama usage-guard
   source runs only from its exact-commit blob or the trusted external
-  executable prefix.
-- Verification: `tests/test-factory-confinement.sh`.
+  executable prefix; the real confinement proof binds every effective
+  credential channel actually consumed (default env store, explicit cookie
+  file, stdin provenance) and the exact-commit guard source, proving each is
+  outside or inaccessible to model tools, and synthetic proof is never
+  evidence.
+- Verification: `tests/test-factory-confinement.sh`, including a real
+  production-launch confinement probe that exercises the default operator env
+  store, an explicitly specified cookie file, and stdin-provided credential
+  provenance against the bound exact commit (no synthetic-only evidence).
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
 ## Task 9: Phase and campaign state machine with outcomes
