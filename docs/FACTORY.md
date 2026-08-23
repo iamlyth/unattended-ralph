@@ -566,6 +566,109 @@ Every implementation plan ends with **Final documentation and specification audi
 
 Read-only reviewers compare source, tests, configuration, README, operations, and the specification, specifically looking for tests that bypass production initialization/event dispatch or assert pixels without semantic behavior. The sole writer corrects documentation and runs final verification. If review finds a gap, Ralph appends remediation and continues; `LOOP_COMPLETE` is forbidden until the complete definition of done passes.
 
+## Harness footprint and packaging isolation
+
+The harness is intentionally invisible to the adopting product: every
+committed harness file lives under the hidden `.factory/` namespace, every
+runtime artifact (state, locks, logs, receipts) lives under the ignored
+`.factory-state/` namespace created mode 0700, and the Pi role definitions
+live under `.pi/`.  The product root receives no new visible harness file,
+and product source/test/packaging/build discovery never traverses the
+hidden namespaces — a generated project can delete `.factory/`,
+`.factory-state/`, and `.pi/` and lose nothing but the harness.
+
+`.factory/loop/footprint.py` is the deterministic inventory authority behind
+this boundary (HIDE-01, §3; Task 13). It enumerates every harness-installed
+or harness-generated path (tracked content, present-on-disk content, and
+external-prefix installs) and fails closed when a path escapes the allowed
+namespaces or the trusted external executable prefix. It rejects absolute,
+traversal, and control-character paths; case-fold, Unicode-normalization,
+and trailing-dot/space namespace escapes (`.Factory/`, NFKC fullwidth
+aliasing, `.factory.`/`.factory ` — Windows/macOS strip trailing dots and
+spaces when creating entries) in *every* product-tree segment — tracked
+and on disk — not only the first; root harness marker basenames (legacy
+root factory files *and* harness config artifacts like
+`factory-loop.json`) at the product root or at any depth; symlink and
+gitlink modes on any
+`.factory/`, `.pi/`, or `.ralph/` tracked entry; symlink escapes inside the
+hidden namespaces (the legacy `.ralph/` namespace is scanned on disk too)
+and product-side symlinks into the harness; hardlink aliasing between a
+harness inode and a product path; FIFOs, sockets, and device nodes beneath
+the hidden namespaces; entries whose device differs from the repository
+root (a hidden namespace or `.ralph/` crossing a mount point); tracked
+`.factory-state/` runtime state; `.factory-state/` that is not exactly mode
+0700 and owned by the invoking user (the ownership check is never skipped
+for root — root fails closed earlier through the pinned-Git resolver);
+legacy root harness files (`PROMPT.md`, `IMPLEMENTATION_PLAN.md`,
+`factory.toml`, ...); harness config artifacts and hidden-namespace entries
+inside product source/test/packaging/build trees; and product install
+prefixes that receive hidden-namespace content, harness markers, symlinks,
+special inodes, or mount crossings at *any* depth of the staged tree. The
+pinned external executables (the Git boundary binary) must resolve under
+exactly the supported immutable executable roots — `/usr/bin`, `/bin`,
+`/sbin`, `/run/current-system`, or the Nix store — never `/etc`, `/lib`,
+or `/lib64` (configuration and shared libraries are not executable roots
+and no pinned candidate ever lives there).
+
+Removal and discovery are fail-closed too: `remove_harness()` verifies
+every namespace root and descendant against the repository's device before
+deleting anything, and refuses entirely when a root or descendant crosses a
+filesystem/mount boundary; on-disk product discovery is derived from the
+pinned `git ls-files -co --exclude-standard -z` set, so git-ignored
+credentials, locks, caches, logs, and build artifacts can never reach a
+packaging glob; and an external-prefix harness install must carry exactly
+its operator manifest (no omitted manifest file, no extra product file or
+symlink) plus only explicitly listed trusted executable entrypoints, under
+a real (never symlinked) prefix that is outside the *resolved* product
+tree (containment compares resolved paths, so a root or prefix reached
+through a symlinked ancestor cannot hide an inside-the-tree prefix).
+
+One `remove_harness()` limitation is accepted by design and deferred: the
+function is a trusted-operator tool, and between its pre-deletion device
+verification and the actual deletion a *privileged* attacker who can
+bind-mount a filesystem over a harness namespace could still cause the
+removal to cross into the mounted tree — a check-to-use (TOCTOU) window
+that no ordinary permission walk closes without a descriptor-anchored
+deletion primitive. That window requires root/bind-mount privileges the
+operator already trusts, so it is recorded here and assigned to Task 16; an
+invasive descriptor-anchored deletion rewrite is deliberately out of scope
+for Task 13, and the harness keeps the documented fail-closed device
+pre-check.
+
+Two gates enforce the inventory:
+
+```bash
+./.factory/tests/test-factory-footprint.sh
+python3 .factory/loop/footprint.py --root "$PWD" --json
+```
+
+The harness-owned suite `.factory/tests/test-factory-footprint.py`
+plus its driver `.factory/tests/test-factory-footprint.sh` prove every escape
+class with committed fixture repositories: containment of the tracked
+harness, tracked-`.factory-state` rejection, role-def-only `.pi/`, legacy
+`.ralph/` frozen to its migration allowlist (tracked and on disk),
+symlink/gitlink modes across all three namespaces and legacy, root
+forbidden files and harness config-artifact markers at the product root or
+at any depth, case/Unicode/trailing-dot-and-space escapes in nested product
+segments, symlink/hardlink escapes, special-inode rejection, simulated
+mount/device crossings, exact-0700 and ownership of `.factory-state`,
+discovery exclusion (including git-ignored secrets, build artifacts, root
+harness markers, and namespace aliases), external-prefix manifest
+completeness, symlinked-prefix and resolved-containment rejection, and
+entrypoint hygiene, recursive product-prefix contamination (nested hidden
+namespaces, markers, symlinks, special inodes, mount crossings), the
+narrowed trusted executable roots (no `/etc`, `/lib`, `/lib64`), and
+deletion of the hidden namespaces without touching a
+single product byte. `verify-boilerplate.sh` runs the packaging gate; the
+generic-leak gate (`scripts/check-generic-leakage.sh`) remains the
+product-neutrality scan.
+
+The check is read-only and deterministic: it never writes to the
+repository, never touches `.ralph/`, and creates no branch or worktree. It
+matters because a harness file that leaks into the product tree — even an
+ignored one — can be packaged, installed, or globbed by product discovery
+and shipped to end users, which is exactly the isolation §3 forbids.
+
 ## Machine-readable acceptance evidence
 
 Proxy evidence must not be promoted to production verification. Three tracked artifacts make acceptance machine-checked:

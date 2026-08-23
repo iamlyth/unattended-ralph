@@ -105,7 +105,7 @@ completes with evidence.
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12, Task 16 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16 |
 | RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12, Task 16 |
-| HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13 |
+| HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16 |
 | MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
@@ -924,7 +924,7 @@ completes with evidence.
 
 ## Task 13: Harness isolation and installed-footprint inventory
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 1
 - Scope: A conformance test inventories every file the harness installs or
   generates and fails when a harness-owned path escapes the hidden
@@ -936,9 +936,19 @@ completes with evidence.
 - Acceptance criteria: the installed-file inventory test passes; a fixture
   harness file placed in a product path fails the gate; build/packaging
   discovery yields no `.factory/` artifacts.
-- Verification: `tests/test-factory-footprint.sh`;
+- Verification: `.factory/tests/test-factory-footprint.sh` and
   `scripts/check-generic-leakage.sh`.
 - Documentation impact: `docs/FACTORY.md`.
+- Evidence: hidden footprint 97/97 and its shell driver pass warning-clean;
+  the live tracked/on-disk/external inventory is clean, product discovery
+  excludes hidden/ignored credential and build artifacts, product-install
+  contamination fails, and docs/leakage/diff gates pass. Adversarial fixtures
+  cover NUL-safe tracked modes, whitespace filenames, `.pi`/`.ralph` links,
+  every-segment case/NFKC/trailing-dot aliases, root/nested markers, special
+  inodes and device crossings, deletion refusal, exact 0700 ownership, and
+  complete external manifests. Independent security review accepted the
+  remediated checkpoint with no blockers. `verify-boilerplate.sh` remains
+  nonzero only at the legacy context-summary authority assigned to Task 15.
 
 ## Task 14: Conformance sidecar and requirement policy for the §24 registry
 
@@ -1030,7 +1040,9 @@ completes with evidence.
   delivery and reap, timeout/crash dirty-work preservation, tamper state fail
   closed, Ollama check/wait before invocation with quota errors blocking,
   credential enforcement and redaction active, exact-commit receipt/manifest
-  trust, no completion-token bypass, finite termination fixtures for every
+  trust, harness-removal privileged bind-mount swap/TOCTOU refusal (the Task 13
+  accepted residual), no completion-token bypass, finite termination fixtures
+  for every
   outcome, migration without Ralph imports, lock non-inheritance, setsid
   escape, task-excerpt byte binding, context confinement, mid-phase mutation
   fail closed, synthetic Ollama cookie argv/environ, immutable verifier

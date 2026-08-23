@@ -274,6 +274,7 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
+./.factory/tests/test-factory-footprint.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by
 # default, defaults no vision model (consumer-configured placeholder), and keeps
 # every mutable capture/review/calibration/probe path under the ignored
