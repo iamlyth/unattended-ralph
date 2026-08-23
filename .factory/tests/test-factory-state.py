@@ -44,6 +44,7 @@ FIXTURES = ROOT / ".factory" / "tests" / "fixtures"
 STATE_SCRIPT = LOOP / "state.py"
 
 sys.path.insert(0, str(LOOP))
+import state as state_module  # noqa: E402  (module object for internal race hooks)
 from state import (  # noqa: E402
     AUDIT_FINAL_TARGETS,
     BINDING_FIELDS,
@@ -52,6 +53,7 @@ from state import (  # noqa: E402
     LEDGER_MAX,
     OUTCOMES,
     PHASES,
+    PHASE_OUTCOMES,
     PHASE_VALUES,
     RETRY_OUTCOMES,
     SCHEMA_NAME,
@@ -67,12 +69,15 @@ from state import (  # noqa: E402
     StateTamperError,
     StateTransitionError,
     advance,
+    atomic_write_json,
     begin_attempt,
     init_state,
     load_state,
+    owner_tamper_gate,
     parse_state,
     record_phase_digest,
     record_retry,
+    recover_state,
     repository_identity,
     state_digest,
     verify_phase_digest,
@@ -93,6 +98,8 @@ MONOTONIC2 = MONOTONIC + 1
 VALID_FIXTURES = (
     "state-valid-initial.json",
     "state-valid-implementation.json",
+    "state-valid-implementation-planned.json",
+    "state-valid-planning-post-audit.json",
     "state-valid-retry-planning.json",
     "state-valid-verification.json",
     "state-valid-audit.json",
@@ -125,8 +132,11 @@ TAMPER_FIXTURES = {
     "state-phase-unknown.json": "`current_phase` must be one of",
     "state-attempt-number-negative.json": "`attempt_number` must be a non-negative integer",
     "state-attempt-number-bool.json": "`attempt_number` must be an integer",
-    "state-phase-monotonic-negative.json": "`phase_started_at_monotonic` must be a non-negative integer",
+    "state-phase-monotonic-negative.json": "positive monotonic marker",
+    "state-phase-monotonic-zero.json": "positive monotonic marker",
     "state-attempt-monotonic-negative.json": "`attempt_started_at_monotonic` must be a non-negative integer",
+    "state-attempt-before-phase.json": "can never precede",
+    "state-outcome-phase-mismatch.json": "not a §13 outcome",
     "state-terminal-outcome-mismatch.json": "must record",
     "state-terminal-outcome-null.json": "must record",
     "state-task-without-attempt.json": "must have begun at least one attempt",
@@ -135,6 +145,7 @@ TAMPER_FIXTURES = {
     "state-task-id-zero.json": "`selected_task_id` must be a positive integer",
     "state-task-id-bool.json": "`selected_task_id` must be a positive integer",
     "state-attempt-without-timestamp.json": "positive `attempt_started_at_monotonic`",
+    "state-attempt-marker-without-attempt.json": "no attempt is active",
     "state-outcome-unknown.json": "trusted outcome enum",
     "state-outcome-number.json": "trusted outcome enum",
     "state-spec-digest-invalid.json": "`specification_digest` must match",
@@ -148,6 +159,24 @@ TAMPER_FIXTURES = {
     "state-phase-base-commit-invalid.json": "`phase_base_commit` must match",
     "state-phase-base-commit-uppercase.json": "`phase_base_commit` must match",
 }
+
+# Independent (S6) fixtures: the digest constants and the expected transition
+# states are authored as fixed values in the corpus, never derived from the
+# code path they exercise.
+DIGEST_FIXTURES = (
+    "state-digest-valid-initial.json",
+    "state-digest-valid-implementation.json",
+    "state-digest-valid-audit.json",
+)
+
+TRANSITION_FIXTURES = (
+    "state-transition-planning-planned.json",
+    "state-transition-planning-failed.json",
+    "state-transition-implementation-completed.json",
+    "state-transition-verification-pass.json",
+    "state-transition-audit-nonfinal.json",
+    "state-transition-audit-final.json",
+)
 
 UNSAFE_FIXTURES = (
     "state-unsafe-not-json.json",
@@ -165,7 +194,12 @@ LEDGER_FIXTURES = (
 )
 
 ALL_FIXTURES = sorted(
-    VALID_FIXTURES + tuple(TAMPER_FIXTURES) + UNSAFE_FIXTURES + LEDGER_FIXTURES
+    VALID_FIXTURES
+    + tuple(TAMPER_FIXTURES)
+    + DIGEST_FIXTURES
+    + TRANSITION_FIXTURES
+    + UNSAFE_FIXTURES
+    + LEDGER_FIXTURES
 )
 
 # The documented §11 advance edge set (audit finality is handled explicitly).
@@ -300,6 +334,17 @@ class StateConformanceCase(unittest.TestCase):
         path = FIXTURES / name
         self.assertTrue(path.is_file(), f"missing fixture {path}")
         return path
+
+    def set_hook(self, hook_name: str, hook) -> None:
+        """Install a module-private race hook and guarantee it is cleared.
+
+        The hooks are one-shot (consumed and cleared immediately before the
+        operation they perturb), so a fired hook leaves no residue; the
+        cleanup here is defense in depth so a test that raises before the
+        hook fires can never leak a stale hook into a later test.
+        """
+        setattr(state_module, hook_name, hook)
+        self.addCleanup(lambda: setattr(state_module, hook_name, None))
 
 
 class FixtureCorpusTest(StateConformanceCase):
@@ -462,15 +507,54 @@ class CounterTest(StateConformanceCase):
             parse_state(json.loads(
                 self.fixture("state-attempt-number-bool.json").read_text("utf-8")
             ))
-        with self.assertRaisesRegex(StateTamperError, "non-negative integer"):
-            parse_state(json.loads(
-                self.fixture("state-phase-monotonic-negative.json").read_text("utf-8")
-            ))
+        for name in (
+            "state-phase-monotonic-negative.json",
+            "state-phase-monotonic-zero.json",
+        ):
+            with self.subTest(fixture=name):
+                with self.assertRaisesRegex(StateTamperError, "positive monotonic"):
+                    parse_state(json.loads(
+                        self.fixture(name).read_text("utf-8")
+                    ))
         with self.assertRaisesRegex(StateTamperError, "non-negative integer"):
             parse_state(json.loads(
                 self.fixture("state-attempt-monotonic-negative.json")
                 .read_text("utf-8")
             ))
+
+    def test_phase_outcome_enum_values_are_phase_scoped(self) -> None:
+        """Task 19 S9: `last_outcome` must belong to the owning phase's §13 set."""
+        mismatch = json.loads(
+            self.fixture("state-outcome-phase-mismatch.json").read_text("utf-8")
+        )
+        with self.assertRaisesRegex(StateTamperError, "not a §13 outcome"):
+            parse_state(mismatch)
+        # The per-phase outcome sets are exact and documented.
+        self.assertEqual(
+            PHASE_OUTCOMES["planning"], frozenset(
+                {"interrupted", "pass", "findings", "blocked"}
+            )
+        )
+        self.assertEqual(
+            PHASE_OUTCOMES["implementation"], frozenset(
+                {"planned", "task_progress", "task_failed", "interrupted"}
+            )
+        )
+        self.assertEqual(
+            PHASE_OUTCOMES["verification"], frozenset(
+                {"task_completed", "work_exhausted", "blocked", "task_failed"}
+            )
+        )
+        self.assertEqual(
+            PHASE_OUTCOMES["audit"], frozenset({"pass", "findings", "blocked"})
+        )
+        # `last_outcome` is null only during a fresh planning phase.
+        null_verification = json.loads(
+            self.fixture("state-valid-verification.json").read_text("utf-8")
+        )
+        null_verification["last_outcome"] = None
+        with self.assertRaisesRegex(StateTamperError, "null only during the planning"):
+            parse_state(null_verification)
 
     def test_phase_enum_is_exact(self) -> None:
         self.assertEqual(PHASES, ("planning", "implementation", "verification", "audit"))
@@ -564,6 +648,21 @@ class TaskAttemptTest(StateConformanceCase):
         with self.assertRaisesRegex(StateTamperError, "attempt_started_at_monotonic"):
             parse_state(data)
 
+    def test_attempt_marker_is_zero_without_an_active_attempt(self) -> None:
+        """Task 19 S9 inverse marker invariant: no attempt => marker zero.
+
+        A positive ``attempt_started_at_monotonic`` while ``attempt_number``
+        is zero is a forged marker and fails closed with the exact invariant
+        message (the committed ``state-attempt-marker-without-attempt.json``
+        fixture is authored independently from this test's expectations).
+        """
+        data = json.loads(
+            self.fixture("state-attempt-marker-without-attempt.json")
+            .read_text("utf-8")
+        )
+        with self.assertRaisesRegex(StateTamperError, "no attempt is active"):
+            parse_state(data)
+
     def test_valid_implementation_fixture_is_accepted(self) -> None:
         data = json.loads(
             self.fixture("state-valid-implementation.json").read_text("utf-8")
@@ -637,7 +736,9 @@ class DigestDeterminismTest(StateConformanceCase):
             "campaign_id": make_state(campaign_id="other-campaign"),
             "rounds_requested": make_state(rounds_requested=3),
             "current_round": make_state(current_round=2, rounds_requested=3),
-            "current_phase": make_state(current_phase="verification"),
+            "current_phase": make_state(
+                current_phase="verification", last_outcome="task_completed"
+            ),
             "specification_digest": make_state(specification_digest="0" * 64),
             "plan_digest": make_state(plan_digest="0" * 64),
             "audit_objectives_digest": make_state(audit_objectives_digest="0" * 64),
@@ -648,7 +749,14 @@ class DigestDeterminismTest(StateConformanceCase):
             "phase_started_at_monotonic": make_state(
                 phase_started_at_monotonic=MONOTONIC + 7
             ),
-            "last_outcome": make_state(last_outcome="failed"),
+            "phase_and_outcome": make_state(
+                current_phase="audit", last_outcome="pass"
+            ),
+            "attempt_binding": make_state(
+                current_phase="implementation", selected_task_id=4,
+                attempt_number=1, attempt_started_at_monotonic=MONOTONIC,
+                last_outcome="task_progress",
+            ),
         }
         self.assertEqual(
             len({state_digest(v) for v in variants.values()}),
@@ -754,18 +862,33 @@ class TransitionTableTest(StateConformanceCase):
         self.assertEqual(round_two.plan_digest, "1" * 64)
 
     def test_plan_binding_rejected_outside_the_edge(self) -> None:
-        verification = make_state(current_phase="verification", last_outcome="pass")
+        verification = make_state(
+            current_phase="verification", last_outcome="task_completed"
+        )
         with self.assertRaisesRegex(
             StateTransitionError, "bind only on the"
         ):
             advance(verification, "pass", plan_digest="0" * 64, now=1)
 
-    def test_now_must_be_a_nonnegative_marker(self) -> None:
-        with self.assertRaisesRegex(StateTamperError, "non-negative monotonic"):
-            advance(
-                make_state(), "planned",
-                plan_digest="0" * 64, phase_base_commit="0" * 40, now=-1,
-            )
+    def test_now_must_be_a_positive_marker(self) -> None:
+        kwargs = dict(plan_digest="0" * 64, phase_base_commit="0" * 40)
+        with self.assertRaisesRegex(StateTamperError, "positive monotonic"):
+            advance(make_state(), "planned", now=-1, **kwargs)
+        with self.assertRaisesRegex(StateTamperError, "epoch marker"):
+            advance(make_state(), "planned", now=0, **kwargs)
+
+    def test_begin_attempt_rejects_now_zero_and_coupling(self) -> None:
+        """S3: epoch-zero markers are tamper; S9: attempt >= owning phase."""
+        state = advance(
+            make_state(), "planned", plan_digest="0" * 64,
+            phase_base_commit="0" * 40, now=100,
+        )
+        with self.assertRaisesRegex(StateTamperError, "epoch marker"):
+            begin_attempt(state, 4, now=0)
+        with self.assertRaisesRegex(StateTamperError, "can never precede"):
+            begin_attempt(state, 4, now=1)
+        began = begin_attempt(state, 4, now=100)
+        self.assertEqual(began.attempt_started_at_monotonic, 100)
 
     def test_round_increments_only_on_audit_nonfinal(self) -> None:
         state = make_state()
@@ -829,10 +952,12 @@ class RetryAndAttemptTest(StateConformanceCase):
     def test_retry_is_rejected_where_not_documented(self) -> None:
         cases = (
             (make_state(), "task_progress"),                  # planning
-            (make_state(current_phase="verification"), "interrupted"),
-            (make_state(current_phase="audit"), "planned"),
+            (make_state(current_phase="verification",
+                        last_outcome="task_completed"), "interrupted"),
+            (make_state(current_phase="audit", last_outcome="pass"), "planned"),
             (implementation_state(), "pass"),
-            (make_state(current_phase="success", last_outcome="success"), "interrupted"),
+            (make_state(current_phase="success", last_outcome="success"),
+             "interrupted"),
         )
         for state, outcome in cases:
             with self.subTest(phase=state.current_phase, outcome=outcome):
@@ -865,10 +990,10 @@ class RetryAndAttemptTest(StateConformanceCase):
         state = begin_attempt(make_state(
             current_phase="implementation", last_outcome="task_progress",
             phase_started_at_monotonic=MONOTONIC,
-        ), 4, now=10)
-        state = begin_attempt(state, 4, now=20)
+        ), 4, now=MONOTONIC)
+        state = begin_attempt(state, 4, now=MONOTONIC + 1)
         self.assertEqual(state.attempt_number, 2)
-        switched = begin_attempt(state, 7, now=30)
+        switched = begin_attempt(state, 7, now=MONOTONIC + 2)
         self.assertEqual(switched.selected_task_id, 7)
         self.assertEqual(switched.attempt_number, 1)
 
@@ -877,7 +1002,7 @@ class RetryAndAttemptTest(StateConformanceCase):
             begin_attempt(make_state(), 4)
 
     def test_begin_attempt_requires_positive_task_id(self) -> None:
-        state = make_state(current_phase="implementation")
+        state = implementation_state()
         for task_id in (0, -1, True):
             with self.subTest(task_id=task_id):
                 with self.assertRaises(StateTransitionError):
@@ -983,16 +1108,64 @@ class SecureIoTamperTest(StateConformanceCase):
         with self.assertRaises(StateTamperError):
             load_state(root)
 
-    @unittest.skipUnless(
-        os.geteuid() == 0, "owner tamper requires root to change file ownership"
-    )
     def test_owner_tamper_fails_closed(self) -> None:
+        """The owner probe runs and asserts the gate; never skips (Task 19 S7).
+
+        :func:`owner_tamper_gate` performs a real ``chown(2)`` and declares
+        what the kernel actually allows.  A privileged run can change file
+        ownership and really exercises the owner-tamper fail-closed path; an
+        unprivileged run cannot, and the gate reports the ownership check
+        unavailable with a fail-closed reason.  Either way the probe RUNS and
+        asserts the gate — it never silently skips and never falsely claims
+        owner-tamper coverage when the kernel refuses the ownership change.
+        """
         root = self.new_repo()
         self.init_campaign(root)
+        gate = owner_tamper_gate(root)
+        if not gate["available"]:
+            # The kernel refused the ownership change: the owner check is
+            # genuinely unavailable in this process.  Assert the gate declared
+            # the unavailability with a fail-closed reason, and do NOT claim
+            # owner-tamper coverage.
+            self.assertTrue(
+                gate["reason"], "an unavailable owner gate must declare a reason"
+            )
+            self.assertIn(
+                "owner", gate["reason"].lower(),
+                "an unavailable owner gate must name the owner check",
+            )
+            return
+        self.assertIsNone(gate["reason"])
+        # The kernel honors ownership changes: exercise the real owner tamper
+        # and assert the state reader fails closed on the foreign owner.
         state_file = root / ".factory-state" / STATE_FILE_NAME
-        os.chown(state_file, 65534, -1)  # "nobody"
+        target = 65534 if os.getuid() != 65534 else 65533
+        os.chown(state_file, target, -1)
         with self.assertRaises(StateTamperError):
             load_state(root)
+
+    def test_owner_rejection_is_always_exercised_with_wrong_expected_uid(
+        self,
+    ) -> None:
+        """Task 19 S7: the owner-rejection branch always runs in this test.
+
+        ``load_state``'s internal ``_expected_uid`` defaults to the current
+        user in production; a wrong expected UID makes the real ``stat``
+        owner metadata fail the exact production owner check with no
+        ``chown`` required, so this test exercises the owner-rejection branch
+        deterministically in any environment (root or unprivileged).  It
+        complements — never replaces — the honest real-chown capability gate,
+        and claims no real-system owner-tamper coverage.  The knob is
+        underscore-private: the trusted CLI cannot set it.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        wrong = os.getuid() + 100000
+        self.assertNotEqual(wrong, os.getuid())
+        with self.assertRaises(StateTamperError):
+            load_state(root, _expected_uid=wrong)
+        # The campaign is untouched: default owner validation still loads.
+        self.assertEqual(load_state(root).campaign_id, "state-conformance")
 
     def test_link_count_tamper_fails_closed(self) -> None:
         root = self.new_repo()
@@ -1023,7 +1196,10 @@ class SecureIoTamperTest(StateConformanceCase):
         with self.assertRaises(StateTamperError):
             load_state(root)
         # A campaign may never clobber through the symlink: init fails closed.
-        with self.assertRaises(StateIOError):
+        # Recovery now refuses an unsafe existing state directory (Task 19
+        # S2) before any write attempt, so the fail-closed error is the
+        # recovery refusal rather than a deeper StateIOError.
+        with self.assertRaisesRegex(StateError, "unsafe existing state directory"):
             self.init_campaign(root, campaign_id="clobber")
 
     def test_world_writable_directory_fails_closed(self) -> None:
@@ -1229,6 +1405,633 @@ class LedgerTest(StateConformanceCase):
         with self.assertRaises(StateDigestError):
             record_phase_digest(root, "round-2-planning")
 
+    def test_concurrent_same_tag_duplicate_allows_at_most_one_success(
+        self,
+    ) -> None:
+        """Task 19 hardening L5: when a concurrent writer lands the *same*
+        tag on the same ledger inode between the duplicate-tag check and the
+        append, the second writer fails closed — at most one same-tag writer
+        can ever succeed — and the resulting ledger stays a valid unique-tag
+        sequence (never left with a repeated tag).
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+
+        def concurrent_writer(_root, directory_fd):
+            line = json.dumps(
+                {"tag": "round-2-planning", "digest": "0" * 64},
+                sort_keys=True, separators=(",", ":"),
+            ).encode() + b"\n"
+            fd = os.open(
+                DIGEST_LEDGER_NAME,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.write(fd, line)
+            os.close(fd)
+
+        self.set_hook("_LEDGER_RACE_AFTER_DUP_CHECK", concurrent_writer)
+        with self.assertRaisesRegex(StateDigestError, "repeats phase tag"):
+            record_phase_digest(root, "round-2-planning")
+        ledger = (root / ".factory-state" / DIGEST_LEDGER_NAME).read_text("utf-8")
+        tags = [json.loads(line)["tag"] for line in ledger.splitlines()]
+        self.assertEqual(tags.count("round-2-planning"), 1)
+
+    def test_ledger_inode_swap_before_append_fails_closed(self) -> None:
+        """Task 19 hardening L4: swapping the ledger to a different inode
+        between the duplicate-tag check and the append fails closed — the
+        append is bound to the exact inode that was checked, never a
+        substituted ledger.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+
+        def swap(_root, directory_fd):
+            os.unlink(DIGEST_LEDGER_NAME, dir_fd=directory_fd)
+            fd = os.open(
+                DIGEST_LEDGER_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.write(fd, b'{"tag":"round-2-planning","digest":"' + b"0" * 64 + b'"}\n')
+            os.close(fd)
+
+        self.set_hook("_LEDGER_RACE_AFTER_DUP_CHECK", swap)
+        with self.assertRaisesRegex(
+            StateDigestError, "was replaced between the duplicate-tag check"
+        ):
+            record_phase_digest(root, "round-2-planning")
+
+
+class IndependentFixtureTest(StateConformanceCase):
+    """S6: transition and digest fixtures are authored independently.
+
+    The expected transition states and the digest constants below are fixed
+    values committed in the corpus, written by hand from the documented §11
+    table and the canonical digest encoding; they are never derived from the
+    code path they exercise at test time, so a later drift in ``advance`` or
+    ``state_digest`` fails these fixtures instead of being masked by a
+    self-derived expectation.
+    """
+
+    def test_digest_fixtures_are_fixed_constants(self) -> None:
+        for name in DIGEST_FIXTURES:
+            with self.subTest(fixture=name):
+                data = json.loads(self.fixture(name).read_text("utf-8"))
+                self.assertEqual(
+                    set(data), {"digest_sha256", "state"},
+                    "digest fixtures carry exactly a state and its fixed digest",
+                )
+                self.assertRegex(data["digest_sha256"], r"^[0-9a-f]{64}$")
+                state = parse_state(data["state"])
+                self.assertEqual(state_digest(state), data["digest_sha256"])
+                canonical = json.dumps(
+                    state.to_dict(), sort_keys=True,
+                    separators=(",", ":"), ensure_ascii=True,
+                ).encode("utf-8")
+                self.assertEqual(
+                    hashlib.sha256(canonical).hexdigest(),
+                    data["digest_sha256"],
+                )
+
+    def test_transition_fixtures_advance_exactly(self) -> None:
+        for name in TRANSITION_FIXTURES:
+            with self.subTest(fixture=name):
+                data = json.loads(self.fixture(name).read_text("utf-8"))
+                state = parse_state(data["input"])
+                kwargs: dict = {"now": data["now"]}
+                if "plan_digest" in data:
+                    kwargs["plan_digest"] = data["plan_digest"]
+                if "phase_base_commit" in data:
+                    kwargs["phase_base_commit"] = data["phase_base_commit"]
+                result = advance(state, data["outcome"], **kwargs)
+                self.assertEqual(
+                    result.to_dict(), data["expected"],
+                    f"{name}: advance did not produce the hand-authored state",
+                )
+                # The hand-authored expected state is itself a valid state.
+                self.assertEqual(
+                    parse_state(data["expected"]).to_dict(), data["expected"]
+                )
+
+    def test_digest_fixtures_cover_three_lifecycle_shapes(self) -> None:
+        self.assertEqual(len(DIGEST_FIXTURES), 3)
+        for name in DIGEST_FIXTURES:
+            data = json.loads(self.fixture(name).read_text("utf-8"))
+            parse_state(data["state"])
+
+
+class InitNoReplaceTest(StateConformanceCase):
+    """S1: init is atomic with no-replace semantics."""
+
+    def test_init_never_clobbers_existing_state(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        before = (root / ".factory-state" / STATE_FILE_NAME).read_bytes()
+        with self.assertRaisesRegex(StateError, "refusing to overwrite"):
+            self.init_campaign(root, campaign_id="other-campaign")
+        after = (root / ".factory-state" / STATE_FILE_NAME).read_bytes()
+        self.assertEqual(after, before)
+        # The failed init leaves no temporary or quarantine artifact behind.
+        directory = root / ".factory-state"
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()), [STATE_FILE_NAME]
+        )
+
+    def test_init_refuses_a_prior_campaign_ledger_binding(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+        (root / ".factory-state" / STATE_FILE_NAME).unlink()
+        with self.assertRaisesRegex(StateError, "second campaign binding"):
+            self.init_campaign(root, campaign_id="other")
+
+    def test_underlying_publication_is_no_replace(self) -> None:
+        root = self.new_repo()
+        directory = root / ".factory-state"
+        directory.mkdir(mode=0o700)
+        atomic_write_json(
+            root, STATE_FILE_NAME, {"schema": SCHEMA_NAME}, no_replace=True
+        )
+        with self.assertRaises(StateIOError):
+            atomic_write_json(
+                root, STATE_FILE_NAME, {"schema": "forged"}, no_replace=True
+            )
+        self.assertEqual(
+            json.loads((directory / STATE_FILE_NAME).read_text("utf-8")),
+            {"schema": SCHEMA_NAME},
+        )
+
+
+class RecoveryTest(StateConformanceCase):
+    """S2: deterministic crash-window and orphan recovery."""
+
+    def _orphan(self, root: Path, suffix: str) -> Path:
+        name = f".{STATE_FILE_NAME}.{suffix}"
+        self.seed(root, name, b"torn write")
+        return root / ".factory-state" / name
+
+    def test_recover_removes_validated_orphan_temporary(self) -> None:
+        root = self.new_repo()
+        orphan = self._orphan(root, "0" * 32)
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "clean")
+        self.assertEqual(summary["removed"], 1)
+        self.assertIsNone(summary["restored"])
+        self.assertFalse(orphan.exists())
+        directory = root / ".factory-state"
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), [])
+
+    def test_recover_restores_quarantined_state_without_data_loss(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        state = load_state(root)
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "a" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "restored")
+        self.assertEqual(summary["restored"], STATE_FILE_NAME)
+        self.assertEqual(load_state(root), state, "no durable state is lost")
+        directory = root / ".factory-state"
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()), [STATE_FILE_NAME]
+        )
+
+    def test_recover_keeps_canonical_and_cleans_leftovers(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        before = load_state(root)
+        orphan = self._orphan(root, "b" * 32)
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "c" * 32
+        shutil.copy2(root / ".factory-state" / STATE_FILE_NAME,
+                     root / ".factory-state" / quarantine)
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "clean")
+        self.assertEqual(summary["removed"], 2)
+        self.assertEqual(load_state(root), before)
+        self.assertFalse(orphan.exists())
+        self.assertFalse((root / ".factory-state" / quarantine).exists())
+
+    def test_recover_fails_closed_on_multiple_quarantines(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        q1 = f".{STATE_FILE_NAME}.quarantine-" + "d" * 32
+        q2 = f".{STATE_FILE_NAME}.quarantine-" + "e" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / q1
+        )
+        shutil.copy2(root / ".factory-state" / q1, root / ".factory-state" / q2)
+        with self.assertRaisesRegex(StateError, "multiple quarantined"):
+            recover_state(root)
+
+    def test_recover_fails_closed_on_unsafe_orphan(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        orphan = self._orphan(root, "f" * 32)
+        os.chmod(orphan, 0o644)
+        with self.assertRaisesRegex(StateError, "unsafe orphaned"):
+            recover_state(root)
+        self.assertTrue(orphan.exists())
+
+    def test_recover_fails_closed_on_foreign_quarantine(self) -> None:
+        root = self.new_repo()
+        other = self.new_repo()
+        self.init_campaign(other)
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "9" * 32
+        self.seed(root, quarantine,
+                  (other / ".factory-state" / STATE_FILE_NAME).read_bytes())
+        with self.assertRaisesRegex(StateError, "does not match the canonical root"):
+            recover_state(root)
+
+    def test_recover_reports_clean_only_when_directory_is_truly_absent(self) -> None:
+        """Task 19 S2: ``clean`` requires no private directory at all.
+
+        The pre-existing fresh-root test proves a truly absent directory is
+        clean; the following unsafe-existing-directory tests prove that an
+        existing symlink, plain file, wrong-mode, or foreign-owned directory
+        fails closed instead of being reported clean.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        private = root / ".factory-state"
+
+        # A symlinked private directory (even a dangling one) fails closed.
+        shutil.rmtree(private)
+        os.symlink("elsewhere", private)
+        with self.assertRaisesRegex(StateError, "unsafe existing state directory"):
+            recover_state(root)
+
+        # A plain file where the directory must be fails closed.
+        os.unlink(private)
+        private.write_text("not a directory", encoding="utf-8")
+        with self.assertRaisesRegex(StateError, "unsafe existing state directory"):
+            recover_state(root)
+
+        # A world-accessible existing directory fails closed.
+        private.unlink()
+        private.mkdir(mode=0o755)
+        with self.assertRaisesRegex(StateError, "unsafe existing state directory"):
+            recover_state(root)
+
+        # A foreign-owned directory fails closed through the internal owner
+        # expectation (real stat metadata + wrong expected UID; no chown).
+        with self.assertRaisesRegex(StateError, "unsafe existing state directory"):
+            recover_state(root, _expected_uid=os.getuid() + 100000)
+
+    def test_recover_restores_quarantine_matching_the_ledger_digest(self) -> None:
+        """Task 19 S2: a ledger-bound restore must match the latest digest.
+
+        The ledger records the state digest before the crash; the quarantined
+        state is byte-identical to it, so recovery restores it, re-validates
+        the canonical in place, and only then deletes the quarantine.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        state = load_state(root)
+        record_phase_digest(root, "round-1-planning")
+        ledger = (root / ".factory-state" / DIGEST_LEDGER_NAME).read_text("utf-8")
+        latest = json.loads(ledger.splitlines()[-1])["digest"]
+        self.assertEqual(latest, state_digest(state))
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "a" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "restored")
+        self.assertEqual(summary["restored"], STATE_FILE_NAME)
+        restored = load_state(root)
+        self.assertEqual(restored, state, "no durable state is lost")
+        self.assertEqual(state_digest(restored), latest)
+        directory = root / ".factory-state"
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()),
+            [STATE_FILE_NAME, DIGEST_LEDGER_NAME],
+        )
+
+    def test_recover_fails_closed_when_quarantine_digest_mismatches_ledger(
+        self,
+    ) -> None:
+        """Task 19 S2 tamper test: a tampered quarantine is never restored.
+
+        The quarantined state was recorded in the ledger before the crash; an
+        attacker mutates the quarantined content afterwards, so the recovered
+        digest no longer matches the latest recorded ledger entry and recovery
+        fails closed, leaving the quarantine untouched for inspection.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "c" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        # The tampered state is still a structurally valid §11 state whose
+        # repository_identity matches the canonical root, so recovery reaches
+        # the ledger digest check and fails closed exactly there.
+        original = json.loads(
+            (root / ".factory-state" / quarantine).read_text("utf-8")
+        )
+        forged = dict(original, campaign_id="tampered-campaign")
+        self.seed(root, quarantine, json.dumps(forged, sort_keys=True).encode())
+        with self.assertRaisesRegex(StateError, "does not match the latest"):
+            recover_state(root)
+        # Fail-closed: nothing restored, quarantine preserved, no canonical.
+        directory = root / ".factory-state"
+        self.assertFalse((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / quarantine).exists())
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()),
+            [quarantine, DIGEST_LEDGER_NAME],
+        )
+
+    def test_recover_fails_closed_on_unsafe_ledger_during_restore(self) -> None:
+        """Task 19 S2: an unreadable ledger blocks quarantine restore.
+
+        When a ledger exists but cannot be validated, recovery cannot prove
+        the quarantined state matches the latest recorded digest and fails
+        closed, preserving the quarantine.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "d" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        self.seed(root, DIGEST_LEDGER_NAME,
+                  self.fixture("state-ledger-malformed.jsonl").read_bytes())
+        with self.assertRaises(StateDigestError):
+            recover_state(root)
+        directory = root / ".factory-state"
+        self.assertFalse((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / quarantine).exists())
+
+    def test_recover_preserves_unknown_artifacts_and_evidence(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+        orphan = self._orphan(root, "7" * 32)
+        self.seed(root, "operator-note.txt", b"keep me")
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "clean")
+        self.assertEqual(summary["removed"], 1)
+        self.assertFalse(orphan.exists())
+        directory = root / ".factory-state"
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir()),
+            [STATE_FILE_NAME, "operator-note.txt", DIGEST_LEDGER_NAME],
+        )
+        self.assertEqual(load_state(root).campaign_id, "state-conformance")
+
+    def test_recover_is_deterministic_and_idempotent(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        before = load_state(root)
+        self._orphan(root, "8" * 32)
+        first = recover_state(root)
+        second = recover_state(root)
+        # The first run removed the observed validated orphan (removed=1); the
+        # second run observes an already-final clean directory (removed=0).
+        # Idempotency is compared on the stable final state/status, not on the
+        # one-shot removed counter.
+        self.assertEqual(first, {"status": "clean", "removed": 1, "restored": None})
+        self.assertEqual(second, {"status": "clean", "removed": 0, "restored": None})
+        self.assertEqual(first["status"], second["status"])
+        self.assertEqual(first["restored"], second["restored"])
+        self.assertEqual(
+            load_state(root), before, "recovery must not change durable state"
+        )
+
+    def test_init_recovers_then_refuses_restored_campaign(self) -> None:
+        root = self.new_repo()
+        self.init_campaign(root)
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "5" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        with self.assertRaisesRegex(StateError, "refusing to overwrite"):
+            self.init_campaign(root, campaign_id="clobber")
+        self.assertEqual(load_state(root).campaign_id, "state-conformance")
+
+    def test_recover_on_fresh_root_is_clean(self) -> None:
+        root = self.new_repo()
+        self.assertEqual(recover_state(root), {"status": "clean", "removed": 0, "restored": None})
+        self.cli(root, "recover")
+        result = self.cli(root, "recover")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("status=clean", result.stdout)
+
+    def test_recover_reports_existing_empty_for_a_present_empty_directory(
+        self,
+    ) -> None:
+        """Task 19 S2: a valid present-but-empty private directory is a
+        distinct ``existing-empty`` outcome, never confused with a truly
+        absent directory (``clean``). Recovery touches nothing and leaves the
+        empty directory untouched.
+        """
+        root = self.new_repo()
+        (root / ".factory-state").mkdir(mode=0o700)
+        summary = recover_state(root)
+        self.assertEqual(
+            summary, {"status": "existing-empty", "removed": 0, "restored": None}
+        )
+        directory = root / ".factory-state"
+        self.assertTrue(directory.is_dir())
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), [])
+        # ``existing-empty`` is distinct from a truly absent directory.
+        fresh = self.new_repo()
+        self.assertEqual(
+            recover_state(fresh),
+            {"status": "clean", "removed": 0, "restored": None},
+        )
+
+    def test_recover_zero_byte_ledger_blocks_restore(self) -> None:
+        """Task 19 hardening L4: a present-but-zero-byte ledger is ambiguous
+        torn evidence of an interrupted first append and must block a
+        quarantine restore, never being silently treated as “no evidence”.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "3" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        self.seed(root, DIGEST_LEDGER_NAME, b"")
+        with self.assertRaisesRegex(StateDigestError, "empty"):
+            recover_state(root)
+        directory = root / ".factory-state"
+        self.assertFalse((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / quarantine).exists())
+        self.assertTrue((directory / DIGEST_LEDGER_NAME).exists())
+
+    def test_recover_restores_quarantine_matching_the_latest_of_multi_entry_ledger(
+        self,
+    ) -> None:
+        """Task 19 S2: with a multi-entry ledger, recovery binds the restore to
+        the *latest* recorded digest, not the first. The quarantined state is
+        byte-identical to the latest entry and is restored.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")  # first entry (planning)
+        planned = advance(
+            load_state(root), "planned", now=MONOTONIC + 1,
+            plan_digest=PLAN_SHA, phase_base_commit=BASE_COMMIT,
+        )
+        write_state(root, planned)
+        record_phase_digest(root, "round-1-implementation")  # latest (impl)
+        ledger = (root / ".factory-state" / DIGEST_LEDGER_NAME).read_text("utf-8")
+        self.assertEqual(len(ledger.splitlines()), 2)
+        latest = json.loads(ledger.splitlines()[-1])["digest"]
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "4" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / quarantine
+        )
+        summary = recover_state(root)
+        self.assertEqual(summary["status"], "restored")
+        restored = load_state(root)
+        self.assertEqual(restored, planned)
+        self.assertEqual(state_digest(restored), latest)
+
+    def test_recover_rejects_quarantine_matching_an_older_ledger_entry(
+        self,
+    ) -> None:
+        """Task 19 S2: a quarantined state whose digest matches an *earlier*
+        ledger entry but not the latest fails closed — recovery must bind to
+        the latest recorded digest and never restore a stale state that a
+        later entry superseded.
+        """
+        root = self.new_repo()
+        self.init_campaign(root)
+        initial_bytes = (root / ".factory-state" / STATE_FILE_NAME).read_bytes()
+        record_phase_digest(root, "round-1-planning")  # first (initial state)
+        planned = advance(
+            load_state(root), "planned", now=MONOTONIC + 1,
+            plan_digest=PLAN_SHA, phase_base_commit=BASE_COMMIT,
+        )
+        write_state(root, planned)
+        record_phase_digest(root, "round-1-implementation")  # latest
+        quarantine = f".{STATE_FILE_NAME}.quarantine-" + "5" * 32
+        # The canonical is absent (torn write) and the sole remaining
+        # quarantine holds the *older* (initial) state whose digest matches
+        # the first ledger entry, not the latest.
+        (root / ".factory-state" / STATE_FILE_NAME).unlink()
+        self.seed(root, quarantine, initial_bytes)
+        with self.assertRaisesRegex(StateError, "does not match the latest"):
+            recover_state(root)
+        directory = root / ".factory-state"
+        self.assertFalse((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / quarantine).exists())
+        self.assertTrue((directory / DIGEST_LEDGER_NAME).exists())
+
+
+class RecoveryRaceHookTest(StateConformanceCase):
+    """Task 19 S2: the deterministic race hooks force the exact restore
+    fail-closed branches (raced canonical, substituted canonical, substituted
+    quarantine) that a live crash cannot reproduce deterministically.
+    """
+
+    def _make_quarantine(self, root: Path) -> str:
+        self.init_campaign(root)
+        record_phase_digest(root, "round-1-planning")
+        qname = f".{STATE_FILE_NAME}.quarantine-" + "1" * 32
+        (root / ".factory-state" / STATE_FILE_NAME).rename(
+            root / ".factory-state" / qname
+        )
+        return qname
+
+    def test_raced_canonical_appears_fails_closed_preserving_quarantine(
+        self,
+    ) -> None:
+        """A writer creates the canonical name between the quarantine read and
+        recovery's no-replace ``linkat``: recovery must fail closed on the
+        raced canonical without deleting the quarantine (recoverability).
+        """
+        root = self.new_repo()
+        qname = self._make_quarantine(root)
+
+        def raced_writer(_root, directory_fd):
+            fd = os.open(
+                STATE_FILE_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.write(fd, b"raced writer")
+            os.close(fd)
+
+        self.set_hook("_RACE_BEFORE_RESTORE_LINK", raced_writer)
+        with self.assertRaisesRegex(StateError, "state file appeared during recovery"):
+            recover_state(root)
+        directory = root / ".factory-state"
+        # Fail-closed: neither artifact is destroyed; the quarantine remains
+        # for a later clean recovery (once the writer is stopped).
+        self.assertTrue((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / qname).exists())
+
+    def test_canonical_substituted_after_link_differs_fails_closed(self) -> None:
+        """After recovery links the canonical name, a hook substitutes a
+        different valid state in its place: the in-place re-validation detects
+        the mismatch and fails closed, preserving the quarantine.
+        """
+        root = self.new_repo()
+        qname = self._make_quarantine(root)
+        forged = json.loads((root / ".factory-state" / qname).read_text("utf-8"))
+        forged = dict(forged, campaign_id="raced-campaign")
+        raw = json.dumps(forged, sort_keys=True).encode()
+
+        def substitute(_root, directory_fd):
+            os.unlink(STATE_FILE_NAME, dir_fd=directory_fd)
+            fd = os.open(
+                STATE_FILE_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.write(fd, raw)
+            os.close(fd)
+
+        self.set_hook("_RACE_AFTER_RESTORE_LINK", substitute)
+        with self.assertRaisesRegex(StateError, "differs from the validated"):
+            recover_state(root)
+        directory = root / ".factory-state"
+        self.assertTrue((directory / qname).exists())
+
+    def test_quarantine_inode_swap_after_link_fails_closed(self) -> None:
+        """After recovery links the canonical name, the quarantine name is
+        swapped to a brand-new inode: the canonical/quarantine identity check
+        fails closed and the swap is never accepted, so a forgery cannot
+        replace the durable copy before the quarantine is deleted.
+        """
+        root = self.new_repo()
+        qname = self._make_quarantine(root)
+
+        def swap(_root, directory_fd):
+            os.unlink(qname, dir_fd=directory_fd)
+            fd = os.open(
+                qname,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            os.write(
+                fd, (root / ".factory-state" / STATE_FILE_NAME).read_bytes()
+            )
+            os.close(fd)
+
+        self.set_hook("_RACE_AFTER_RESTORE_LINK", swap)
+        with self.assertRaisesRegex(StateError, "quarantine was substituted"):
+            recover_state(root)
+        directory = root / ".factory-state"
+        self.assertTrue((directory / STATE_FILE_NAME).exists())
+        self.assertTrue((directory / qname).exists())
+
 
 class TrustedCliTest(StateConformanceCase):
     """The trusted control-plane CLI prints one outcome and fails closed."""
@@ -1414,6 +2217,29 @@ class PurityAndBoundaryTest(StateConformanceCase):
         self.assertIn('"tag"', ledger)
         self.assertIn('"digest"', ledger)
         self.assertNotIn('"current_phase"', ledger)
+
+    def test_expected_uid_is_underscore_private_with_no_cli_bypass(self) -> None:
+        """Task 19 S7: the internal owner expectation is underscore-private
+        (``_expected_uid``) on the module's own functions and is never exposed
+        as a trusted-CLI option, so no operator can weaken the real owner
+        check through the control-plane command surface.
+        """
+        import inspect
+
+        for func in (recover_state, load_state):
+            with self.subTest(func=func.__name__):
+                self.assertIn("_expected_uid", inspect.signature(func).parameters)
+        # The CLI surface defines no expected-uid knob: every command rejects
+        # it as an unrecognized argument (argparse exits 2).
+        root = self.new_repo()
+        self.init_campaign(root)
+        for command in (("recover",), ("show",), ("digest",)):
+            with self.subTest(command=command):
+                result = self.cli(root, *command, "--expected-uid", "999")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("unrecognized arguments", result.stderr)
+        # The real owner check still runs with the default (current) UID.
+        self.assertEqual(load_state(root).campaign_id, "state-conformance")
 
 
 if __name__ == "__main__":

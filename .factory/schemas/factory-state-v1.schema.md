@@ -45,15 +45,15 @@ exactly once, with the §11 type and invariant:
 | `current_round` | positive integer, `1 <= current_round <= rounds_requested`; monotonic, 1-based | only `audit --nonfinal` increments it |
 | `current_phase` | one of `planning, implementation, verification, audit, success, findings, blocked, failed, interrupted, infrastructure_failure` | only §4 transitions |
 | `specification_digest` | 64-character lowercase SHA-256 hex | write-once |
-| `plan_digest` | 64-character lowercase SHA-256 hex; binds a completed planning phase | rebind only on `planning -> implementation` |
+| `plan_digest` | 64-character lowercase SHA-256 hex; binds a completed planning phase (see §2.1 for its derivation) | rebind only on `planning -> implementation` |
 | `role_prompt_digests` | non-empty JSON object mapping each role name to a 64-hex SHA-256 digest | write-once |
 | `audit_objectives_digest` | 64-character lowercase SHA-256 hex | write-once |
 | `phase_base_commit` | 40-character lowercase Git object ID; binds a completed planning phase | rebind only on `planning -> implementation` |
 | `selected_task_id` | positive integer or `null`; present only during `implementation` with `attempt_number >= 1` | only `begin_attempt` |
 | `attempt_number` | non-negative integer; monotonic within the current task, reset to zero only on a trusted task/phase transition | only `begin_attempt` / phase transitions |
-| `phase_started_at_monotonic` | non-negative integer (`time.monotonic_ns`) | only phase transitions |
-| `attempt_started_at_monotonic` | non-negative integer; positive exactly while an attempt is active | only `begin_attempt` / phase transitions |
-| `last_outcome` | `null` before the first trusted outcome, otherwise exactly one trusted outcome enum value (§5) | trusted harness only |
+| `phase_started_at_monotonic` | positive integer (`time.monotonic_ns`); a zeroed `now=0` epoch marker is rejected as tamper (Task 19 S3) | only phase transitions |
+| `attempt_started_at_monotonic` | non-negative integer; positive exactly while an attempt is active and `>= phase_started_at_monotonic` (an attempt can never precede the phase that owns it, S9); the inverse holds too — when no attempt is active (`attempt_number == 0`) the marker must be zero (S9) | only `begin_attempt` / phase transitions |
+| `last_outcome` | `null` only during a fresh `planning` phase, otherwise exactly one §13 outcome of the owning phase (S9); a phase/outcome mismatch fails closed | trusted harness only |
 
 ### 2.1 Write-once bindings
 
@@ -62,9 +62,22 @@ exactly once, with the §11 type and invariant:
 `audit_objectives_digest` are bound by `init_state` and can never change on a
 transition. `plan_digest` and `phase_base_commit` bind a completed planning
 round and are write-once until the next trusted `planning -> implementation`
-transition. `load_state` additionally fails closed when the recorded identity
+transition.
+
+`plan_digest` (Task 19 S8) is the SHA-256 of the exact bytes of the committed
+`factory-plan/v1` plan document — the canonical
+`.factory/artifacts/implementation-plan.md` at the bound `phase_base_commit`
+— as accepted by the deterministic plan parser. It is bound only by the
+trusted `planning -> implementation` edge and is write-once until the next
+such edge of the next round, so a later plan cannot silently change the plan a
+round was planned against.
+
+`load_state` additionally fails closed when the recorded identity
 does not match the canonical root directory or when any expected campaign
-binding differs.
+binding differs. The state-file and private-directory owner checks compare
+real `stat` metadata against an internal expected owner UID (default: the
+current user), so the exact owner-rejection branch is always exercisable with
+real stat metadata and a wrong expected UID, with no `chown` required (S7).
 
 ## 3. Transition table and outcomes
 
@@ -108,8 +121,11 @@ through `record_retry` without claiming a transition:
 Attempts begin through `begin_attempt` (implementation phase only):
 `attempt_number` increments while the same `selected_task_id` is selected and
 restarts at 1 on a trusted task transition; `attempt_started_at_monotonic`
-restarts for timeout recovery. `advance` resets the task/attempt fields to
-their inactive form on every phase change.
+restarts for timeout recovery and must never precede
+`phase_started_at_monotonic` (S9). `advance` resets the task/attempt fields to
+their inactive form on every phase change. Every persisted `last_outcome` is
+a §13 outcome of its owning phase (S9); a `null` `last_outcome` is valid only
+in a fresh planning phase.
 
 ## 4. Determinism and digest
 
@@ -128,20 +144,71 @@ afterwards:
 - `record_phase_digest(root, tag)` appends one newline-terminated JSON line
   `{"tag": ..., "digest": ...}` to the append-only ledger (mode 0600, bounded
   1 MiB, single link, same-UID); a repeated tag, unsafe tag, malformed line,
-  or substituted file fails closed.
+  or substituted file fails closed. The duplicate-tag check and the append
+  happen inside one validated directory scope bound to the exact checked
+  inode: a ledger swapped to a different inode between the check and the
+  append fails closed, and a concurrent writer that lands the *same* tag on
+  the same inode in that window is detected on the re-read before the append
+  (Task 19 L5), so at most one same-tag writer can ever succeed and the
+  ledger is never left with a repeated tag.
 - `verify_phase_digest(root, tag)` reopens/re-validates the state, recomputes
   the digest, and fails closed on any mismatch or missing/malformed record.
 
 ## 5. Secure file I/O
 
 - `.factory-state` is a private (0700) owned directory; a world-accessible,
-  foreign-owned, or symlinked directory fails closed.
+  foreign-owned, or symlinked directory fails closed. The owner checks
+  compare real `stat` metadata against an internal expected owner UID
+  (default: the current user), so the exact owner-rejection branch is always
+  exercisable with real stat metadata and a wrong expected UID, with no
+  `chown` required (S7).
 - The state file is a regular same-UID file, mode 0600, link count 1, size
   bounded (`STATE_FILE_MAX`); reads hold one descriptor and re-validate the
   (dev, inode) and size before/after reading.
 - Writes publish through a mode-0600 temporary inode and `linkat`; a raced
   pathname is never silently replaced; the previous validated inode is
   quarantined on failure, never destroyed silently.
+- `init` (Task 19 S1) runs deterministic crash-window recovery first, refuses
+  a prior campaign binding recorded in the digest ledger, and then publishes
+  atomically with **no-replace** semantics (`atomic_write_json(...,
+  no_replace=True)`): the existence check and the `linkat` publication happen
+  inside one locked directory scope, so a fresh campaign can never clobber
+  existing state, an existing binding, or a raced pathname.
+- Crash-window/orphan recovery (Task 19 S2) is deterministic: `recover_state`
+  removes validated orphaned temporaries (`.{marker}.{32-hex}`) and
+  quarantines (`.{marker}.quarantine-{32-hex}`) of the established atomic
+  writer, and when the canonical file is absent restores the single last
+  validated quarantine atomically with no-replace — never creating a second
+  authority. Recovery only ever deletes a file it can prove is an exact
+  mode-0600, same-UID, single-link regular marker (`_validate_orphan`), fails
+  closed on ambiguous (multiple quarantines) or foreign artifacts, and
+  preserves any unknown name untouched. Operator entrypoint: `recover`.
+  Recovery additionally:
+  - reports `clean` *only* when the private directory is truly absent; an
+    existing symlinked, filed, wrong-mode, or foreign-owned directory fails
+    closed instead of being treated as clean;
+  - reports a distinct `existing-empty` outcome when the private directory is
+    present, valid, and completely empty (for example one left behind by an
+    owner probe) — never confused with a truly absent (`clean`) directory,
+    and recovery creates or deletes nothing for it;
+  - when a digest ledger exists, requires the recovered state's digest to
+    match the *latest* recorded ledger entry before restoring a quarantine,
+    so a quarantined state tampered after it was recorded — or one that only
+    matches an earlier (superseded) ledger entry — fails closed with the
+    quarantine preserved. A present-but-zero-byte ledger is ambiguous torn
+    evidence of an interrupted first append and likewise blocks the restore
+    (hardening L4) rather than being silently treated as “no evidence”;
+  - after linking the quarantine into the canonical name, re-validates the
+    canonical state in place (tolerating the transient two-link window)
+    *before* deleting the quarantine, so a raced, substituted, or forged
+    canonical fails closed with the quarantine preserved for inspection, and
+    verifies the canonical and quarantine are still one inode before deleting
+    the quarantine so an inode swap of the quarantine itself fails closed.
+- The owner-tamper probe (Task 19 S7) never skips: `owner_tamper_gate`
+  performs a real `chown(2)` on a probe file and declares kernel-level
+  availability. A privileged run genuinely exercises the owner tamper
+  fail-closed path; an unprivileged run reports the owner check unavailable
+  with a fail-closed reason and never falsely claims owner-tamper coverage.
 
 ## 6. Defect classes and fixtures
 
@@ -165,6 +232,9 @@ inventoried verbatim by the hidden conformance suite.
 | `current_round` zero/boolean/exceeds budget | `state-current-round-zero.json`, `state-current-round-bool.json`, `state-current-round-exceeds-requested.json` |
 | unknown phase | `state-phase-unknown.json` |
 | negative attempt or monotonic marker | `state-attempt-number-negative.json`, `state-phase-monotonic-negative.json`, `state-attempt-monotonic-negative.json` |
+| zeroed epoch monotonic marker (S3) | `state-phase-monotonic-zero.json` |
+| attempt preceding its owning phase (S9) | `state-attempt-before-phase.json` |
+| attempt marker without an active attempt (S9 inverse: no attempt => marker zero) | `state-attempt-marker-without-attempt.json` |
 | boolean attempt number | `state-attempt-number-bool.json` |
 | terminal state without matching outcome | `state-terminal-outcome-mismatch.json`, `state-terminal-outcome-null.json` |
 | task without begun attempt | `state-task-without-attempt.json` |
@@ -173,6 +243,7 @@ inventoried verbatim by the hidden conformance suite.
 | non-positive task id | `state-task-id-zero.json`, `state-task-id-bool.json` |
 | active attempt without timestamp | `state-attempt-without-timestamp.json` |
 | untrusted `last_outcome` | `state-outcome-unknown.json`, `state-outcome-number.json` |
+| phase/outcome mismatch (S9) | `state-outcome-phase-mismatch.json` |
 | invalid digest shape / role digests | `state-spec-digest-invalid.json`, `state-plan-digest-invalid.json`, `state-audit-digest-invalid.json`, `state-role-digest-invalid.json`, `state-role-digest-empty-role.json`, `state-role-digests-empty.json`, `state-role-digests-not-object.json`, `state-digest-uppercase.json` |
 | invalid / uppercase phase base commit | `state-phase-base-commit-invalid.json`, `state-phase-base-commit-uppercase.json` |
 | unsafe I/O content | `state-unsafe-not-json.json`, `state-unsafe-binary.json`, `state-unsafe-oversized.json` |
@@ -188,7 +259,9 @@ audit, a recorded planning retry, and every terminal state.
 
 `python3 .factory/loop/state.py --root ROOT <command>` is the operator
 entrypoint (never invoked by a model role): `init`, `show`, `digest`,
-`advance OUTCOME [--plan-digest ...] [--base-commit ...]`,
+`recover`, `advance OUTCOME [--plan-digest ...] [--base-commit ...]`,
 `begin-attempt TASK_ID`, `record-retry OUTCOME`, `record-phase-digest TAG`,
-`verify-phase-digest TAG`. A fail-closed path prints a single
-`factory-state: <error>` line to stderr and exits 1; argparse misuse exits 2.
+`verify-phase-digest TAG`. `recover` runs the deterministic crash-window/orphan
+recovery of §5 and prints `recovered status=... removed=... restored=...`. A
+fail-closed path prints a single `factory-state: <error>` line to stderr and
+exits 1; argparse misuse exits 2.

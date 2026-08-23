@@ -66,13 +66,13 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
         selection = select_task(plan)
         self.assertTrue(selection.selected)
         self.assertEqual(selection.classification, "selected")
-        # Task 3 and Task 4 are complete at this plan revision, so Task 5
-        # (dependency Task 4 complete) is the lowest-priority runnable pending
-        # task.
-        self.assertEqual(selection.task_id, 5)
-        # Task 5 and Task 13 are runnable (Task 5 depends on the now-complete
-        # Task 4; Task 13 depends only on the complete Task 1) and Task 5 wins
-        # on numeric priority, proving plan-derived priority order.
+        # Task 4 is complete at this plan revision, so the remediation task
+        # Task 19 (dependency Task 4 complete) is now complete. Task 13
+        # (dependency Task 1 complete) is the sole runnable pending task, so
+        # the selector deterministically picks Task 13.
+        self.assertEqual(selection.task_id, 13)
+        # Task 13 is the only runnable pending task after Task 19 completes;
+        # every other unfinished task still has an incomplete dependency.
         statuses = {task.number: task.status for task in plan.tasks}
         runnable = sorted(
             task.number
@@ -80,8 +80,9 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
             if task.status == "pending"
             and all(statuses[dep] == "complete" for dep in task.dependencies)
         )
-        self.assertEqual(runnable, [5, 13])
-        self.assertEqual(plan.tasks[4].priority, 5)
+        self.assertEqual(runnable, [13])
+        self.assertEqual(plan.tasks[18].status, "complete")
+        self.assertEqual(plan.tasks[18].priority, 1)
         self.assertEqual(plan.tasks[12].priority, 13)
         self.assertEqual(plan.tasks[2].status, "complete")
         self.assertEqual(plan.tasks[3].status, "complete")
@@ -89,7 +90,7 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
     def test_canonical_bound_base_commit_matches(self) -> None:
         plan = Plan.from_file(CANONICAL_PLAN)
         selection = select_task(plan, bound_base_commit=plan.base_commit)
-        self.assertEqual(selection.task_id, 5)
+        self.assertEqual(selection.task_id, 13)
 
     def test_bound_base_commit_mismatch_is_stale(self) -> None:
         plan = Plan.from_file(CANONICAL_PLAN)
@@ -349,7 +350,7 @@ class PurityAndLedgerBoundaryTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source, forbidden)
         plan = Plan.from_file(CANONICAL_PLAN)
-        self.assertEqual(select_task(plan).task_id, 5)
+        self.assertEqual(select_task(plan).task_id, 13)
 
     def test_selection_result_is_immutable(self) -> None:
         plan = parse_fixture("plan-select-priority-order.md")
@@ -377,7 +378,7 @@ class TrustedCliTest(unittest.TestCase):
     def test_cli_selects_canonical_next_task(self) -> None:
         result = self._run("select", str(CANONICAL_PLAN))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "selected=5")
+        self.assertEqual(result.stdout.strip(), "selected=13")
 
     def test_cli_reports_blocked(self) -> None:
         result = self._run("select", str(FIXTURES / "plan-select-blocked.md"))

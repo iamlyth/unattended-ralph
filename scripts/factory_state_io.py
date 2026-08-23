@@ -42,20 +42,62 @@ def _name(name: str) -> str:
     return name
 
 
-def _validate_directory(info: os.stat_result) -> None:
+def _internal_orphan_name(name: str) -> str:
+    """Validate a narrowly scoped internal orphan/quarantine marker name.
+
+    The established atomic writer itself creates orphaned markers whose names
+    are ``.{marker}.{32-hex}`` (a torn temporary that never linked) and
+    ``.{marker}.quarantine-{32-hex}`` (the validated predecessor of an
+    interrupted update).  Those names legitimately start with a dot, so they
+    cannot pass :func:`_name`; recovery accepts them only through this exact
+    shape check (used as the ``name_validator`` for internal reads), never
+    through a relaxed public-name rule.  Any other name fails closed.
+    """
+    if not _INTERNAL_ORPHAN_RE.fullmatch(name):
+        raise StateIOError(f"unsafe internal orphan marker name: {name!r}")
+    return name
+
+
+_INTERNAL_ORPHAN_RE = re.compile(
+    r"^\.(?P<base>[A-Za-z0-9][A-Za-z0-9._-]{0,127})"
+    r"(?:\.quarantine-|\.)[0-9a-f]{32}$"
+)
+
+
+def _resolve_expected_uid(_expected_uid: int | None) -> int:
+    """Resolve the internal expected owner UID (default: the current user).
+
+    Every owner check in this module compares real ``stat`` metadata against
+    this expected UID, so a deterministic always-runnable test can pass a
+    wrong expected UID and exercise the exact owner-rejection branch with
+    real stat metadata and without requiring ``chown`` (Task 19 S7).  The
+    knob is underscore-private ``_expected_uid`` precisely because it is an
+    internal test hook: production never passes it (the real owner check
+    always compares against the current UID) and no CLI surface can set it.
+    """
+    return os.getuid() if _expected_uid is None else _expected_uid
+
+
+def _validate_directory(info: os.stat_result, *, _expected_uid: int) -> None:
     if (
         not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
+        or info.st_uid != _expected_uid
         or info.st_mode & 0o077
     ):
         raise StateIOError(".factory-state must be a private owned directory")
 
 
-def _validate_file(info: os.stat_result, *, maximum: int) -> None:
+def _validate_file(
+    info: os.stat_result,
+    *,
+    _expected_uid: int,
+    maximum: int,
+    allow_linked: bool = False,
+) -> None:
     if (
         not stat.S_ISREG(info.st_mode)
-        or info.st_uid != os.getuid()
-        or info.st_nlink != 1
+        or info.st_uid != _expected_uid
+        or (info.st_nlink not in (1, 2) if allow_linked else info.st_nlink != 1)
         or info.st_mode & 0o022
         or info.st_size > maximum
     ):
@@ -63,8 +105,11 @@ def _validate_file(info: os.stat_result, *, maximum: int) -> None:
 
 
 @contextmanager
-def state_dir(root: Path, *, create: bool = False) -> Iterator[int]:
+def state_dir(
+    root: Path, *, create: bool = False, _expected_uid: int | None = None
+) -> Iterator[int]:
     require_linux_primitives()
+    expected = _resolve_expected_uid(_expected_uid)
     root = root.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     root_fd = os.open(root, flags)
@@ -78,10 +123,10 @@ def state_dir(root: Path, *, create: bool = False) -> Iterator[int]:
             os.mkdir(".factory-state", 0o700, dir_fd=root_fd)
             os.fsync(root_fd)
             info = os.stat(".factory-state", dir_fd=root_fd, follow_symlinks=False)
-        _validate_directory(info)
+        _validate_directory(info, _expected_uid=expected)
         directory_fd = os.open(".factory-state", flags, dir_fd=root_fd)
         opened = os.fstat(directory_fd)
-        _validate_directory(opened)
+        _validate_directory(opened, _expected_uid=expected)
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             raise StateIOError(".factory-state changed while being opened")
         yield directory_fd
@@ -97,9 +142,16 @@ def read_bytes(
     *,
     maximum: int = 1024 * 1024,
     missing_ok: bool = False,
+    name_validator: Callable[[str], str] | None = None,
+    _expected_uid: int | None = None,
+    allow_linked: bool = False,
 ) -> bytes | None:
-    name = _name(name)
-    with state_dir(root) as directory_fd:
+    if name_validator is None:
+        name = _name(name)
+    else:
+        name = name_validator(name)
+    expected = _resolve_expected_uid(_expected_uid)
+    with state_dir(root, _expected_uid=expected) as directory_fd:
         try:
             descriptor = os.open(
                 name,
@@ -114,7 +166,10 @@ def read_bytes(
             raise StateIOError(f"cannot safely open lifecycle marker {name}: {exc}") from exc
         try:
             before = os.fstat(descriptor)
-            _validate_file(before, maximum=maximum)
+            _validate_file(
+                before, _expected_uid=expected, maximum=maximum,
+                allow_linked=allow_linked,
+            )
             named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
                 raise StateIOError(f"lifecycle marker changed while opening: {name}")
@@ -147,8 +202,15 @@ def read_text(
     *,
     maximum: int = 1024 * 1024,
     missing_ok: bool = False,
+    name_validator: Callable[[str], str] | None = None,
+    _expected_uid: int | None = None,
+    allow_linked: bool = False,
 ) -> str | None:
-    raw = read_bytes(root, name, maximum=maximum, missing_ok=missing_ok)
+    raw = read_bytes(
+        root, name, maximum=maximum, missing_ok=missing_ok,
+        name_validator=name_validator, _expected_uid=_expected_uid,
+        allow_linked=allow_linked,
+    )
     if raw is None:
         return None
     try:
@@ -163,8 +225,15 @@ def read_json(
     *,
     maximum: int = 1024 * 1024,
     missing_ok: bool = False,
+    name_validator: Callable[[str], str] | None = None,
+    _expected_uid: int | None = None,
+    allow_linked: bool = False,
 ) -> object | None:
-    text = read_text(root, name, maximum=maximum, missing_ok=missing_ok)
+    text = read_text(
+        root, name, maximum=maximum, missing_ok=missing_ok,
+        name_validator=name_validator, _expected_uid=_expected_uid,
+        allow_linked=allow_linked,
+    )
     if text is None:
         return None
     try:
@@ -173,7 +242,23 @@ def read_json(
         raise StateIOError(f"invalid JSON lifecycle marker {name}: {exc}") from exc
 
 
-def atomic_write(root: Path, name: str, data: bytes, *, create_directory: bool = True) -> None:
+def atomic_write(
+    root: Path,
+    name: str,
+    data: bytes,
+    *,
+    create_directory: bool = True,
+    no_replace: bool = False,
+) -> None:
+    """Atomically publish ``data`` under ``name`` inside the private directory.
+
+    ``no_replace=True`` gives atomic no-replace semantics (Task 19 S1): the
+    existence check and the ``linkat`` publication happen inside one locked
+    directory scope, so the call can never clobber an existing marker or a
+    raced pathname; an existing target fails closed with a dedicated error
+    without touching it (no quarantine, no temporary file), exactly as a
+    fresh campaign init must.
+    """
     name = _name(name)
     if len(data) > 1024 * 1024:
         raise StateIOError("lifecycle marker exceeds 1 MiB")
@@ -183,7 +268,13 @@ def atomic_write(root: Path, name: str, data: bytes, *, create_directory: bool =
         except FileNotFoundError:
             existing = None
         if existing is not None:
-            _validate_file(existing, maximum=1024 * 1024)
+            if no_replace:
+                raise StateIOError(
+                    f"refusing to overwrite lifecycle marker {name}"
+                )
+            _validate_file(
+                existing, _expected_uid=os.getuid(), maximum=1024 * 1024
+            )
         temporary = f".{name}.{secrets.token_hex(16)}"
         descriptor = os.open(
             temporary,
@@ -211,7 +302,9 @@ def atomic_write(root: Path, name: str, data: bytes, *, create_directory: bool =
                 os.rename(name, quarantine, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
                 os.fsync(directory_fd)
                 quarantined = os.stat(quarantine, dir_fd=directory_fd, follow_symlinks=False)
-                _validate_file(quarantined, maximum=1024 * 1024)
+                _validate_file(
+                    quarantined, _expected_uid=os.getuid(), maximum=1024 * 1024
+                )
                 if (quarantined.st_dev, quarantined.st_ino) != (existing.st_dev, existing.st_ino):
                     raise StateIOError(f"lifecycle marker substituted at quarantine: {name}")
             try:
@@ -243,13 +336,16 @@ def atomic_write(root: Path, name: str, data: bytes, *, create_directory: bool =
             # durable state is not destroyed silently.
 
 
-def atomic_write_text(root: Path, name: str, value: str) -> None:
-    atomic_write(root, name, value.encode("utf-8"))
+def atomic_write_text(root: Path, name: str, value: str, *, no_replace: bool = False) -> None:
+    atomic_write(root, name, value.encode("utf-8"), no_replace=no_replace)
 
 
-def atomic_write_json(root: Path, name: str, value: object, *, indent: int | None = None) -> None:
+def atomic_write_json(
+    root: Path, name: str, value: object, *, indent: int | None = None,
+    no_replace: bool = False,
+) -> None:
     raw = json.dumps(value, sort_keys=True, indent=indent, separators=None if indent else (",", ":"))
-    atomic_write_text(root, name, raw + "\n")
+    atomic_write_text(root, name, raw + "\n", no_replace=no_replace)
 
 
 def consume_json(
@@ -268,8 +364,8 @@ def consume_json(
             descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
             before = os.fstat(descriptor)
             named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            _validate_file(before, maximum=maximum)
-            _validate_file(named, maximum=maximum)
+            _validate_file(before, _expected_uid=os.getuid(), maximum=maximum)
+            _validate_file(named, _expected_uid=os.getuid(), maximum=maximum)
             if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
                 raise StateIOError(f"lifecycle marker changed while opening: {name}")
             raw = os.read(descriptor, maximum + 1)
@@ -307,8 +403,10 @@ def consume_json(
                 or (opened.st_dev, opened.st_ino) != identity
             ):
                 raise StateIOError(f"lifecycle marker substituted at quarantine: {name}")
-            _validate_file(quarantined, maximum=maximum)
-            _validate_file(opened, maximum=maximum)
+            _validate_file(
+                quarantined, _expected_uid=os.getuid(), maximum=maximum
+            )
+            _validate_file(opened, _expected_uid=os.getuid(), maximum=maximum)
             os.unlink(quarantine, dir_fd=directory_fd)
             os.fsync(directory_fd)
             return result
@@ -336,8 +434,10 @@ def remove(
                 raise StateIOError(f"lifecycle marker is missing: {name}")
             before = os.fstat(descriptor)
             named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            _validate_file(before, maximum=1024 * 1024)
-            _validate_file(named, maximum=1024 * 1024)
+            _validate_file(
+                before, _expected_uid=os.getuid(), maximum=1024 * 1024
+            )
+            _validate_file(named, _expected_uid=os.getuid(), maximum=1024 * 1024)
             if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
                 raise StateIOError(f"lifecycle marker changed while opening: {name}")
             current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -356,8 +456,10 @@ def remove(
                 or (opened.st_dev, opened.st_ino) != identity
             ):
                 raise StateIOError(f"lifecycle marker substituted at quarantine: {name}")
-            _validate_file(quarantined, maximum=1024 * 1024)
-            _validate_file(opened, maximum=1024 * 1024)
+            _validate_file(
+                quarantined, _expected_uid=os.getuid(), maximum=1024 * 1024
+            )
+            _validate_file(opened, _expected_uid=os.getuid(), maximum=1024 * 1024)
             os.unlink(quarantine, dir_fd=directory_fd)
             os.fsync(directory_fd)
         finally:

@@ -38,7 +38,18 @@ identity against the canonical root descriptor and any expected campaign
 binding, so a forged, moved, symlinked, oversized, wrong-owner, or wrong-mode
 file fails closed. The §11 transition table is enforced edge for edge,
 campaign-scoped bindings are write-once, round/attempt counters are
-monotonic, and a terminal phase accepts no further transition.
+monotonic, and a terminal phase accepts no further transition. `plan_digest`
+(Task 19 S8) is the SHA-256 of the exact bytes of the committed
+`factory-plan/v1` plan document at the bound `phase_base_commit`; it binds only
+on the `planning -> implementation` edge and is write-once until the next
+round's binding, so a round's plan can never silently change. A zeroed epoch
+monotonic marker is rejected as tamper, an active attempt can never precede
+the phase that owns it, an attempt marker is zero whenever no attempt is
+active, and a persisted `last_outcome` must be a §13 outcome of its owning
+phase (S3/S9). The state-file and private-directory owner checks compare
+real `stat` metadata against an internal expected owner UID (default: the
+current user), so the exact owner-rejection branch is always exercisable
+with real stat metadata and a wrong expected UID, with no `chown` required.
 
 Trusted control-plane operations only (each prints one machine-readable
 outcome; `ROOT` defaults to the canonical repository):
@@ -47,7 +58,7 @@ outcome; `ROOT` defaults to the canonical repository):
 .factory/loop/state.py --root ROOT init --campaign-id C --rounds N \
   --base-commit H --spec-digest S --plan-digest P --audit-digest A \
   --role-digest ROLE=HEX
-.factory/loop/state.py --root ROOT show|digest
+.factory/loop/state.py --root ROOT show|digest|recover
 .factory/loop/state.py --root ROOT advance OUTCOME \
   [--plan-digest P --base-commit H]
 .factory/loop/state.py --root ROOT begin-attempt TASK_ID
@@ -55,6 +66,31 @@ outcome; `ROOT` defaults to the canonical repository):
 .factory/loop/state.py --root ROOT record-phase-digest TAG
 .factory/loop/state.py --root ROOT verify-phase-digest TAG
 ```
+
+`init` (Task 19 S1) runs deterministic crash-window recovery first, refuses a
+prior campaign binding already recorded in the digest ledger, then publishes
+atomically with no-replace semantics — it can never clobber existing state or
+a raced pathname. `recover` (Task 19 S2) restores the single last validated
+state from a torn write or removes validated orphaned temporaries/quarantines
+of the atomic writer; it fails closed on ambiguous or foreign artifacts, only
+deletes exact mode-0600 same-UID single-link regular markers, and preserves
+unknown files untouched. Recovery reports `clean` *only* when the private
+directory is truly absent — an existing symlinked, filed, wrong-mode, or
+foreign-owned directory fails closed instead of being reported clean — and a
+distinct `existing-empty` outcome when the directory is present and completely
+empty (never confused with a truly absent directory). When a
+digest ledger exists, a quarantined state is restored only when its digest
+matches the *latest* recorded ledger entry (a state tampered after it was
+recorded, or one matching only an earlier/superseded entry, fails closed with
+the quarantine preserved; a present-but-zero-byte ledger is ambiguous torn
+evidence and likewise blocks the restore), and after linking the
+quarantine into the canonical name the canonical state is re-validated in
+place *before* the quarantine is deleted and its inode is checked against the
+quarantine so a substitution fails closed. The owner-tamper probe (S7) never
+skips: `owner_tamper_gate` performs a real `chown(2)` and declares whether
+the owner
+check is exercisable, so coverage is genuinely exercised when possible and
+honestly declared unavailable (with a fail-closed reason) when not.
 
 Recovery is deterministic: the harness records the state digest before every
 untrusted phase and reopens/revalidates the file after it, so any same-user

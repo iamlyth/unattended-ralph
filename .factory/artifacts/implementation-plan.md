@@ -654,7 +654,7 @@ completes with evidence.
 
 ## Task 19: Harden factory-state/v1 authority (Task 4 review findings)
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 4
 - Priority: 1
 - Scope: Review and harden the Task 4 `factory-state/v1` authority against the
@@ -700,6 +700,41 @@ completes with evidence.
   independent fixtures; new `.factory/tests/fixtures/state-*` files;
   `scripts/validate-implementation-plan.py planning`;
   `scripts/check-plan-freshness.sh`.
+- Evidence: every Task 4 review finding is closed with an exact fail-closed
+  fixture exercised by the trusted control plane, not only the unit suite.
+  S1 `init` is atomic and no-replace (never clobbers existing state or a
+  campaign binding); S2 crash-window and orphan recovery is deterministic,
+  fails closed on an unsafe existing state directory, re-validates the
+  canonical state after linking and before deleting the quarantine, and
+  matches the latest recorded digest-ledger entry when a ledger exists;
+  S3 a zeroed `now=0`/epoch-zero monotonic start marker is rejected as
+  tamper; S6 independent transition and state-digest fixtures are authored
+  separately from the code path they exercise; S7 the owner-tamper probe
+  always exercises the actual owner-check branch via a deterministic
+  real-stat expected-UID mismatch requiring no `chown`, with a genuine
+  ownership tamper reported and exercised only when the kernel capability
+  exists (never skipping, never claiming unavailable real-system evidence);
+  S8 `plan_digest` is documented, derived, and write-once bound in
+  `docs/OPERATIONS.md` and the state schema; S9 `phase`/`outcome` enum
+  values are validated, the `attempt >= phase` monotonic coupling is
+  enforced so an attempt can never precede its owning phase, and the inverse
+  marker invariant holds (no active attempt => marker zero). The hidden
+  harness-owned suite `.factory/tests/test-factory-state.py` (125 tests,
+  all passing) proves the exact §11 transitions, retry/attempt budgets,
+  write-once bindings, secure atomic no-follow I/O, crash-window/quarantine
+  recovery, digest determinism, the append-only ledger, and the trusted
+  control-plane CLI across the committed `state-*.json`/`state-*.jsonl`
+  corpus; `.factory/tests/test-factory-plan-parser.py` (13 tests) and
+  `.factory/tests/test-factory-selector.py` (32 tests) also pass, and
+  `scripts/validate-implementation-plan.py planning`,
+  `scripts/check-plan-freshness.sh`, `scripts/check-generic-leakage.sh`, and
+  `scripts/check-docs-sync.sh` all exit 0 with no `docs/SPEC.md` change.
+  The independent security review of the hardened authority is acceptable.
+  The complete `verify-boilerplate.sh` gate still exits 1 solely from the
+  legacy context-summary authority drift (`scripts/check-context-summary.py`
+  reports the open-task set drifts from the plan against the stale
+  `.factory/artifacts/context-summary.md`); that legacy authority removal is
+  assigned to pending Task 15 and is not a Task 19 defect.
 - Documentation impact: `docs/OPERATIONS.md`,
   `.factory/schemas/factory-state-v1.schema.md`.
 

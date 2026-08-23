@@ -58,7 +58,24 @@ Campaign-scoped bindings (``schema``, ``repository_identity``, ``branch``,
 :func:`init_state` may establish them and no transition may change them.
 ``plan_digest`` and ``phase_base_commit`` bind a completed planning phase and
 are write-once until the next trusted ``planning -> implementation``
-transition.
+transition.  ``plan_digest`` is the SHA-256 of the exact bytes of the
+committed ``factory-plan/v1`` plan document (the canonical
+``.factory/artifacts/implementation-plan.md`` at the bound
+``phase_base_commit``) that the deterministic plan parser accepted; it is
+bound only by the trusted ``planning -> implementation`` edge and is
+write-once until the next such edge of the next round (Task 19 S8).
+
+Crash-window and orphan recovery (Task 19 S2) is deterministic and explicit:
+:func:`recover_state` restores the single authoritative state from the last
+validated quarantine when a torn atomic update left no canonical file (never
+creating a second authority), removes validated orphaned temporaries from a
+torn write that never published, and fails closed on ambiguous or unsafe
+leftover artifacts; :func:`init_state` runs recovery first and then publishes
+atomically with no-replace semantics (Task 19 S1), so a campaign never
+clobbers existing state or an existing campaign binding.  Monotonic markers
+are strictly positive (a zeroed ``now=0`` epoch marker is rejected as tamper,
+Task 19 S3), and an active attempt can never precede the phase that owns it
+(``attempt_started_at_monotonic >= phase_started_at_monotonic``, S9).
 
 All file I/O reuses the established dirfd/no-follow authority
 ``scripts/factory_state_io.py``: atomic publication through a mode-0600
@@ -95,7 +112,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 SCHEMA_NAME = "factory-state/v1"
 STATE_FILE_NAME = "factory-loop.json"
@@ -157,6 +174,24 @@ RETRY_OUTCOMES: Dict[str, Tuple[str, ...]] = {
     "implementation": ("task_progress", "task_failed", "interrupted"),
 }
 
+# §13 outcomes that may legitimately be recorded in a *persisted* state of
+# each live phase, derived edge-for-edge from the §11 transition table, the
+# retry table, and ``init`` (Task 19 S9): ``advance`` records the outcome of
+# the completed step for a non-terminal target, ``record_retry`` records the
+# retry outcome without a phase change, and ``init`` records ``None``.  A
+# ``last_outcome`` outside the owning phase's set is a forged phase/outcome
+# combination and fails closed.
+PHASE_OUTCOMES: Dict[str, frozenset] = {
+    "planning": frozenset({"interrupted", "pass", "findings", "blocked"}),
+    "implementation": frozenset(
+        {"planned", "task_progress", "task_failed", "interrupted"}
+    ),
+    "verification": frozenset(
+        {"task_completed", "work_exhausted", "blocked", "task_failed"}
+    ),
+    "audit": frozenset({"pass", "findings", "blocked"}),
+}
+
 # Campaign-scoped fields bound once by ``init`` and immutable afterwards.
 BINDING_FIELDS = (
     "schema", "repository_identity", "branch", "campaign_id",
@@ -176,6 +211,44 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 IDENTITY_RE = re.compile(r"^[0-9a-f]+:[0-9a-f]+$")
 SAFE_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Orphaned artifacts of the established atomic writer (Task 19 S2): a mode-0600
+# temporary ``.{name}.{32-hex}`` from a write that never published and a
+# quarantined ``.{name}.quarantine-{32-hex}`` copy of the last validated
+# state from an interrupted update.  Only these exact shapes are ever
+# recognized by recovery; any other name is preserved untouched.
+TEMP_ORPHAN_RE = re.compile(rf"^\.{re.escape(STATE_FILE_NAME)}\.[0-9a-f]{{32}}$")
+QUARANTINE_ORPHAN_RE = re.compile(
+    rf"^\.{re.escape(STATE_FILE_NAME)}\.quarantine-[0-9a-f]{{32}}$"
+)
+
+# Deterministic internal race hooks (Task 19 hardening): module-private,
+# one-shot, and unreachable from the trusted CLI.  Production never sets
+# them; the hidden conformance suite installs a hook to force the exact race
+# branch that a live crash cannot reproduce deterministically.  Each hook is
+# consumed (read and cleared) immediately before the operation it perturbs,
+# so a stale hook can never fire on a later unrelated call, and a hook that
+# fired while its operation raised leaves no residue behind.
+#
+#   ``_RACE_BEFORE_RESTORE_LINK(root, directory_fd)`` — called inside the
+#   restore dirfd scope immediately before recovery's no-replace ``linkat``
+#   publishes the canonical name; a hook that creates the canonical name
+#   forces the ``FileExistsError`` raced-canonical fail-closed branch.
+#
+#   ``_RACE_AFTER_RESTORE_LINK(root, directory_fd)`` — called inside the
+#   restore dirfd scope immediately after the ``linkat``; a hook that
+#   replaces the canonical name or the quarantine forces the substituted
+#   canonical/quarantine re-validation and identity fail-closed branches.
+#
+#   ``_LEDGER_RACE_AFTER_DUP_CHECK(root, directory_fd)`` — called inside the
+#   single validated ledger scope between the duplicate-tag read and the
+#   append; a hook that swaps or creates the ledger forces the
+#   ledger-identity fail-closed branches of ``record_phase_digest``, and a
+#   hook that appends the same tag to the same inode forces the
+#   concurrent-duplicate fail-closed branch (at most one same-tag writer
+#   succeeds and the ledger stays valid, hardening L5).
+_RACE_BEFORE_RESTORE_LINK: Optional[Callable[[Path, int], None]] = None
+_RACE_AFTER_RESTORE_LINK: Optional[Callable[[Path, int], None]] = None
+_LEDGER_RACE_AFTER_DUP_CHECK: Optional[Callable[[Path, int], None]] = None
 
 
 class StateError(Exception):
@@ -453,19 +526,40 @@ def _validate_state(state: FactoryState) -> None:
         raise StateTamperError(
             "a task is selected only during the implementation phase"
         )
-    for name, value in (
-        ("phase_started_at_monotonic", state.phase_started_at_monotonic),
-        ("attempt_started_at_monotonic", state.attempt_started_at_monotonic),
+    phase_marker = state.phase_started_at_monotonic
+    if (
+        isinstance(phase_marker, bool)
+        or not isinstance(phase_marker, int)
+        or phase_marker <= 0
     ):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value < 0
-        ):
-            raise StateTamperError(f"`{name}` must be a non-negative integer")
-    if state.attempt_number > 0 and state.attempt_started_at_monotonic == 0:
+        raise StateTamperError(
+            "`phase_started_at_monotonic` must be a positive monotonic marker "
+            "(a zeroed `now=0` epoch marker is rejected as tamper)"
+        )
+    attempt_marker = state.attempt_started_at_monotonic
+    if (
+        isinstance(attempt_marker, bool)
+        or not isinstance(attempt_marker, int)
+        or attempt_marker < 0
+    ):
+        raise StateTamperError(
+            "`attempt_started_at_monotonic` must be a non-negative integer"
+        )
+    if state.attempt_number > 0 and attempt_marker == 0:
         raise StateTamperError(
             "an active attempt must have a positive `attempt_started_at_monotonic`"
+        )
+    if attempt_marker > 0 and attempt_marker < phase_marker:
+        raise StateTamperError(
+            "an attempt can never precede the phase that owns it "
+            "(`attempt_started_at_monotonic` must be >= "
+            "`phase_started_at_monotonic`)"
+        )
+    if state.attempt_number == 0 and attempt_marker != 0:
+        raise StateTamperError(
+            "an attempt marker is zero whenever no attempt is active "
+            "(`attempt_started_at_monotonic` must be 0 when `attempt_number` "
+            "is 0)"
         )
     if state.current_phase in TERMINAL_PHASES and state.last_outcome != state.current_phase:
         raise StateTamperError(
@@ -477,6 +571,21 @@ def _validate_state(state: FactoryState) -> None:
             f"`last_outcome` must be a trusted outcome enum value or null, "
             f"got {state.last_outcome!r}"
         )
+    if state.last_outcome is None:
+        if state.current_phase != "planning":
+            raise StateTamperError(
+                "`last_outcome` may be null only during the planning phase, "
+                f"not {state.current_phase!r}"
+            )
+    else:
+        allowed = PHASE_OUTCOMES.get(
+            state.current_phase, frozenset({state.current_phase})
+        )
+        if state.last_outcome not in allowed:
+            raise StateTamperError(
+                f"`last_outcome` {state.last_outcome!r} is not a §13 outcome "
+                f"of phase {state.current_phase!r}"
+            )
 
 
 def parse_state(data: object) -> FactoryState:
@@ -626,14 +735,17 @@ def advance(
         next_plan_digest, next_base = state.plan_digest, state.phase_base_commit
     if now is None:
         now = time.monotonic_ns()
-    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-        raise StateTamperError("`now` must be a non-negative monotonic marker")
+    if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
+        raise StateTamperError(
+            "`now` must be a positive monotonic marker (a zeroed `now=0` "
+            "epoch marker is rejected as tamper)"
+        )
     next_round = (
         state.current_round + 1
         if state.current_phase == "audit" and target == "planning"
         else state.current_round
     )
-    return _checked_replace(
+    result = _checked_replace(
         state,
         current_phase=target,
         current_round=next_round,
@@ -645,6 +757,8 @@ def advance(
         phase_started_at_monotonic=now,
         last_outcome=target if target in TERMINAL_PHASES else outcome,
     )
+    result.validate()
+    return result
 
 
 def record_retry(state: FactoryState, outcome: str) -> FactoryState:
@@ -692,19 +806,24 @@ def begin_attempt(
         )
     if now is None:
         now = time.monotonic_ns()
-    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-        raise StateTamperError("`now` must be a non-negative monotonic marker")
+    if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
+        raise StateTamperError(
+            "`now` must be a positive monotonic marker (a zeroed `now=0` "
+            "epoch marker is rejected as tamper)"
+        )
     attempt = (
         state.attempt_number + 1
         if state.selected_task_id == task_id
         else 1
     )
-    return _checked_replace(
+    result = _checked_replace(
         state,
         selected_task_id=task_id,
         attempt_number=attempt,
         attempt_started_at_monotonic=now,
     )
+    result.validate()
+    return result
 
 
 def state_digest(state: FactoryState) -> str:
@@ -805,6 +924,11 @@ def init_state(
             )
     if now is None:
         now = time.monotonic_ns()
+    if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
+        raise StateTamperError(
+            "`now` must be a positive monotonic marker (a zeroed `now=0` "
+            "epoch marker is rejected as tamper)"
+        )
     state = FactoryState(
         schema=SCHEMA_NAME,
         repository_identity=identity,
@@ -825,12 +949,41 @@ def init_state(
         last_outcome=None,
     )
     state.validate()
+    # Deterministic crash-window/orphan recovery first (Task 19 S2): a torn
+    # write left only validated orphaned temporaries (removed) or a quarantine
+    # holding the last validated state (restored) — never a second authority.
+    recover_state(root)
     if _state_file_exists(root):
         raise StateError(
             f"refusing to overwrite an existing control-state file "
             f"{root / '.factory-state' / STATE_FILE_NAME}"
         )
-    write_state(root, state)
+    try:
+        has_prior_ledger = bool(_read_ledger(root))
+    except StateDigestError as exc:
+        if not os.path.exists(root / ".factory-state"):
+            has_prior_ledger = False
+        else:
+            raise StateError(
+                f"refusing to create a second campaign binding: the prior "
+                f"digest ledger is unsafe: {exc}"
+            ) from exc
+    if has_prior_ledger:
+        raise StateError(
+            f"refusing to create a second campaign binding: the digest ledger "
+            f"{root / '.factory-state' / DIGEST_LEDGER_NAME} already records "
+            f"a prior campaign's phase digests"
+        )
+    try:
+        # Atomic no-replace publication (Task 19 S1): the existence check and
+        # the linkat publish happen inside one directory scope, so init can
+        # never clobber existing state or a raced pathname.
+        atomic_write_json(root, STATE_FILE_NAME, state.to_dict(), no_replace=True)
+    except StateIOError as exc:
+        raise StateError(
+            f"refusing to overwrite an existing control-state file "
+            f"{root / '.factory-state' / STATE_FILE_NAME}: {exc}"
+        ) from exc
     return state
 
 
@@ -856,6 +1009,344 @@ def _state_file_exists(root: Path) -> bool:
         except FileNotFoundError:
             return False
         raise
+
+
+def _validate_orphan(info: os.stat_result) -> None:
+    """An orphaned writer artifact must still be a private owned marker.
+
+    Recovery never deletes a file it cannot prove is an exact mode-0600
+    same-UID single-link regular marker: a foreign, symlinked, hardlinked,
+    group/other-readable, or oversized artifact fails closed instead of being
+    destroyed.  The mode is checked exactly (``stat.S_IMODE(...) == 0o600``),
+    not merely for absent group/other write bits, so a leaked world-readable
+    orphan is never silently removed.
+    """
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_size > STATE_FILE_MAX
+    ):
+        raise StateError(
+            "unsafe orphaned state artifact: refusing to remove a file that is "
+            "not a private (exact 0600), owned, single-link regular marker"
+        )
+
+
+def owner_tamper_gate(root) -> Dict[str, object]:
+    """Probe whether the kernel honors an ownership change on a state file.
+
+    Task 19 S7: the owner-tamper conformance probe must never silently skip
+    the ownership check.  This gate performs a real ``chown(2)`` on a probe
+    file inside the private state directory (mode 0600, owned by the current
+    user) and *declares* what the kernel actually allowed:
+
+    * ``{"available": True, "reason": None}`` — the kernel accepted the
+      ownership change (a privileged run); the caller may exercise a genuine
+      ownership tamper and assert the state reader fails closed;
+    * ``{"available": False, "reason": <detail>}`` — the kernel refused the
+      change (typically an unprivileged run); the owner check is genuinely
+      unavailable in this process, so the caller must NOT claim owner-tamper
+      coverage.  This is an honest, declared unavailability with a
+      fail-closed reason — never a silent skip and never a false claim of
+      coverage.
+
+    The probe owner is restored and the probe removed before returning, so
+    the gate leaves no artifact.  Any name it creates (``.owner-probe-*``) is
+    outside the recognized temporary/quarantine shapes and is therefore never
+    touched by :func:`recover_state`.
+    """
+    root = _as_root(root)
+    probe = f".owner-probe-{os.getpid()}"
+    target_uid = 65534 if os.getuid() != 65534 else 65533
+    try:
+        with _fio.state_dir(root, create=True) as directory_fd:
+            descriptor = os.open(
+                probe,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.write(descriptor, b"owner-tamper-probe\n")
+            finally:
+                os.close(descriptor)
+            try:
+                os.chown(
+                    probe, target_uid, -1,
+                    dir_fd=directory_fd, follow_symlinks=False,
+                )
+            except OSError as exc:
+                os.unlink(probe, dir_fd=directory_fd)
+                return {
+                    "available": False,
+                    "reason": (
+                        "owner tamper unavailable: kernel refused chown(2): "
+                        f"{exc.strerror or exc}"
+                    ),
+                }
+            # The kernel honored the ownership change; restore our ownership
+            # so the probe never leaves a foreign-owned artifact, then remove
+            # it so the gate leaves the private directory clean.
+            try:
+                os.chown(
+                    probe, os.getuid(), -1,
+                    dir_fd=directory_fd, follow_symlinks=False,
+                )
+            except OSError:
+                pass
+            os.unlink(probe, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+    except OSError as exc:
+        return {
+            "available": False,
+            "reason": f"owner tamper unavailable: cannot probe ownership: {exc.strerror or exc}",
+        }
+    return {"available": True, "reason": None}
+
+
+def _latest_ledger_digest(root: Path) -> Optional[str]:
+    """Digest of the most recently recorded ledger entry, or ``None`` when no
+    digest ledger exists.
+
+    Task 19 S2: when a ledger exists, recovery must match the recovered state
+    against the latest recorded state digest before restoring a quarantine, so
+    a quarantined state that was tampered after it was recorded fails closed.
+    A malformed or unsafe ledger fails closed through ``_read_ledger``, and a
+    present-but-empty ledger is ambiguous torn evidence and likewise fails
+    closed (hardening L4) instead of silently skipping the digest check.
+    """
+    ledger = _read_ledger(root)
+    if not ledger:
+        return None
+    return next(reversed(ledger.values()))
+
+
+def recover_state(
+    root, *, _expected_uid: Optional[int] = None
+) -> Dict[str, object]:
+    """Deterministically recover crash-window and orphaned state artifacts.
+
+    Task 19 S2: an atomic update can be torn by a crash at exactly two
+    boundaries — leaving (a) an orphaned mode-0600 temporary that never
+    linked, or (b) a quarantined copy of the last validated state after the
+    canonical name was renamed but before the new state linked.  Recovery is a
+    pure function of the private directory contents:
+
+    * ``clean`` is reported *only* when the private directory is truly
+      absent; an existing directory that is a symlink, a plain file,
+      wrong-mode, or foreign-owned fails closed instead of being treated as
+      clean;
+    * ``existing-empty`` is reported when the private directory exists, is
+      a valid private owned directory, and contains *nothing at all* — a
+      valid present-empty directory (for example one left behind by an
+      owner probe) is explicitly distinguished from a truly absent
+      directory, so the caller is never told a fresh root has no lifecycle
+      state when the directory is actually there; recovery creates or
+      deletes nothing and leaves the empty directory untouched;
+    * the canonical ``factory-loop.json`` is the single authority; when it
+      exists it is re-validated and any validated orphaned temporaries and
+      quarantines are removed (they are leftovers of a completed or aborted
+      update);
+    * when it is absent and exactly one quarantine remains, the quarantine
+      holds the last validated state; the recovered state must match the
+      latest recorded digest-ledger entry when a ledger exists (a
+      present-but-empty ledger is ambiguous torn evidence and blocks the
+      restore as fail-closed), the quarantine is restored atomically with
+      no-replace, the canonical state is re-validated in place *before* the
+      quarantine is deleted, and no second authority is created;
+    * when it is absent and no quarantine remains, validated orphaned
+      temporaries from a torn first write that never published are removed
+      (no authoritative state ever existed, so nothing is lost);
+    * more than one quarantine, an unvalidatable or foreign quarantine, an
+      unsafe orphan, or a torn state fails closed for operator inspection —
+      recovery never guesses and never deletes ambiguous or foreign
+      artifacts.
+
+    Any name outside the recognized state/ledger/temporary/quarantine shapes
+    is preserved untouched.  Returns a machine-readable summary dict:
+    ``status`` is ``clean`` (directory truly absent), ``existing-empty``
+    (directory present and completely empty), or ``restored`` (a quarantine
+    was restored); ``removed`` counts validated orphaned
+    temporaries/quarantines deleted; ``restored`` is the restored canonical
+    name or ``None``.
+
+    ``_expected_uid`` is the underscore-private internal owner expectation
+    threaded to the directory/file owner checks (default: the current user);
+    a deterministic test may pass a wrong expected UID to exercise the exact
+    owner-rejection branch of an unsafe existing directory without requiring
+    ``chown``.  Production never passes it and the trusted CLI cannot set it.
+    """
+    root = _as_root(root)
+    global _RACE_BEFORE_RESTORE_LINK, _RACE_AFTER_RESTORE_LINK
+    # ``clean`` requires the private directory to be *truly absent*: a
+    # symlinked, filed, world-writable, or foreign-owned existing directory
+    # is unsafe and must fail closed rather than being reported clean (Task
+    # 19 S2).  A dangling symlink still stats (mode S_IFLNK), so only a real
+    # FileNotFoundError means the campaign has nothing to recover.
+    try:
+        os.stat(root / ".factory-state", follow_symlinks=False)
+    except FileNotFoundError:
+        return {"status": "clean", "removed": 0, "restored": None}
+    try:
+        with _fio.state_dir(
+            root, create=False, _expected_uid=_expected_uid
+        ) as directory_fd:
+            names = sorted(os.listdir(directory_fd))
+            temporaries = [
+                name for name in names if TEMP_ORPHAN_RE.fullmatch(name)
+            ]
+            quarantines = [
+                name for name in names if QUARANTINE_ORPHAN_RE.fullmatch(name)
+            ]
+            for name in temporaries + quarantines:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                _validate_orphan(info)
+            canonical_present = STATE_FILE_NAME in names
+    except StateIOError as exc:
+        raise StateError(
+            f"refusing recovery into an unsafe existing state directory: {exc}"
+        ) from exc
+
+    if canonical_present:
+        # The canonical file is the single authority; re-validate it so a
+        # forged, moved, or torn state is never paired with recovery cleanup.
+        load_state(root)
+    else:
+        if len(quarantines) > 1:
+            raise StateError(
+                "ambiguous crash recovery: multiple quarantined state copies; "
+                "refusing to choose one without creating a second authority"
+            )
+        if len(quarantines) == 1:
+            quarantine = quarantines[0]
+            try:
+                data = read_json(
+                    root, quarantine, maximum=STATE_FILE_MAX,
+                    # Only the narrowly scoped internal orphan-name shape is
+                    # accepted for a quarantined state read; a quarantined
+                    # marker name starts with a dot, so it cannot pass the
+                    # public safe-name rule (``_name``) and must go through
+                    # this exact shape validator (Task 19 S2).
+                    name_validator=_fio._internal_orphan_name,
+                    _expected_uid=_expected_uid,
+                )
+            except StateIOError as exc:
+                raise StateError(
+                    f"cannot read the quarantined state {quarantine!r}: {exc}"
+                ) from exc
+            recovered = parse_state(data)
+            if recovered.repository_identity != repository_identity(root):
+                raise StateError(
+                    "quarantined state does not match the canonical root; "
+                    "refusing to restore a moved or forged state"
+                )
+            latest = _latest_ledger_digest(root)
+            if latest is not None and state_digest(recovered) != latest:
+                raise StateError(
+                    f"quarantined state digest does not match the latest "
+                    f"digest-ledger entry ({latest}); refusing to restore a "
+                    f"tampered state"
+                )
+            with _fio.state_dir(
+                root, create=False, _expected_uid=_expected_uid
+            ) as directory_fd:
+                hook = _RACE_BEFORE_RESTORE_LINK
+                if hook is not None:
+                    _RACE_BEFORE_RESTORE_LINK = None
+                    hook(root, directory_fd)
+                try:
+                    # No-replace restore: the canonical name must still be
+                    # absent, so recovery can never overwrite a raced writer.
+                    os.link(
+                        quarantine, STATE_FILE_NAME,
+                        src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as exc:
+                    raise StateError(
+                        "state file appeared during recovery; rerun recovery "
+                        "with the writer stopped"
+                    ) from exc
+                hook = _RACE_AFTER_RESTORE_LINK
+                if hook is not None:
+                    _RACE_AFTER_RESTORE_LINK = None
+                    hook(root, directory_fd)
+            # Re-validate the canonical state in place *before* deleting the
+            # quarantine (Task 19 S2): the canonical and the quarantine are
+            # one inode right now (nlink=2), so the read tolerates the extra
+            # link and must reproduce the exact validated state.  A raced,
+            # substituted, or forged canonical fails closed with the
+            # quarantine preserved for operator inspection.
+            try:
+                raw = _fio.read_bytes(
+                    root, STATE_FILE_NAME, maximum=STATE_FILE_MAX,
+                    _expected_uid=_expected_uid, allow_linked=True,
+                )
+                reparsed = parse_state(json.loads(raw.decode("utf-8")))
+            except (StateIOError, UnicodeError, json.JSONDecodeError) as exc:
+                raise StateError(
+                    f"cannot re-validate the restored state {STATE_FILE_NAME!r}: "
+                    f"{exc}"
+                ) from exc
+            if reparsed.to_dict() != recovered.to_dict():
+                raise StateError(
+                    "restored canonical state differs from the validated "
+                    "quarantined state; refusing to delete the quarantine"
+                )
+            with _fio.state_dir(
+                root, create=False, _expected_uid=_expected_uid
+            ) as directory_fd:
+                canonical = os.stat(
+                    STATE_FILE_NAME, dir_fd=directory_fd, follow_symlinks=False
+                )
+                quarantined = os.stat(
+                    quarantine, dir_fd=directory_fd, follow_symlinks=False
+                )
+                if (canonical.st_dev, canonical.st_ino) != (
+                    quarantined.st_dev, quarantined.st_ino
+                ):
+                    raise StateError(
+                        "quarantine was substituted during restore; refusing "
+                        "to delete it"
+                    )
+                os.unlink(quarantine, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+    restored = STATE_FILE_NAME if not canonical_present and len(quarantines) == 1 else None
+    restored = STATE_FILE_NAME if not canonical_present and len(quarantines) == 1 else None
+    removed = 0
+    with _fio.state_dir(
+        root, create=False, _expected_uid=_expected_uid
+    ) as directory_fd:
+        leftovers = temporaries + (quarantines if canonical_present else [])
+        for name in leftovers:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            _validate_orphan(info)
+            os.unlink(name, dir_fd=directory_fd)
+            removed += 1
+        if leftovers:
+            os.fsync(directory_fd)
+    # ``existing-empty`` distinguishes a valid present-but-empty private
+    # directory from a truly absent one (``clean``): recovery found no
+    # lifecycle artifact to act on, but the directory exists, so a caller is
+    # never told a fresh root has no lifecycle state when the directory is
+    # actually there (for example one left behind by an owner probe).  A
+    # present directory that contained artifacts reports ``clean`` after
+    # recovery leaves a validated final state (leftovers already removed);
+    # ``restored`` is reported only when a quarantine was linked into the
+    # canonical name.
+    if restored:
+        status = "restored"
+    elif not names:
+        status = "existing-empty"
+    else:
+        status = "clean"
+    return {
+        "status": status,
+        "removed": removed,
+        "restored": restored,
+    }
 
 
 def write_state(root, state: FactoryState) -> None:
@@ -893,6 +1384,7 @@ def load_state(
     expected_plan_digest: Optional[str] = None,
     expected_audit_objectives_digest: Optional[str] = None,
     expected_role_prompt_digests: Optional[Mapping[str, str]] = None,
+    _expected_uid: Optional[int] = None,
 ) -> FactoryState:
     """Securely reopen, validate, and bind the control-state file.
 
@@ -901,10 +1393,21 @@ def load_state(
     field set and invariants, and then fails closed when the recorded
     ``repository_identity`` does not match the canonical root directory or
     when any expected campaign binding differs.
+
+    ``_expected_uid`` is the underscore-private *internal* owner expectation
+    that defaults to the current user (Task 19 S7): production never passes
+    it, so the real owner check always compares real ``stat`` metadata
+    against the current UID, and the trusted CLI cannot set it.  A
+    deterministic always-runnable test may pass a wrong expected UID to
+    exercise the exact owner-rejection branch with real stat metadata and
+    without requiring ``chown``.
     """
     root = _as_root(root)
     try:
-        data = read_json(root, STATE_FILE_NAME, maximum=STATE_FILE_MAX)
+        data = read_json(
+            root, STATE_FILE_NAME, maximum=STATE_FILE_MAX,
+            _expected_uid=_expected_uid,
+        )
     except StateIOError as exc:
         raise StateTamperError(str(exc)) from exc
     state = parse_state(data)
@@ -927,60 +1430,126 @@ def load_state(
 # ---------------------------------------------------------------------------
 
 
-def _append_ledger_line(root: Path, line: bytes) -> None:
-    """Append exactly one validated JSON line to the append-only ledger."""
+def _append_ledger_line_fd(
+    directory_fd: int,
+    line: bytes,
+    *,
+    tag: str,
+    expected_identity: Optional[Tuple[int, int]],
+) -> None:
+    """Append exactly one validated JSON line inside an open dirfd scope.
+
+    The caller holds the single validated ``state_dir`` scope and already
+    read the ledger through the same scope (:func:`_read_ledger_fd`) to
+    reject duplicate tags; ``expected_identity`` is the (dev, inode) of the
+    ledger observed by that read, or ``None`` when the ledger was absent.
+    Every step re-validates identity against that expectation, so a ledger
+    that was swapped, substituted, or created between the duplicate-tag
+    check and the append fails closed (Task 19 hardening L4/L5): the stat
+    before the append must match the read's identity, the opened descriptor
+    must match it, the ledger is re-read to confirm the same tag is still
+    absent on the very same inode (so a concurrent same-tag writer that
+    landed between the duplicate-tag check and this append cannot produce a
+    duplicate — at most one same-tag writer ever succeeds and the ledger
+    stays a valid unique-tag sequence), and after the write the name must
+    still resolve to the same inode with exactly
+    ``before_size + len(line)`` bytes.
+    """
     if not line.endswith(b"\n") or b"\n" in line[:-1] or b"\x00" in line:
-        raise StateDigestError("ledger line must be one newline-terminated JSON line")
+        raise StateDigestError(
+            "ledger line must be one newline-terminated JSON line"
+        )
     try:
-        with _fio.state_dir(root, create=True) as directory_fd:
-            descriptor = -1
-            try:
-                try:
-                    existing = os.stat(
-                        DIGEST_LEDGER_NAME, dir_fd=directory_fd, follow_symlinks=False
-                    )
-                except FileNotFoundError:
-                    existing = None
-                if existing is not None:
-                    _validate_ledger_file(existing)
-                descriptor = os.open(
-                    DIGEST_LEDGER_NAME,
-                    os.O_WRONLY | os.O_APPEND | os.O_CREAT
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                    dir_fd=directory_fd,
+        try:
+            name_before = os.stat(
+                DIGEST_LEDGER_NAME, dir_fd=directory_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            name_before = None
+        name_identity = (
+            (name_before.st_dev, name_before.st_ino)
+            if name_before is not None
+            else None
+        )
+        if name_identity != expected_identity:
+            raise StateDigestError(
+                "digest ledger was replaced between the duplicate-tag check "
+                "and the append"
+            )
+        # Re-read the ledger through the same directory scope and confirm the
+        # *same inode* still holds no record of this tag before we append.  A
+        # concurrent writer that appended the same tag to this exact inode
+        # between the caller's duplicate-tag check and now is caught here, so
+        # exactly one same-tag writer can ever succeed and the resulting
+        # ledger is never left with a repeated tag (Task 19 hardening L5).  A
+        # swap to a different inode is also caught (the fresh identity differs
+        # from the dup-checked expectation).
+        recheck_ledger, recheck_identity = _read_ledger_fd(directory_fd)
+        if recheck_identity != expected_identity:
+            raise StateDigestError(
+                "digest ledger was replaced between the duplicate-tag check "
+                "and the append"
+            )
+        if tag in recheck_ledger:
+            raise StateDigestError(f"digest ledger repeats phase tag {tag!r}")
+        descriptor = os.open(
+            DIGEST_LEDGER_NAME,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            before = os.fstat(descriptor)
+            _validate_ledger_file(before)
+            if expected_identity is not None and (
+                before.st_dev, before.st_ino
+            ) != expected_identity:
+                raise StateDigestError(
+                    "digest ledger was replaced between the duplicate-tag "
+                    "check and the append"
                 )
-                os.fchmod(descriptor, 0o600)
-                before = os.fstat(descriptor)
-                _validate_ledger_file(before)
-                written = os.write(descriptor, line)
-                after = os.fstat(descriptor)
-                _validate_ledger_file(after)
-                if written != len(line):
-                    raise StateDigestError("short digest-ledger append")
-                if (
-                    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-                    or after.st_size != before.st_size + len(line)
-                ):
-                    raise StateDigestError("digest ledger changed while appending")
-                os.fsync(descriptor)
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-            os.fsync(directory_fd)
-    except StateError:
-        raise
+            written = os.write(descriptor, line)
+            after = os.fstat(descriptor)
+            _validate_ledger_file(after)
+            if written != len(line):
+                raise StateDigestError("short digest-ledger append")
+            if (
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or after.st_size != before.st_size + len(line)
+            ):
+                raise StateDigestError("digest ledger changed while appending")
+            name_after = os.stat(
+                DIGEST_LEDGER_NAME, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if (name_after.st_dev, name_after.st_ino) != (
+                after.st_dev, after.st_ino
+            ):
+                raise StateDigestError(
+                    "digest ledger name replaced during the append"
+                )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(directory_fd)
     except (OSError, StateIOError) as exc:
         raise StateDigestError(f"cannot append to the digest ledger: {exc}") from exc
 
 
-def _read_ledger(root: Path) -> Dict[str, str]:
-    try:
-        raw = read_bytes(root, DIGEST_LEDGER_NAME, maximum=LEDGER_MAX, missing_ok=True)
-    except StateIOError as exc:
-        raise StateDigestError(str(exc)) from exc
-    if raw is None:
-        return {}
+def _parse_ledger_lines(raw: bytes) -> Dict[str, str]:
+    """Parse and validate the exact ``{"tag", "digest"}`` line set.
+
+    An existing *zero-byte* ledger fails closed: the file is present but
+    holds no record, which is ambiguous torn evidence of an interrupted
+    first append — it is never silently treated as “no evidence” (Task 19
+    hardening L4).
+    """
+    if raw == b"":
+        raise StateDigestError(
+            "digest ledger exists but is empty (a torn append artifact); "
+            "refusing to treat it as no recorded evidence"
+        )
     try:
         text = raw.decode("utf-8")
     except UnicodeError as exc:
@@ -1011,28 +1580,114 @@ def _read_ledger(root: Path) -> Dict[str, str]:
     return ledger
 
 
+def _read_ledger_fd(
+    directory_fd: int,
+) -> Tuple[Dict[str, str], Optional[Tuple[int, int]]]:
+    """Read and validate the ledger through an already-open directory fd.
+
+    Returns ``(parsed entries, ledger (dev, inode) identity)`` where the
+    identity is ``None`` when the ledger does not exist.  The read holds one
+    descriptor and re-validates identity/size before and after, so a ledger
+    replaced while being read fails closed; the returned identity lets the
+    caller bind the append to the very ledger that was just checked.
+    """
+    try:
+        descriptor = os.open(
+            DIGEST_LEDGER_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        raise StateDigestError(
+            f"cannot safely open the digest ledger: {exc}"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        _validate_ledger_file(before)
+        named = os.stat(
+            DIGEST_LEDGER_NAME, dir_fd=directory_fd, follow_symlinks=False
+        )
+        identity = (before.st_dev, before.st_ino)
+        if identity != (named.st_dev, named.st_ino):
+            raise StateDigestError(
+                "digest ledger changed while being opened"
+            )
+        chunks: List[bytes] = []
+        remaining = LEDGER_MAX + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named_after = os.stat(
+            DIGEST_LEDGER_NAME, dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (
+            len(raw) > LEDGER_MAX
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)
+        ):
+            raise StateDigestError("digest ledger changed while reading")
+        return _parse_ledger_lines(raw), identity
+    finally:
+        os.close(descriptor)
+
+
+def _read_ledger(root: Path) -> Dict[str, str]:
+    try:
+        raw = read_bytes(
+            root, DIGEST_LEDGER_NAME, maximum=LEDGER_MAX, missing_ok=True
+        )
+    except StateIOError as exc:
+        raise StateDigestError(str(exc)) from exc
+    if raw is None:
+        return {}
+    return _parse_ledger_lines(raw)
+
+
 def record_phase_digest(root, tag: str) -> str:
     """Record the current state digest before an untrusted phase.
 
     Appends one ``{"tag": ..., "digest": ...}`` line to the append-only
     evidence ledger ``.factory-state/state-digest-ledger.jsonl``; the ledger
     is evidence, never orchestration state, and a repeated tag fails closed.
-    Returns the recorded digest.
+    The duplicate-tag check and the append happen inside *one* validated
+    directory scope over the same ledger identity (Task 19 hardening L3), so
+    a ledger swapped or substituted between the check and the append — or
+    while being appended — fails closed instead of silently recording into
+    an unexpected file.  Returns the recorded digest.
     """
     root = _as_root(root)
     if not SAFE_TAG_RE.fullmatch(tag):
         raise StateDigestError(f"unsafe phase tag {tag!r}")
+    global _LEDGER_RACE_AFTER_DUP_CHECK
     state = load_state(root)
     digest = state_digest(state)
-    if tag in _read_ledger(root):
-        raise StateDigestError(f"digest ledger repeats phase tag {tag!r}")
-    _append_ledger_line(
-        root,
-        json.dumps(
-            {"tag": tag, "digest": digest}, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        + b"\n",
-    )
+    line = json.dumps(
+        {"tag": tag, "digest": digest}, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8") + b"\n"
+    try:
+        with _fio.state_dir(root, create=True) as directory_fd:
+            ledger, identity = _read_ledger_fd(directory_fd)
+            if tag in ledger:
+                raise StateDigestError(f"digest ledger repeats phase tag {tag!r}")
+            hook = _LEDGER_RACE_AFTER_DUP_CHECK
+            if hook is not None:
+                _LEDGER_RACE_AFTER_DUP_CHECK = None
+                hook(root, directory_fd)
+            _append_ledger_line_fd(
+                directory_fd, line, tag=tag, expected_identity=identity
+            )
+    except StateError:
+        raise
+    except (OSError, StateIOError) as exc:
+        raise StateDigestError(f"cannot append to the digest ledger: {exc}") from exc
     return digest
 
 
@@ -1094,6 +1749,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sub.add_parser("show", help="print the canonical state JSON")
     sub.add_parser("digest", help="print the deterministic state digest")
+    sub.add_parser(
+        "recover",
+        help=(
+            "deterministic crash-window/orphan recovery (Task 19 S2): restore "
+            "the last validated state from a torn write or remove validated "
+            "orphaned writer artifacts"
+        ),
+    )
 
     # The subparser variables are distinctly named (``*_parser``) so a
     # parser object can never shadow the transition/retry helper of the same
@@ -1148,6 +1811,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "digest":
             state = load_state(root)
             print(f"digest={state_digest(state)}")
+        elif args.command == "recover":
+            summary = recover_state(root)
+            print(
+                f"recovered status={summary['status']} "
+                f"removed={summary['removed']} "
+                f"restored={summary['restored'] or 'none'}"
+            )
         elif args.command == "advance":
             state = advance(
                 load_state(root),
