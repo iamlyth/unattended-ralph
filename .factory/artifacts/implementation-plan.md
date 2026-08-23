@@ -1,19 +1,494 @@
 ---
-spec_path: docs/SPEC.md
-spec_commit: UNPLANNED
-spec_blob: UNPLANNED
-base_commit: UNPLANNED
-status: needs-planning
+spec_path: docs/FACTORY-LOOP-SPEC.md
+spec_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
+spec_blob: ca2334abf18a6557eb09c9baeb4b03bb3df523a4
+base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
+status: active
 ---
 
 # Implementation Plan
 
-No implementation plan has been generated for the current specification commit.
+## Goal and non-goals
 
-Run:
+Goal: implement the minimal fresh-context software-factory loop specified by
+`docs/FACTORY-LOOP-SPEC.md` as a new Python control plane living only under the
+hidden `.factory/` namespace with runtime state under ignored `.factory-state/`.
+The redesign retains the existing Ollama usage guard, the Git commit boundary,
+the credential tool-call/tool-result enforcement, and the exact-commit
+evidence/runner/visual machinery, hardens the Ollama credential transport, and
+migrates off the Ralph Orchestrator control plane with visible `scripts/ralph-*`
+entrypoints reduced to deprecated forwarders (or removed) only after parity is
+proven.
 
-```bash
-./scripts/ralph-plan.sh
-```
+Non-goals:
 
-Review and commit the resulting plan before starting `./scripts/ralph-run.sh`.
+- no durable semantic memory, runtime task ledger, event stream, or loop lock;
+- no `main`-branch promotion, no autonomous release, no product-spec invention
+  (`docs/SPEC.md` remains the adopting-product placeholder and is not planned
+  against);
+- no adaptive model subroles, no parallel model launches, no Rust toolchain;
+- no new orchestration added to the visible product `scripts/` directory beyond
+  adaptation of existing configuration readers and deprecation forwarders;
+- this boilerplate cycle does not plan, build, or test the Controller product.
+
+## Architecture and constraints
+
+- Control-plane implementation is Python 3.11+ standard library under
+  `.factory/loop/` (plan parser, selector, state, locking, launch/supervision,
+  phase machine, conformance helpers). POSIX shell is limited to small operator
+  entry points. The existing secure Pi wrapper (`scripts/pi2-secure-exec.py`)
+  is invoked, never reimplemented.
+- Committed schema `factory-plan/v1` (Markdown + schema files under
+  `.factory/schemas/`) is the plan contract; the deterministic parser is part
+  of the acceptance boundary and round-trips without semantic loss.
+- Exactly one minimal mutable control-state file
+  `.factory-state/factory-loop.json` (schema `factory-state/v1`) carries only
+  the §11 fields and enforces the §11 transition table; append-only evidence
+  artifacts are never orchestration state.
+- Locking is an exclusive `flock` on the canonical Git top-level directory
+  descriptor (`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`); the descriptor and lock
+  metadata are never inherited by model processes, and no second writer,
+  worktree, or parallel lifecycle mutation is permitted.
+- Every phase runs a fresh model process with the static role prompt digest
+  bound at campaign start, deterministic audit-objective digest, exact bound
+  commit, and a selected task excerpt whose bytes are re-derived from the
+  committed plan and digest-matched before launch.
+- Ollama `--check`/`--wait` runs before every model invocation under the
+  retained decision table; credential material appears in no child argv,
+  environ, log, or repository state and is transported via a mode-0600
+  mechanism, with owned temporary material erased.
+- The existing evidence machinery (exact-commit receipts/manifests, capability
+  contracts, immutable verifier binding, visual provenance, installed and
+  runner evidence) stays authoritative and is re-verified on the new path.
+- Migration is generic-first: the Ralph control plane is frozen, `.ralph/` is
+  archived read-only outside the model-visible workspace, and the completed
+  design must not depend on `ralph emit`, completion tokens, Ralph event
+  streams, runtime task stores, or Ralph memories.
+- The redesign is accepted only when `verify-boilerplate.sh`, the §2 §2
+  conformance suite, the conformance sidecar for every §24 requirement ID, and
+  an independent final audit pass on the boilerplate.
+
+## Specification conformance matrix
+
+Every normative requirement in `docs/FACTORY-LOOP-SPEC.md` §24 is mapped to
+the bounded tasks below. Classification in this fresh plan is `missing` when
+the behavior does not exist yet and `partial` when existing machinery is
+retained but must be re-bound/hardened; no row is `verified` until its task
+completes with evidence.
+
+| ID | Spec § | Classification | Evidence | Task |
+|----|--------|--------------|----------|------|
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8 |
+| CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6 |
+| CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
+| ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
+| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2 |
+| TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3 |
+| TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
+| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
+| QUOTA-02 | §10 | missing | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7 |
+| STATE-01 | §11, §17 | missing | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4 |
+| LOCK-01 | §12 | missing | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5 |
+| PROC-01 | §9, §12, §17 | missing | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5 |
+| PHASE-01 | §13, §14 | missing | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9 |
+| COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9 |
+| FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10 |
+| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11 |
+| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12 |
+| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12 |
+| RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12 |
+| HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13 |
+| MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
+| TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
+| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 18 |
+
+## Interaction acceptance inventory
+
+- input boundary: each role receives only its static prompt, the concise
+  `AGENTS.md`, the canonical specification, the canonical plan, and the current
+  code/tests at the bound Git state; the selected task is byte- and
+  digest-bound to the committed plan (AUTH-01, CTX-01, TASK-02).
+- semantic boundary: no durable semantic memory, scratchpad prose, prior
+  conversations, context summaries, or completion claims are injected or read
+  as authority; findings reach later developers only through a planner
+  revision of the plan (CTX-02, FIND-01).
+- production boundary: the developer role is the only writer of product code;
+  harness and runtime files stay confined to `.factory/`, `.factory-state/`,
+  and `.pi/` and never touch product/build/package paths (HIDE-01, ROLE-01).
+- evidence boundary: deterministic verification produces exact-commit
+  receipts and manifests; visual and runner evidence retain byte provenance;
+  a model completion token can never bypass a deterministic gate (EVID-01,
+  VIS-01, RUNNER-01).
+
+## Task 1: Bind the canonical specification and baseline harness config
+
+- Status: pending
+- Dependencies: None
+- Scope: Point `.factory/config.toml [project].spec` at
+  `docs/FACTORY-LOOP-SPEC.md` so plan freshness and planning gates resolve the
+  redesign specification (commit `2d6a4fd`, blob `ca2334ab…`); adapt
+  `scripts/check-spec-provided.sh` so it gates on the new canonical spec and
+  never plans against `docs/SPEC.md` (which remains the adopting product
+  placeholder, untouched and unplanned); adapt `scripts/check-plan-freshness.sh`
+  and `scripts/plan-scope-guard.sh` to the new spec path without adding new
+  orchestration to the visible `scripts/` tree.
+- Acceptance criteria: `scripts/check-plan-freshness.sh` resolves the committed
+  plan's spec binding to `docs/FACTORY-LOOP-SPEC.md` at commit `2d6a4fd` and
+  blob `ca2334ab…` and exits 0; `scripts/check-spec-provided.sh` exits 0 while
+  the new canonical spec is present; `docs/SPEC.md` is byte-unchanged and not
+  planned against.
+- Verification: `scripts/check-plan-freshness.sh` and
+  `scripts/check-spec-provided.sh` run from a clean tree; `git diff HEAD -- docs/SPEC.md` is empty.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+
+## Task 2: `factory-plan/v1` schema and deterministic parser
+
+- Status: pending
+- Dependencies: Task 1
+- Scope: Commit `factory-plan/v1` schema and the stdlib-only deterministic
+  parser in `.factory/loop/plan_parser.py` per §7: canonical front matter
+  (spec path/commit/blob, base commit, lifecycle status), unique task IDs,
+  allowed statuses and transitions, dependency/priority fields, scope,
+  acceptance, verification, documentation impact, conformance matrix rows, and
+  interaction inventory. The parser rejects duplicate headings, unknown
+  lifecycle states, ambiguous task sections, out-of-order or cyclic
+  dependencies, and non-contiguous IDs, and round-trips without semantic loss.
+  `scripts/validate-implementation-plan.py` remains a passing gate for the
+  owned plan file.
+- Acceptance criteria: the parser and the existing validator agree on the
+  canonical committed plan; each documented defect class has an exact
+  fixture; output is a deterministic function of the plan bytes.
+- Verification: `tests/test-factory-plan-parser.py`; run
+  `scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md`.
+- Documentation impact: `docs/FACTORY.md`.
+
+## Task 3: Deterministic plan-derived task selection
+
+- Status: pending
+- Dependencies: Task 2
+- Scope: Implement `.factory/loop/selector.py` for §8: reject an invalid,
+  stale, or ambiguously parsed plan; resume the sole `in_progress` task;
+  otherwise sort runnable `pending` tasks (dependencies complete) by explicit
+  numeric priority then lexicographic task ID; select exactly one; classify
+  `work_exhausted` or `blocked` when none are runnable. The selector runs only
+  inside the trusted control plane and never consults a runtime task ledger.
+- Acceptance criteria: fixture plans and harness prove the exact selection
+  order, single-task guarantee, deterministic tie-breaks, and the empty-work
+  classifications; the selection is a pure function of the plan and state.
+- Verification: `tests/test-factory-selector.py`; fixture corpus under
+  `tests/fixtures/plan-*`.
+- Documentation impact: `docs/FACTORY.md`.
+
+## Task 4: Minimal mutable control state
+
+- Status: pending
+- Dependencies: Task 1
+- Scope: Implement the single mutable control-state file
+  `.factory-state/factory-loop.json` under schema `factory-state/v1` with
+  exactly the §11 field set: schema, repository identity, branch, campaign id,
+  round counters, phase, spec/plan/prompt-set digests, base commit, selected
+  task id, attempt counters, monotonic phase/attempt start markers, and a
+  trusted `last_outcome` enum. All writes are atomic, no-follow, and
+  ownership/mode/link-count checked (reuse `scripts/factory_state_io.py`);
+  the §11 transition table is enforced; completed-phase bindings are
+  write-once; counters are monotonic; the state digest is recorded before each
+  untrusted phase and re-validated after.
+- Acceptance criteria: every tamper class (forged field, mode/owner/link
+  change, counter rewind, wrong path identity, illegal transition) fails
+  closed; every legitimate transition advances exactly as the §11 table
+  specifies; the state file is the only mutable lifecycle file.
+- Verification: `tests/test-factory-state.py`; adversarial fixture files under
+  `tests/fixtures/state-*`.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 5: Root-descriptor lock and Git writer boundary
+
+- Status: pending
+- Dependencies: Task 4
+- Scope: Implement the lock authority: exclusive `flock` on the already-open
+  canonical Git top-level directory descriptor opened with
+  `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`; validate canonical repository identity,
+  required branch, and spec/plan bindings before launch; close the lock
+  descriptor in every child before exec and strip lock metadata from the
+  child environment; start a new process session; make a separately opened
+  repository descriptor unable to unlock the holder; detect double-fork or
+  `setsid` escape and fail closed for operator inspection. Preserve the Git
+  command-boundary guard so `--no-verify`, hook-path override,
+  `GIT_CONFIG_*`, worktrees, amend/merge/rebase bypasses, and forged handoffs
+  remain rejected.
+- Acceptance criteria: concurrent launcher probes prove exactly one writer;
+  an untrusted leaf inherits no lock descriptor and no lock environment; the
+  escaped-descendant case blocks recovery; commit-boundary bypass tests stay
+  rejected.
+- Verification: `tests/test-factory-lock.py` extended with inheritance and
+  escape fixtures; `tests/test-git-commit-guard.sh` still passes.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 6: Fresh-context execution, invocation contract, and supervision
+
+- Status: pending
+- Dependencies: Task 3, Task 5
+- Scope: Implement `.factory/loop/launch.py`: every role starts in a new
+  fresh process via the existing secure wrapper (`scripts/pi2-secure-exec.py`)
+  in one-shot mode with disabled session resume and memory injection; the
+  invocation binds exact model/provider, static role prompt digest,
+  campaign-bound prompt-set digest, deterministic audit-objective digest,
+  canonical workspace and bound commit, selected task ID with an excerpt whose
+  bytes are re-derived from the committed plan blob and digest-matched (fail
+  closed on substitution/paraphrase), allowed tools, and runtime/inactivity
+  bounds. Supervision delivers TERM, INT, and HUP to the full process group,
+  then reaps with a bounded grace escalating to KILL; escaped children are
+  detected; dirty or interrupted work is preserved and never silently
+  overwritten; the machine-readable exit status is the only completion signal.
+- Acceptance criteria: process invariants (new session, no inherited lock/env,
+  no resume) verified per launch; excerpt digest match/mismatch fixtures pass;
+  signal delivery and reap fixtures pass; a crashed attempt leaves its dirty
+  work intact.
+- Verification: `tests/test-factory-launch.py`;
+  `tests/test-factory-supervision.sh`.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 7: Ollama usage guard retention and credential hardening
+
+- Status: pending
+- Dependencies: Task 6
+- Scope: Retain the `scripts/ollama-usage-guard.sh` `--check`/`--wait`
+  contract and the §10 decision table, wired into the control plane before
+  every model invocation. Harden the credential transport: cookies and
+  credentials never appear in child argv, child environments, logs, or
+  repository state; transport via a bounded stdin or a mode-0600 descriptor or
+  file; erase all owned temporary material; expose only redacted status;
+  signals received while waiting terminate the wait and campaign cleanly.
+  Add a conformance test that inspects a live synthetic child's
+  `/proc/<pid>/cmdline` and `/proc/<pid>/environ` and fails if the synthetic
+  cookie name or value appears.
+- Acceptance criteria: the exit table is enforced by fixtures; the
+  synthetic-secret probe never leaks into cmdline/environ; waiting aborts
+  cleanly on signal.
+- Verification: `tests/test-pi2-ollama-wrapper.sh` extended with the proc
+  probe; `tests/fixtures/usage-ok.html` and `usage-blocked.html` still drive
+  the parse path.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 8: Role prompts, prompt-set binding, and workspace confinement
+
+- Status: pending
+- Dependencies: Task 6
+- Scope: Commit distinct static role prompts for planner, developer, tester,
+  and auditor under `.factory/prompts/` with campaign-bound digests; commit
+  the audit-objective registry bound at campaign start and selected
+  deterministically per round. Implement model workspace confinement so
+  `.ralph/`, `.factory-state/`, prior scratchpads and handoffs, runtime task
+  stores, memory stores, and migration archives are unavailable through model
+  tools; the plan, spec, code/tests, and allowlisted `.factory/` inputs are
+  readable, and role write allowlists are honored. No memory, conversation, or
+  context-summary authority is injected.
+- Acceptance criteria: each role launch proves it can read the allowlisted
+  inputs and cannot read any forbidden path; the role-prompt digests match the
+  campaign binding; no completion claim from a previous attempt is present in
+  the fresh context.
+- Verification: `tests/test-factory-confinement.sh`.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+
+## Task 9: Phase and campaign state machine with outcomes
+
+- Status: pending
+- Dependencies: Task 4, Task 7, Task 8
+- Scope: Implement the phase/campaign orchestration: `planning ->
+  implementation -> verification -> audit` with the §11 transition table,
+  §13 phase-outcome classification (planned/failed/interrupted;
+  task_completed/progress/failed/interrupted/work_exhausted/blocked; pass/
+  findings/blocked/infrastructure_failure; pass/findings/blocked), §14 finite
+  round semantics, and the §15 predicate ladder kept distinct. Rounds advance
+  only on non-final audit; phase never moves backward; counters are
+  monotonic; a finite campaign always terminates (success, findings, blocked,
+  failed, infrastructure_failure, interrupted) and never spins on empty work.
+- Acceptance criteria: fixture campaigns for each outcome and the success/
+  blocked/findings/failed/interrupted combinations terminate within the
+  configured bounds; no phase transition violates the state machine.
+- Verification: `tests/test-factory-phase.py`;
+  `tests/test-factory-campaign.sh`.
+- Documentation impact: `docs/FACTORY.md`.
+
+## Task 10: Findings flow
+
+- Status: pending
+- Dependencies: Task 9
+- Scope: Structure tester/auditor findings as exact-commit, receipt-backed
+  findings that are incorporated into the canonical plan only by the next
+  planner revision. No independent runtime task queue may exist; evidence
+  ledgers stay out of task/memory authority; verification `findings`,
+  `blocked`, and audit results become next-round planner inputs through the
+  plan, not through memory injection.
+- Acceptance criteria: a fixture finding reaches the next developer only via
+  a revised plan task; no code path reads a separate task ledger; receipts are
+  the only acceptance evidence.
+- Verification: `tests/test-factory-findings.sh`.
+- Documentation impact: `docs/FACTORY.md`.
+
+## Task 11: Credential and security boundary retention
+
+- Status: pending
+- Dependencies: Task 6, Task 8
+- Scope: Preserve the existing Pi tool-call/tool-result credential guard and
+  trusted SDK authority; the retained extension contains only required
+  credential enforcement and guarded Git boundary behavior. No model tool can
+  dump environment, authentication files, private keys, or secrets; tool-result
+  redaction, stdin bounded command checks, and sanitized logs remain active.
+  Ralph lifecycle topics, `ralph emit`, completion-token handling, event
+  snapshots, launch handshakes, and Ralph CLI shims are removed from the new
+  path and never reimplemented.
+- Acceptance criteria: adversarial fixture attempts to exfiltrate secrets
+  through tools, results, logs, argv, or environment all fail closed; the
+  secure wrapper and credential-guard behavior remain unchanged in contract.
+- Verification: `tests/test-credential-extension.sh`;
+  `tests/test-credential-guard.sh`.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 12: Evidence, verifier, and runner machinery retention
+
+- Status: pending
+- Dependencies: Task 5, Task 9
+- Scope: Retain exact-commit signed runner receipts, capability contracts,
+  visual provenance, atomic publication, installed and human evidence tiers,
+  and the receipt wrapper (`scripts/machine-receipt.py`). The verifier
+  entrypoint is opened and bound to its committed blob/identity before
+  untrusted execution, and later pathname substitution fails closed. PASS
+  requires exit 0 and verified identity/commit/digests; any BLOCKED evidence
+  forces an audit `findings` result; audits cite `[receipt: …]` /
+  `[manifest: …]` exact references. Receipt publication happens only through
+  the trusted control plane.
+- Acceptance criteria: fixtures prove the receipt wrapper remains
+  authoritative, the immutable verifier binding rejects path substitution,
+  and no model assertion can elevate evidence.
+- Verification: `tests/test-factory-receipts.sh`;
+  `tests/test-runner-signer.sh`.
+- Documentation impact: `docs/OPERATIONS.md`.
+
+## Task 13: Harness isolation and installed-footprint inventory
+
+- Status: pending
+- Dependencies: Task 1
+- Scope: A conformance test inventories every file the harness installs or
+  generates and fails when a harness-owned path escapes the hidden
+  `.factory/`, runtime `.factory-state/`, or `.pi/` namespaces or the external
+  executable prefix. Product source, test, packaging, and build discovery must
+  exclude the hidden namespaces; deleting the hidden namespaces must remove
+  the harness without deleting product code. The generic-leak check and the
+  forbidden-root-file check keep product root clean.
+- Acceptance criteria: the installed-file inventory test passes; a fixture
+  harness file placed in a product path fails the gate; build/packaging
+  discovery yields no `.factory/` artifacts.
+- Verification: `tests/test-factory-footprint.sh`;
+  `scripts/check-generic-leakage.sh`.
+- Documentation impact: `docs/FACTORY.md`.
+
+## Task 14: Conformance sidecar and requirement policy for the §24 registry
+
+- Status: pending
+- Dependencies: Task 12, Task 13
+- Scope: Populate the existing machine-readable conformance sidecar
+  (`.factory/artifacts/conformance.json`) and requirement policy
+  (`.factory/requirement-policy.json`) with every §24 requirement ID, its
+  minimum evidence tier, required capability annotations, exact evidence
+  commit references, and receipt/artifact references. Classifications retain
+  fail-closed semantics; only all-verified can produce campaign success;
+  `blocked`/`partial`/`not_applicable` keep their blocking behavior.
+- Acceptance criteria: `scripts/validate-conformance.py` passes with the
+  populated sidecar; every §24 ID appears in both the sidecar and the policy
+  with matching required tiers; no requirement is self-declared.
+- Verification: `scripts/validate-conformance.py`;
+  `scripts/check-capability-evidence.py`.
+- Documentation impact: none (sidecar is machine data).
+
+## Task 15: Migration and deprecation of the Ralph control plane
+
+- Status: pending
+- Dependencies: Task 9, Task 10
+- Scope: Freeze new Ralph Orchestrator campaign launches; preserve existing
+  `.ralph/` and campaign artifacts as read-only recovery history outside the
+  model-visible workspace; migrate the active plan and campaign cursor into
+  the single minimal state file; do not translate runtime tasks, memories, or
+  completion tokens into the new authorities. Existing visible
+  `scripts/ralph-*` entry points become deprecated forwarders only, and the
+  completed design must not require them; new orchestration implementation
+  never lands in the visible `scripts/` directory. New-path source and tests
+  reject any dependency on `ralph emit`, completion tokens, Ralph event
+  streams, runtime task stores, or Ralph memories. Port to the Controller
+  product occurs only after generic verification, and this task stays
+  generic-only.
+- Acceptance criteria: migration fixtures prove plan/commits/dirty-work/
+  evidence/blockers survive while no `.ralph/` runtime state is imported;
+  deprecation forwarders are marked and optional; the generic suite has no
+  Ralph dependency.
+- Verification: `tests/test-factory-migration.sh`.
+- Documentation impact: `docs/OPERATIONS.md`, `README.md`.
+
+## Task 16: Adversarial conformance suite and verification gate
+
+- Status: pending
+- Dependencies: Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15
+- Scope: Implement the full §22 conformance suite (tests 1-27: fresh roles
+  and allowed inputs, memory/session disabled, deterministic selection, no
+  runtime ledger, findings only via plan, empty work reaches verification/
+  audit, external blockers end nonzero without elevation, pass impossible with
+  unresolved findings, one-writer lock concurrency, full process-group signal
+  delivery and reap, timeout/crash dirty-work preservation, tamper state fail
+  closed, Ollama check/wait before invocation with quota errors blocking,
+  credential enforcement and redaction active, exact-commit receipt/manifest
+  trust, no completion-token bypass, finite termination fixtures for every
+  outcome, migration without Ralph imports, lock non-inheritance, setsid
+  escape, task-excerpt byte binding, context confinement, mid-phase mutation
+  fail closed, synthetic Ollama cookie argv/environ, immutable verifier
+  descriptor, Git commit-boundary rejection, no Ralph lifecycle dependency).
+  Rework `scripts/verify-boilerplate.sh` so it runs the new-suite and the
+  generic implementation acceptance; a synthetic five-round campaign completes
+  with both success and findings fixtures.
+- Acceptance criteria: every §22 test passes deterministically on clean
+  trees; verify-boilerplate.sh fails on any of the adversarial fixtures.
+- Verification: `./scripts/verify-boilerplate.sh`;
+  `tests/test-factory-adversarial.sh`.
+- Documentation impact: `AGENTS.md` validation commands.
+
+## Task 17: Documentation synchronization
+
+- Status: pending
+- Dependencies: Task 16
+- Scope: Synchronize README, `docs/FACTORY.md`, `docs/OPERATIONS.md`, the
+  concise `AGENTS.md`, and the installed help/usage text to the new Python
+  factory loop; document the canonical specification path, the single state
+  file, role prompts, lock/security/evidence boundaries, and the migration/
+  deprecation status. The documentation checker and `check-docs-sync.sh` must
+  pass.
+- Acceptance criteria: all listed documents reflect the implemented loop and
+  pass the doc gates; `AGENTS.md` stays at or under the concise length limit
+  and names deterministic commands.
+- Verification: `scripts/check-docs-sync.sh`; the docs gate inside
+  `scripts/verify-boilerplate.sh`.
+- Documentation impact: README.md, `docs/FACTORY.md`, `docs/OPERATIONS.md`,
+  `AGENTS.md`, help text.
+
+## Task 18: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Tasks 1-17
+- Scope: Independent read-only audit and review at the final committed
+  revision verifies the definition of done: every conformance row in the
+  matrix and the
+  sidecar is `verified` with exact evidence, the interaction inventory
+  covers input/semantic/production/evidence, all open findings and defects are
+  closed or explicitly documented, the repository is clean at the audit
+  commit, and the documentation (README, FACTORY, OPERATIONS, AGENTS) is in
+  sync. The auditor is a separate fresh process with a distinct static
+  prompt, no developer/tester conversation, and reads only authoritative
+  inputs at the exact commit. An audit finding becomes a next-round planner
+  task; the audit itself never edits product code or the plan.
+- Acceptance criteria: audit report records every §31 requirement verified or
+  an explicit finding; no acceptance-critical audit finding remains; the
+  campaign does not claim success unless the final audit is clean and the
+  conformance sidecar shows all verified.
+- Verification: `scripts/validate-conformance.py`;
+  `scripts/check-docs-sync.sh`; independent audit evidence appended to
+  `.factory/artifacts/campaign-audit.md`.
+- Documentation impact: `.factory/artifacts/campaign-audit.md`.
