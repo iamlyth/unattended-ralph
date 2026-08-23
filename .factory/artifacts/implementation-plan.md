@@ -82,7 +82,7 @@ completes with evidence.
 | CTX-01 | §5, §9 | missing | fresh process per role with disabled session resume/memory injection implemented | Task 6 |
 | CTX-02 | §5, §18 | missing | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8 |
 | ROLE-01 | §6 | missing | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8 |
-| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2 |
+| PLAN-01 | §7 | missing | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously | Task 2, Task 14 |
 | TASK-01 | §7, §8 | missing | trusted task transitions and deterministic priority-then-ID selection | Task 3 |
 | TASK-02 | §9, §20 | missing | delivered task bytes and digest exactly match the committed plan | Task 6 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7 |
@@ -155,7 +155,7 @@ completes with evidence.
 
 ## Task 2: `factory-plan/v1` schema and deterministic parser
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 1
 - Scope: Commit `factory-plan/v1` schema and the stdlib-only deterministic
   parser in `.factory/loop/plan_parser.py` per §7: canonical front matter
@@ -170,8 +170,20 @@ completes with evidence.
 - Acceptance criteria: the parser and the existing validator agree on the
   canonical committed plan; each documented defect class has an exact
   fixture; output is a deterministic function of the plan bytes.
-- Verification: `tests/test-factory-plan-parser.py`; run
+- Verification: `.factory/tests/test-factory-plan-parser.py`; run
   `scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md`.
+- Evidence: `.factory/loop/plan_parser.py` is a stdlib-only deterministic
+  `factory-plan/v1` parser with byte-exact `parse -> serialize -> parse`
+  round-trip, deterministic JSON dump, the documented status transition
+  table, and `PlanError` rejection of every documented defect class; the
+  committed schema is `.factory/schemas/factory-plan-v1.schema.md` with the
+  machine-readable model contract `.factory/schemas/factory-plan-v1.schema.json`.
+  The harness-owned suite `.factory/tests/test-factory-plan-parser.py`
+  (12 tests, all passing) proves agreement with `scripts/validate-implementation-plan.py`
+  on the committed canonical plan, exact-fixture rejection for every defect
+  class (`.factory/tests/fixtures/plan-*.md`), and byte-exact/deterministic
+  round-trip; `scripts/validate-implementation-plan.py planning
+  .factory/artifacts/implementation-plan.md` still exits 0.
 - Documentation impact: `docs/FACTORY.md`.
 
 ## Task 3: Deterministic plan-derived task selection

@@ -140,6 +140,34 @@ The planner may only modify `.factory/artifacts/implementation-plan.md` and the 
 
 Inspect the plan before implementation. Every newly accepted task must be `pending`; inherited completed, in-progress, or blocked tasks fail the planning gate. Every `partial`, `missing`, or `ambiguous` conformance row must map to a task. `scripts/check-plan-freshness.sh` prevents a stale plan or altered cycle base from running after the specification changes.
 
+### Plan contract: `factory-plan/v1`
+
+The canonical plan conforms to the committed schema `factory-plan/v1`
+(`.factory/schemas/factory-plan-v1.schema.md`, with the machine-readable
+model contract in `.factory/schemas/factory-plan-v1.schema.json`) and is
+parsed by the stdlib-only deterministic parser `.factory/loop/plan_parser.py`.
+The parser is part of the acceptance boundary: it binds the canonical front
+matter (spec path/commit/blob, base commit, lifecycle status), unique and
+contiguous task IDs, the allowed statuses and transition table,
+dependency/priority fields, and the conformance matrix and interaction
+inventory, and it rejects duplicate headings/keys/IDs, unknown lifecycle
+states, ambiguous task sections, out-of-order or cyclic dependencies, and
+non-contiguous IDs. Output is a deterministic function of the plan bytes and
+`parse -> serialize -> parse` round-trips byte-exactly without semantic loss.
+
+Inspect or validate the parsed plan at any time:
+
+```bash
+python3 .factory/loop/plan_parser.py parse .factory/artifacts/implementation-plan.md
+python3 .factory/loop/plan_parser.py dump .factory/artifacts/implementation-plan.md
+python3 scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md
+```
+
+The harness-owned conformance suite for the parser lives under the hidden
+namespace (`.factory/tests/test-factory-plan-parser.py`, defect fixtures in
+`.factory/tests/fixtures/plan-*.md`) per HIDE-01: harness-only tests never
+land in the adopting product's visible test tree.
+
 For a headless planning loop:
 
 ```bash
