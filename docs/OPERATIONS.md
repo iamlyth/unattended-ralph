@@ -433,6 +433,37 @@ Required capabilities in `.factory/config.toml` must be both declared and
 evidenced before an independent audit may pass. Runner provisioning remains
 outside the repository.
 
+## Evidence and verifier authority (Task 12)
+
+Before the tester starts, the trusted campaign opens the configured committed
+verifier with `O_NOFOLLOW`, binds its owner/mode/link/inode and exact blob, and
+retains that descriptor. Immediately before the gate it revalidates descriptor,
+pathname, commit, and bytes, then executes through `/proc/self/fd/<n>`; a
+pathname swap cannot change the executed verifier. The child inherits exactly
+that one read-only verifier descriptor — proven from inside the child through
+`/proc/self/fdinfo` (read-only access mode, zero position, failed write probe)
+and an exact fd-table check — and never the root-lock descriptor or any other
+holder alias. Trusted Git and `ssh-keygen` calls use pinned immutable absolute
+executables, sanitized Git environments, and finite timeouts; the complete-mode
+campaign-audit validator runs the runner-evidence checker under the same
+sanitized, bounded invocation and fails closed cleanly (no traceback) if that
+check times out.
+
+Machine receipts and adjacent stdout/stderr are bounded, no-follow,
+owner/mode/link/inode-checked, atomically published without same-tag
+replacement, and tied to protected coordinator state. Untrusted roles do not
+receive the coordinator nonce and cannot mint receipts from environment claims.
+An evidence line uses the exact grammar `PASS|FAIL|BLOCKED <shell-quoted argv>
+[receipt: path]` or `[manifest: path]`; its command must equal the receipt argv.
+PASS requires recorded exit 0, and any genuine BLOCKED evidence forces a
+`findings` audit result.
+
+Machine evidence never elevates tiers: ordinary receipts are capped at
+`installed`, signed runner manifests at `real_system`, and no machine artifact
+can claim `human`. Missing hardware, compositor, target consumer, signer, or
+human review remains a finding. Receipts, manifests, and evidence tiers verify
+claims but never select implementation tasks.
+
 ## Quota states
 
 ### Guard contract and schema reference (QUOTA-01, QUOTA-02)

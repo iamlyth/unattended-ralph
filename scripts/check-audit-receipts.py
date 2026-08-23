@@ -39,6 +39,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -46,21 +48,78 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RECEIPT = re.compile(r"\[receipt:\s*([^\]]+)\]")
 MANIFEST = re.compile(r"\[manifest:\s*([^\]]+)\]")
-STATUS = re.compile(r"\b(PASS|FAIL|BLOCKED)\b")
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COORDINATOR_FILE = ".factory-state/audit-coordinator.json"
+MAX_ARTIFACT = 64 * 1024 * 1024
+
+# LOW4: the evidence-line prefix and the exact anchored status tokens.  A
+# status word embedded in a command, path, or citation is never a status; no
+# other spelling is accepted.
+EVIDENCE_PREFIX = "- Executable evidence:"
+STATUS_TOKENS = frozenset(("PASS", "FAIL", "BLOCKED"))
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"audit-receipts: {message}")
 
 
+def secured_read_bytes(path: Path, *, what: str, maximum: int = MAX_ARTIFACT) -> bytes:
+    """Bounded no-follow read of one receipt artifact with identity checks.
+
+    The adjacent stdout/stderr transcripts and receipt records must be
+    regular single-link current-user-owned files that are not
+    group/other-writable and whose descriptor identity matches the pathname
+    at both ends of the read (owner/mode/link-count/inode hardening, Task 12):
+    a symlink, hardlink alias, foreign owner, wrong mode, or inode
+    substitution fails closed.
+    """
+    absolute = path.absolute()
+    try:
+        descriptor = os.open(
+            absolute, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except OSError as exc:
+        fail(f"cannot open {what}: {path}: {type(exc).__name__}")
+    try:
+        before = os.fstat(descriptor)
+        named = absolute.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or before.st_mode & 0o022
+            or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
+            or before.st_size > maximum
+        ):
+            fail(f"unsafe {what} (owner/mode/link-count/inode): {path}")
+        raw = b""
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            raw += chunk
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        named_after = absolute.lstat()
+        if (
+            len(raw) > maximum
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)
+        ):
+            fail(f"{what} changed while reading: {path}")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
 def regular_json(path: Path) -> dict:
     if path.is_symlink() or not path.is_file():
         fail(f"unsafe or missing evidence file: {path}")
     try:
-        raw = path.read_bytes()
+        raw = secured_read_bytes(path, what="evidence record", maximum=1024 * 1024)
         data = json.loads(raw)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"invalid evidence file {path}: {exc}")
@@ -70,15 +129,25 @@ def regular_json(path: Path) -> dict:
 
 
 def resolve(root: Path, reference: str) -> Path:
+    """Resolve one evidence citation inside the repository (no traversal).
+
+    LOW3: the parent directory is resolved (so a symlinked intermediate
+    component cannot redirect a citation out of the repository) but the
+    **final pathname is returned unresolved**: ``secured_read_bytes``'
+    no-follow open and final-component identity check are what reject a
+    symlinked evidence file or transcript.  A fully-resolved path here would
+    silently canonicalize a symlink away and validate its target instead.
+    """
     path = Path(reference)
     if path.is_absolute() or ".." in path.parts:
         fail(f"evidence reference escapes the repository: {reference}")
-    resolved = (root / reference).resolve()
     try:
-        resolved.relative_to(root.resolve())
-    except ValueError:
-        fail(f"evidence reference escapes the repository: {reference}")
-    return resolved
+        resolved_root = root.resolve()
+        resolved_parent = (root / path.parent).resolve(strict=True)
+        resolved_parent.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        fail(f"evidence reference escapes the repository or is unavailable: {reference}")
+    return resolved_parent / path.name
 
 
 def campaign_binding(root: Path) -> tuple[int | None, str | None, str | None]:
@@ -91,11 +160,19 @@ def campaign_binding(root: Path) -> tuple[int | None, str | None, str | None]:
     state_base = None
     state_nonce = None
     if state.exists():
+        # The coordinator state is protected runtime state: a symlink, a
+        # foreign-owned, hardlinked, or group/other-writable file, or an
+        # unsafe inode is fail-closed evidence of tampering (LOW5).
         if state.is_symlink() or not state.is_file():
             fail("audit coordinator state is unsafe")
+        info = state.stat()
+        if info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022:
+            fail("audit coordinator state is unsafe (owner/mode/link-count)")
+        raw = secured_read_bytes(
+            state, what="audit coordinator state", maximum=16384)
         try:
-            data = json.loads(state.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            data = json.loads(raw)
+        except (UnicodeError, json.JSONDecodeError) as exc:
             fail(f"invalid audit coordinator state: {exc}")
         expected = {"schema", "round", "base_commit", "nonce", "created_at"}
         if (
@@ -146,10 +223,16 @@ def validate_receipt(root: Path, reference: str) -> dict:
         if not isinstance(data[field], str) or not SHA256.fullmatch(data[field]):
             fail(f"receipt {field} is invalid: {reference}")
     for log_name, digest_field in (("stdout", "stdout_sha256"), ("stderr", "stderr_sha256")):
+        # Task 12 §19: the adjacent stdout/stderr transcripts are read
+        # through the same no-follow owner/mode/link-count/inode check as
+        # the receipt record itself, so a symlinked, hardlinked, foreign-
+        # owned, or wrong-mode transcript can never certify runtime.
         log_path = path.parent / f"{path.stem}.{log_name}"
-        if log_path.is_symlink() or not log_path.is_file():
-            fail(f"receipt log is missing: {log_path}")
-        if hashlib.sha256(log_path.read_bytes()).hexdigest() != data[digest_field]:
+        raw = secured_read_bytes(
+            log_path, what=f"receipt {log_name} transcript",
+            maximum=MAX_ARTIFACT,
+        )
+        if hashlib.sha256(raw).hexdigest() != data[digest_field]:
             fail(f"receipt log digest mismatch: {log_path}")
     if not isinstance(data["exit_code"], int):
         fail(f"receipt exit_code is invalid: {reference}")
@@ -195,17 +278,26 @@ def parse_evidence(root: Path, report: Path) -> tuple[list[dict], bool]:
     match = re.search(r"^## Evidence reviewed\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
     if not match:
         fail("audit report has no Evidence section")
-    blocked_anywhere = bool(re.search(r"\bBLOCKED\b", text))
+    # LOW4: a standalone BLOCKED token anywhere in the report forces
+    # findings (a BLOCKED evidence line can never be smuggled past the
+    # section-scoped scan by a paraphrase or a misplaced marker).
+    blocked_anywhere = bool(re.search(r"(?<!\S)BLOCKED(?!\S)", text))
     expected_round, expected_base, expected_nonce = campaign_binding(root)
     lines: list[dict] = []
     for line in match.group(1).splitlines():
         stripped = line.strip()
-        if not stripped.startswith("- Executable evidence:"):
+        if not stripped.startswith(EVIDENCE_PREFIX):
             continue
-        status = STATUS.search(stripped)
-        if not status:
-            fail(f"executable evidence line lacks a PASS/FAIL/BLOCKED marker: {stripped}")
-        marker = status.group(1)
+        body = stripped[len(EVIDENCE_PREFIX):].strip()
+        tokens = body.split()
+        status_index = next(
+            (index for index, token in enumerate(tokens) if token in STATUS_TOKENS),
+            None,
+        )
+        if status_index is None:
+            fail(f"executable evidence line lacks an anchored PASS/FAIL/BLOCKED status token: {stripped}")
+        marker = tokens[status_index]
+        command = " ".join(tokens[:status_index])
         receipt_match = RECEIPT.search(stripped)
         manifest_match = MANIFEST.search(stripped)
         if marker == "BLOCKED":
@@ -216,6 +308,19 @@ def parse_evidence(root: Path, report: Path) -> tuple[list[dict], bool]:
         receipt = None
         if receipt_match:
             receipt = validate_receipt(root, receipt_match.group(1))
+            # LOW5: the command the line represents must exactly equal the
+            # receipt's recorded argv — a receipt certifies only the exact
+            # command the coordinator executed, never a relabeled one.
+            represented = _represented_command(command)
+            try:
+                represented_argv = shlex.split(represented)
+            except ValueError as exc:
+                fail(f"evidence line command is not a clean argv (unbalanced quotes): {stripped}")
+            if represented_argv != receipt["argv"]:
+                fail(
+                    f"evidence line command {represented!r} does not exactly equal the "
+                    f"receipt argv {receipt['argv']!r}: {stripped}"
+                )
             if expected_round is not None and receipt["coordinator_round"] != expected_round:
                 fail(
                     f"receipt {receipt_match.group(1)} belongs to round "
@@ -248,6 +353,17 @@ def parse_evidence(root: Path, report: Path) -> tuple[list[dict], bool]:
             fail(f"FAIL claim has a receipt with exit 0: {stripped}")
         lines.append({"line": stripped, "marker": marker, "blocked": False})
     return lines, blocked_anywhere
+
+
+def _represented_command(represented: str) -> str:
+    """Strip one optional surrounding backtick pair from a command representation."""
+    text = represented.strip()
+    if len(text) >= 2 and text[0] == "`" and text[-1] == "`":
+        inner = text[1:-1].strip()
+        if inner and "`" not in inner:
+            return inner
+        fail(f"evidence line command is malformed: {represented!r}")
+    return text
 
 
 def main() -> int:

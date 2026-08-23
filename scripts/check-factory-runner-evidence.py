@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -19,6 +21,122 @@ SIGNER_TRUST = ROOT / ".factory/signer-trust.json"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_EVIDENCE_FILE = 16 * 1024 * 1024
+# Finite bound for every trusted Git read (MED2): the pinned absolute Git
+# executable can never wait forever behind the evidence boundary.
+GIT_TIMEOUT = 120.0
+
+# -- pinned immutable executable boundary (MED2) --------------------------------
+#
+# Every trusted Git read (and the ssh-keygen signature verifier) uses a
+# pinned **absolute immutable** executable, never a PATH-derived name: an
+# attacker-controlled PATH (or GIT_*/SSH_* environment) can never substitute
+# a different binary behind the runner-evidence boundary.  The candidates are
+# the fixed FHS locations, the NixOS system profile, and the immutable
+# root-owned Nix store; each candidate must be a regular executable whose
+# complete realpath chain the caller cannot modify (foreign-owned, no
+# group/other write bits, sticky-protected store entries excepted), and the
+# resolver fails closed as root (every component is caller-owned under uid 0).
+
+FIXED_BIN_CANDIDATES = ("/usr/bin", "/bin", "/run/current-system/sw/bin")
+NIX_STORE_BIN_GLOB = "/nix/store/*/bin"
+NIX_STORE_PATH_RE = re.compile(r"^/nix/store/[0-9a-z]{32}-[^/]+/bin/[^/]+$")
+
+# Git environment variables that can redirect where the executable reads
+# repository state (F5) — stripped from every trusted invocation.
+GIT_ENV_STRIP = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def sanitized_git_environment() -> dict:
+    """Parent environment without every Git override key (by prefix for the
+    complete ``GIT_CONFIG*`` family, exact names for the redirectors)."""
+    environment = dict(os.environ)
+    for key in list(environment):
+        if key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_") or key in GIT_ENV_STRIP:
+            environment.pop(key, None)
+    return environment
+
+
+def _immutable_chain(path: str) -> None:
+    """Fail unless the caller cannot modify ``path`` or any ancestor."""
+    resolved = os.path.realpath(path)
+    store_root = Path("/nix/store")
+    if resolved.startswith(str(store_root) + os.sep):
+        boundary = store_root
+    else:
+        boundary = Path(resolved).anchor
+    current = Path(resolved)
+    while True:
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            fail(f"cannot stat pinned candidate component {current}: {exc}")
+        if info.st_uid == os.getuid():
+            sticky = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
+            if not sticky:
+                fail(f"pinned candidate component {current} is caller-owned")
+        if info.st_mode & 0o022 and not (
+            stat.S_ISDIR(info.st_mode) and stat.S_ISVTX
+        ):
+            fail(f"pinned candidate component {current} is group/other-writable")
+        if current == boundary or current == current.parent:
+            break
+        current = current.parent
+
+
+def _candidate_usable(candidate: str) -> bool:
+    """True when the absolute candidate is a regular immutable executable."""
+    if not candidate.startswith("/"):
+        return False
+    try:
+        _immutable_chain(candidate)
+        info = os.stat(candidate)
+    except (OSError, SystemExit):
+        return False
+    return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
+
+
+def _resolve_pinned(name: str) -> str:
+    """Resolve the pinned absolute immutable ``name`` executable (fail closed)."""
+    if os.geteuid() == 0:
+        fail(
+            f"the pinned {name} boundary refuses to resolve as root: every "
+            "candidate component is caller-owned under uid 0"
+        )
+    for directory in FIXED_BIN_CANDIDATES:
+        candidate = f"{directory}/{name}"
+        if os.path.exists(candidate) and _candidate_usable(candidate):
+            return candidate
+    try:
+        found = sorted(glob.glob(f"{NIX_STORE_BIN_GLOB}/{name}"))
+    except OSError:
+        found = []
+    for candidate in found:
+        if NIX_STORE_PATH_RE.fullmatch(candidate) and _candidate_usable(candidate):
+            return candidate
+    fail(
+        f"no immutable absolute {name} executable is available to the trusted "
+        "runner-evidence boundary; refusing to resolve it from a caller PATH"
+    )
+
+
+GIT_EXECUTABLE = _resolve_pinned("git")
+SSH_KEYGEN = _resolve_pinned("ssh-keygen")
 
 
 def fail(message: str) -> None:
@@ -26,7 +144,10 @@ def fail(message: str) -> None:
 
 
 def git(*args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=ROOT, text=True, capture_output=True)
+    result = subprocess.run(
+        [GIT_EXECUTABLE, *args], cwd=ROOT, text=True, capture_output=True,
+        env=sanitized_git_environment(), timeout=GIT_TIMEOUT,
+    )
     if result.returncode:
         fail(f"Git binding failed: {' '.join(args)}")
     return result.stdout.strip()
@@ -149,13 +270,13 @@ def verify_manifest_signature(signer: dict, manifest: dict, manifest_path: Path,
             signature_file.close()
             result = subprocess.run(
                 [
-                    "ssh-keygen", "-Y", "verify",
+                    SSH_KEYGEN, "-Y", "verify",
                     "-f", str(allowed_path),
                     "-I", principal,
                     "-n", namespace,
                     "-s", signature_file.name,
                 ],
-                input=raw, capture_output=True,
+                input=raw, capture_output=True, timeout=GIT_TIMEOUT,
             )
             if result.returncode != 0:
                 detail = result.stderr.decode("utf-8", errors="replace").strip()
@@ -316,8 +437,9 @@ def validate(expected_commit: str | None = None) -> tuple[str, list[str]]:
         fail("aggregate does not cover every declared runner")
     with tempfile.NamedTemporaryFile(prefix="factory-evidence-", suffix=".tar") as archive_file:
         if subprocess.run(
-            ["git", "archive", "--format=tar", "--output", archive_file.name, commit],
+            [GIT_EXECUTABLE, "archive", "--format=tar", "--output", archive_file.name, commit],
             cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=sanitized_git_environment(), timeout=GIT_TIMEOUT,
         ).returncode:
             fail("cannot reconstruct commit-bound source archive")
         archive_sha256 = hashlib.sha256(Path(archive_file.name).read_bytes()).hexdigest()

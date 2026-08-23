@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,8 +18,10 @@ SOURCE = Path(__file__).resolve().parent.parent
 ENV_KEYS = ("FACTORY_LOCK_HELD", "FACTORY_LOCK_FD", "FACTORY_LOCK_ID", "FACTORY_LOCK_ROOT")
 
 
-def run(command: list[str], root: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True)
+def run(command: list[str], root: Path, *, check: bool = True,
+        env: dict | None = None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(command, cwd=root, text=True, capture_output=True,
+                            env=env)
     if check and result.returncode:
         raise AssertionError((command, result.returncode, result.stdout, result.stderr))
     return result
@@ -254,11 +257,117 @@ def test_legacy_substitution_after_final_check_is_not_unlinked() -> None:
         shutil.rmtree(root)
 
 
+def test_coordinator_env_stripped_from_untrusted_leaf() -> None:
+    """Task 12 F3: the audit-coordinator launch binding stays trusted.
+
+    The trusted parent (holding the protected coordinator state and the
+    coordinator env) mints an arbitrary probe receipt; the same parent then
+    runs an untrusted leaf through ``factory_lock_run_untrusted``, which
+    strips every ``FACTORY_CAMPAIGN_AUDIT_*`` key before the leaf executes.
+    The leaf sees no coordinator binding, its machine-receipt mint fails
+    closed, and no receipt artifact appears — even though the protected
+    coordinator state file is present in the repository.
+    """
+    root = make_repo()
+    try:
+        shutil.copy2(SOURCE / "scripts" / "machine-receipt.py",
+                     root / "scripts" / "machine-receipt.py")
+        runtime = root / ".factory-state"
+        runtime.mkdir(mode=0o700)
+        base = "a" * 40
+        nonce = "b" * 64
+        coordinator = runtime / "audit-coordinator.json"
+        coordinator.write_text(
+            json.dumps({
+                "schema": "ralph-audit-coordinator/v1",
+                "round": 1,
+                "base_commit": base,
+                "nonce": nonce,
+                "created_at": 1,
+            }, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        coordinator.chmod(0o600)
+        env = dict(os.environ)
+        env["FACTORY_CAMPAIGN_AUDIT_ROUND"] = "1"
+        env["FACTORY_CAMPAIGN_AUDIT_BASE"] = base
+        env["FACTORY_CAMPAIGN_AUDIT_NONCE"] = nonce
+
+        leaf = root / "audit-leaf.sh"
+        leaf.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+root=${1:?repository root required}
+# F3 negative: the untrusted leaf must not inherit the coordinator launch
+# binding (round/base/nonce) from the trusted parent.
+if env | grep -q '^FACTORY_CAMPAIGN_AUDIT_'; then
+    echo "untrusted leaf inherited coordinator env" >&2
+    exit 7
+fi
+set +e
+python3 "$root/scripts/machine-receipt.py" --root "$root" \
+    --tag child-probe -- true >"$root/leaf.out" 2>&1
+rc=$?
+set -e
+if (( rc == 0 )); then
+    echo "untrusted leaf minted a machine receipt" >&2
+    exit 8
+fi
+if [[ -e "$root/.factory-state/audit-receipts/child-probe.json" ]]; then
+    echo "untrusted leaf created a receipt artifact" >&2
+    exit 9
+fi
+echo 'leaf-clean'
+""",
+            encoding="utf-8",
+        )
+        leaf.chmod(0o755)
+        probe = root / "probe-coordinator.sh"
+        probe.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+root=${1:?repository root required}
+# shellcheck source=scripts/factory-lock.sh
+source "$SCRIPT_DIR/scripts/factory-lock.sh"
+factory_lock_bootstrap "$root" bash "$0" "$@"
+# F3 positive: the trusted parent (protected coordinator state + env)
+# mints an arbitrary probe receipt with exit 0.
+python3 "$root/scripts/machine-receipt.py" --root "$root" --tag parent-probe \
+    -- sh -c 'printf "parent-runtime\\n"'
+[[ -e "$root/.factory-state/audit-receipts/parent-probe.json" ]]
+# F3 negative: the untrusted leaf loses the coordinator env and can never
+# mint, even though the trusted parent still holds the protected state.
+factory_lock_run_untrusted bash "$root/audit-leaf.sh" "$root"
+echo 'coordinator-boundary-clean'
+""",
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+        result = run(
+            [str(root / "scripts/factory-lock-exec.py"), str(root), "--",
+             str(probe), str(root)],
+            root,
+            env=env,
+        )
+        assert "coordinator-boundary-clean" in result.stdout, result
+        assert (root / ".factory-state/audit-receipts/parent-probe.json").exists()
+        assert not (root / ".factory-state/audit-receipts/child-probe.json").exists()
+        assert "leaf-clean" in result.stdout, result
+    finally:
+        for key in ("FACTORY_CAMPAIGN_AUDIT_ROUND",
+                    "FACTORY_CAMPAIGN_AUDIT_BASE",
+                    "FACTORY_CAMPAIGN_AUDIT_NONCE"):
+            os.environ.pop(key, None)
+        shutil.rmtree(root)
+
+
 def main() -> None:
     test_root_flock_drop_and_untrusted_background_child()
     test_untrusted_signal_is_forwarded_and_reaped()
     test_legacy_holder_and_unsafe_legacy_fail_closed()
     test_legacy_substitution_after_final_check_is_not_unlinked()
+    test_coordinator_env_stripped_from_untrusted_leaf()
     print("test: repository-root factory lock checks passed")
 
 

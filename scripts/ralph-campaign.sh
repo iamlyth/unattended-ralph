@@ -383,6 +383,9 @@ PY
             else
                 set +e
                 factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 \
+                    FACTORY_CAMPAIGN_AUDIT_ROUND="$FACTORY_CAMPAIGN_AUDIT_ROUND" \
+                    FACTORY_CAMPAIGN_AUDIT_BASE="$FACTORY_CAMPAIGN_AUDIT_BASE" \
+                    FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256="$FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256" \
                     ./scripts/final-gate.sh --campaign-audit >/dev/null 2>&1
                 audit_gate_rc=$?
                 set -e
@@ -394,6 +397,9 @@ PY
                 fi
             fi
             factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 \
+                FACTORY_CAMPAIGN_AUDIT_ROUND="$FACTORY_CAMPAIGN_AUDIT_ROUND" \
+                FACTORY_CAMPAIGN_AUDIT_BASE="$FACTORY_CAMPAIGN_AUDIT_BASE" \
+                FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256="$FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256" \
                 ./scripts/final-gate.sh --campaign-audit
             audit_result=$(python3 - <<'PY'
 import re

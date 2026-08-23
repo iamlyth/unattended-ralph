@@ -4,23 +4,135 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
 SHA = r"[0-9a-f]{40}"
+GIT_TIMEOUT = 120.0
+
+# -- pinned immutable absolute Git (MED2) -----------------------------------
+# Every trusted Git read of the campaign-audit validator uses a pinned
+# absolute immutable executable — never a PATH-derived ``git`` — and a
+# sanitized environment and finite timeout, so a poisoned PATH or GIT_*
+# override can never redirect the binding reads.
+
+GIT_ENV_STRIP = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+    "GIT_TERMINAL_PROMPT", "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def _immutable_chain(path: str) -> None:
+    resolved = os.path.realpath(path)
+    store_root = Path("/nix/store")
+    if resolved.startswith(str(store_root) + os.sep):
+        boundary = store_root
+    else:
+        boundary = Path(resolved).anchor
+    current = Path(resolved)
+    while True:
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            fail(f"cannot stat pinned candidate component {current}: {exc}")
+        if info.st_uid == os.getuid():
+            sticky = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
+            if not sticky:
+                fail(f"pinned candidate component {current} is caller-owned")
+        if info.st_mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and stat.S_ISVTX):
+            fail(f"pinned candidate component {current} is group/other-writable")
+        if current == boundary or current == current.parent:
+            break
+        current = current.parent
+
+
+def _candidate_usable(candidate: str) -> bool:
+    if not candidate.startswith("/"):
+        return False
+    try:
+        _immutable_chain(candidate)
+        info = os.stat(candidate)
+    except (OSError, SystemExit):
+        return False
+    return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
+
+
+def _resolve_pinned_git() -> str:
+    if os.geteuid() == 0:
+        fail("the pinned Git boundary refuses to resolve as root")
+    for directory in ("/usr/bin", "/bin", "/run/current-system/sw/bin"):
+        candidate = f"{directory}/git"
+        if os.path.exists(candidate) and _candidate_usable(candidate):
+            return candidate
+    try:
+        found = sorted(glob.glob("/nix/store/*/bin/git"))
+    except OSError:
+        found = []
+    for candidate in found:
+        if re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/]+/bin/git", candidate) and _candidate_usable(candidate):
+            return candidate
+    fail("no immutable absolute Git executable is available to the trusted boundary")
+    raise AssertionError("unreachable")
+
+
+def _sanitized_git_environment() -> dict:
+    environment = dict(os.environ)
+    for key in list(environment):
+        if key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_") or key in GIT_ENV_STRIP:
+            environment.pop(key, None)
+    return environment
+
+
+GIT_EXECUTABLE = _resolve_pinned_git()
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"campaign-audit: {message}")
 
 
+def _trusted_run(
+    argv: list[str], *, what: str, **kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """One finite-bounded trusted subprocess (F4).
+
+    Every trusted child of the campaign-audit validator runs with a
+    sanitized Git environment (no ``GIT_*``/``GIT_CONFIG_*`` redirector can
+    leak through) and a finite timeout, and a wedged or hostile child fails
+    closed with a clean diagnostic instead of a traceback: a poisoned PATH
+    or hostile env can never substitute the pinned absolute executables, and
+    a hung runner-evidence check can never hang the independent audit.
+    """
+    try:
+        if "stdout" not in kwargs and "stderr" not in kwargs:
+            kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return subprocess.run(
+            argv, cwd=ROOT,
+            env=_sanitized_git_environment(), timeout=GIT_TIMEOUT, **kwargs,
+        )
+    except subprocess.TimeoutExpired as exc:
+        fail(f"{what} exceeded the {GIT_TIMEOUT:g}s trusted-execution bound")
+
+
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+    result = _trusted_run(
+        [GIT_EXECUTABLE, *args],
+        what=f"Git binding {' '.join(args)}",
+        text=True, capture_output=True,
+    )
+    if result.returncode:
+        fail(f"Git binding failed: {' '.join(args)}")
+    return result.stdout.strip()
 
 
 def parse(path: Path) -> tuple[dict[str, str], str]:
@@ -80,9 +192,11 @@ def main() -> int:
             fail("report binding does not match supervisor-owned campaign state")
         if not re.fullmatch(SHA, args.expected_base):
             fail("expected audit base is invalid")
-    if subprocess.run(
-        ["git", "merge-base", "--is-ancestor", meta["audit_base_commit"], "HEAD"],
-        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    if _trusted_run(
+        [GIT_EXECUTABLE, "merge-base", "--is-ancestor",
+         meta["audit_base_commit"], "HEAD"],
+        what="Git ancestor check",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode:
         fail("audit base is not an ancestor of HEAD")
     if git("rev-parse", f"{meta['audit_base_commit']}:.factory/artifacts/implementation-plan.md") != meta["plan_blob"]:
@@ -92,10 +206,15 @@ def main() -> int:
     if git("rev-parse", f"{meta['audit_base_commit']}:.factory/environment.toml") != meta["environment_blob"]:
         fail("environment blob does not match audit base")
     if args.mode == "complete":
-        evidence_digest = subprocess.run(
+        # F4: the outer runner-evidence checker is itself invoked with a
+        # pinned absolute immutable executable, a sanitized environment (no
+        # GIT_* / GIT_CONFIG_* redirector can leak through), and a finite
+        # timeout — a hostile or wedged runner-evidence check can neither
+        # redirect nor hang the independent campaign audit.
+        evidence_digest = _trusted_run(
             [str(ROOT / "scripts/check-factory-runner-evidence.py"),
              "--expected-commit", meta["audit_base_commit"], "--print-digest"],
-            cwd=ROOT, text=True, capture_output=True,
+            what="runner-evidence digest check",
         )
         if evidence_digest.returncode or evidence_digest.stdout.strip() != meta["runner_evidence_sha256"]:
             fail("runner evidence digest does not match the verified campaign phase")
@@ -145,10 +264,11 @@ def main() -> int:
         if missing:
             fail(f"pass lacks declared required environment capabilities: {missing}")
         if required_capabilities:
-            evidence = subprocess.run(
+            evidence = _trusted_run(
                 [str(ROOT / "scripts/check-factory-runner-evidence.py"),
-                 "--expected-commit", meta["audit_base_commit"], "--print-capabilities"],
-                cwd=ROOT, text=True, capture_output=True,
+                 "--expected-commit", meta["audit_base_commit"],
+                 "--print-capabilities"],
+                what="runner-evidence capability check",
             )
             if evidence.returncode:
                 fail("pass lacks valid commit-bound runner evidence")

@@ -101,7 +101,11 @@ finish_audit_cycle() {
     payload=$(printf '{"loop":{"workspace":"%s","id":"campaign-audit-final"},"iteration":{"current":"final"}}' "$PROJECT_ROOT")
     if printf '%s' "$payload" | factory_lock_run_untrusted \
             ./scripts/git-commit-hook.sh --campaign-audit --final-handoff; then :; else return $?; fi
-    if factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 ./scripts/final-gate.sh --campaign-audit; then :; else return $?; fi
+    if factory_lock_run_untrusted env FACTORY_FINAL_GATE_ATTEST=1 \
+            FACTORY_CAMPAIGN_AUDIT_ROUND="$FACTORY_CAMPAIGN_AUDIT_ROUND" \
+            FACTORY_CAMPAIGN_AUDIT_BASE="$FACTORY_CAMPAIGN_AUDIT_BASE" \
+            FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256="$FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256" \
+            ./scripts/final-gate.sh --campaign-audit; then :; else return $?; fi
     head=$(git rev-parse HEAD)
     ./scripts/ralph-final-state.py attest campaign-audit "$head" >/dev/null
     echo "ralph-audit: independent audit completed"
@@ -163,7 +167,11 @@ while true; do
     fi
     stale_diagnostics=$(ralph_supervision_diagnostics_file campaign-audit)
     set +e
-    factory_lock_run_untrusted ./scripts/final-gate.sh --campaign-audit >"$stale_diagnostics" 2>&1
+    factory_lock_run_untrusted env \
+        FACTORY_CAMPAIGN_AUDIT_ROUND="$FACTORY_CAMPAIGN_AUDIT_ROUND" \
+        FACTORY_CAMPAIGN_AUDIT_BASE="$FACTORY_CAMPAIGN_AUDIT_BASE" \
+        FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256="$FACTORY_CAMPAIGN_RUNNER_EVIDENCE_SHA256" \
+        ./scripts/final-gate.sh --campaign-audit >"$stale_diagnostics" 2>&1
     gate_rc=$?
     set -e
     if (( $(wc -c < "$stale_diagnostics") > 65536 )); then

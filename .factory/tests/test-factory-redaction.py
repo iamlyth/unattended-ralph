@@ -798,7 +798,21 @@ class CampaignGateEndToEndTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def test_verification_gate_secret_never_reaches_results(self) -> None:
-        leak = self.tmp / "leak-gate.py"
+        ws = FACTORY_CAMPAIGN.FixtureWorkspace(
+            self.tmp / "ws",
+            scenario={
+                "planner": {"behavior": "planned"},
+                "developer": {"behavior": "complete"},
+                "tester": {"behavior": "pass"},
+                "auditor": {"behavior": "findings"},
+            },
+        )
+        # Task 12: the deterministic verifier is bound to its committed blob
+        # before the untrusted phase, so the leak gate must be a committed
+        # repo-relative executable (an unbound caller-owned script now fails
+        # closed as infrastructure_failure and never runs).
+        leak = ws.root / "src" / "leak-gate.py"
+        leak.parent.mkdir(parents=True, exist_ok=True)
         leak.write_text(
             "#!/usr/bin/env python3\n"
             "import sys\n"
@@ -809,18 +823,11 @@ class CampaignGateEndToEndTests(unittest.TestCase):
             encoding="utf-8",
         )
         os.chmod(leak, 0o755)
-        ws = FACTORY_CAMPAIGN.FixtureWorkspace(
-            self.tmp / "ws",
-            scenario={
-                "planner": {"behavior": "planned"},
-                "developer": {"behavior": "complete"},
-                "tester": {"behavior": "pass"},
-                "auditor": {"behavior": "findings"},
-            },
-        )
+        _git(ws.root, "add", "-A")
+        _git(ws.root, "commit", "-qm", "leak gate fixture")
         ws.commit_scenario()
         rc, data = ws.run_cli(
-            extra=["--verification-command", str(leak)])
+            extra=["--verification-command", "./src/leak-gate.py"])
         self.assertEqual(rc, 1)
         self.assertEqual(data["phase_history"][2]["phase"], "verification")
         self.assertEqual(data["phase_history"][2]["outcome"], "findings")

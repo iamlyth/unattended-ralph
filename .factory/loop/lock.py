@@ -38,6 +38,18 @@ Guarantees provided here (the trusted control plane wires them at launch):
   description), and any separately opened descriptor naming the locked
   inode all fail closed — an untrusted leaf can never receive a handle that
   aliases the root.
+* ``spawn_child(executable=…)`` (Task 12 MED1) separates the path the
+  kernel opens from the bound ``argv``: the trusted holder runs the
+  retained verifier descriptor as ``executable=/proc/self/fd/<fd>`` (with
+  the same read-only descriptor in ``pass_fds``) so the child executes the
+  bound inode at exec time.  The bound command argv is passed to the kernel
+  verbatim, so every argument after the script path is preserved; for a
+  shebang script the kernel's shebang dispatch passes the descriptor path
+  ``/proc/self/fd/<fd>`` as the script argument, so the script's ``$0`` is
+  the fd path — never the canonical repository path (F1).  The inherited
+  verifier fd is intentionally the only extra descriptor the child
+  receives (accepted read-only inheritance, F2); the root lock descriptor
+  and every other trusted-holder descriptor are never inherited.
 * A bounded child timeout kills and reaps the child's **entire new process
   group** (F3): TERM to the group, then the *full* bounded grace is always
   observed (the leader exiting on TERM is never taken as “the group is
@@ -823,6 +835,7 @@ class RootLock:
         cwd: Optional[Path] = None,
         env: Optional[Mapping[str, str]] = None,
         pass_fds: Sequence[int] = (),
+        executable: Optional[str] = None,
         timeout: Optional[float] = None,
         kill_grace: float = DEFAULT_KILL_GRACE,
         check: bool = False,
@@ -868,6 +881,7 @@ class RootLock:
         try:
             process = subprocess.Popen(
                 argv,
+                executable=executable,
                 cwd=str(cwd or self._root),
                 env=environment,
                 start_new_session=True,

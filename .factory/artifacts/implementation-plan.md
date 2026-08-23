@@ -102,9 +102,9 @@ completes with evidence.
 | COMPLETE-01 | §15 | missing | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
 | FIND-01 | §16 | missing | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16 |
-| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12 |
-| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12 |
-| RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12 |
+| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12, Task 16 |
+| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16 |
+| RUNNER-01 | §19 | partial | existing runner/capability receipt machinery retained | Task 12, Task 16 |
 | HIDE-01 | §3 | missing | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13 |
 | MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15 |
 | TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
@@ -889,7 +889,7 @@ completes with evidence.
 
 ## Task 12: Evidence, verifier, and runner machinery retention
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 5, Task 9
 - Scope: Retain exact-commit signed runner receipts, capability contracts,
   visual provenance, atomic publication, installed and human evidence tiers,
@@ -906,9 +906,21 @@ completes with evidence.
 - Acceptance criteria: fixtures prove the receipt wrapper remains
   authoritative, the immutable verifier binding rejects path substitution,
   and no model assertion can elevate evidence.
-- Verification: `tests/test-factory-receipts.sh`;
-  `tests/test-runner-signer.sh`.
-- Documentation impact: `docs/OPERATIONS.md`.
+- Verification: `.factory/tests/test-factory-evidence.py`,
+  `tests/test-audit-receipts.sh`, `tests/test-runner-signer.sh`, and
+  `tests/test-campaign-audit.sh`.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+- Evidence: hidden evidence 116/116, campaign 66/66, lock 39/39, and the
+  visible receipt/signer/campaign-audit/factory-lock gates pass. Tests prove
+  committed verifier execution through a retained read-only descriptor after
+  pathname substitution, no root-lock descriptor inheritance, pinned and
+  sanitized Git/ssh-keygen authority, no-follow receipt/transcript handling,
+  atomic same-tag no-replace publication, protected coordinator-only minting,
+  exact command/argv and status grammar, BLOCKED→findings, and machine tier/
+  human non-elevation. Independent security review accepted the final
+  remediated checkpoint with no blockers. Legacy maintenance verifier routing
+  remains migration work under Tasks 15/16; no full boilerplate or real-runner
+  pass is claimed.
 
 ## Task 13: Harness isolation and installed-footprint inventory
 

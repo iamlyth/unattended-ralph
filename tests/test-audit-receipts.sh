@@ -203,7 +203,7 @@ assert data['evidence_commit'] == head, data['evidence_commit']
 assert data['coordinator_round'] == 2
 assert len(data['coordinator_nonce']) == 64
 PY
-write_report "$tmp/audit" pass "\`sh -c 'printf ...'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
+write_report "$tmp/audit" pass "\`sh -c 'printf \"runtime output\\n\"'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
 # Fabricated command prose without a receipt cannot certify runtime.
@@ -220,7 +220,7 @@ must_fail "missing receipt" \
 (cd "$tmp/audit" && ./scripts/machine-receipt.py --tag pass-again \
     --audit-round "$ROUND" --evidence-commit "$head" --nonce "$(printf 'a%.0s' {1..64})" \
     -- true >/dev/null)
-write_report "$tmp/audit" findings "\`cmd\` FAIL [receipt: .factory-state/audit-receipts/pass-again.json]"
+write_report "$tmp/audit" findings "\`true\` FAIL [receipt: .factory-state/audit-receipts/pass-again.json]"
 must_fail "FAIL claim with an exit-0 receipt" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -229,7 +229,7 @@ must_fail "FAIL claim with an exit-0 receipt" \
     --audit-round "$ROUND" --evidence-commit "$head" --nonce "$(printf 'a%.0s' {1..64})" \
     -- true >/dev/null)
 printf 'intruder\n' >> "$tmp/audit/.factory-state/audit-receipts/tampered.stdout"
-write_report "$tmp/audit" pass "\`cmd\` PASS [receipt: .factory-state/audit-receipts/tampered.json]"
+write_report "$tmp/audit" pass "\`true\` PASS [receipt: .factory-state/audit-receipts/tampered.json]"
 must_fail "tampered receipt transcript" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -239,7 +239,7 @@ cat > "$tmp/audit/.factory-state/audit-receipts/stale.json" <<JSON
 JSON
 printf 'stale\n' > "$tmp/audit/.factory-state/audit-receipts/stale.stdout"
 printf '\n' > "$tmp/audit/.factory-state/audit-receipts/stale.stderr"
-write_report "$tmp/audit" pass "\`cmd\` PASS [receipt: .factory-state/audit-receipts/stale.json]"
+write_report "$tmp/audit" pass "\`true\` PASS [receipt: .factory-state/audit-receipts/stale.json]"
 must_fail "stale round receipt" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -249,7 +249,7 @@ cat > "$tmp/audit/.factory-state/audit-receipts/reused.json" <<JSON
 JSON
 printf 'reused\n' > "$tmp/audit/.factory-state/audit-receipts/reused.stdout"
 printf '\n' > "$tmp/audit/.factory-state/audit-receipts/reused.stderr"
-write_report "$tmp/audit" pass "\`cmd [receipt: .factory-state/audit-receipts/reused.json]\` PASS"
+write_report "$tmp/audit" pass "\`true\` PASS [receipt: .factory-state/audit-receipts/reused.json]"
 must_fail "receipt reused with a stale nonce" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -259,7 +259,7 @@ cat > "$tmp/audit/.factory-state/audit-receipts/legacy.json" <<JSON
 JSON
 printf 'legacy\n' > "$tmp/audit/.factory-state/audit-receipts/legacy.stdout"
 printf '\n' > "$tmp/audit/.factory-state/audit-receipts/legacy.stderr"
-write_report "$tmp/audit" pass "\`cmd [receipt: .factory-state/audit-receipts/legacy.json]\` PASS"
+write_report "$tmp/audit" pass "\`true\` PASS [receipt: .factory-state/audit-receipts/legacy.json]"
 must_fail "legacy receipt without coordinator binding" \
     "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
@@ -275,7 +275,7 @@ write_report "$tmp/audit" findings "\`real system probe\` BLOCKED (no real syste
 
 # A findings report citing a passing receipt is valid (runtime certified by
 # the machine receipt, not prose).
-write_report "$tmp/audit" findings "\`sh -c 'printf ...'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
+write_report "$tmp/audit" findings "\`sh -c 'printf \"runtime output\\n\"'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
 # A `[manifest:]` reference must be an exact signed record in the runner-

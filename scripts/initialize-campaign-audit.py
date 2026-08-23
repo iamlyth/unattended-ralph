@@ -10,6 +10,7 @@ call cannot mint receipts outside the audit coordinator's bounded invocation.
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -23,10 +24,94 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 COORDINATOR_FILE = ROOT / ".factory-state/audit-coordinator.json"
+# Finite bound for every trusted Git read of the coordinator (MED2).
+GIT_TIMEOUT = 120.0
+
+# -- pinned immutable absolute Git (MED2) -----------------------------------
+# The trusted coordinator reads Git with a pinned absolute immutable
+# executable, never a PATH-derived ``git`` (a poisoned PATH or GIT_* override
+# can never redirect the binding reads).
+
+
+def _immutable_chain(path: str) -> None:
+    resolved = os.path.realpath(path)
+    store_root = Path("/nix/store")
+    if resolved.startswith(str(store_root) + os.sep):
+        boundary = store_root
+    else:
+        boundary = Path(resolved).anchor
+    current = Path(resolved)
+    while True:
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise SystemExit(f"initialize-campaign-audit: pinned component {current}: {exc}")
+        if info.st_uid == os.getuid():
+            sticky = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
+            if not sticky:
+                raise SystemExit(f"initialize-campaign-audit: pinned component {current} is caller-owned")
+        if info.st_mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and stat.S_ISVTX):
+            raise SystemExit(f"initialize-campaign-audit: pinned component {current} is group/other-writable")
+        if current == boundary or current == current.parent:
+            break
+        current = current.parent
+
+
+def _candidate_usable(candidate: str) -> bool:
+    if not candidate.startswith("/"):
+        return False
+    try:
+        _immutable_chain(candidate)
+        info = os.stat(candidate)
+    except (OSError, SystemExit):
+        return False
+    return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
+
+
+def _resolve_pinned_git() -> str:
+    if os.geteuid() == 0:
+        raise SystemExit("initialize-campaign-audit: the pinned Git boundary refuses to resolve as root")
+    for directory in ("/usr/bin", "/bin", "/run/current-system/sw/bin"):
+        candidate = f"{directory}/git"
+        if os.path.exists(candidate) and _candidate_usable(candidate):
+            return candidate
+    try:
+        found = sorted(glob.glob("/nix/store/*/bin/git"))
+    except OSError:
+        found = []
+    for candidate in found:
+        if re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/]+/bin/git", candidate) and _candidate_usable(candidate):
+            return candidate
+    raise SystemExit("initialize-campaign-audit: no immutable absolute Git executable is available")
+
+
+GIT_EXECUTABLE = _resolve_pinned_git()
+
+GIT_ENV_STRIP = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+    "GIT_TERMINAL_PROMPT", "GIT_CONFIG_PARAMETERS", "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+)
+
+
+def _sanitized_git_environment() -> dict:
+    environment = dict(os.environ)
+    for key in list(environment):
+        if key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_") or key in GIT_ENV_STRIP:
+            environment.pop(key, None)
+    return environment
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+    result = subprocess.run(
+        [GIT_EXECUTABLE, *args], cwd=ROOT, text=True, capture_output=True,
+        env=_sanitized_git_environment(), timeout=GIT_TIMEOUT,
+    )
+    if result.returncode:
+        raise SystemExit(f"initialize-campaign-audit: Git binding failed: {' '.join(args)}")
+    return result.stdout.strip()
 
 
 def atomic_write(path: Path, text: str, mode: int | None = None) -> None:

@@ -76,6 +76,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package import (the hidden `.factory/loop/` package)
     from . import audit_objectives as audit_objectives_module
+    from . import evidence as evidence_module
     from . import findings as findings_module
     from . import gitutil
     from . import lock as lock_module
@@ -87,6 +88,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import redaction as output_redaction
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
+    import evidence as evidence_module  # type: ignore[no-redef]
     import findings as findings_module  # type: ignore[no-redef]
     import gitutil  # type: ignore[no-redef]
     import lock as lock_module  # type: ignore[no-redef]
@@ -1742,6 +1744,11 @@ class Campaign:
         # gate output, built lazily on the first gate run (fail closed when
         # the exact committed guard cannot be verified).
         self._redactor: Optional[object] = None
+        # Task 12: the deterministic verifier bound (committed blob, secure
+        # identity, retained inode descriptor) *before* the untrusted phase;
+        # every gate execution re-validates it and fails closed on any
+        # pathname/content/committed-tree substitution.
+        self._held_verifier: Optional[evidence_module.HeldVerifier] = None
         # Task 10 §16: the phase records of THIS run, consumed by the findings
         # authority to bind every previous-round receipt to a phase that
         # actually ran and classified findings/blocked.
@@ -2493,9 +2500,48 @@ class Campaign:
     def _run_gate(self, command: Sequence[str], label: str) -> Tuple[bool, int, str]:
         if not command:
             return False, 0, ""
+        held = self._held_verifier
+        spawn_argv = list(command)
+        spawn_executable = None
+        spawn_pass_fds: Tuple[int, ...] = ()
+        if held is not None and tuple(held.binding.command) == tuple(command):
+            # Task 12 §19 (MED1): the verifier entrypoint was opened and bound
+            # to its committed blob/identity/inode *before* the untrusted
+            # phase.  Immediately before every execution the retained
+            # descriptor is re-validated (inode identity, owner/mode/
+            # link-count, byte digest, committed blob at the current head);
+            # then the child executes ``/proc/self/fd/<fd>`` (the retained
+            # read-only descriptor, passed through ``pass_fds`` while the root
+            # lock and every other holder descriptor are never passed) with
+            # the bound command argv passed to the kernel verbatim, so a
+            # pathname substitution in the final revalidate→exec race still
+            # executes the exact bound inode and any substitution fails
+            # closed instead of executing substituted bytes.  The kernel's
+            # shebang dispatch replaces the script argument with the fd path
+            # (a script sees ``$0 = /proc/self/fd/<fd>`` — never the
+            # canonical path — while every argument after it is preserved;
+            # F1), and the child intentionally inherits exactly that one
+            # read-only verifier descriptor (accepted inheritance; F2).
+            try:
+                evidence_module.revalidate_verifier(
+                    self._root, held.binding, git=self._git,
+                    current_commit=self._git.head(), held=held,
+                )
+                spawn_argv, spawn_executable, spawn_pass_fds = held.spawn(
+                    list(command)
+                )
+                spawn_pass_fds = tuple(spawn_pass_fds)
+            except evidence_module.VerifierBindingError as exc:
+                # The gate must report that it did NOT run: the substituted
+                # verifier was never executed, so the campaign classifies
+                # the verification as infrastructure_failure (an untrusted
+                # verifier can never yield pass/findings evidence).
+                return False, -1, f"{label} verifier binding failed closed: {exc}"
         try:
             result = self._lock.spawn_child(
-                list(command),
+                spawn_argv,
+                executable=spawn_executable,
+                pass_fds=spawn_pass_fds,
                 env=sanitized_gate_environment(),
                 timeout=self._config.gate_timeout,
             )
@@ -2941,8 +2987,38 @@ class Campaign:
         )
 
     def _step_verification(self, state: state_module.FactoryState) -> _Step:
-        tag = self._begin_untrusted(state, 1)
         head = self._git.head()
+        # Task 12 §19: the deterministic verifier entrypoint is opened and
+        # bound to its committed blob, secure identity, and inode BEFORE the
+        # untrusted tester phase; the retained descriptor pins the bound
+        # inode so a later pathname or content substitution fails closed at
+        # execution time.  A verifier that cannot be bound is an untrusted
+        # verifier and fails the campaign closed as infrastructure_failure
+        # without running any untrusted phase.
+        if self._held_verifier is not None:
+            self._held_verifier.close()
+            self._held_verifier = None
+        if self._config.verification_command:
+            try:
+                self._held_verifier = evidence_module.HeldVerifier(
+                    self._root,
+                    evidence_module.bind_verifier(
+                        self._root, self._config.verification_command,
+                        commit=head, git=self._git,
+                    ),
+                )
+            except evidence_module.VerifierBindingError as exc:
+                state2 = state_module.advance(state, "infrastructure_failure")
+                state_module.write_state(self._root, state2)
+                return _Step(
+                    self._record(
+                        state, 1, "infrastructure_failure",
+                        f"verifier binding failed closed before the untrusted "
+                        f"phase: {exc}",
+                    ),
+                    state=state2,
+                )
+        tag = self._begin_untrusted(state, 1)
         self._prepare_phase_result_file(
             self._config.phase_result_path, "verification"
         )
@@ -3160,6 +3236,9 @@ class Campaign:
             self._publish_result(result)
             return result
         finally:
+            if self._held_verifier is not None:
+                self._held_verifier.close()
+                self._held_verifier = None
             if self._lock is not None:
                 self._lock.release()
 

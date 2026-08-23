@@ -35,13 +35,19 @@ factory_lock_assert_held() {
     python3 "$FACTORY_LOCK_HELPER_DIR/factory-lock-exec.py" "$root" --check
 }
 
-# Run an untrusted leaf without any descriptor referring to the lock inode and
-# without lock metadata in its environment. This is already-loaded shell logic:
-# a subshell closes the dynamic repository-root lock descriptor and unsets all
-# lock metadata BEFORE any mutable workspace executable runs, so a workspace
-# helper is never executed while authority is live and background descendants
-# of the untrusted command can retain, unlock, or claim nothing. The trusted
-# caller retains its own descriptor outside the subshell.
+# Run an untrusted leaf without any descriptor referring to the lock inode,
+# without lock metadata in its environment, and without the audit-coordinator
+# launch binding. This is already-loaded shell logic: a subshell closes the
+# dynamic repository-root lock descriptor and unsets all lock metadata and
+# every ``FACTORY_CAMPAIGN_AUDIT_*`` coordinator-binding variable BEFORE any
+# mutable workspace executable runs, so a workspace helper is never executed
+# while authority is live, background descendants of the untrusted command can
+# retain, unlock, or claim nothing, and an untrusted leaf can never inherit the
+# coordinator round/base/nonce that would let it mint machine receipts — even
+# when the trusted parent holds the protected coordinator state. The trusted
+# caller retains its own descriptor and may pass the audit binding back
+# explicitly (``factory_lock_run_untrusted env FACTORY_CAMPAIGN_AUDIT_ROUND=…
+# … ./scripts/final-gate.sh --campaign-audit``) for trusted steps that need it.
 factory_lock_run_untrusted() {
     local root=${FACTORY_LOCK_ROOT:?factory_lock_bootstrap must run first}
     (( $# > 0 )) || { echo "factory-lock: untrusted command required" >&2; return 2; }
@@ -56,6 +62,11 @@ factory_lock_run_untrusted() {
             eval "exec $fd>&-"
         fi
         unset FACTORY_LOCK_HELD FACTORY_LOCK_FD FACTORY_LOCK_ID FACTORY_LOCK_ROOT
+        # F3: the untrusted leaf never inherits the audit-coordinator launch
+        # binding (round/base/nonce). A prefix scan also catches future keys.
+        for name in ${!FACTORY_CAMPAIGN_AUDIT_*}; do
+            unset "$name"
+        done
         if command -v setsid >/dev/null 2>&1; then
             exec setsid -- "$@"
         fi

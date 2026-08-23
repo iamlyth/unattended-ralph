@@ -35,6 +35,7 @@ import json
 import os
 import re
 import resource
+import stat
 import subprocess
 import tempfile
 import threading
@@ -83,6 +84,67 @@ def atomic_write(path: Path, data: bytes) -> None:
             pass
 
 
+def verify_artifact(path: Path, what: str) -> None:
+    """Harden one published receipt artifact (owner/mode/link-count/inode).
+
+    The adjacent stdout/stderr transcripts and the receipt JSON must be
+    regular single-link current-user-owned files that are not
+    group/other-writable; a symlink, hardlink alias, foreign owner, or
+    wrong mode fails closed so a substituted artifact can never certify
+    runtime.
+    """
+    if path.is_symlink() or not path.is_file():
+        fail(f"{what} is not a regular file: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        fail(f"cannot stat {what}: {path}: {type(exc).__name__}")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o022
+    ):
+        fail(f"{what} is unsafe (owner/mode/link-count/inode): {path}")
+
+
+def atomic_write_noreplace(path: Path, data: bytes) -> None:
+    """Publish one receipt artifact with atomic no-replace semantics.
+
+    Task 12 §19: same-tag coordinator receipt publication must fail closed
+    rather than silently replace an existing receipt (Task 10 residual): an
+    existing canonical artifact, or a raced pathname, can never be
+    overwritten.  Publication uses ``linkat``-style ``os.link`` (unlike
+    ``rename`` it cannot clobber), then the published inode is re-validated
+    and the temporary unlinked.
+    """
+    if path.is_symlink() or path.exists():
+        fail(f"receipt artifact already exists; same-tag publication fails "
+             f"closed (no-replace): {path.name}")
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        try:
+            os.link(temporary, str(path))
+        except FileExistsError:
+            fail(f"receipt artifact raced during publication: {path.name}")
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        verify_artifact(path, f"receipt artifact {path.name}")
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def regular_json(path: Path, maximum: int) -> dict:
     if path.is_symlink() or not path.is_file():
         fail(f"unsafe or missing coordinator state: {path}")
@@ -99,7 +161,16 @@ def regular_json(path: Path, maximum: int) -> dict:
 
 def coordinator_binding(root: Path, round_number: int | None, evidence_commit: str | None,
                         nonce: str | None) -> tuple[int, str, str]:
-    """Validate the audit coordinator binding; every receipt is round-bound."""
+    """Validate the audit coordinator binding; every receipt is round-bound.
+
+    LOW5 (trusted coordinator-only mint path): minting is authorized **only**
+    by the protected ``.factory-state/audit-coordinator.json`` state that the
+    trusted audit coordinator mints (``scripts/initialize-campaign-audit.py``),
+    never by environment variables alone.  The resolved round/base/nonce
+    (from the env or explicit test binding) must match that protected state
+    exactly; an auditor that inherits no coordinator binding, or that sets
+    env keys against a missing/deleted state, can never mint a receipt.
+    """
     env_round = os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND", "")
     env_base = os.environ.get("FACTORY_CAMPAIGN_AUDIT_BASE", "")
     env_nonce = os.environ.get("FACTORY_CAMPAIGN_AUDIT_NONCE", "")
@@ -120,25 +191,33 @@ def coordinator_binding(root: Path, round_number: int | None, evidence_commit: s
             "a bare model receipt call is not authorized"
         )
     state = root / COORDINATOR_FILE
-    if not state.exists() and not (env_base or os.environ.get("FACTORY_CAMPAIGN_AUDIT_ROUND")):
-        fail("audit coordinator state is missing; machine receipts cannot be minted outside a campaign audit")
-    if state.exists():
-        data = regular_json(state, 16384)
-        expected = {"schema", "round", "base_commit", "nonce", "created_at"}
-        if (
-            set(data) != expected
-            or data.get("schema") != "ralph-audit-coordinator/v1"
-            or type(data.get("round")) is not int
-            or data["round"] < 1
-            or not isinstance(data.get("base_commit"), str)
-            or not SHA1.fullmatch(data["base_commit"])
-            or not isinstance(data.get("nonce"), str)
-            or not SHA256.fullmatch(data["nonce"])
-            or not isinstance(data.get("created_at"), int)
-        ):
-            fail("audit coordinator state is invalid")
-        if data["round"] != round_number or data["base_commit"] != evidence_commit or data["nonce"] != nonce:
-            fail("supplied audit binding does not match the protected coordinator state")
+    # The protected coordinator state is mandatory: an environment-only
+    # binding (no state, or a state the caller could delete/replace) never
+    # authorizes a receipt.
+    if state.is_symlink() or not state.is_file():
+        fail(
+            "audit coordinator state is missing or unsafe; machine receipts "
+            "are minted only inside the coordinator's protected invocation"
+        )
+    info = state.stat()
+    if info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022:
+        fail("audit coordinator state is unsafe (owner/mode/link-count)")
+    data = regular_json(state, 16384)
+    expected = {"schema", "round", "base_commit", "nonce", "created_at"}
+    if (
+        set(data) != expected
+        or data.get("schema") != "ralph-audit-coordinator/v1"
+        or type(data.get("round")) is not int
+        or data["round"] < 1
+        or not isinstance(data.get("base_commit"), str)
+        or not SHA1.fullmatch(data["base_commit"])
+        or not isinstance(data.get("nonce"), str)
+        or not SHA256.fullmatch(data["nonce"])
+        or not isinstance(data.get("created_at"), int)
+    ):
+        fail("audit coordinator state is invalid")
+    if data["round"] != round_number or data["base_commit"] != evidence_commit or data["nonce"] != nonce:
+        fail("supplied audit binding does not match the protected coordinator state")
     return round_number, evidence_commit, nonce
 
 
@@ -191,8 +270,17 @@ def record_receipt(root: Path, tag: str, argv: list[str], exit_code: int,
     receipts = receipts_dir(root)
     stdout_path = receipts / f"{tag}.stdout"
     stderr_path = receipts / f"{tag}.stderr"
-    atomic_write(stdout_path, stdout)
-    atomic_write(stderr_path, stderr)
+    # Task 12 §19: same-tag receipt publication is no-replace — an existing
+    # artifact (a pre-planted or forged receipt, or a reused tag) fails
+    # closed instead of being silently replaced.
+    for existing in (stdout_path, stderr_path, receipts / f"{tag}.json"):
+        if existing.is_symlink() or existing.exists():
+            fail(
+                f"receipt tag {tag!r} already published; same-tag "
+                "publication fails closed (no-replace)"
+            )
+    atomic_write_noreplace(stdout_path, stdout)
+    atomic_write_noreplace(stderr_path, stderr)
     receipt = {
         "schema": "ralph-audit-receipt/v1",
         "tag": tag,
@@ -208,7 +296,10 @@ def record_receipt(root: Path, tag: str, argv: list[str], exit_code: int,
         "coordinator_nonce": nonce,
     }
     receipt_path = receipts / f"{tag}.json"
-    atomic_write(receipt_path, (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode())
+    atomic_write_noreplace(receipt_path, (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode())
+    verify_artifact(stdout_path, f"receipt stdout {tag}")
+    verify_artifact(stderr_path, f"receipt stderr {tag}")
+    verify_artifact(receipt_path, f"receipt record {tag}")
     return receipt_path
 
 
