@@ -293,26 +293,49 @@ completes with evidence.
 
 - Status: pending
 - Dependencies: Task 4
-- Scope: Implement the lock authority: exclusive `flock` on the already-open
-  canonical Git top-level directory descriptor opened with
-  `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`; validate canonical repository identity,
-  required branch, and spec/plan bindings before launch; close the lock
-  descriptor in every child before exec and strip lock metadata from the
-  child environment; start a new process session; make a separately opened
-  repository descriptor unable to unlock the holder; detect double-fork or
-  `setsid` escape and fail closed for operator inspection. Preserve the Git
-  command-boundary guard so `--no-verify`, hook-path override,
-  `GIT_CONFIG_*`, worktrees, amend/merge/rebase bypasses, and forged handoffs
-  remain rejected. Invoke the Git binary through a PATH-pinned absolute
-  executable (never an unqualified `git` resolved from a caller-controlled
-  PATH) so an attacker-controlled PATH cannot substitute a different `git`
-  behind the guarded commit boundary.
+- Scope: Reconcile the Task 5 security review (findings F1-F10): implement
+  the lock authority: exclusive `flock` on the already-open canonical Git
+  top-level directory descriptor opened with
+  `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`. At acquisition, bind the descriptor to
+  its canonical path by matching device+inode and make canonical repository
+  identity, required branch, and spec/plan bindings mandatory and validated
+  before the lock is granted, failing closed on any mismatch (F2). Detect a
+  double-fork/`setsid` escape or any holder descendant outside the session
+  via a full `/proc` ancestor walk (F1) and fail closed for operator
+  inspection; the detection API accepts and reports against the captured
+  descendant scope supplied by supervision (F6 contract) so descendant
+  accounting is never stale. Reject any passed or inherited fd that aliases
+  the root lock file before exec (F8) and route every lock/authority failure
+  through one unified fail-closed exception contract (F9). Close the lock
+  descriptor in every child before exec and strip every `GIT_CONFIG*`
+  variable (F5) and the entire lock-key environment prefix, including legacy
+  keys (F10), from the child environment; start a new process session; make a
+  separately opened repository descriptor unable to unlock the holder. Enforce
+  a bounded timeout that kills and reaps the holder's full process group (F3).
+  Preserve the Git command-boundary guard so `--no-verify`, hook-path
+  override, `GIT_CONFIG*`, worktrees, amend/merge/rebase bypasses, and forged
+  handoffs remain rejected. Invoke Git through fixed trusted absolute
+  candidates or a root-owned immutable Nix-store-validated path (F4), never an
+  unqualified `git` resolved from a caller-controlled PATH, so an
+  attacker-controlled PATH cannot substitute a different `git` behind the
+  guarded commit boundary.
 - Acceptance criteria: concurrent launcher probes prove exactly one writer;
-  an untrusted leaf inherits no lock descriptor and no lock environment; the
-  escaped-descendant case blocks recovery; commit-boundary bypass tests stay
-  rejected.
-- Verification: `tests/test-factory-lock.py` extended with inheritance and
-  escape fixtures; `tests/test-git-commit-guard.sh` still passes.
+  an untrusted leaf inherits no lock descriptor and no lock environment; a
+  full `/proc` ancestor walk proves the escaped/`setsid` descendant is
+  detected against the captured descendant scope (F1); the acquired
+  descriptor's device+inode matches its canonical path and identity/branch/
+  spec/plan are bound before the lock is granted, failing closed on any
+  mismatch before any write (F2); a bounded timeout kills and reaps the
+  holder's full process group (F3); no caller-controlled PATH can substitute
+  `git` (F4); every `GIT_CONFIG*` and legacy/prefix lock key is absent from
+  the child environment (F5, F10); a passed or inherited fd aliasing the root
+  lock is rejected before exec (F8); every lock failure surfaces through the
+  unified fail-closed exception contract (F9); the escaped-descendant case
+  blocks recovery; commit-boundary bypass tests stay rejected.
+- Verification: `tests/test-factory-lock.py` extended with inheritance,
+  escape, `/proc` ancestor-walk, inode-binding, `GIT_CONFIG*`/legacy lock-key
+  strip, alias-fd, unified-exception, and timeout fixtures;
+  `tests/test-git-commit-guard.sh` still passes.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 6: Fresh-context execution, invocation contract, and supervision
@@ -327,14 +350,22 @@ completes with evidence.
   canonical workspace and bound commit, selected task ID with an excerpt whose
   bytes are re-derived from the committed plan blob and digest-matched (fail
   closed on substitution/paraphrase), allowed tools, and runtime/inactivity
-  bounds. Supervision delivers TERM, INT, and HUP to the full process group,
-  then reaps with a bounded grace escalating to KILL; escaped children are
-  detected; dirty or interrupted work is preserved and never silently
-  overwritten; the machine-readable exit status is the only completion signal.
+  bounds. Supervision maintains a descendant-scoped handle scan (F6): it
+  snapshots and re-enumerates only the role's own live descendants and supplies
+  that captured descendant scope to the Task 5 lock-detector API so descendant
+  accounting is never stale. Supervision delivers TERM, INT, and HUP to the
+  full process group, then reaps with a bounded grace escalating to KILL,
+  guarding the launch snapshot against PID reuse and crash-before-snapshot
+  windows and installing a subreaper so an escaped descendant cannot orphan
+  and is always reaped (F7); escaped children are detected; dirty or
+  interrupted work is preserved and never silently overwritten; the
+  machine-readable exit status is the only completion signal.
 - Acceptance criteria: process invariants (new session, no inherited lock/env,
   no resume) verified per launch; excerpt digest match/mismatch fixtures pass;
-  signal delivery and reap fixtures pass; a crashed attempt leaves its dirty
-  work intact.
+  signal delivery and reap fixtures pass; the descendant-scoped scan covers
+  exactly the launch snapshot with no stale handles (F6); PID-reuse,
+  crash-before-snapshot, and subreaper fixtures pass and an escaped orphan is
+  always reaped (F7); a crashed attempt leaves its dirty work intact.
 - Verification: `tests/test-factory-launch.py`;
   `tests/test-factory-supervision.sh`.
 - Documentation impact: `docs/OPERATIONS.md`.
@@ -423,7 +454,11 @@ completes with evidence.
 - Dependencies: Task 6, Task 8
 - Scope: Preserve the existing Pi tool-call/tool-result credential guard and
   trusted SDK authority; the retained extension contains only required
-  credential enforcement and guarded Git boundary behavior. No model tool can
+  credential enforcement and guarded Git boundary behavior, including the
+  model-facing git shim and bare-git selection pinned to the trusted fixed
+  absolute candidates or a root-owned immutable Nix-store-validated path so a
+  caller-controlled PATH cannot redirect `git` behind the model boundary. No
+  model tool can
   dump environment, authentication files, private keys, or secrets; tool-result
   redaction, stdin bounded command checks, and sanitized logs remain active.
   Ralph lifecycle topics, `ralph emit`, completion-token handling, event
@@ -431,7 +466,9 @@ completes with evidence.
   path and never reimplemented.
 - Acceptance criteria: adversarial fixture attempts to exfiltrate secrets
   through tools, results, logs, argv, or environment all fail closed; the
-  secure wrapper and credential-guard behavior remain unchanged in contract.
+  secure wrapper and credential-guard behavior remain unchanged in contract;
+  a caller-controlled PATH cannot redirect the model-facing git shim or
+  bare-git selection.
 - Verification: `tests/test-credential-extension.sh`;
   `tests/test-credential-guard.sh`.
 - Documentation impact: `docs/OPERATIONS.md`.
