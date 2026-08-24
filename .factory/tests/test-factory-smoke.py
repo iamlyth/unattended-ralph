@@ -457,10 +457,22 @@ class _SmokeBase(unittest.TestCase):
 
 
 class EvidenceSmokeUnit(_SmokeBase):
-    """Pure deterministic transformations of the committed plan bytes."""
+    """Pure deterministic transformations of canonical pre-smoke bytes."""
+
+    @staticmethod
+    def _pre_smoke_plan() -> bytes:
+        """Derive the pre-round fixture whether or not live smoke has run."""
+        text = (ROOT / PLAN_REL).read_text(encoding="utf-8")
+        text = text.replace(common.SMOKE_MARKER + "\n", "", 1)
+        heading = "## Task 22: Live campaign and control-state instantiation"
+        start = text.index(heading)
+        end = text.index("\n## Task 23:", start)
+        block = text[start:end]
+        block = block.replace("- Status: complete", "- Status: pending", 1)
+        return (text[:start] + block + text[end:]).encode("utf-8")
 
     def test_marker_revision_is_canonical_and_byte_bound(self) -> None:
-        plan = (ROOT / PLAN_REL).read_bytes()
+        plan = self._pre_smoke_plan()
         revision = common.plan_with_smoke_marker(plan)
         parsed = plan_parser_module.Plan.from_bytes(revision)
         # Byte-exact round-trip and deterministic bytes.
@@ -473,7 +485,7 @@ class EvidenceSmokeUnit(_SmokeBase):
         self.assertNotEqual(revision, plan)
 
     def test_developer_revision_completes_exactly_one_task(self) -> None:
-        plan = (ROOT / PLAN_REL).read_bytes()
+        plan = self._pre_smoke_plan()
         marker = common.plan_with_smoke_marker(plan)
         completed = common.plan_with_task_complete(marker, 22)
         parsed = plan_parser_module.Plan.from_bytes(completed)

@@ -1815,6 +1815,12 @@ class StateIoCloexecTest(unittest.TestCase):
 
 class LiveRepoSmokeTest(unittest.TestCase):
     def test_live_repo_derive_is_read_only(self):
+        state_path = ROOT / ".factory-state" / STATE_FILE_NAME
+        state_before = state_path.read_bytes() if state_path.exists() else None
+        state_stat_before = (
+            (state_path.stat().st_mode, state_path.stat().st_mtime_ns)
+            if state_path.exists() else None
+        )
         result = subprocess.run(
             [sys.executable, str(MIGRATION_SCRIPT), "--root", str(ROOT),
              "derive", "--no-report"],
@@ -1828,7 +1834,14 @@ class LiveRepoSmokeTest(unittest.TestCase):
         self.assertFalse(payload["no_import"]["env_store_read"])
         # The live tree was not rewritten by a read-only derivation.
         self.assertTrue((ROOT / ".factory" / "ralph-freeze").is_file())
-        self.assertFalse((ROOT / ".factory-state" / STATE_FILE_NAME).exists())
+        if state_before is None:
+            self.assertFalse(state_path.exists())
+        else:
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertEqual(
+                (state_path.stat().st_mode, state_path.stat().st_mtime_ns),
+                state_stat_before,
+            )
 
 
 if __name__ == "__main__":
