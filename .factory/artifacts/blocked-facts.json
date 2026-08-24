@@ -9,7 +9,7 @@
       "requirements": [
         "AUTH-01"
       ],
-      "blocking_evidence": "AUTH-01 requires installed-tier acceptance evidence from the completed fresh-context campaign (specification, plan, and current code/tests authoritative with the plan as the sole task ledger). The machinery exists and hidden suites pass, but no installed-tier campaign receipt exists and Tasks 16/20 (adversarial suite and final audit) are pending, so the required tier cannot be verified yet.",
+      "blocking_evidence": "AUTH-01 requires installed-tier acceptance evidence from the completed fresh-context campaign (specification, plan, and current code/tests authoritative with the plan as the sole task ledger). The machinery exists and hidden suites pass, but no installed-tier campaign receipt exists and the live installed-tier evidence (Task 23) is pending, so the required tier cannot be verified yet.",
       "resolution": null
     },
     {
@@ -20,7 +20,7 @@
       "requirements": [
         "CTX-01"
       ],
-      "blocking_evidence": "CTX-01 requires installed-tier evidence that every role runs in a fresh process with only allowlisted current inputs and no semantic memory/session resume. The launch/supervision machinery (Task 6) is fixture-proven only; no installed-tier campaign receipt exists and final verification is pending Tasks 16/20.",
+      "blocking_evidence": "CTX-01 requires installed-tier evidence that every role runs in a fresh process with only allowlisted current inputs and no semantic memory/session resume. The launch/supervision machinery (Task 6) is fixture-proven only; no installed-tier campaign receipt exists and final verification is pending Task 23.",
       "resolution": null
     },
     {
@@ -31,7 +31,7 @@
       "requirements": [
         "CTX-02"
       ],
-      "blocking_evidence": "CTX-02 requires installed-tier evidence that legacy task, memory, scratch, event, and state paths are unavailable to model tools. Confinement machinery is fixture-proven, but no installed-tier campaign receipt exists; final verification pending Tasks 16/20.",
+      "blocking_evidence": "CTX-02 requires installed-tier evidence that legacy task, memory, scratch, event, and state paths are unavailable to model tools. Confinement machinery is fixture-proven, but no installed-tier campaign receipt exists; final verification pending Task 23.",
       "resolution": null
     },
     {
@@ -53,7 +53,7 @@
       "requirements": [
         "PLAN-01"
       ],
-      "blocking_evidence": "PLAN-01 requires unit-tier acceptance of the factory-plan/v1 schema and parser binding spec/base/tasks/requirements/interactions/conformance with byte-exact round-trip, section-24 registry coverage, and adversarial invariants. The parser and fixtures pass, but the requirement's acceptance within a completed campaign is pending final verification (Tasks 16/20).",
+      "blocking_evidence": "PLAN-01 requires unit-tier acceptance of the factory-plan/v1 schema and parser binding spec/base/tasks/requirements/interactions/conformance with byte-exact round-trip, section-24 registry coverage, and adversarial invariants. The parser and fixtures pass, but the requirement's acceptance within a completed campaign is pending final verification (Task 23).",
       "resolution": null
     },
     {

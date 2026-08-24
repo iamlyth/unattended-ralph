@@ -83,22 +83,26 @@ machine-readable conformance sidecar (`.factory/artifacts/conformance.json`,
 which `scripts/validate-conformance.py` cross-checks row-by-row): the
 retained-and-rebound machinery rows AUTH-01 through VIS-01 are `partial`
 (existing harness authority is preserved and re-bound to the new path;
-installed-tier receipts and live campaign evidence are still owed by
-Tasks 20/22), RUNNER-01 is `blocked` (real-system evidence requires a
+Task 20 completes the installed-harness mechanics with fixture-authority
+receipts only at its exact commit, while live installed-tier receipts and
+live campaign evidence are still owed by Tasks 22/23), RUNNER-01 is
+`blocked` (real-system evidence requires a
 provisioned, signed hardware runner the generic environment does not declare;
 external-human remediation is Task 24, FACT-020), HIDE-01, MIG-01, and
 TEST-01 are `partial` (footprint inventory, generic-first migration, and the
 §22 adversarial suite exist but their installed/checked evidence is still
-owed by Tasks 20/23), and ACCEPT-01 is `missing` (no boilerplate acceptance
+owed by Task 23), and ACCEPT-01 is `missing` (no boilerplate acceptance
 evidence exists yet); no row is `verified` until its task completes with
 exact-commit evidence at the required tier.
 
 Matrix ownership: the round-1 independent audit
 (`.factory/artifacts/campaign-audit.md` at commit `02a1de4`) reported
 `findings` with 0 of 24 rows verified. Every non-verified row is therefore
-owned by its referenced remediation tasks — Tasks 20-24 (installed-tier
-evidence, round-1 objective coverage, live campaign control state, generic
-evidence-scope authority, external runner provisioning) — and remains NOT
+owned by its referenced remediation tasks — Tasks 20-24 (Task 20's
+installed-harness mechanics are complete at `6b9c626` with fixture-authority
+receipts only; round-1 objective coverage, live campaign control state,
+live generic-namespace/coordinator receipts and check-installed acceptance,
+and external runner provisioning remain pending) — and remains NOT
 VERIFIED under the pending final audit (Task 25), which may only report
 clean when every row is verified with exact-commit receipts at its required
 tier. RUNNER-01's row is owned by blocked Tasks 21/24 and stays `blocked`
@@ -107,28 +111,28 @@ elevated by prose.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
-| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16, Task 20, Task 22, Task 25 |
-| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16, Task 20, Task 22, Task 25 |
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16, Task 20, Task 22, Task 23, Task 25 |
+| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16, Task 20, Task 22, Task 23, Task 25 |
 | CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools; generic checker read authority scoped to the exact commit and dedicated generic namespace | Task 8, Task 15, Task 16, Task 20, Task 23, Task 25 |
-| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16, Task 20, Task 22, Task 25 |
+| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16, Task 20, Task 22, Task 23, Task 25 |
 | PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18, Task 25 |
 | TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16, Task 22, Task 25 |
-| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 25 |
+| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 25 |
 | QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 25 |
 | QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 25 |
 | STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25 |
 | LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 25 |
 | PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 22, Task 25 |
-| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 25 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 23, Task 25 |
 | PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16, Task 22, Task 25 |
 | COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 22, Task 25 |
 | FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 25 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 22, Task 25 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained; installed-tier receipts minted from the installed copy | Task 12, Task 16, Task 20, Task 23, Task 25 |
-| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 25 |
+| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 23, Task 25 |
 | RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 21, Task 24, Task 25 |
-| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 25 |
-| MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 25 |
+| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 23, Task 25 |
+| MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 23, Task 25 |
 | TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization; production gates executed from the installed copy | Task 16, Task 17, Task 20, Task 23, Task 25 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25 |
 
@@ -1289,45 +1293,54 @@ elevated by prose.
 
 ## Task 20: Installed-tier evidence for the generic harness
 
-- Status: pending
+- Status: complete
 - Dependencies: Tasks 1-19
-- Scope: Remediate campaign-audit Findings 2 and 6: build a clean
-  exact-commit installation of the generic harness into test-owned external
-  and hidden prefixes (per-launch test-owned directories outside the model
-  workspace — a custom external-prefix install plus a hidden dot-prefixed
-  install under the test-owned namespace), inventory the physical installed
-  files, and execute the production control-plane CLIs and deterministic
-  gates from the installed copy. Source-tree runs and private unit-test runs
-  are never relabeled as installed-tier evidence. Production paths executed
+- Scope: Remediate campaign-audit Findings 2 and 6: build the installed-
+  harness **mechanics** — a clean exact-commit installation of the generic
+  harness into test-owned external and hidden prefixes (per-launch
+  test-owned directories outside the model workspace — a custom
+  external-prefix install plus a hidden dot-prefixed install under the
+  test-owned namespace), the physical installed-file inventory, and
+  execution of the production control-plane CLIs and deterministic gates
+  from the installed copy. Source-tree runs and private unit-test runs are
+  never relabeled as installed-tier evidence. Production paths executed
   from the installed copy include `python -m factory.loop.launch` (help and
   CLI surface plus the external-prefix launcher entry point),
-  `factory-campaign`, the parser/selector/state CLIs, `scripts/machine-receipt.py`,
-  and the installed footprint inventory. Every installed-tier gate is minted
-  as an exact-commit receipt via `scripts/machine-receipt.py` under the
-  campaign coordinator binding at the audit base and published under
-  `.factory-state/audit-receipts/` so `scripts/check-audit-receipts.py` exits
-  0; the physical installed-file inventory (path, mode, owner, link count) is
-  captured and asserted to stay inside the test-owned external/hidden
-  prefixes and the hidden `.factory/`/`.factory-state/`/`.pi/` namespaces
-  (HIDE-01).
+  `factory-campaign`, the parser/selector/state CLIs,
+  `scripts/machine-receipt.py`, and the installed footprint inventory.
+  Every installed-tier gate is minted as an exact-commit receipt via
+  `scripts/machine-receipt.py`; at this commit the receipts are
+  fixture-authority only (minted under the fixture authority's audit
+  coordinator, never against the live `.factory-state/`), so
+  `scripts/check-audit-receipts.py` exits 0; the physical installed-file
+  inventory (path, mode, owner, link count) is captured and asserted to
+  stay inside the test-owned external/hidden prefixes and the hidden
+  `.factory/`/`.factory-state/`/`.pi/` namespaces (HIDE-01). The live
+  generic-namespace evidence, coordinator receipts at the audit base, and
+  the fresh check-installed acceptance are owned by pending Task 23 after
+  Task 22.
 - Acceptance criteria: the installed copy is a fresh build from the exact
-  bound commit into test-owned external/hidden prefixes; the physical
-  installed-file inventory is complete and confined; every installed-tier
-  production CLI/gate runs from the installed copy with its documented exit
-  status; each installed-tier gate has an exact-commit receipt published at
-  the audit base; `scripts/check-audit-receipts.py` and the fresh
-  installed-functional evidence gate exit 0; no source-tree or private-test
-  run is claimed as installed-tier evidence.
+  bound commit `6b9c626` into test-owned external/hidden prefixes; the
+  physical installed-file inventory is complete and confined; every
+  installed-tier production CLI/gate runs from the installed copy with its
+  documented exit status; every installed-tier gate has an exact-commit
+  fixture-authority receipt and `scripts/check-audit-receipts.py` exits 0;
+  no source-tree or private-test run is claimed as installed-tier evidence,
+  and no live installed-functional evidence is staged by this task (the
+  live `.factory-state/` is never touched).
 - Verification: `scripts/verify-boilerplate.sh`;
   `scripts/check-audit-receipts.py`;
   `scripts/check-installed-functional-evidence.sh`;
   `.factory/tests/test-factory-footprint.sh` installed inventory;
   `scripts/validate-conformance.py planning`; `scripts/check-docs-sync.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
-- Evidence: WIP phase (uncommitted on `develop` at `c4df597`): the
-  installed-tier machinery is implemented and proven by the hidden suite
-  `.factory/tests/test-factory-installed.py/.sh` with fixture-authority
-  receipts only — a descriptor-anchored trusted installer
+- Evidence: exact commit `6b9c626` completes the installed-harness
+  mechanics with fixture-authority receipts only — no live
+  installed-functional evidence is staged (the live `.factory-state/`
+  is never touched, replaced, or relabeled). The installed-tier machinery
+  is implemented and proven by the hidden suite
+  `.factory/tests/test-factory-installed.py/.sh` — a descriptor-anchored
+  trusted installer
   (`.factory/loop/installer.py`, prefix opened `O_DIRECTORY|O_NOFOLLOW|
   O_CLOEXEC` with fd identity/containment revalidated per stage and
   `openat` staging), a single fair select event loop in
@@ -1337,17 +1350,15 @@ elevated by prose.
   `.factory/bin/factory-launch` (forwards INT/TERM/HUP/QUIT, bounded
   wait/reap before alias cleanup, actual or 128+signal status), the
   installed physical-file inventory in `.factory/loop/footprint.py`, and
-  the installed-root-attested receipt gates.  The modified
+  the installed-root-attested receipt gates.  The
   `.factory/tests/test-factory-migration.py` `GitBytesBoundedTests`
   regressions (fair single-loop drain, bounded group termination, the
-  batched-stdin and >128 KiB deadlock tests) are **review authority** for
-  the gitutil refactor and stay pending on the reviewer allowlist until
-  this task commits; the installed suite derives the actual pending set
-  independently so the allowlist is not fragile.  Live installed-functional
-  evidence is **not** staged in this WIP phase (the live `.factory-state/`
-  is never touched); Task 20 stays `pending` until the post-commit phase
-  runs the suite at the bound Task-20 commit and stages the fresh live
-  evidence.
+  batched-stdin and >128 KiB deadlock tests) are part of the committed
+  Task-20 change and pass at `6b9c626`; the installed suite derives the
+  actual pending set independently so the allowlist is not fragile.  Live installed-functional evidence is **not** staged at `6b9c626`: the
+  fresh generic-namespace evidence, the coordinator receipts at the audit
+  base, and the check-installed acceptance are owned by pending Task 23
+  after Task 22.
 
 ## Task 21: Round-1 campaign audit objective coverage
 
@@ -1428,25 +1439,35 @@ elevated by prose.
   foreign adopting-product commit `61356a0` that is not an ancestor of the
   boilerplate audit base) is foreign runtime evidence and MUST be
   preserved byte-for-byte: no delete, quarantine, or mutation of any existing
-  `.factory-state` file. Instead, scope every generic checker's and generic
-  read authority to the exact bound commit and a dedicated generic evidence
-  namespace: `scripts/check-installed-functional-evidence.sh` and sibling
-  generic readers read only the exact-commit generic-namespaced evidence
-  produced by Task 20 (for example under a dedicated generic evidence
-  sub-namespace such as `.factory-state/generic-evidence/`) and ignore
-  foreign artifacts outside that namespace, so a foreign artifact causes no
-  error and is never rewritten. Preservation is proven by recording the
-  foreign files' byte digests before and after the task and verifying the
-  digests, mode, and mtime are unchanged.
+  `.factory-state` file. This task owns the **live** installed-tier
+  evidence for the generic harness after Task 22: it runs the installed
+  suite (Task 20 machinery) at the bound Task-23 commit, stages the fresh
+  live evidence under a dedicated generic evidence namespace (for example
+  `.factory-state/generic-evidence/`), mints the installed-tier coordinator
+  receipts at the audit base under `.factory-state/audit-receipts/`, and
+  produces the fresh check-installed acceptance
+  (`scripts/check-installed-functional-evidence.sh` exit 0). It scopes
+  every generic checker's and generic read authority to the exact bound
+  commit and the dedicated generic evidence namespace:
+  `scripts/check-installed-functional-evidence.sh` and sibling generic
+  readers ignore foreign artifacts outside that namespace, so a foreign
+  artifact causes no error and is never rewritten. Preservation is proven
+  by recording the foreign files' byte digests before and after the task
+  and verifying the digests, mode, and mtime are unchanged.
 - Acceptance criteria: the pre-existing foreign `.factory-state` bytes are
-  byte-identical after the task (digest snapshot proves untouched); generic
-  checkers read only the exact-commit dedicated generic namespace and ignore
-  the foreign artifact; no generic tooling deletes, quarantines, or mutates a
-  foreign artifact; `scripts/check-installed-functional-evidence.sh` exits 0
-  on the fresh generic evidence and `scripts/check-generic-leakage.sh` passes.
+  byte-identical after the task (digest snapshot proves untouched); the
+  installed suite (Task 20 machinery) runs from the installed copy at the
+  bound Task-23 commit and mints the live generic-namespace evidence and
+  coordinator receipts at the audit base so `scripts/check-audit-receipts.py`
+  exits 0; generic checkers read only the exact-commit dedicated generic
+  namespace and ignore the foreign artifact; no generic tooling deletes,
+  quarantines, or mutates a foreign artifact;
+  `scripts/check-installed-functional-evidence.sh` exits 0 on the fresh
+  generic evidence and `scripts/check-generic-leakage.sh` passes.
 - Verification: byte-digest before/after snapshot of the foreign
   `.factory-state` files (digest, mode, and mtime recorded and re-verified);
   `scripts/check-installed-functional-evidence.sh`;
+  `scripts/check-audit-receipts.py`;
   `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 

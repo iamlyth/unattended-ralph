@@ -776,14 +776,14 @@ committed in a fixture authority) proves the post-commit install never
 double-stages a declared entrypoint and reports an empty pending set,
 which catches the H1 regression before the real Task-20 commit lands.
 
-Task 20's live installed-functional evidence is **two-phase**: this WIP
-phase builds and proves the installed-tier machinery with fixture-authority
-receipts only (the live `.factory-state/` foreign evidence is never
-touched, replaced, or relabeled fixture), and the post-commit phase — once
-the Task-20 commit is the exact bound commit — runs the installed suite at
-that commit and stages the fresh live evidence under the generic evidence
-namespace.  Task 20 stays `pending` in the plan until that post-commit
-phase lands.
+Task 20 is **complete at exact commit `6b9c626`** as installed-harness
+mechanics with fixture-authority receipts only: the installed suite builds
+and proves the installed-tier machinery against the fixture authority, and
+the live `.factory-state/` foreign evidence is never touched, replaced, or
+relabeled.  The **live** installed-functional evidence — the fresh
+generic-namespace evidence, the coordinator receipts at the audit base, and
+the check-installed acceptance — is owned by pending Task 23 after Task 22
+runs the live campaign; Task 20 itself never stages live evidence.
 
 ## Machine visual-audit scaffold
 
