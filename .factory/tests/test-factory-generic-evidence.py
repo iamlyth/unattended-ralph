@@ -73,6 +73,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 sys.path.insert(0, str(LOOP))
 import evidence as evidence_module  # noqa: E402
+import generic_evidence as generic_evidence_module  # noqa: E402
 import gitutil  # noqa: E402
 import state as state_module  # noqa: E402
 
@@ -101,6 +102,22 @@ def _sha256(data: bytes) -> str:
 
 class GenericEvidenceSuite(unittest.TestCase):
     """End-to-end generic evidence publication and acceptance (Task 23)."""
+
+    def test_staging_snapshot_may_exceed_evidence_record_bound(self) -> None:
+        staging = Path(tempfile.mkdtemp(prefix="generic-staging-bound."))
+        self.addCleanup(shutil.rmtree, staging, ignore_errors=True)
+        os.chmod(staging, 0o700)
+        record = staging / generic_evidence_module.STAGING_NAME
+        record.write_text(
+            json.dumps({
+                "schema": generic_evidence_module.STAGING_SCHEMA,
+                "snapshot_fixture": "x" * (generic_evidence_module.MAX_RECORD + 1),
+            }),
+            encoding="utf-8",
+        )
+        os.chmod(record, 0o600)
+        parsed = generic_evidence_module._read_staging(staging)
+        self.assertEqual(parsed["schema"], generic_evidence_module.STAGING_SCHEMA)
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="factory-generic-evidence."))

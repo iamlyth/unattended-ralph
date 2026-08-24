@@ -599,8 +599,8 @@ def _read_staging(staging: Path) -> dict:
         or record_info.st_mode & 0o022
     ):
         raise GenericEvidenceError("staging record is unsafe (owner/mode/link-count)")
-    if record_info.st_size > MAX_RECORD:
-        raise GenericEvidenceError("staging record exceeds the size bound")
+    if record_info.st_size > MAX_SNAPSHOT:
+        raise GenericEvidenceError("staging record exceeds the snapshot size bound")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
