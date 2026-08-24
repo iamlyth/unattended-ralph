@@ -113,7 +113,7 @@ exact-commit evidence.
 | RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 20 |
 | HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16, Task 20 |
 | MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20 |
-| TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
+| TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17, Task 20 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
 
 ## Interaction acceptance inventory
@@ -1097,7 +1097,7 @@ exact-commit evidence.
 
 ## Task 17: Documentation synchronization
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 16
 - Scope: Synchronize README, `docs/FACTORY.md`, `docs/OPERATIONS.md`, the
   concise `AGENTS.md`, and the installed help/usage text to the new Python
@@ -1111,7 +1111,16 @@ exact-commit evidence.
 - Verification: `scripts/check-docs-sync.sh`; the docs gate inside
   `scripts/verify-boilerplate.sh`.
 - Documentation impact: README.md, `docs/FACTORY.md`, `docs/OPERATIONS.md`,
-  `AGENTS.md`, help text.
+  `docs/BUG_WORKFLOW.md`, `AGENTS.md`, help text.
+- Evidence: the documentation gate checks canonical spec/plan/state bindings,
+  every documented CLI/path/help surface, frozen Ralph framing, planner-only
+  findings, finite outcomes, migration and recovery behavior, Linux/Landlock/
+  `/proc`/OpenSSH prerequisites, and adopting-product verifier boundaries.
+  `AGENTS.md` is 94 lines and the gate enforces that limit. Docs sync, plan
+  freshness, plan-cycle, bug-workflow, hidden parser/selector/state, and the
+  complete boilerplate gate exit 0. Independent documentation review found no
+  stale operative Ralph/context-summary/resume/task-ledger claim and no runner,
+  visual, installed, real-system, or human evidence overclaim.
 
 ## Task 18: Close `factory-plan/v1` untrusted-plan acceptance gaps
 

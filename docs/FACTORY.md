@@ -14,8 +14,11 @@ should refer to [README.md](../README.md) for product documentation.
 ## What this is
 
 A reusable, single-writer implementation of Geoffrey Huntley's Ralph Wiggum
-development technique using Ralph Orchestrator, jailed Pi, Ollama, adaptive
-read-only subagents, Git checkpoints, quota waiting, and crash recovery.
+development technique using a fresh-context Python control plane: planner,
+developer, tester, and auditor run as separate fresh, confined model
+processes with deterministic task selection; jailed Pi with real Landlock
+confinement; the retained Ollama usage guard; Git checkpoints; quota
+waiting; and crash recovery.
 
 The canonical bound specification (this cycle: `docs/FACTORY-LOOP-SPEC.md`, per
 `.factory/config.toml` `[project].spec`; `docs/SPEC.md` stays the adopting-product
@@ -28,14 +31,15 @@ tracks task status and verification evidence.
 - `main` is the human-controlled release branch.
 - The configured development branch (`.factory/config.toml` `development_branch`) is the autonomous implementation branch.
 - One committed canonical specification is the source of truth; Git versions it. This cycle binds `docs/FACTORY-LOOP-SPEC.md` (`.factory/config.toml` `[project].spec`); the adopting product supplies its own `docs/SPEC.md` later.
-- A planning-only Ralph loop creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
-- Each implementation iteration selects one bounded task and starts with fresh model context.
-- Pi subagents perform parallel read-only planning, research, review, security, and documentation analysis.
-- Exactly one primary worker may edit, stage, or commit repository files.
-- Tests and documentation are completion gates.
+- A planning phase (one of the four fresh roles) creates `.factory/artifacts/implementation-plan.md` for the exact spec commit.
+- Each implementation iteration selects exactly one bounded task deterministically and starts with fresh model context.
+- Four static roles — planner, developer, tester, auditor — are the complete role set; parallel model launches are forbidden. Each runs from a static digest-bound prompt: `.factory/prompts/planner.md`, `.factory/prompts/developer.md`, `.factory/prompts/tester.md`, `.factory/prompts/auditor.md`.
+- Exactly one primary worker may edit, stage, or commit repository files; Git history and commit operations run in the trusted orchestrator, never in model tools.
+- Tests, documentation, machine evidence, and an independent audit are completion gates.
+- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored) carries only the §11 fields and enforces the §11 transition table.
 - You review the configured development branch and manually promote it to `main`.
 
-No Git worktrees are used. `features.parallel` is disabled in both Ralph configurations.
+No Git worktrees are used.
 
 ## Fresh role boundary
 
@@ -113,7 +117,7 @@ surfaces and the new campaign has no dependency on them.
 
 ## Relationship to Huntley's playbook
 
-The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum) (reviewed at commit `88d488a148af97e4a3f22b11b4c3598c79d6a577`). This boilerplate adopts the playbook's highest-value context and backpressure patterns:
+The prompts are periodically compared against [`ghuntley/how-to-ralph-wiggum`](https://github.com/ghuntley/how-to-ralph-wiggum). The pinned commit `88d488a148af97e4a3f22b11b4c3598c79d6a577` is a **historical snapshot only and is non-authoritative**: the boilerplate never depends on the external playbook, its prompts, or that commit, and the pinned snapshot is not a contract this cycle must track. The canonical `docs/FACTORY-LOOP-SPEC.md` is the only authority. This boilerplate adopts the playbook's highest-value context and backpressure patterns:
 
 - deterministic orientation: study the specification, plan, concise `AGENTS.md`, source, tests, and shared patterns every iteration;
 - **do not assume functionality is missing**—search and trace production behavior first;
@@ -133,48 +137,42 @@ Durable, tracked state:
 - `AGENTS.md`: concise build/run/validation commands and durable operational patterns
 - `.factory/artifacts/implementation-plan.md`: feature task status and verification evidence
 - `.factory/bugs/open.md` / `.factory/bugs/closed.md`: portable canonical defect state
-- `.factory/artifacts/maintenance-plan.md`: one selected bug, fingerprint, tasks, and evidence
+- `.factory/artifacts/maintenance-plan.md`: frozen legacy maintenance artifact (the fresh loop has no maintenance role)
 - `.ralph/agent/scratchpad.md`: concise crash handoff
 - source, tests, README, and operational documentation
-- `.factory/config.toml`, Ralph configs, prompts, and project subagent definitions
+- `.factory/config.toml`, the frozen legacy Ralph configs, static role prompts, and project subagent definitions
 
 Volatile, ignored state:
 
-- event streams and pointer files under `.ralph/`
-- loop locks, diagnostics, API state, task/memory stores, and TUI exports
+- legacy event streams and pointer files under `.ralph/` (the new loop creates none)
+- legacy loop locks, diagnostics, API state, task/memory stores, and TUI exports
 - Pi transcripts and scheduled-agent state
 - legacy `.factory-lock` only during one-time migration,
   `.bug-ledger.lock`, and `.factory-state/` lifecycle markers
 - `.ollama-usage-env`
 
-Git checkpoints make the plan, scratchpad, and implementation recoverable. Event/task files improve same-disk recovery but are not treated as portable project history.
+Git checkpoints make the plan and implementation recoverable. The new loop
+creates no event/task files; `.factory-state/` holds only the one mutable
+state file and append-only evidence.
 
 ## Branch policy
 
-The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
-
-A boilerplate experiment on a `factory/*` branch requires the explicit temporary override:
-
-```bash
-FACTORY_ALLOW_TRIAL_BRANCH=1 ./scripts/ralph-plan.sh
-```
-
-Do not carry this override into normal development.
+The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees. The campaign CLI requires the exact `--branch`; there is no trial-branch escape in the new loop.
 
 ## Prerequisites
 
-- Ralph Orchestrator with the native Pi backend
-- `pi2` configured with the `@tintinweb/pi-subagents` extension
-- Ollama provider/model access
-- Bash, Git, Python 3.11+, curl, flock, and optionally ShellCheck
+- Linux with the Landlock LSM (path-beneath rules) and `/proc` plus `flock`/`O_NOFOLLOW`; hosts without the required confinement or lifecycle primitives fail closed
+- Python 3.11+ (stdlib-only control plane), Git, curl, flock, and optionally ShellCheck
+- OpenSSH (`ssh-keygen -Y verify`) for signed runner evidence; runners and SSH aliases are declared/configured outside the repository
+- Ollama provider/model access and the retained usage guard for `ollama`-provider launches
 - A clean configured development branch with at least one commit
 
-The project tracks `.pi/subagents.json` with a maximum of eight simultaneous read-only subagents. Project agents in `.pi/agents/` intentionally expose no `bash`, `edit`, or `write` tools.
+The project tracks `.pi/subagents.json` with a maximum of eight simultaneous read-only subagents. Project agents in `.pi/agents/` intentionally expose no `bash`, `edit`, or `write` tools; the fresh loop itself launches only the four role processes, never adaptive subroles.
 
 ## Initial setup
 
 1. Merge this boilerplate branch into the configured development branch.
-2. Configure Ollama Cloud usage credentials:
+2. Configure Ollama usage credentials for the operator store (outside the model workspace):
 
    ```bash
    source scripts/update-ollama-cookies.sh
@@ -186,22 +184,21 @@ The project tracks `.pi/subagents.json` with a maximum of eight simultaneous rea
    ./scripts/ollama-usage-guard.sh --check
    ```
 
-4. Edit `docs/SPEC.md` and commit it separately:
-
-   ```bash
-   git add docs/SPEC.md
-   git commit -m "spec: define the next release"
-   ```
+4. This cycle's canonical specification is the committed
+   `docs/FACTORY-LOOP-SPEC.md`; an adopting product replaces it with its own
+   committed product specification and commits it separately before planning.
 
 ## Plan
 
-Run the planning-only fresh-context loop:
+Planning runs inside the finite campaign (`.factory/loop/campaign.py run`):
+the planner role is one fresh confined process, and the trusted campaign
+derives every binding from the committed plan and control state at the
+current HEAD.
 
-```bash
-./scripts/ralph-plan.sh
-```
-
-The planner may only modify `.factory/artifacts/implementation-plan.md` and the recovery scratchpad. A fresh invocation atomically replaces both with minimal cycle state before Ralph starts, so completed tasks are not carried into future prompts. Previous plans remain available through Git history; `--resume` preserves the active draft. The generated plan records:
+The planner may only modify `.factory/artifacts/implementation-plan.md`. A
+fresh planning phase atomically replaces the plan with minimal cycle state,
+so completed tasks are not carried into future prompts; previous plans
+remain available through Git history. The generated plan records:
 
 - the spec path;
 - the latest commit that changed the spec;
@@ -284,59 +281,43 @@ classifications; inspect it at any time with:
 python3 .factory/loop/selector.py select .factory/artifacts/implementation-plan.md
 ```
 
-For a headless planning loop:
-
-```bash
-./scripts/ralph-plan.sh --no-tui
-```
-
 ## Implement
 
-Start the single-writer build loop:
+The implementation phase is the same finite campaign (`.factory/loop/campaign.py run`): each attempt launches the developer as a fresh confined process through `python -m factory.loop.launch launch` with the exact selected task excerpt (bytes re-derived from the committed plan and digest-matched), then the trusted campaign validates the result against plan state and Git. Each iteration:
 
-```bash
-./scripts/ralph-run.sh
-```
+1. validates branch, plan freshness, and the single control-state file;
+2. runs the Ollama usage guard and waits for quota when necessary;
+3. deterministically selects one ready task (`.factory/loop/selector.py`);
+4. implements and tests exactly that task with one writer;
+5. updates the plan and (legacy) crash handoff;
+6. commits one coherent checkpoint through the trusted pinned-Git authority;
+7. exits so the next task receives fresh context.
 
-Each iteration:
+Only the final documentation and specification audit may complete the cycle. It must satisfy the specification's definition of done: all conformance rows verified, every interaction exercised through production paths with semantic outcomes, full installed verification, no contradictory open bugs, adversarial reviews, current documentation, and a clean tree.
 
-1. validates branch and plan freshness;
-2. waits for Ollama quota when necessary;
-3. selects one ready task;
-4. fans out only read-only analysis;
-5. implements and tests one task with one writer;
-6. updates the plan and recovery scratchpad;
-7. creates a Git checkpoint;
-8. exits so the next task receives fresh context.
+There is no minimum iteration count: high quality is determined by evidence, not loop volume. Conversely, completing the originally planned tasks is not enough when acceptance discovers another gap. The planner preserves the plan, appends a new uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. The configured attempt/round budgets are safety ceilings, not targets; a reached ceiling leaves the cycle incomplete with durable state, and a ceiling never constitutes completion.
 
-Ralph 2.10.1 otherwise interprets the real `ralph emit` acknowledgement as
-a five-second deadline, kills Pi while it finishes the tool turn, and counts
-that kill as an iteration failure. `scripts/pi2-ollama.sh` explicitly loads a
-Pi tool-call extension that rewrites only a direct final `ralph emit` command to
-`scripts/pi-cli-shims/ralph`. The shim resolves the real Ralph binary from the
-jail's trusted PATH, preserves its status and stderr, and changes only the
-successful command's exact acknowledgement; every other Ralph command is directly executed. Arbitrary
-identical model/backend output remains visible to Ralph's fail-safe detector.
-The wrapper and `scripts/pi2-secure-exec.py` retain exec-style process semantics,
-so backend signals propagate without an orphaning relay process. The tradeoff is
-that Pi may use a short final model turn after publication; a genuine silent hang
-remains bounded by Ralph's normal five-minute inactivity timeout.
+### Checkpoint protocol and completion
 
-Only the final documentation and specification audit may produce `LOOP_COMPLETE`. It must satisfy the specification's definition of done: all conformance rows verified, every interaction exercised through production event dispatch with semantic outcomes, full installed verification, no contradictory open bugs, adversarial reviews, current documentation, and a clean tree.
+Completion is never a model claim. The trusted harness derives phase
+outcomes from plan state, Git state, exit status, and deterministic gates
+(§13); model prose and completion tokens are not control protocol. Each
+phase records its digest in the append-only evidence ledger before it starts
+and re-validates it after, so a mid-phase mutation of the control-state file
+fails closed. `.factory/ralph-freeze` keeps the legacy launchers from
+starting new cycles; `scripts/check-scratchpad.sh` still guards the legacy
+handoff document on the frozen surface.
 
-There is no minimum iteration count: high quality is determined by evidence, not loop volume. Conversely, completing the originally planned tasks is not enough when acceptance discovers another gap. The worker preserves the ledger, appends a new uniquely numbered remediation task, adds it to the final audit dependencies, returns the audit to pending, and continues. `.factory/ralph/implementation.yml` permits up to 1000 iterations and a one-year runtime as safety ceilings. If those or an external session ceiling are reached, the plan remains active/blocked with a recovery handoff; a ceiling never constitutes completion.
+An ordinary checkpoint never commits a scratchpad-only change: it leaves the
+latest non-empty handoff in the worktree for recovery. Substantive source,
+test, plan-state, ledger, or documentation changes may commit with it. The
+final gate (`scripts/final-gate.sh --implementation`) attests a clean
+unchanged HEAD and requires every task `complete`, every conformance row
+`verified`, and exact-commit installed evidence; no tracked commit follows a
+passing attestation.
 
-### Completion protocol and checkpoint guards
-
-Ralph recognizes a completion promise only when the reserved token is the exact final non-empty model-output line outside all `<event>` tags. A token inside an event is never completion. Sender-side Pi rewriting and command filtering are defense in depth, not an authority: same-UID code can hide or replace an executable. The trusted receiver therefore enforces the strict event-topic/schema allowlist, recursively rejects reserved tokens (including ordered string fragments), and terminates the leaf fail-closed. Each prompt still requires the standalone final line after the normal event is closed.
-
-Before every checkpoint, planning revalidates the launcher's immutable specification metadata and cycle `base_commit`; maintenance planning performs its equivalent freshness check. `scripts/check-scratchpad.sh` requires one level-one handoff document, and every iteration hook passes its lifecycle token so contamination fails before checkpointing. `--allow-missing` covers only Ralph's fresh-loop scratchpad removal, while `--allow-oversize` warns without accepting an oversized final handoff. An ordinary checkpoint never commits a scratchpad-only change: it leaves the latest non-empty handoff in the worktree for `--resume` and recovery. Substantive source, test, plan-state, ledger, or documentation changes may commit with the scratchpad.
-
-The tightly scoped `--final-handoff` checkpoint accepts no dirty path except the scratchpad and permits at most one metadata-only final commit per durable lifecycle cycle. In hook-finalized modes it runs before `scripts/ralph-completion-gate.sh`; the gate then records at most one successful clean-HEAD attestation for that cycle and fails if HEAD or the tracked tree changes during validation. Maintenance planning instead runs its completion hook validate-only: the untrusted hook chain must not hold the factory lock, so after Ralph returns success the trusted launcher performs the ledger transition, the strict final handoff, the gate attestation, and the final-state attestation under the retained lock, with the finalizer permitting only the scratchpad that the handoff commits. No tracked commit follows a passing attestation. In implementation completion, front matter must be exactly `complete`, every task must be `complete`, and every conformance row must be `verified`; unavailable declared capabilities remain findings until real evidence exists.
-
-When the strict gate rejects a valid premature completion request, it still writes an atomic, one-shot marker bound to the launcher nonce, lifecycle mode, loop ID, and canonical workspace. Hook payload bytes are retained in memory, and marker removal is a dirfd/no-follow quarantine-then-validate operation, so pathname substitution cannot authorize continuation. The supervisor consumes only a matching marker and continues the same cycle with `--continue`. Completion-rejection, stale, and combined no-progress counts are persisted under `.factory-state/`, so process or campaign resume cannot reset their ceilings (eight, two, and eight by default). Stale, malformed, mismatched, or symlink markers cannot authorize continuation. History replacement, malformed records, exhausted budgets, and arbitrary non-quota failures are terminal; quota exhaustion remains inside the leaf launcher's verified wait path.
-
-A phase-start handshake records the exact received event delta digest and size, the exact first trusted record digest and size, and its attempt/cycle nonce. Campaign confirmation requires the same inode, exact total size, and identical bytes; both later appends and same-size rewrites fail closed. `.ralph`, pointer markers, and event streams must be owned and not group/other writable. These controls require Linux `O_NOFOLLOW`, dirfd, `/proc`, and directory `flock` primitives; the lifecycle exits explicitly when they are unavailable.
+These controls require Linux `O_NOFOLLOW`, dirfd, `/proc`, and directory
+`flock` primitives; the lifecycle exits explicitly when they are unavailable.
 
 ## Run a finite multi-round campaign
 
@@ -344,72 +325,39 @@ A campaign removes the human-operated outer loop while retaining objective
 stopping boundaries:
 
 ```bash
-# Unattended by default:
-./scripts/ralph-campaign.sh --rounds 3
-# Optional attended diagnostic display:
-./scripts/ralph-campaign.sh --rounds 3 --tui
+python3 .factory/loop/campaign.py --root "$PWD" run \
+  --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
+  --branch boilerplate-develop --provider ollama --model <model> \
+  --backend <absolute-model-backend>
+python3 .factory/loop/campaign.py --root "$PWD" show
 ```
 
-Each mandatory round records the current clean `HEAD` as a new base, runs a
-fresh `ralph-plan.sh` cycle, runs the resulting plan through `ralph-run.sh`,
-executes `verification.campaign_command`, validates installed-functional
-evidence, transfers the exact clean Git tree to every declared runner, and
-validates commit-bound runner receipts.
-Immediately before local verification, the campaign opens and retains an immutable descriptor to the binding helper before any untrusted phase, recomputes and compares the tracked config and executable Git blobs, content digests, canonical argv, and secure modes, then executes the exact opened verifier inode through the retained `/proc/self/fd` descriptor; implementation-time replacement, same-size rewrite, writable modes, or binding drift fails before the verifier runs. It then launches an independent adversarial audit
-through `ralph-audit.sh`. A prior completion claim never shortens the requested
+Campaigns are headless and unattended; there is no TUI. Each mandatory round
+records the current clean `HEAD` as a new base, runs a fresh planning phase,
+runs the resulting plan through implementation attempts, executes
+`verification.campaign_command`, validates installed-functional evidence,
+transfers the exact clean Git tree to every declared runner, and validates
+commit-bound runner receipts.
+Immediately before local verification, the campaign opens and retains an immutable descriptor to the binding helper before any untrusted phase, recomputes and compares the tracked config and executable Git blobs, content digests, canonical argv, and secure modes, then executes the exact opened verifier inode through the retained `/proc/self/fd` descriptor; implementation-time replacement, same-size rewrite, writable modes, or binding drift fails before the verifier runs. It then launches an independent adversarial audit as a fresh auditor role. A prior completion claim never shortens the requested
 round count. The next round's fresh planner consumes the preceding
 `.factory/artifacts/campaign-audit.md`; prior plans and audit reports remain in Git history.
 
-Ignored state in `.factory-state/ralph-campaign.json` records the requested
-rounds, selected TUI mode, current phase, each round base, phase-start markers,
-commits, and audit results. Start a new campaign only from a clean configured development branch.
-Resume an interrupted active campaign with exactly matching options:
+All lifecycle state is persisted atomically in the single
+`.factory-state/factory-loop.json` file; the legacy
+`.factory-state/ralph-campaign.json` is a frozen deprecated surface. Start a new campaign only from a clean configured development branch. Interrupted campaigns resume from the persisted state by re-running the same `run` command; there is no `--resume`/`--restart` flag.
 
-```bash
-./scripts/ralph-campaign.sh --rounds 3 --resume
-# Only when the saved campaign was explicitly attended:
-./scripts/ralph-campaign.sh --rounds 3 --resume --tui
-```
-
-### Rebind a reviewed pre-verification fast-forward
-
-A stopped first round may exceptionally need to include reviewed linear commits
-that landed after its implementation checkpoint but before any verification
-binding was recorded. Confirm no Ralph process is alive, retain an
-operator-controlled copy of `.factory-state/ralph-campaign.json`, and record its
-digest before recovery:
-
-```bash
-sha256sum .factory-state/ralph-campaign.json
-cp -a .factory-state/ralph-campaign.json /operator-controlled/ralph-campaign.before-rebind.json
-old=<recorded-implementation-commit>
-new=$(git rev-parse HEAD)
-./scripts/ralph-campaign-state.py rebind-implementation \
-  --expected-old "$old" --new "$new"
-```
-
-Do not use the generic `update` command or edit the JSON. The dedicated command
-acquires the factory lock and succeeds only for an active first-round
-`verification` phase whose verification, runner-evidence, and audit fields are
-all unset. The explicit old value must match, the new value must be the current
-clean development-branch HEAD and a strict merge-free descendant, and state is strictly
-validated before and after an fsync-backed atomic replacement. Its JSON receipt
-records the old/new commits and before/after state SHA-256 digests. It never
-runs Ralph or changes evidence. Review the receipt, then use the normal campaign
-`--resume`; verification reruns for the rebound commit. All later-round,
-already-verified, dirty, backward, equal, non-ancestor, merge, or wrong-old
-requests fail without changing state.
+### Verifier, lock, and runner authority
 
 The trusted campaign, launchers, and state transitions share an inherited
 exclusive `flock` on the already-open canonical repository-root directory, so
 planning, implementation, verification, audit checkpointing, and recovery
-retain one repository writer without a replaceable authority pathname. Ralph/Pi,
-hooks, gates, verifiers, runners, evidence checkers, tests, and product commands
-run only after an already-loaded shell function closes the dynamic repository-root descriptor and unsets all lock metadata in a subshell before any mutable workspace executable runs, so background descendants retain, unlock, or claim nothing. A separately opened root FD cannot unlock the parent's
+retain one repository writer without a replaceable authority pathname. Model
+roles, hooks, gates, verifiers, runners, evidence checkers, tests, and product commands
+run only after the orchestrator closes the dynamic repository-root descriptor and unsets all lock metadata before any mutable workspace executable runs, so background descendants retain, unlock, or claim nothing. A separately opened root FD cannot unlock the parent's
 open-file description. Migration first acquires any safe legacy `.factory-lock`,
 fails if it is busy or ambiguous, then quarantines and validates it before
 removal.
-Quota waits and bounded rejection/stale recovery remain inside each leaf.
+Quota waits and bounded retry/stale recovery remain inside each leaf.
 The campaign does not retry arbitrary nonzero leaf or gate results: it returns
 nonzero with durable state still active at the same resumable phase. Invalid or
 corrupt state, rewritten bases, dirty boundaries, and conflicting options fail
@@ -467,44 +415,41 @@ Runner provisioning and credentials are maintained outside this repository.
 
 Ordinary defects stay out of `docs/SPEC.md`. Canonical state is tracked in
 `.factory/bugs/open.md` and `.factory/bugs/closed.md`, with optional manual references to GitHub,
-Forgejo, or both. After human triage, run:
+Forgejo, or both. Validate and inspect it with `scripts/bug-ledger.py`.
 
-```bash
-./scripts/ralph-maintenance-plan.sh BUG-0001
-./scripts/ralph-maintenance-run.sh
-```
+The legacy maintenance loops (`scripts/ralph-maintenance-plan.sh` /
+`scripts/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
+fresh Python loop's complete role set is planner, developer, tester, and
+auditor, so it has no maintenance role. Product defects are triaged by the
+human and enter the canonical plan through a planning revision. See
+[BUG_WORKFLOW.md](BUG_WORKFLOW.md) for the ledger contract.
 
-A fresh invocation replaces the previous maintenance plan and scratchpad with a minimal selected-bug skeleton; prior evidence remains in Git and the closed ledger, while `--resume` preserves an interrupted draft. Every newly accepted maintenance task must be pending. The dedicated plan is bound to the immutable bug intake, committed spec, and
-planning checkpoint. The single-writer maintenance loop adds regression tests,
-implements the fix, runs the configured project verifier, records closure
-evidence, and moves only that bug into the closed ledger. Contract changes are
-blocked and returned to the specification workflow. See
-[BUG_WORKFLOW.md](BUG_WORKFLOW.md).
+## Concurrency
 
-## Adaptive concurrency
-
-Configured ceilings live in `.factory/config.toml`:
-
-```toml
-[concurrency]
-adaptive = true
-planning_subagents = 8
-research_subagents = 8
-review_subagents = 8
-implementation_advisors = 2
-mutating_workers = 1
-integration_workers = 1
-min_model_requests = 1
-max_model_requests = 8
-```
-
-These are ceilings, not targets. The coordinating agent starts with the smallest useful fan-out and increases only for independent read-only work. Source mutation and integration remain serialized.
+The four static roles are the complete model-role set of the fresh loop and
+parallel model launches are forbidden: exactly one role process runs at a
+time. The legacy `[concurrency]` block in `.factory/config.toml` is retained
+only for policy checks (`mutating_workers = 1`, `integration_workers = 1`,
+`allow_worktrees = false`); it does not describe adaptive subroles.
 
 ## Quota states
 
+### Guard contract
+
+Quota enforcement is implemented by the hidden standard-library guard
+`.factory/loop/usage.py` (with its fetch child `.factory/loop/usage_fetch.py`),
+run before every model invocation; a single check emits the machine-readable
+`ollama-usage/v1` status object with only redacted fields. The retained shell
+guard `scripts/ollama-usage-guard.sh` keeps its `--check`/`--wait` exit
+contract (0 allowed, 1 quota threshold, 2 fatal, 3 transient) for supervisors
+and compatibility; both guards agree on the §10 decision table. Cookie bytes
+reach the fetch child only on a private stdin pipe and the workspace
+`.ollama-usage-env` store is metadata-detected only, never a credential
+authority.
+
 ### Allowed
 
-The session and weekly percentages are below `OLLAMA_THRESHOLD`; Ralph starts the next iteration.
+The session and weekly percentages are below `OLLAMA_THRESHOLD`; the model invocation proceeds.
 
 ### Waiting
 
@@ -540,65 +485,58 @@ OLLAMA_WAIT_INTERVAL_SECONDS=300
 OLLAMA_WAIT_MAX_SECONDS=0  # unlimited
 ```
 
-If the backend reaches quota during an already-running request, `scripts/ralph-run.sh` checks quota, waits, repairs runtime markers, and resumes with `--continue`.
+If the backend reaches quota during an already-running request, the launch
+path checks quota, waits, and retries without inventing a new attempt.
 
 ## Clean stop
 
-In TUI or foreground mode, press `Ctrl+C`. Ralph aborts the backend and leaves durable state for recovery. Do not use `kill -9` unless the process cannot terminate normally.
-
-For a headless process, read `.ralph/loop.lock` and send SIGINT to its PID from the host.
+The fresh loop is headless: interrupt the campaign process (`Ctrl+C`/`SIGINT`
+or `SIGTERM`). The bounded supervisor terminates and reaps the full model
+process group, preserves dirty work, and leaves the single control-state file
+resumable at the same phase. Do not use `kill -9` unless the process cannot
+terminate normally.
 
 ## Recovery
 
-1. Confirm no Ralph process is alive.
-2. Run:
-
-   ```bash
-   ./scripts/ralph-recover.sh --dry-run
-   ```
-
-3. Check the inferred loop ID and event stream.
-4. Resume:
-
-   ```bash
-   ./scripts/ralph-recover.sh
-   ```
-
-The script restores a missing tracked scratchpad, removes only a stale lock, recognizes timestamped and fallback event streams, reconstructs pointer files, and starts `ralph-run.sh --resume`.
-
-If unfinished runtime tasks belong to multiple loop IDs, recovery refuses to guess; pass the intended ID explicitly:
+Recovery is derived from Git, the canonical plan, the single
+`factory-state/v1` file, and process liveness — never from model prose or
+runtime ledgers. Confirm no role process is alive, then re-run the same
+campaign command; `state.py recover` deterministically restores a torn write
+or removes validated orphaned writer artifacts:
 
 ```bash
-./scripts/ralph-recover.sh --loop-id primary-YYYYMMDD-HHMMSS
+python3 .factory/loop/state.py --root "$PWD" show
+python3 .factory/loop/state.py --root "$PWD" recover
+python3 .factory/loop/campaign.py --root "$PWD" run \
+  --campaign-id <same-id> --rounds <same> --branch <same> [same options]
 ```
 
-Planning and maintenance recovery use:
+A clean committed task resumes from the next deterministic task; an
+`in_progress` task resumes from current code and Git diff in a fresh context.
+An ambiguous live process, changed repository identity, changed branch, unsafe
+file, stale specification binding, changed plan base, rewound counter, or
+invalid state transition fails closed for human/operator inspection. Recovery
+never resets Git and never starts a second writer.
 
-```bash
-./scripts/ralph-recover.sh --mode planning
-./scripts/ralph-recover.sh --mode campaign-audit
-./scripts/ralph-recover.sh --mode maintenance-planning
-./scripts/ralph-recover.sh --mode maintenance
-```
-
-New loops persist their lifecycle mode and recovery rejects a mismatched mode.
-Recovery never resets Git or starts a second writer.
+The frozen legacy recovery path (`scripts/ralph-recover.sh`) exists only for
+an already in-flight legacy cycle; it requires the operator-only
+`FACTORY_RALPH_FREEZE_OVERRIDE=1` escape and is not a new launch.
 
 ## Specification changes
 
 Never edit the specification during implementation. `check-plan-freshness.sh` compares both the latest spec commit and the exact Git blob against plan metadata. If they differ:
 
-1. stop the implementation loop;
-2. commit the revised `docs/SPEC.md`;
-3. run `./scripts/ralph-plan.sh`, which seeds minimal plan/scratchpad state and leaves the completed plan only in Git history;
+1. stop the campaign;
+2. commit the revised canonical specification;
+3. start a new campaign from a clean tree so the fresh planning phase replaces the plan and leaves the completed plan only in Git history;
 4. inspect the replacement plan and confirm it contains only current pending gaps;
-5. start a new implementation loop.
+5. start a new implementation phase.
 
 ## Documentation gate
 
-Every implementation plan ends with **Final documentation and specification audit**. `scripts/validate-implementation-plan.py` requires the plan to contain a conformance matrix, interaction inventory, canonical task statuses, and a final audit depending on every other task. At implementation completion it rejects unfinished tasks and any matrix classification other than `verified`. The final gate also validates bug ledgers, rejects unresolved open bugs, runs project verification, and then requires commit-bound `test_installed_functional` evidence with zero skips. `scripts/verify-project.sh` writes the local evidence only after the mandatory test and packaging gates pass; `scripts/check-installed-functional-evidence.sh` invalidates it if production or acceptance inputs changed afterward. This prevents mocked or proxy-only coverage, fixture assembly without production dispatch, backend-less skips, or optional smoke skips from satisfying installed production behavior.
+Every implementation plan ends with **Final documentation and specification audit**. `scripts/validate-implementation-plan.py` requires the plan to contain a conformance matrix, interaction inventory, canonical task statuses, and a final audit depending on every other task. At implementation completion it rejects unfinished tasks and any matrix classification other than `verified`. The final gate also validates bug ledgers, rejects unresolved open bugs, runs project verification, and then requires commit-bound `test_installed_functional` evidence with zero skips. `scripts/verify-project.sh` is **adopting-product only**: the generic boilerplate ships no product build and no `scripts/verify-project.sh` of its own (`final-gate.sh` runs it only when an adopting product provides it). When an adopting product supplies it, it writes the local evidence only after that product's mandatory test and packaging gates pass; `scripts/check-installed-functional-evidence.sh` invalidates it if production or acceptance inputs changed afterward. This prevents mocked or proxy-only coverage, fixture assembly without production dispatch, backend-less skips, or optional smoke skips from satisfying installed production behavior.
 
-Read-only reviewers compare source, tests, configuration, README, operations, and the specification, specifically looking for tests that bypass production initialization/event dispatch or assert pixels without semantic behavior. The sole writer corrects documentation and runs final verification. If review finds a gap, Ralph appends remediation and continues; `LOOP_COMPLETE` is forbidden until the complete definition of done passes.
+Read-only reviewers compare source, tests, configuration, README, operations, and the specification, specifically looking for tests that bypass production initialization/event dispatch or assert pixels without semantic behavior. The sole writer corrects documentation and runs final verification. If review finds a gap, the next planner appends remediation and the campaign continues; completion is forbidden until the complete definition of done passes.
 
 ## Harness footprint and packaging isolation
 
@@ -823,7 +761,7 @@ The verifier checks shell syntax, ShellCheck when available, TOML/JSON configura
 
 ## Release
 
-After Ralph reports completion, review the configured development branch. Release manually:
+After the campaign reports a terminal outcome, review the configured development branch. Release manually:
 
 ```bash
 git switch main
@@ -831,4 +769,7 @@ git merge --no-ff <development-branch>
 git tag vX.Y.Z
 ```
 
-For the next release, update the same `docs/SPEC.md` in a dedicated commit, run a new planning loop, and execute a new implementation loop. Git retains prior specifications and plans.
+For the next release, update the same canonical specification
+`docs/FACTORY-LOOP-SPEC.md` in a dedicated commit, run a new planning loop,
+and execute a new implementation loop. Git retains prior specifications and
+plans; the adopting-product placeholder is never the release update target.

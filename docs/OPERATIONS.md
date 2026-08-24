@@ -5,22 +5,25 @@
 Durable, tracked state:
 
 - `docs/FACTORY-LOOP-SPEC.md`: canonical specification for this boilerplate cycle (`docs/SPEC.md` remains the adopting-product placeholder, never planned against)
-- `.factory/artifacts/implementation-plan.md`: task status and verification evidence
+- `.factory/artifacts/implementation-plan.md`: the canonical plan and sole task ledger
 - `.factory/bugs/open.md` / `.factory/bugs/closed.md`: portable canonical defect state
-- `.factory/artifacts/maintenance-plan.md`: one selected bug, fingerprint, tasks, and evidence
-- `.ralph/agent/scratchpad.md`: concise crash handoff
+- `.ralph/agent/scratchpad.md`: legacy crash handoff (not injected into model context)
 - source, tests, README, and operational documentation
-- `.factory/config.toml`, Ralph configs, prompts, and project subagent definitions
+- `.factory/config.toml`, static role prompts (`.factory/prompts/planner.md`, `developer.md`, `tester.md`, `auditor.md`), frozen legacy Ralph configs, and project subagent definitions
 
 Volatile, ignored state:
 
-- event streams and pointer files under `.ralph/`
-- loop locks, diagnostics, API state, task/memory stores, and TUI exports
+- `.factory-state/`: the single mutable control-state file
+  `.factory-state/factory-loop.json` plus append-only evidence (digest
+  ledger, receipts, runner evidence); created mode 0700
+- legacy event streams and pointer files under `.ralph/` (the new loop creates none)
 - Pi transcripts and scheduled-agent state
-- `.factory-lock`, `.bug-ledger.lock`, and `.factory-state/` selection/loop-mode markers
-- `.ollama-usage-env`
+- legacy `.factory-lock` only during one-time migration and `.bug-ledger.lock`
+- `.ollama-usage-env` (legacy workspace store; the operator store is external)
 
-Git checkpoints make the plan, scratchpad, and implementation recoverable. Event/task files improve same-disk recovery but are not treated as portable project history.
+Git checkpoints make the plan and implementation recoverable. The new loop
+creates no runtime task queue, event stream, memory store, or second mutable
+control-state authority.
 
 ## Control-state authority (STATE-01)
 
@@ -329,80 +332,44 @@ argv or environment ever appears in a result.
 
 ## Branch policy
 
-The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees.
-
-A boilerplate experiment on a `factory/*` branch requires the explicit temporary override:
-
-```bash
-FACTORY_ALLOW_TRIAL_BRANCH=1 ./scripts/ralph-plan.sh
-```
-
-Do not carry this override into normal development.
+The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees. The campaign CLI requires the exact `--branch`; there is no trial-branch escape in the new loop.
 
 ## Multi-round campaign
 
-Campaigns are unattended and headless by default; use `--tui` only for an
-attended diagnostic display.
+Campaigns are unattended and headless; there is no TUI.
 
 ```bash
-./scripts/ralph-campaign.sh --rounds 3
+python3 .factory/loop/campaign.py --root "$PWD" run \
+  --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
+  --branch boilerplate-develop --provider ollama --model <model> \
+  --backend <absolute-model-backend>
+python3 .factory/loop/campaign.py --root "$PWD" show
 ```
 
 Each mandatory round starts a fresh specification plan at a new Git base, runs
 single-writer implementation and the configured campaign verifier, then starts
 an independent production-evidence audit. State is persisted atomically in
-`.factory-state/ralph-campaign.json`; prior plans and audits remain in Git.
-The lifecycle lock is an exclusive Linux `flock` on the already-open canonical
-repository-root directory itself; there is no replaceable lock-file authority.
-The trusted supervisor retains that dynamic descriptor, while Ralph/Pi, hooks,
-gates, verifiers, runner/evidence commands, tests, and product leaves receive
-neither a root descriptor nor lock metadata. A separately opened root FD cannot
-unlock the supervisor's open-file description. Safe legacy lock files are
-acquired, quarantined, revalidated, and removed once; busy or ambiguous
-migration state stops the lifecycle. After interruption, confirm no child
-Ralph process is alive and resume the exact phase with matching options:
+the single `.factory-state/factory-loop.json` file; prior plans and audits
+remain in Git. The lifecycle lock is an exclusive Linux `flock` on the
+already-open canonical repository-root directory itself; there is no
+replaceable lock-file authority. The trusted orchestrator retains that
+dynamic descriptor, while role processes, hooks, gates, verifiers,
+runner/evidence commands, tests, and product leaves receive neither a root
+descriptor nor lock metadata. A separately opened root FD cannot unlock the
+orchestrator's open-file description. Safe legacy lock files are acquired,
+quarantined, revalidated, and removed once; busy or ambiguous migration state
+stops the lifecycle. After interruption, confirm no role process is alive and
+re-run the same `run` command; there is no `--resume`/`--restart` flag.
 
-```bash
-./scripts/ralph-campaign.sh --rounds 3 --resume
-```
-
-If a checkout was stopped under the previous lock-file authority, run the
-one-time migration before resuming. The helper holds the stable factory lock,
-strictly validates the campaign and current committed verifier blob, preserves
-any legacy recovery counters, and creates cycle-bound supervision and migration
-markers without changing the campaign JSON. Its deterministic partial-write
-recovery may complete an interrupted first invocation, while an already
-completed migration is rejected:
-
-```bash
-./scripts/ralph-supervision-migrate.py --mode implementation \
-  --expected-campaign-sha256 <digest-of-the-saved-campaign-json>
-```
-
-Only a later explicitly authorized operator action may resume that saved state
-with `./scripts/ralph-campaign.sh --rounds N --resume`; resume validates the
-exact migration marker and atomically promotes the saved legacy verifier digest
-before any leaf launch, so later interruptions remain resumable.
-
-Ralph 2.10.1 misclassifies its five-second post-`ralph emit` SIGTERM as a
-failed iteration. The Pi2 wrapper explicitly loads a tool-call extension that
-routes only a direct final emit through `scripts/pi-cli-shims/ralph`; the shim
-preserves the real command's status and stderr while changing its exact
-acknowledgement. Arbitrary identical output remains fail-closed. The bounded
-no-follow prompt bridge and wrapper retain exec-style signal propagation. Remove
-this compatibility path only after the pinned Ralph integration probe passes
-without it.
-
-Use `--restart` only to replace a terminal saved campaign. Lifecycle tokens in a
-scratchpad or `ralph emit` topic/payload are rejected before checkpointing; only
-the exact standalone final model-output line requests completion. Ordinary
-scratchpad-only updates remain uncommitted in the worktree for recovery. A
-strict final-handoff checkpoint may commit only that file once, then the final
-gate attests a clean unchanged HEAD with no later tracked commit. A
-current-attempt `loop_stale` result may receive at most two recoveries.
-Completion rejection and combined no-progress ceilings are also persisted, so
-restarting a child or resuming the campaign cannot reset them. Quota handling
-stays in leaf launchers. Any other nonzero leaf or gate result stops immediately
+The legacy `scripts/ralph-campaign.sh` (and its `.factory-state/ralph-campaign.json`
+and `ralph-supervision-migrate.py` machinery) is a frozen deprecated surface
+kept only for history; the new loop never depends on it. The legacy Ralph
+`ralph emit`/completion-token protocol is not reimplemented: completion is
+derived from plan state, Git state, exit status, and deterministic gates
+(§13), never from a model output line. Ordinary scratchpad-only updates remain
+uncommitted in the worktree for recovery. A strict final-handoff checkpoint may
+commit only that file once, then the final gate attests a clean unchanged HEAD
+with no later tracked commit. Any nonzero leaf or gate result stops immediately
 with campaign state active at the same phase; the campaign never unlinks its
 locked pathname or retries an arbitrary failure. Corrupt history/state, dirty
 boundaries, stale Git bindings, exhausted ceilings, verifier changes, and
@@ -513,7 +480,7 @@ the legacy store without reading it.
 
 ### Allowed
 
-The session and weekly percentages are below `OLLAMA_THRESHOLD`; Ralph starts the next iteration.
+The session and weekly percentages are below `OLLAMA_THRESHOLD`; the model invocation proceeds.
 
 ### Waiting
 
@@ -647,78 +614,79 @@ relied on.
 
 ## Clean stop
 
-In TUI or foreground mode, press `Ctrl+C`. Ralph aborts the backend and leaves durable state for recovery. Do not use `kill -9` unless the process cannot terminate normally.
-
-For a headless process, read `.ralph/loop.lock` and send SIGINT to its PID from the host.
+The fresh loop is headless: interrupt the campaign process (`Ctrl+C`/`SIGINT`
+or `SIGTERM`). The bounded supervisor terminates and reaps the full model
+process group, preserves dirty work, and leaves the single control-state file
+resumable at the same phase. Do not use `kill -9` unless the process cannot
+terminate normally.
 
 ## Recovery
 
-1. Confirm no Ralph process is alive.
-2. Run:
-
-   ```bash
-   ./scripts/ralph-recover.sh --dry-run
-   ```
-
-3. Check the inferred loop ID and event stream.
-4. Resume:
-
-   ```bash
-   ./scripts/ralph-recover.sh
-   ```
-
-The script restores a missing tracked scratchpad, removes only a stale lock, recognizes timestamped and fallback event streams, reconstructs pointer files, and starts `ralph-run.sh --resume`. New launches persist `.factory-state/loop-mode`; recovery rejects a requested mode that differs. Legacy runs without the marker retain inference behavior with a warning.
-
-If unfinished runtime tasks belong to multiple loop IDs, recovery refuses to guess; pass the intended ID explicitly:
+Recovery is derived from Git, the canonical plan, the single
+`factory-state/v1` file, and process liveness — never from model prose or
+runtime ledgers. Confirm no role process is alive, then re-run the same
+campaign command; `state.py recover` deterministically restores a torn write
+or removes validated orphaned writer artifacts:
 
 ```bash
-./scripts/ralph-recover.sh --loop-id primary-YYYYMMDD-HHMMSS
+python3 .factory/loop/state.py --root "$PWD" show
+python3 .factory/loop/state.py --root "$PWD" recover
+python3 .factory/loop/campaign.py --root "$PWD" run \
+  --campaign-id <same-id> --rounds <same> --branch <same> [same options]
 ```
 
-Campaign audit recovery uses:
+A clean committed task resumes from the next deterministic task; an
+`in_progress` task resumes from current code and Git diff in a fresh context.
+On a clean tree with no campaign initialized, `show` honestly reports
+`lifecycle marker is missing` (no lifecycle state) and `recover` reports
+`clean`; there is nothing to resume until a campaign (or `state.py init`)
+creates the state file.
 
-```bash
-./scripts/ralph-recover.sh --mode campaign-audit
-```
+An ambiguous live process, changed repository identity, changed branch, unsafe
+file, stale specification binding, changed plan base, rewound counter, or
+invalid state transition fails closed for human/operator inspection. Recovery
+never resets Git and never starts a second writer.
 
-After leaf recovery completes, resume the campaign command so it records the
-audit result and continues the next configured phase.
+The frozen legacy recovery path (`scripts/ralph-recover.sh`) exists only for
+an already in-flight legacy cycle; it requires the operator-only
+`FACTORY_RALPH_FREEZE_OVERRIDE=1` escape and is not a new launch.
 
 ## Bug maintenance
 
 GitHub and Forgejo issues are optional manual references; a bug may link either or both with `bug-ledger.py link|unlink`. Never store PATs in the repo or embed credentials/query tokens in URLs. Validate and inspect canonical state with `scripts/bug-ledger.py validate|list|show|fingerprint` and maintain it with `add`, `link`, `unlink`, `set-status`, `close`, and safe interrupted-close `recover`. States are `open`, `triaged`, `planned`, `in_progress`, `blocked`, and `closed`; close requires `in_progress`.
 
-An ordinary defect restores the approved contract and can use:
-
-```bash
-./scripts/ralph-maintenance-plan.sh BUG-0001
-./scripts/ralph-maintenance-run.sh
-```
-
-Triage the bug before planning. A fresh maintenance-planning command atomically seeds a minimal selected-bug plan and scratchpad; it never copies the prior cycle, and the planning gate accepts only pending tasks. Use `--resume` to preserve an interrupted draft instead of starting over. Successful planning marks it `planned`; the first implementation task marks it `in_progress`. If `contract_change` is true, expected behavior requires a product decision, or the spec would need editing, block maintenance and use the human specification workflow. One cycle handles one bug. Recovery uses `--mode maintenance-planning` or `--mode maintenance`; both preserve quota waiting, the factory lock, clean-tree policy, loop-mode binding, and checkpoints. Maintenance completion also requires the executable argv configured as `[verification].maintenance_command`; this boilerplate intentionally leaves `scripts/verify-project.sh` for each project to provide. Full details are in `docs/BUG_WORKFLOW.md`.
+The legacy maintenance loops (`scripts/ralph-maintenance-plan.sh` /
+`scripts/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
+fresh loop's complete role set is planner, developer, tester, and auditor, so
+it has no maintenance role. Product defects are triaged by the human and enter
+the canonical plan through a planning revision; `[verification].maintenance_command`
+and `scripts/verify-project.sh` are project-supplied. Full details are in
+`docs/BUG_WORKFLOW.md`.
 
 ## Specification changes
 
 Never edit the specification during implementation. `check-plan-freshness.sh` compares both the latest spec commit and the exact Git blob against plan metadata. If they differ:
 
-1. stop the implementation loop;
-2. commit the revised `docs/SPEC.md`;
-3. run `./scripts/ralph-plan.sh`; this atomically seeds a minimal plan and scratchpad and leaves the completed plan only in Git history;
+1. stop the campaign;
+2. commit the revised canonical specification;
+3. start a new campaign from a clean tree so the fresh planning phase replaces the plan and leaves the completed plan only in Git history;
 4. inspect the replacement plan and confirm it contains only current pending gaps, not completed historical tasks;
-5. start a new implementation loop.
+5. start a new implementation phase.
 
 ## Documentation gate
 
-Every implementation plan ends with **Final documentation and specification audit**. Read-only reviewers compare source, tests, configuration, README, operations, and the specification. The sole writer corrects documentation and runs final verification. `LOOP_COMPLETE` is forbidden until this gate passes.
+Every implementation plan ends with **Final documentation and specification audit**. Read-only reviewers compare source, tests, configuration, README, operations, and the specification. The sole writer corrects documentation and runs final verification. Completion is forbidden until this gate passes.
 
 ## Troubleshooting
 
-- **`expected <development-branch>`**: merge/switch to the configured development branch; use the trial override only for this boilerplate branch.
+- **`expected <development-branch>`**: merge/switch to the configured development branch (`.factory/config.toml` `development_branch`).
 - **`exactly one working tree`**: remove stale worktrees and run `git worktree prune`.
-- **`plan is unplanned`**: run the planning loop.
+- **`plan is unplanned`**: start a fresh planning phase
+  (`python3 .factory/loop/campaign.py --root "$PWD" run --campaign-id <id> --rounds <n> --branch <branch>`).
 - **`fresh implementation plan may contain only pending tasks`**: remove carried-over lifecycle tasks; inspect current code and plan only remaining spec gaps.
-- **missing planning base/draft on resume**: recover the interrupted lifecycle markers; never restore an old completed plan as the active draft.
-- **`specification changed after planning`**: commit the spec and replan.
-- **`another factory process holds .factory-lock`**: confirm the existing planner/worker is stopped before deleting a stale `.factory-lock`.
-- **quota wait appears idle**: the guard prints each usage poll; lower the polling interval temporarily for diagnostics.
-- **cookie expired**: refresh with `source scripts/update-ollama-cookies.sh`.
+- **missing plan draft on resume**: `state.py recover` restores a torn write or removes validated orphaned writer markers; never restore an old completed plan as the active draft.
+- **`lifecycle marker is missing` from `state.py show`**: no campaign has initialized `.factory-state/factory-loop.json` on this tree; start or resume a campaign before expecting lifecycle state.
+- **`specification changed after planning`**: commit the revised canonical specification and start a new campaign from a clean tree.
+- **`factory-state/v1` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
+- **quota wait appears idle**: the usage guard prints each usage poll; lower the polling interval temporarily for diagnostics.
+- **cookie expired**: refresh the external operator store (`$OLLAMA_USAGE_ENV_FILE`, else `$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`) with `source scripts/update-ollama-cookies.sh`.

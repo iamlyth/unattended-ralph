@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Retained legacy/deprecated compatibility gate.  The fresh Python loop
+# (`.factory/loop/`) derives planning freshness and the planning base from the
+# committed plan front matter, Git, and the single `factory-state/v1` file; it
+# never consults the legacy `planning-base-commit` marker below.  The
+# `--planning` base comparison reads the frozen `scripts/ralph-plan.sh` marker
+# (`FACTORY_PLANNING_BASE_COMMIT` / `factory-state-file.py read
+# planning-base-commit`) and exists only for the deprecated legacy launchers;
+# the fresh campaign binds the planning base from its own state instead.
+# Error messages below therefore point at the fresh planning path.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PLAN=${FACTORY_PLAN_PATH:-$PROJECT_ROOT/.factory/artifacts/implementation-plan.md}
@@ -12,7 +22,7 @@ fi
 (( $# == 0 )) || { echo "Usage: scripts/check-plan-freshness.sh [--planning]" >&2; exit 2; }
 cd -- "$PROJECT_ROOT"
 
-[[ -s "$PLAN" ]] || { echo "plan-freshness: missing .factory/artifacts/implementation-plan.md; run ./scripts/ralph-plan.sh" >&2; exit 1; }
+[[ -s "$PLAN" ]] || { echo "plan-freshness: missing .factory/artifacts/implementation-plan.md; start a fresh planning phase (python3 .factory/loop/campaign.py --root \"\$PWD\" run --campaign-id <id> --rounds <n> --branch <branch>)" >&2; exit 1; }
 
 mapfile -t META < <(python3 - "$PLAN" <<'PY'
 import sys
@@ -61,7 +71,7 @@ if grep -q 'SPEC_PENDING_HUMAN_SUPPLY' "$SPEC_PATH"; then
     exit 1
 fi
 [[ "$RECORDED_COMMIT" != UNPLANNED && "$RECORDED_BLOB" != UNPLANNED ]] || {
-    echo "plan-freshness: plan is unplanned; run ./scripts/ralph-plan.sh" >&2
+    echo "plan-freshness: plan is unplanned; start a fresh planning phase (python3 .factory/loop/campaign.py --root \"\$PWD\" run --campaign-id <id> --rounds <n> --branch <branch>)" >&2
     exit 1
 }
 if [[ "$PHASE" == planning ]]; then
@@ -82,6 +92,11 @@ git merge-base --is-ancestor "$BASE_COMMIT" HEAD || {
     exit 1
 }
 if [[ "$PHASE" == planning ]]; then
+    # Legacy/deprecated marker authority: the expected planning base is the
+    # frozen `scripts/ralph-plan.sh` marker (`FACTORY_PLANNING_BASE_COMMIT` or
+    # `.factory-state/planning-base-commit`).  The fresh Python loop never
+    # writes or reads this marker; it binds the planning base from Git and the
+    # `factory-state/v1` file, so this comparison is dead on the new path.
     EXPECTED_BASE=${FACTORY_PLANNING_BASE_COMMIT:-}
     if [[ -z "$EXPECTED_BASE" ]]; then
         EXPECTED_BASE=$("$SCRIPT_DIR/factory-state-file.py" read planning-base-commit --missing-ok) || exit $?
@@ -92,7 +107,7 @@ if [[ "$PHASE" == planning ]]; then
 fi
 
 if ! git diff --quiet -- "$SPEC_PATH" || ! git diff --cached --quiet -- "$SPEC_PATH"; then
-    echo "plan-freshness: '$SPEC_PATH' has uncommitted changes; commit the spec and replan" >&2
+    echo "plan-freshness: '$SPEC_PATH' has uncommitted changes; commit the spec and start a fresh planning phase" >&2
     exit 1
 fi
 
@@ -105,7 +120,7 @@ if [[ "$ACTUAL_COMMIT" != "$RECORDED_COMMIT" || "$ACTUAL_BLOB" != "$RECORDED_BLO
     echo "  current commit:  $ACTUAL_COMMIT" >&2
     echo "  recorded blob:   $RECORDED_BLOB" >&2
     echo "  current blob:    $ACTUAL_BLOB" >&2
-    echo "Run ./scripts/ralph-plan.sh before implementation." >&2
+    echo "Start a fresh planning phase before implementation (python3 .factory/loop/campaign.py --root \"\$PWD\" run ...)." >&2
     exit 1
 fi
 

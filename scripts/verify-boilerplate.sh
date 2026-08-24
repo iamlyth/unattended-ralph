@@ -258,7 +258,7 @@ grep -q 'install-git-commit-guard.sh' scripts/ralph-campaign.sh
 grep -q 'install-git-commit-guard.sh' scripts/ralph-recover.sh
 grep -q '^## Build' AGENTS.md
 grep -q '^## Immediate validation' AGENTS.md
-(( $(wc -l < AGENTS.md) <= 100 )) || { echo 'verify: AGENTS.md must remain concise (100 lines maximum)' >&2; exit 1; }
+(( $(wc -l < AGENTS.md) <= 94 )) || { echo 'verify: AGENTS.md must remain concise (94 lines maximum)' >&2; exit 1; }
 grep -q 'Do not assume functionality is missing or complete' .factory/prompts/implementation.md
 # False-positive-acceptance redesign: prompts must distinguish real acceptance
 # from proxy evidence and require machine-readable conformance evidence.
@@ -347,6 +347,7 @@ grep -q 'check-factory-runner-evidence.py' .factory/prompts/implementation.md
 grep -q 'check-factory-runner-evidence.py' .factory/prompts/audit.md
 grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
+./scripts/check-docs-sync.sh
 ./.factory/tests/test-factory-footprint.sh
 ./.factory/tests/test-factory-migration.sh
 ./.factory/tests/test-factory-adversarial.sh
