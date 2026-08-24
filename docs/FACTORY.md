@@ -101,6 +101,25 @@ signature, digest, tier, or coordinator state. Machine evidence can add
 findings but cannot elevate installed/real-system/human acceptance tiers or
 become task authority.
 
+An explicit evidence-smoke lane (`.factory/loop/campaign.py run
+--evidence-smoke`, driven by the trusted operator command
+`.factory/smoke/evidence_smoke.py`) instantiates the live campaign machinery
+for exactly one full planning/implementation/verification/audit round with
+the designated deterministic committed smoke seam
+(`.factory/smoke/evidence_smoke_driver.py`): it fails closed on a dirty tree,
+wrong branch/commit, unbound seam, or foreign seam label, preserves every
+pre-existing `.factory-state` byte (digest/mode/mtime snapshot), commits one
+bounded tracked evidence artifact under `.factory/artifacts/`, and reports an
+honest finite outcome — the round proves one full phase cycle (round limit)
+without claiming acceptance. The seam is private source methodology
+evidence only — never a real model/human outcome, never installed-tier
+evidence, never GIT-01 acceptance evidence, and never acceptance-tier
+evidence; no external model, credential, cookie, runner, or human is
+invoked. The round makes exactly two orchestrator commits (the canonical
+planner revision, then the developer task-complete revision with the
+tracked evidence artifact); the planner output keeps Task 22 `pending` and
+only the developer marks it `complete` (spec §6.2). See `docs/OPERATIONS.md`.
+
 ## Ralph migration boundary
 
 `.factory/ralph-freeze` prevents new legacy campaign launches. The hidden

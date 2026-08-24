@@ -877,6 +877,20 @@ class RootLock:
             )
         self._assert_anchored()
         self._assert_no_root_aliases(pass_fds)
+        # Task 22 residual: a standard descriptor (0/1/2) can never be a
+        # retained helper descriptor — ``close_fds=True`` always preserves
+        # the standard streams, so a ``pass_fds`` entry <= 2 is always a
+        # mistake.  Reject it explicitly instead of silently dropping it
+        # (a caller that believes the descriptor reached the child would be
+        # wrong about the executed boundary).
+        for fd in tuple(pass_fds):
+            if fd <= 2:
+                raise RootLockUnsafeError(
+                    f"refusing to pass the standard descriptor {fd} into a "
+                    "child; pass_fds must name a retained helper descriptor "
+                    "> 2 (close_fds=True always preserves the standard "
+                    "streams)"
+                )
         environment = stripped_child_env(env)
         try:
             process = subprocess.Popen(
@@ -886,7 +900,7 @@ class RootLock:
                 env=environment,
                 start_new_session=True,
                 close_fds=True,
-                pass_fds=tuple(f for f in pass_fds if f > 2),
+                pass_fds=tuple(pass_fds),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

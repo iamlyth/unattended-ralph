@@ -1,8 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+# The trusted verifier runs this gate through the retained descriptor
+# authority (``/proc/self/fd/<fd>``), so ``BASH_SOURCE[0]`` names the fd
+# path, never the canonical repository path.  The trusted parent pins the
+# canonical root into the child environment as FACTORY_VERIFIER_ROOT exactly
+# like verify-boilerplate.sh; when that is absent (direct invocation) the
+# legacy ``$0``-derived resolution is used, and when neither resolves the
+# gate fails closed instead of resolving the wrong root.
+if [[ -n "${FACTORY_VERIFIER_ROOT:-}" ]]; then
+    PROJECT_ROOT=${FACTORY_VERIFIER_ROOT%/}
+    SCRIPT_DIR=$PROJECT_ROOT/scripts
+else
+    SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+fi
+for required_marker in scripts/check-docs-sync.sh .factory/config.toml; do
+    [[ -e "$PROJECT_ROOT/$required_marker" ]] || {
+        echo "docs-sync: cannot resolve the canonical repository root from " \
+            "FACTORY_VERIFIER_ROOT/BASH_SOURCE (missing " \
+            "$PROJECT_ROOT/$required_marker)" >&2
+        exit 1
+    }
+done
 cd -- "$PROJECT_ROOT"
 
 BASE=$(python3 - <<'PY'

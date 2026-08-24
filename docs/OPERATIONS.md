@@ -139,6 +139,60 @@ per-phase contracts are
 `--role-driver` and scenario/result-file options are deterministic hidden-suite
 fixtures only; they are not production confinement or acceptance evidence.
 
+## Evidence-smoke lane (Task 22)
+
+The evidence-smoke lane instantiates the live campaign machinery for exactly
+one full planning -> implementation -> verification -> audit round against
+real production paths — `.factory/loop/campaign.py run --evidence-smoke` on
+the canonical plan and `.factory-state/` — using the designated committed
+smoke seam (`.factory/smoke/evidence_smoke_driver.py`) as a deterministic
+synthetic role process. No external model, credential, cookie, runner, or
+human is ever invoked. The seam is explicitly *private source methodology*
+evidence only: never a real model or human outcome, never installed-tier
+evidence, never GIT-01 acceptance evidence, and never acceptance-tier
+evidence.
+
+```bash
+python3 .factory/smoke/evidence_smoke.py --root ROOT run \
+  --branch boilerplate-develop --expect-commit SHA40
+```
+
+`--expect-commit` is mandatory: the round only runs against the exact bound
+commit and fails closed on any other HEAD. The operator command fails closed
+unless the worktree is clean at the exact bound branch/commit, the
+designated seam is the exact committed blob, the campaign id carries the
+private seam label (`evidence-smoke-`), and no `.factory-state`
+`factory-loop.json`, recovery orphan (`.factory-loop.json.<32hex>`), state
+digest ledger, or structured result/evidence artifact exists yet (every
+smoke output is no-replace). The campaign CLI re-checks the same boundary
+(`--evidence-smoke` refuses an arbitrary role candidate, a non-`synthetic`
+provider, a multi-round run, a foreign seam label, or a missing exact bound
+commit). Before the run, every pre-existing `.factory-state` entry is
+snapshotted (digest, mode, mtime); afterwards the same entries must be
+byte-identical, so foreign runtime bytes are never deleted, quarantined, or
+modified. The round terminates `success` with the exact one-round phase
+history, instantiates `.factory-state/factory-loop.json` (write-once
+bindings, monotonic counters, terminal `success`) and the append-only digest
+ledger, and makes exactly two orchestrator commits: the canonical
+byte-bound planner revision (Task 22 stays `pending` in the planner output;
+per spec §6.2 only the developer role may mark the selected task
+`complete`) and the developer task-complete revision carrying one bounded
+tracked evidence artifact under `.factory/artifacts/`
+(`campaign-smoke-evidence.json`, schema `factory-smoke-evidence/v1`). The
+round leaves the final audit task pending — the round proves one full phase
+cycle, not acceptance. Tester/auditor results are exact
+`factory-phase-result/v1` `pass` documents; no row is elevated and no
+receipt is minted. The role driver and both gate modes execute only from
+their bound committed descriptors through the pinned interpreter
+(`/proc/self/fd/<fd>` with `pass_fds`; no pathname exec, no `PATH`-resolved
+shebang), the post-round documentation gates run through the same
+committed-descriptor authority under a sanitized allowlist environment with
+a scrubbed pinned `PATH`, and the campaign child is supervised as a new
+session with a bounded TERM -> grace -> KILL of the whole process group and
+marker-based survivor detection. State digest verification,
+`scripts/check-plan-freshness.sh`, and `scripts/check-generic-leakage.sh`
+pass.
+
 ## Findings flow (Task 10)
 
 Tester and auditor outcomes never create runtime tasks. When the trusted

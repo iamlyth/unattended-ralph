@@ -161,6 +161,23 @@ TERMINAL_EXIT_CODES: Mapping[str, int] = {
 # The campaign phase context passed to an embedded/fixture role driver.
 CAMPAIGN_ENV_PREFIX = "FACTORY_LOOP_CAMPAIGN_"
 
+# The fail-closed evidence-smoke lane (Task 22): an explicit campaign mode
+# that drives exactly one full planning -> implementation -> verification ->
+# audit round with the designated committed smoke seam and never an
+# arbitrary role candidate.  The seam is private harness methodology
+# evidence (label prefix ``evidence-smoke-``), never a real model or human
+# outcome.
+EVIDENCE_SMOKE_DRIVER_REL = ".factory/smoke/evidence_smoke_driver.py"
+EVIDENCE_SMOKE_ID_PREFIX = "evidence-smoke-"
+EVIDENCE_SMOKE_EVIDENCE_PREFIX = ".factory/artifacts/"
+
+# A torn ``factory-loop.json`` writer leftover (``state`` authority's
+# ``TEMP_ORPHAN_RE`` contract): the evidence-smoke preflight rejects any such
+# recovery orphan before the state recovery can reconcile it.
+EVIDENCE_SMOKE_STATE_ORPHAN_RE = re.compile(
+    r"^\.factory-loop\.json\.[0-9a-f]{32}$"
+)
+
 # The orchestration layer's own commit identity: every campaign commit is
 # provably orchestrator-created (the model never runs Git).
 COMMIT_AUTHOR_NAME = "factory-campaign"
@@ -434,6 +451,7 @@ class CampaignConfig:
     model: str = "fixture-model"
     backend: str = ""
     role_driver: Optional[str] = None
+    developer_evidence_path: str = ""
     scenario_path: str = ""
     acceptance_command: Tuple[str, ...] = ()
     verification_command: Tuple[str, ...] = ()
@@ -554,6 +572,26 @@ class CampaignConfig:
                 raise CampaignConfigError(
                     "the role driver path must not contain empty, `.`, or `..` "
                     "segments"
+                )
+        if self.developer_evidence_path:
+            unsafe_evidence, reason = _unsafe_repo_relative(
+                self.developer_evidence_path
+            )
+            if unsafe_evidence:
+                raise CampaignConfigError(
+                    f"developer evidence path is not a safe repository-relative "
+                    f"path: {reason}"
+                )
+            if not self.developer_evidence_path.startswith(
+                EVIDENCE_SMOKE_EVIDENCE_PREFIX
+            ):
+                raise CampaignConfigError(
+                    "developer evidence must live under the bounded harness-owned "
+                    f"`{EVIDENCE_SMOKE_EVIDENCE_PREFIX}` namespace"
+                )
+            if self.developer_evidence_path == self.plan_path:
+                raise CampaignConfigError(
+                    "developer evidence must not collide with the canonical plan"
                 )
         for name in ("scenario_path", "phase_result_path", "audit_result_path"):
             value = getattr(self, name)
@@ -1750,6 +1788,18 @@ class Campaign:
         # every gate execution re-validates it and fails closed on any
         # pathname/content/committed-tree substitution.
         self._held_verifier: Optional[evidence_module.HeldVerifier] = None
+        # Task 22 (B1): the role driver is bound to its exact committed
+        # blob/identity/inode descriptor *before* planning and every role
+        # execution re-validates it, then executes the pinned interpreter
+        # with the descriptor path (/proc/self/fd/<fd>) through pass_fds —
+        # no pathname exec, so a substitution after binding can never
+        # substitute the executed bytes.
+        self._held_driver: Optional[evidence_module.HeldVerifier] = None
+        # Task 22 (B2): the acceptance gate is bound to its exact committed
+        # descriptor *before* planning and both acceptance and verification
+        # modes execute through the same retained-fd authority — no pathname
+        # asymmetry between the two gate lanes.
+        self._held_acceptance: Optional[evidence_module.HeldVerifier] = None
         # Task 10 §16: the phase records of THIS run, consumed by the findings
         # authority to bind every previous-round receipt to a phase that
         # actually ran and classified findings/blocked.
@@ -1777,6 +1827,80 @@ class Campaign:
             plan=plan,
         )
         self._git = TrustedGit(self._lock, self._config.plan_path)
+        self._bind_held_authorities()
+
+    def _bind_held_authorities(self) -> None:
+        """Bind the driver and acceptance gate to their committed descriptors.
+
+        Task 22 (B1/B2): the role driver and the acceptance gate are opened
+        ``O_RDONLY|O_NOFOLLOW|O_CLOEXEC`` and bound (committed blob, secure
+        identity, retained inode) *before* any untrusted phase — the planner
+        runs only after both are held, so a pathname/content substitution by
+        any untrusted role fails closed instead of executing substituted
+        bytes.  A script that cannot be bound fails the campaign closed at
+        startup (never a silent pathname fallback).
+        """
+        config = self._config
+        if config.role_driver:
+            canonical = "./" + config.role_driver
+            try:
+                binding = evidence_module.bind_verifier(
+                    self._root, (canonical,),
+                    commit=self._git.head(), git=self._git,
+                )
+                self._held_driver = evidence_module.HeldVerifier(
+                    self._root, binding
+                )
+            except evidence_module.VerifierBindingError as exc:
+                raise CampaignBindingError(
+                    f"the role driver {config.role_driver!r} cannot be bound "
+                    f"before the campaign start: {exc}"
+                ) from exc
+        if config.acceptance_command:
+            command = tuple(config.acceptance_command)
+            if command and command[0].startswith("./"):
+                try:
+                    binding = evidence_module.bind_verifier(
+                        self._root, command,
+                        commit=self._git.head(), git=self._git,
+                    )
+                    self._held_acceptance = evidence_module.HeldVerifier(
+                        self._root, binding
+                    )
+                except evidence_module.VerifierBindingError as exc:
+                    raise CampaignConfigError(
+                        f"the acceptance gate cannot be bound before the "
+                        f"plan start: {exc}"
+                    ) from exc
+
+    def _spawn_held_script(
+        self, held: evidence_module.HeldVerifier, tail: Sequence[str],
+    ) -> Tuple[Sequence[str], Optional[str], Sequence[int]]:
+        """One fd-pinned execution through a pinned interpreter.
+
+        Re-validates the retained descriptor (owner/mode/link-count/inode,
+        byte digest, pathname identity, committed blob at the current head)
+        and then executes the *pinned interpreter* with the descriptor path
+        ``/proc/self/fd/<fd>`` as the script argument and exactly that
+        descriptor in ``pass_fds`` — no ``PATH``-resolved shebang, so a
+        malicious ``PATH`` or a pathname swap can never substitute the
+        executed bytes (B1/B2 pinned-interpreter contract).
+        """
+        raw = evidence_module.revalidate_verifier(
+            self._root, held.binding, git=self._git,
+            current_commit=self._git.head(), held=held,
+        )
+        first_line = raw.split(b"\n", 1)[0].strip()
+        if not (first_line.startswith(b"#!") and b"python" in first_line.lower()):
+            raise CampaignBindingError(
+                "the bound script is not a pinned-interpreter Python script; "
+                "refusing an ambiguous interpreter dispatch"
+            )
+        return (
+            [sys.executable, f"/proc/self/fd/{held.fd}", *tail],
+            None,
+            (held.fd,),
+        )
 
     # -- control-state recovery (Git + plan + state) -----------------------------
 
@@ -1916,6 +2040,7 @@ class Campaign:
         violation = scope_violation(
             changed, phase="implementation",
             plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            allow_paths=self._implementation_allow_paths(),
         )
         if violation:
             raise CampaignRecoveryError(
@@ -2117,6 +2242,7 @@ class Campaign:
         violation = scope_violation(
             changed, phase="implementation",
             plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            allow_paths=self._implementation_allow_paths(),
         )
         if violation:
             raise CampaignRecoveryError(
@@ -2203,13 +2329,27 @@ class Campaign:
     ) -> RoleOutcome:
         config = self._config
         driver_rel = config.role_driver
-        committed = self._git.blob_at(head, driver_rel)
-        worktree = _bounded_read(self._root, driver_rel, "role driver", MAX_RESULT_FILE * 4)
-        if plan_sha256(worktree) != plan_sha256(committed):
+        if self._held_driver is None:
             raise CampaignBindingError(
-                f"the role driver {driver_rel!r} is not the exact committed "
-                "blob at the bound commit"
+                f"the role driver {driver_rel!r} was not bound before the "
+                "campaign start; a driver cannot execute unbound"
             )
+        # Task 22 (B1): no pathname exec.  The driver descriptor is bound to
+        # its exact committed blob/identity/inode before planning; every role
+        # execution re-validates it (owner/mode/link-count/inode, byte
+        # digest, pathname identity, and the committed blob at the phase
+        # head) and the child executes the pinned interpreter with the
+        # descriptor path through ``pass_fds``.  The marker-bearing
+        # campaign id rides in the driver argv so a leaked driver is a
+        # detectable survivor (F process contract).
+        try:
+            driver_argv, driver_executable, driver_pass_fds = (
+                self._spawn_held_script(self._held_driver, [role, config.campaign_id])
+            )
+        except evidence_module.VerifierBindingError as exc:
+            raise CampaignBindingError(
+                f"the role driver {driver_rel!r} binding failed closed: {exc}"
+            ) from exc
         env = sanitized_gate_environment()
         env[CAMPAIGN_ENV_PREFIX + "ROOT"] = str(self._root)
         env[CAMPAIGN_ENV_PREFIX + "PLAN"] = config.plan_path
@@ -2219,6 +2359,15 @@ class Campaign:
         env[CAMPAIGN_ENV_PREFIX + "TASK_ID"] = str(task_id) if task_id is not None else ""
         env[CAMPAIGN_ENV_PREFIX + "BOUND_COMMIT"] = head
         env[CAMPAIGN_ENV_PREFIX + "SCENARIO"] = config.scenario_path
+        # Task 22: the designated evidence-smoke seam receives the campaign
+        # id (the private seam label) and the exact bound developer evidence
+        # path so it can write the single tracked evidence artifact under
+        # ``.factory/artifacts/`` deterministically; every other role driver
+        # simply ignores them.
+        env[CAMPAIGN_ENV_PREFIX + "CAMPAIGN_ID"] = config.campaign_id
+        env[CAMPAIGN_ENV_PREFIX + "DEVELOPER_EVIDENCE"] = (
+            config.developer_evidence_path
+        )
         # Task 16 §22.5: the developer driver role receives the exact
         # task-excerpt digest of the committed plan at the phase head,
         # derived by the real launch authority exactly like the production
@@ -2271,7 +2420,9 @@ class Campaign:
         )
         try:
             result = self._lock.spawn_child(
-                [str(self._root / driver_rel), role],
+                driver_argv,
+                executable=driver_executable,
+                pass_fds=driver_pass_fds or (),
                 env=env,
                 timeout=config.role_timeout,
             )
@@ -2482,9 +2633,37 @@ class Campaign:
         """
         config = self._config
         if config.acceptance_command:
+            command = tuple(config.acceptance_command)
+            spawn_argv = list(command)
+            spawn_executable = None
+            spawn_pass_fds: Tuple[int, ...] = ()
+            if (
+                self._held_acceptance is not None
+                and command == tuple(self._held_acceptance.binding.command)
+            ):
+                # Task 22 (B2): the acceptance gate executes through the
+                # retained-fd authority — the descriptor bound to the exact
+                # committed blob before planning is re-validated immediately
+                # before execution and the child runs the pinned interpreter
+                # with the descriptor path, so acceptance and verification
+                # modes share the identical authority (no pathname
+                # asymmetry) and a substitution can never execute.
+                try:
+                    spawn_argv, spawn_executable, spawn_pass_fds = (
+                        self._spawn_held_script(
+                            self._held_acceptance, list(command)[1:]
+                        )
+                    )
+                    spawn_pass_fds = tuple(spawn_pass_fds)
+                except evidence_module.VerifierBindingError as exc:
+                    return False, f"acceptance gate binding failed closed: {exc}"
+            else:
+                spawn_argv = list(command)
             try:
                 result = self._lock.spawn_child(
-                    list(config.acceptance_command),
+                    spawn_argv,
+                    executable=spawn_executable,
+                    pass_fds=spawn_pass_fds or (),
                     env=sanitized_gate_environment(),
                     timeout=config.gate_timeout,
                 )
@@ -2554,13 +2733,25 @@ class Campaign:
             # F1), and the child intentionally inherits exactly that one
             # read-only verifier descriptor (accepted inheritance; F2).
             try:
-                evidence_module.revalidate_verifier(
+                raw = evidence_module.revalidate_verifier(
                     self._root, held.binding, git=self._git,
                     current_commit=self._git.head(), held=held,
                 )
-                spawn_argv, spawn_executable, spawn_pass_fds = held.spawn(
-                    list(command)
-                )
+                first_line = raw.split(b"\n", 1)[0].strip()
+                if first_line.startswith(b"#!") and b"python" in first_line.lower():
+                    # Task 22 (B2): Python gate scripts execute through the
+                    # pinned interpreter with the descriptor path — no
+                    # ``PATH``-resolved shebang, so a malicious PATH or a
+                    # pathname substitution can never substitute the bytes.
+                    spawn_argv, spawn_executable, spawn_pass_fds = (
+                        self._spawn_held_script(held, list(command)[1:])
+                    )
+                else:
+                    # Non-Python scripts keep the kernel-shebang dispatch on
+                    # the retained descriptor (existing Task 12 contract).
+                    spawn_argv, spawn_executable, spawn_pass_fds = held.spawn(
+                        list(command)
+                    )
                 spawn_pass_fds = tuple(spawn_pass_fds)
             except evidence_module.VerifierBindingError as exc:
                 # The gate must report that it did NOT run: the substituted
@@ -2630,6 +2821,20 @@ class Campaign:
             # Fail closed: a redaction failure never exposes the raw gate
             # output; it carries the fixed marker instead.
             return output_redaction.REDACTION_FAILED
+
+    def _implementation_allow_paths(self) -> List[str]:
+        """The designated developer evidence path, when bound.
+
+        The evidence-smoke lane (Task 22) lets the deterministic developer
+        seam create exactly one bounded harness-owned tracked evidence
+        artifact under ``.factory/artifacts/``; the campaign config binds that
+        exact repository-relative path and it alone is allowed in the
+        implementation scope on top of the canonical plan path.  Every other
+        ``.factory/`` path stays role-forbidden.
+        """
+        if self._config.developer_evidence_path:
+            return [self._config.developer_evidence_path]
+        return []
 
     def _preservable_dirty_paths(self) -> List[str]:
         """Dirty paths that are preserved product work.
@@ -2842,6 +3047,7 @@ class Campaign:
             violation = scope_violation(
                 dirty, phase="implementation",
                 plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+                allow_paths=self._implementation_allow_paths(),
             )
             if valid and violation is None:
                 work_plan = plan_parser.Plan.from_bytes(plan_worktree)
@@ -2862,6 +3068,7 @@ class Campaign:
                         [path], phase="implementation",
                         plan_path=self._config.plan_path,
                         spec_path=self._config.spec_path,
+                        allow_paths=self._implementation_allow_paths(),
                     )],
                     (
                         f"factory-campaign: task {task_id} complete"
@@ -2913,6 +3120,7 @@ class Campaign:
         violation = scope_violation(
             dirty, phase="implementation",
             plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+            allow_paths=self._implementation_allow_paths(),
         )
         scope_ok = violation is None
         had_changes = bool(dirty)
@@ -2942,6 +3150,7 @@ class Campaign:
                     [path], phase="implementation",
                     plan_path=self._config.plan_path,
                     spec_path=self._config.spec_path,
+                    allow_paths=self._implementation_allow_paths(),
                 )
             ]
             new_head = self._git.commit(
@@ -2957,6 +3166,7 @@ class Campaign:
                     [path], phase="implementation",
                     plan_path=self._config.plan_path,
                     spec_path=self._config.spec_path,
+                    allow_paths=self._implementation_allow_paths(),
                 )
             ]
             if allowed:
@@ -3277,6 +3487,12 @@ class Campaign:
             if self._held_verifier is not None:
                 self._held_verifier.close()
                 self._held_verifier = None
+            if self._held_driver is not None:
+                self._held_driver.close()
+                self._held_driver = None
+            if self._held_acceptance is not None:
+                self._held_acceptance.close()
+                self._held_acceptance = None
             if self._lock is not None:
                 self._lock.release()
 
@@ -3304,6 +3520,7 @@ def derive_campaign_config(
     model: str,
     backend: str,
     role_driver: Optional[str],
+    developer_evidence_path: str = "",
     scenario_path: str,
     acceptance_command: Sequence[str],
     verification_command: Sequence[str],
@@ -3364,6 +3581,7 @@ def derive_campaign_config(
         model=model,
         backend=backend,
         role_driver=role_driver,
+        developer_evidence_path=developer_evidence_path,
         scenario_path=scenario_path,
         acceptance_command=tuple(acceptance_command),
         verification_command=tuple(verification_command),
@@ -3413,6 +3631,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_run.add_argument("--model", default="fixture-model")
     p_run.add_argument("--backend", default="")
     p_run.add_argument("--role-driver", default=None, metavar="RELPATH")
+    p_run.add_argument(
+        "--developer-evidence-path",
+        default="",
+        metavar="RELPATH",
+        help=(  # Task 22 evidence-smoke lane
+            "the exact bounded repository-relative evidence artifact the "
+            "developer role may create under `.factory/artifacts/`"
+        ),
+    )
+    p_run.add_argument(
+        "--evidence-smoke",
+        action="store_true",
+        help=(  # Task 22 evidence-smoke lane
+            "fail-closed evidence-smoke mode: exactly one full phase round "
+            "with the designated committed smoke seam, a clean tree at the "
+            "exact branch/commit, and no arbitrary role candidate"
+        ),
+    )
+    p_run.add_argument(
+        "--evidence-bound-commit",
+        default="",
+        metavar="SHA40",
+        help=(  # Task 22 evidence-smoke lane
+            "the exact bound commit the evidence-smoke run must observe; a "
+            "different HEAD fails closed"
+        ),
+    )
     p_run.add_argument("--scenario", default=None, metavar="RELPATH")
     p_run.add_argument("--phase-result", default=None, metavar="RELPATH")
     p_run.add_argument("--audit-result", default=None, metavar="RELPATH")
@@ -3429,6 +3674,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     root = Path(args.root)
     if args.command == "run":
         try:
+            if args.evidence_smoke:
+                _evidence_smoke_preflight(root, args)
             config = derive_campaign_config(
                 root,
                 campaign_id=args.campaign_id,
@@ -3441,6 +3688,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model=args.model,
                 backend=args.backend,
                 role_driver=args.role_driver,
+                developer_evidence_path=args.developer_evidence_path,
                 scenario_path=args.scenario or "",
                 acceptance_command=_flatten(args.acceptance_command),
                 verification_command=_flatten(args.verification_command),
@@ -3471,18 +3719,153 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return EXIT_SUCCESS
 
 
+def _evidence_smoke_preflight(root: Path, args) -> None:
+    """Fail closed before the evidence-smoke round drives the repository.
+
+    Task 22: the ``--evidence-smoke`` mode is the explicit trusted smoke
+    surface.  It refuses any arbitrary role candidate (only the designated
+    committed seam), a non-synthetic provider, a multi-round campaign, a
+    campaign id without the private seam label, an absent developer
+    evidence binding, an absent result channel, a dirty worktree, a wrong
+    branch, or a HEAD that differs from the bound commit.  The designated
+    seam must be the exact committed blob at HEAD.
+    """
+    if args.provider.lower() != "synthetic":
+        raise CampaignConfigError(
+            "the evidence-smoke lane never invokes an external model; "
+            "`--provider` must be `synthetic`"
+        )
+    if args.backend:
+        raise CampaignConfigError(
+            "the evidence-smoke lane binds no model backend"
+        )
+    if args.rounds != 1:
+        raise CampaignConfigError(
+            "the evidence-smoke lane is exactly one full phase cycle "
+            "(`--rounds 1`)"
+        )
+    if args.role_driver != EVIDENCE_SMOKE_DRIVER_REL:
+        raise CampaignConfigError(
+            "the evidence-smoke lane refuses an arbitrary role candidate; "
+            f"only the designated committed seam {EVIDENCE_SMOKE_DRIVER_REL!r} "
+            "is accepted"
+        )
+    if not args.campaign_id.startswith(EVIDENCE_SMOKE_ID_PREFIX):
+        raise CampaignConfigError(
+            "the evidence-smoke campaign id must carry the private seam label "
+            f"`{EVIDENCE_SMOKE_ID_PREFIX}`"
+        )
+    if not args.developer_evidence_path:
+        raise CampaignConfigError(
+            "the evidence-smoke lane requires the designated developer "
+            "evidence artifact binding"
+        )
+    if not args.phase_result or not args.audit_result:
+        raise CampaignConfigError(
+            "the evidence-smoke lane requires both structured result channels"
+        )
+    if args.plan_path != ".factory/artifacts/implementation-plan.md":
+        raise CampaignConfigError(
+            "the evidence-smoke lane drives the canonical plan only"
+        )
+    if not args.evidence_bound_commit:
+        raise CampaignConfigError(
+            "the evidence-smoke lane requires the exact bound commit "
+            "(`--evidence-bound-commit`); a smoke round never runs against "
+            "an unverified HEAD"
+        )
+    if not SHA40_RE.fullmatch(args.evidence_bound_commit):
+        raise CampaignConfigError(
+            "the evidence bound commit must be a 40-hex Git commit hash"
+        )
+    head = _live_head(root)
+    if head != args.evidence_bound_commit:
+        raise CampaignConfigError(
+            f"HEAD {head} does not match the bound exact commit "
+            f"{args.evidence_bound_commit}; the evidence-smoke round fails "
+            "closed on a non-exact commit"
+        )
+    branch = gitutil.git_run(
+        ["-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        timeout=GIT_TIMEOUT,
+    )
+    if branch.returncode != 0 or branch.stdout.strip() != args.branch:
+        raise CampaignConfigError(
+            f"branch {branch.stdout.strip()!r} does not match the required "
+            f"branch {args.branch!r}"
+        )
+    status = gitutil.git_run(
+        ["-C", str(root), "status", "--porcelain", "-z", "--untracked-files=all"],
+        timeout=GIT_TIMEOUT,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise CampaignConfigError(
+            "the worktree is not clean; the evidence-smoke round requires a "
+            "clean tree at the exact bound commit"
+        )
+    # Task 22 preflight: reject any existing recovery orphan, result
+    # collision, or lifecycle ledger collision *before* the campaign state
+    # authority can run its crash-window recovery — a leftover or foreign
+    # lifecycle artifact must never be reconciled, overwritten, or appended
+    # to by the smoke round.
+    state_dir = root / ".factory-state"
+    if state_dir.is_dir():
+        for path in sorted(state_dir.iterdir()):
+            if EVIDENCE_SMOKE_STATE_ORPHAN_RE.fullmatch(path.name):
+                raise CampaignConfigError(
+                    "an existing recovery-orphan state file must be resolved "
+                    f"by the operator before the evidence round: {path}"
+                )
+    for rel, label in (
+        (args.phase_result, "phase result"),
+        (args.audit_result, "audit result"),
+        (args.developer_evidence_path, "evidence artifact"),
+    ):
+        if not rel:
+            continue
+        if (root / rel).exists():
+            raise CampaignConfigError(
+                f"an existing {label} collides with the evidence round's "
+                f"no-replace output: {rel}"
+            )
+    committed = _blob_at(root, args.role_driver)
+    worktree = _bounded_read(
+        root, args.role_driver, "role driver", MAX_RESULT_FILE * 4
+    )
+    if committed != worktree:
+        raise CampaignConfigError(
+            "the designated smoke seam is not the exact committed blob at "
+            "HEAD; a substituted seam fails closed"
+        )
+
+
 def _flatten(groups: Sequence[Sequence[str]]) -> List[str]:
     """Flatten one layer of ``--command`` argument groups.
 
     ``argparse`` with ``action="append"`` yields a list where each element is
-    one command token (``["/bin/false"]``); a programmatic caller may pass a
-    list of token lists.  Each token is preserved exactly — never split into
-    characters — so a command can never be mangled into per-character argv.
+    one command token (``["/bin/false"]``) or, when the operator passes a
+    multi-token command whose tokens carry leading dashes (for example the
+    evidence-smoke gate ``--root ... --mode acceptance``), a JSON array of
+    tokens (``'["./gate.py", "--mode", "acceptance"]'``).  A plain token
+    is preserved exactly — never split into characters — so a command can
+    never be mangled into per-character argv, and a JSON-array element is
+    unrolled into its exact tokens.
     """
     flattened: List[str] = []
     for group in groups:
         if isinstance(group, str):
-            flattened.append(group)
+            try:
+                parsed = json.loads(group)
+            except ValueError:
+                parsed = None
+            if (
+                isinstance(parsed, list)
+                and parsed
+                and all(isinstance(item, str) and item for item in parsed)
+            ):
+                flattened.extend(parsed)
+            else:
+                flattened.append(group)
         else:
             flattened.extend(str(item) for item in group)
     return flattened

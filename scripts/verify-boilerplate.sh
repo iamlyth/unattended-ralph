@@ -52,7 +52,7 @@ else
 fi
 
 python3 - <<'PY'
-import json, pathlib, tomllib
+import json, pathlib, subprocess, tomllib
 with open('.factory/config.toml', 'rb') as stream:
     config = tomllib.load(stream)
 assert config['concurrency']['mutating_workers'] == 1
@@ -177,9 +177,33 @@ required = [
     '.factory/bin/factory-launch',
     '.factory/tests/test-factory-installed.py',
     '.factory/tests/test-factory-installed.sh',
+    '.factory/smoke/evidence_smoke_common.py',
+    '.factory/smoke/evidence_smoke_driver.py',
+    '.factory/smoke/evidence_smoke_gate.py',
+    '.factory/smoke/evidence_smoke.py',
+    '.factory/tests/test-factory-smoke.py',
+    '.factory/tests/test-factory-smoke.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
+# The designated smoke seam, gate, and operator command are tracked
+# executables (100755): they execute only from their bound committed
+# descriptors through the pinned interpreter, never a PATH-resolved name.
+for name in (
+    '.factory/smoke/evidence_smoke_driver.py',
+    '.factory/smoke/evidence_smoke_gate.py',
+    '.factory/smoke/evidence_smoke.py',
+):
+    entry = subprocess.check_output(
+        ['git', 'ls-files', '-s', '--', name], text=True
+    ).strip()
+    if entry:
+        assert entry.split()[0] == '100755', \
+            f'{name} must be tracked executable 100755 (got {entry.split()[0]})'
+    else:
+        mode = pathlib.Path(name).stat().st_mode
+        assert mode & 0o111 and not mode & 0o022, \
+            f'{name} must be a 0755 executable on disk'
 # Task 15 migration: the persisted context-summary authority is removed from
 # the tracked tree and unwired from every new-path control step, so the stale
 # mirror can never compete with the canonical plan as a task authority.  The
@@ -356,6 +380,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./.factory/tests/test-factory-installed.sh
 ./.factory/tests/test-factory-migration.sh
 ./.factory/tests/test-factory-adversarial.sh
+./.factory/tests/test-factory-smoke.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by
 # default, defaults no vision model (consumer-configured placeholder), and keeps
 # every mutable capture/review/calibration/probe path under the ignored

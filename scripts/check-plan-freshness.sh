@@ -12,7 +12,17 @@ set -euo pipefail
 # Error messages below therefore point at the fresh planning path.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+if [[ -n "${FACTORY_VERIFIER_ROOT:-}" ]]; then
+    # The gate child executes the committed script through a retained
+    # descriptor (`/proc/self/fd/<fd>`), so `BASH_SOURCE[0]` names the fd
+    # path, never the canonical repository path.  The trusted parent pins
+    # the canonical root instead, and the script directory is re-derived
+    # from it.
+    PROJECT_ROOT=$(realpath -e -- "$FACTORY_VERIFIER_ROOT")
+    SCRIPT_DIR="$PROJECT_ROOT/scripts"
+else
+    PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+fi
 PLAN=${FACTORY_PLAN_PATH:-$PROJECT_ROOT/.factory/artifacts/implementation-plan.md}
 PHASE=committed
 if [[ ${1:-} == --planning ]]; then

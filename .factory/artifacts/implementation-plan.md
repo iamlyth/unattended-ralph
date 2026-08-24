@@ -1409,19 +1409,24 @@ elevated by prose.
   designated smoke-role seam: the designated smoke role runs the real launch
   CLI against the real campaign state with a deterministic synthetic task so
   the fresh-process, lock, supervision, selection, and phase paths are
-  exercised end-to-end. The seam is explicitly labeled private/installed
-  harness methodology evidence, never a real model or human outcome; no
-  external model, credentials, or cookies are used. The campaign terminates
-  in a documented finite terminal (success/findings/blocked/failed/
-  interrupted/infrastructure_failure) with no orphaned process; STATE-01,
-  LOCK-01, PROC-01, PHASE-01, TASK-01, TASK-02, and the guarded Git boundary
-  (GIT-01) gain campaign-level evidence.
+  exercised end-to-end. The seam is explicitly labeled private source
+  methodology evidence — never a real model or human outcome, never
+  installed-tier evidence, never GIT-01 acceptance evidence, and never
+  acceptance-tier evidence; no external model, credentials, or cookies are
+  used. The planner output keeps Task 22 `pending`; per spec §6.2 only the
+  developer role may mark the selected task `complete`. The campaign
+  terminates in a documented finite terminal (success/findings/blocked/
+  failed/interrupted/infrastructure_failure) with no orphaned process;
+  STATE-01, LOCK-01, PROC-01, PHASE-01, TASK-01, TASK-02, and the guarded
+  Git boundary are exercised at campaign level without claiming
+  installed-tier or GIT-01 acceptance evidence from the smoke seam.
 - Acceptance criteria: a live campaign at the bound commit instantiates
   `.factory-state/factory-loop.json` with exactly the §11 field set and
   drives at least one full phase cycle through the trusted control plane to a
-  finite terminal; the smoke seam is deterministic and labeled harness-tier;
-  no external model/cookies/credentials are invoked; state digest
-  verification, `scripts/check-plan-freshness.sh`, and
+  finite terminal; the smoke seam is deterministic and labeled private
+  source methodology (never installed-tier, never GIT-01); no external
+  model/cookies/credentials are invoked; state digest verification,
+  `scripts/check-plan-freshness.sh`, and
   `scripts/check-generic-leakage.sh` pass.
 - Verification: `.factory/tests/test-factory-campaign.py`;
   `.factory/loop/campaign.py run` live at the bound commit;

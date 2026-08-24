@@ -9,7 +9,15 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+if [[ -n "${FACTORY_VERIFIER_ROOT:-}" ]]; then
+    # The gate child executes the committed script through a retained
+    # descriptor (`/proc/self/fd/<fd>`), so `BASH_SOURCE[0]` names the fd
+    # path, never the canonical repository path.  The trusted parent pins
+    # the canonical root instead.
+    PROJECT_ROOT=$(realpath -e -- "$FACTORY_VERIFIER_ROOT")
+else
+    PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+fi
 cd -- "$PROJECT_ROOT"
 
 ALLOWLIST="$PROJECT_ROOT/.factory/generic-leak-allowlist"

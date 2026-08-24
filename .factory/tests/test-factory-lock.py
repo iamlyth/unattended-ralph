@@ -544,6 +544,25 @@ print('untrusted-clean')
             with self.assertRaises(RootLockUnsafeError):
                 lock.spawn_child([sys.executable, "-c", "pass"], pass_fds=[lock.fd])
 
+    def test_standard_descriptor_pass_fds_is_rejected_explicitly(self) -> None:
+        """Task 22 residual: pass_fds <= 2 is refused, never silently dropped.
+
+        A standard descriptor (stdin/stdout/stderr) can never be a retained
+        helper descriptor — ``close_fds=True`` always preserves the standard
+        streams — so a caller that believed the descriptor reached the child
+        would be wrong about the executed boundary.  The boundary therefore
+        rejects 0/1/2 explicitly instead of filtering them out.
+        """
+        root = self.make_repo()
+        with self.acquire(root) as lock:
+            for fd in (0, 1, 2):
+                with self.assertRaisesRegex(
+                    RootLockUnsafeError, "standard descriptor"
+                ):
+                    lock.spawn_child(
+                        [sys.executable, "-c", "pass"], pass_fds=[fd]
+                    )
+
     def test_pass_fds_alias_of_the_lock_inode_is_rejected(self) -> None:
         """F8: a dup (same OFD) or a separate open (same inode) is refused."""
         root = self.make_repo()

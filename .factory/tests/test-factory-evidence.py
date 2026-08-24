@@ -2246,7 +2246,14 @@ class CampaignVerifierIntegrationTests(unittest.TestCase):
         def substituted(root, binding, *, git=None, current_commit=None, held=None):
             # Simulate the untrusted tester substituting the verifier pathname
             # during the untrusted phase: before the deterministic gate runs,
-            # the bound pathname is replaced by a different inode.
+            # the bound verifier pathname is replaced by a different inode.
+            # The substitution is scoped to the verifier binding only — the
+            # role driver is an additional revalidation target of the same
+            # authority (Task 22 B1) and must not be perturbed by this
+            # verifier-substitution fixture.
+            if not binding.executable.endswith("verify-fixture.sh"):
+                return real_revalidate(root, binding, git=git,
+                                        current_commit=current_commit, held=held)
             path = Path(root) / binding.executable[2:]
             path.unlink()
             _write(path, b"#!/bin/sh\nexit 9\n")
