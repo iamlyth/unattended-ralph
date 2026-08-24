@@ -1437,7 +1437,7 @@ elevated by prose.
 
 ## Task 23: Generic evidence-scope authority for foreign artifacts
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 20, Task 22
 - Scope: Remediate campaign-audit Finding 6 without touching foreign runtime
   evidence. The pre-existing `.factory-state/` content (for example
@@ -1581,6 +1581,17 @@ elevated by prose.
   `scripts/check-audit-receipts.py`;
   `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`;
   `./.factory/tests/test-factory-generic-evidence.sh`.
+- Evidence: at exact commit `1afe31126762a82ff8bfad057011facbccdc02f7`,
+  the trusted publisher completed round 1 and published the no-replace
+  `installed-harness-smoke` receipt plus generic installed-functional record
+  and preservation proof under the dedicated runtime namespace. The receipt
+  binds the exact argv, commit, coordinator round/nonce, bounded transcript
+  digests, zero exit, and no skip marker. The foreign state snapshot remained
+  byte/mode/mtime-ns identical. `check-installed-functional-evidence.sh`,
+  `check-audit-receipts.py`, conformance planning, and the complete boilerplate
+  gate exit 0. This receipt certifies only its exact installed-suite command;
+  it does not reclassify any §24 row, visual/human/runner evidence, or final
+  acceptance.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
 ## Task 24: External human runner provisioning (RUNNER-01)
