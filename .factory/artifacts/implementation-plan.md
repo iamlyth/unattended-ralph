@@ -31,6 +31,7 @@ Non-goals:
   adaptation of existing configuration readers and deprecation forwarders;
 - this boilerplate cycle does not plan, build, or test the Controller product.
 
+- Smoke evidence round (evidence-smoke): deterministic designated harness seam; no external model, cookies, credentials, runner, or human.
 ## Architecture and constraints
 
 - Control-plane implementation is Python 3.11+ standard library under
