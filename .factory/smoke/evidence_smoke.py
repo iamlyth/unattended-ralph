@@ -780,6 +780,10 @@ def _docs_gate_env(gitutil, *, root: Path) -> Dict[str, str]:
         interpreter=sys.executable, git_executable=gitutil.GIT_EXECUTABLE
     )
     environment["FACTORY_VERIFIER_ROOT"] = str(root)
+    # Bytecode writes are disabled for the whole gate child, so the pinned
+    # Git bootstrap and every subprocess can never create a
+    # ``__pycache__``/``*.pyc`` artifact in the repository.
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for key in tuple(environment):
         if key.startswith("FACTORY_LOOP_LOCK_") or key.startswith("FACTORY_LOCK_"):
             environment.pop(key, None)

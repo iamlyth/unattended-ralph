@@ -15,6 +15,12 @@
       "argv": [["./scripts/verify-boilerplate.sh"]]
     },
     {
+      "name": "installed-harness-smoke",
+      "tier": "installed",
+      "allow_manifest": false,
+      "argv": [["./.factory/tests/test-factory-installed.sh"]]
+    },
+    {
       "name": "installed-functional",
       "tier": "installed",
       "allow_manifest": true,

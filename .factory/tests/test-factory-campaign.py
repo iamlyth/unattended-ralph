@@ -823,6 +823,94 @@ class EmptyWorkAndFindings(_CampaignBase):
         rounds = [r["round"] for r in data["phase_history"]]
         self.assertEqual(rounds, [1, 1, 1, 1, 2, 2, 2, 2])
 
+    def test_secret_findings_never_persist_or_prompt(self) -> None:
+        """Task 23 (F): raw credential-shaped values in free-text findings/
+        blocked references are redacted through the exact-commit credential
+        guard BEFORE any durable storage and before the next planner receives
+        them.  The raw secret candidate must never appear in any
+        ``.factory-state`` artifact (preserved result, receipt, control
+        state, payload) and never in the campaign output."""
+        secret_finding = "api_token=super-secret-value-123 leak in fixture"
+        secret_blocker = "GITHUB_TOKEN=ghp_secret_blocker external-capability"
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": {"1": "secret-findings", "2": "pass",
+                                     "default": "pass"}},
+            "auditor": {"behavior": {"1": "secret-blocked", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=2)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0, data)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=2)
+        # The raw secret candidates never persist anywhere under the ignored
+        # runtime namespace and never reach the next planner's payload.
+        state_dir = ws.root / STATE_DIR
+        for path in sorted(state_dir.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            text = path.read_bytes().decode("utf-8", "replace")
+            self.assertNotIn(
+                "super-secret-value-123", text,
+                f"raw secret persisted in {path.relative_to(state_dir)}",
+            )
+            self.assertNotIn(
+                "ghp_secret_blocker", text,
+                f"raw blocked reference persisted in "
+                f"{path.relative_to(state_dir)}",
+            )
+        # The preserved structured results and the receipts carry the
+        # semantic redaction markers instead of the raw values.
+        preserved_verification = (
+            state_dir / "factory-phase-result-round-1-verification.json"
+        )
+        preserved_audit = state_dir / "factory-phase-result-round-1-audit.json"
+        for artifact in (preserved_verification, preserved_audit):
+            text = artifact.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", text,
+                          f"the preserved result must carry a redaction marker: "
+                          f"{artifact.name}")
+        receipt_verification = (
+            state_dir / "factory-findings-receipt-round-1-verification.json"
+        )
+        receipt_audit = state_dir / "factory-findings-receipt-round-1-audit.json"
+        verification_receipt = json.loads(
+            receipt_verification.read_text(encoding="utf-8"))
+        audit_receipt = json.loads(
+            receipt_audit.read_text(encoding="utf-8"))
+        self.assertEqual(
+            verification_receipt["findings"],
+            ["api_token=[REDACTED] leak in fixture"],
+            "the findings receipt must bind the redacted content",
+        )
+        self.assertEqual(
+            audit_receipt["blocked_on"],
+            ["GITHUB_TOKEN=[REDACTED] external-capability"],
+            "the blocked reference in the receipt must be redacted",
+        )
+        for artifact in (receipt_verification, receipt_audit):
+            text = artifact.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", text,
+                          f"the findings receipt must carry a redaction "
+                          f"marker: {artifact.name}")
+        # The receipts authenticate the exact preserved (redacted) content:
+        # the next-round consumption path re-validates the receipt against
+        # the preserved bytes, so the redaction is part of the trusted chain
+        # and the next planner can only ever receive the redacted payload.
+        verification_result = json.loads(
+            preserved_verification.read_text(encoding="utf-8"))
+        audit_result = json.loads(
+            preserved_audit.read_text(encoding="utf-8"))
+        self.assertEqual(verification_result["findings"],
+                         verification_receipt["findings"])
+        self.assertEqual(audit_result["blocked_on"],
+                         audit_receipt["blocked_on"])
+        # The campaign result output itself carries no raw secret.
+        self.assertNotIn("super-secret-value-123", str(data))
+        self.assertNotIn("ghp_secret_blocker", str(data))
+
     def test_planning_retries_within_budget_then_succeeds(self) -> None:
         # A planner that fails once (exit 1) then produces a plan on the
         # second attempt stays within the configured budget.
@@ -1212,6 +1300,71 @@ class LifecycleAndCli(_CampaignBase):
         with self.assertRaises(campaign_module.CampaignResultError):
             campaign_module.read_phase_result(
                 ws.root, f"{STATE_DIR}/bad-result.json", "fixture")
+
+    def test_malformed_secret_result_leaves_no_bytes_or_path(self) -> None:
+        """Task 23: the transient raw result is secure-unlinked in a finally
+        on parse/schema/oversize/error paths — a malformed secret-laden
+        result leaves no bytes and no path; a substituted pathname (the
+        role rewriting the file between the read and the cleanup) is never
+        deleted."""
+        ws = self.make(SUCCESS_SCENARIO)
+        state = ws.root / STATE_DIR
+        state.mkdir(parents=True, exist_ok=True)
+        # Schema-invalid content carrying a raw secret candidate is removed.
+        bad = state / "secret-schema.json"
+        bad.write_text(
+            '{"schema": "factory-phase-result/v1", "outcome": "bogus", '
+            '"detail": "api_token=super-secret-malformed-123"}',
+            encoding="utf-8")
+        with self.assertRaises(campaign_module.CampaignResultError):
+            campaign_module.read_phase_result(
+                ws.root, f"{STATE_DIR}/secret-schema.json", "fixture")
+        self.assertFalse(bad.exists(),
+                         "a schema-invalid secret result must leave no path")
+        # Non-JSON content carrying a raw secret candidate is removed.
+        not_json = state / "secret-not-json.json"
+        not_json.write_text(
+            "GITHUB_TOKEN=ghp_secret_not_json !!! ", encoding="utf-8")
+        with self.assertRaises(campaign_module.CampaignResultError):
+            campaign_module.read_phase_result(
+                ws.root, f"{STATE_DIR}/secret-not-json.json", "fixture")
+        self.assertFalse(not_json.exists(),
+                         "a non-JSON secret result must leave no path")
+        # An oversized result is removed too.
+        oversized = state / "secret-oversize.json"
+        oversized.write_text(
+            '{"schema": "factory-phase-result/v1", "detail": "'
+            + "api_token=oversize-secret " + "x" * (campaign_module.MAX_RESULT_FILE + 64)
+            + '"}',
+            encoding="utf-8")
+        with self.assertRaises(campaign_module.CampaignResultError):
+            campaign_module.read_phase_result(
+                ws.root, f"{STATE_DIR}/secret-oversize.json", "fixture")
+        self.assertFalse(oversized.exists(),
+                         "an oversized secret result must leave no path")
+        # A symlinked handoff is never followed (O_NOFOLLOW) and never
+        # deleted by the secure cleanup: the open fails closed and the
+        # symlink and its target stay untouched.
+        link = state / "symlinked-result.json"
+        target = state / "symlink-target.json"
+        target.write_text("{}", encoding="utf-8")
+        os.symlink(target, link)
+        with self.assertRaises(campaign_module.CampaignResultError):
+            campaign_module.read_phase_result(
+                ws.root, f"{STATE_DIR}/symlinked-result.json", "fixture")
+        self.assertTrue(link.is_symlink(),
+                        "a symlinked handoff must never be deleted")
+        self.assertTrue(target.exists(), "the symlink target must never be deleted")
+        # A successful read still removes the consumed handoff.
+        ok = state / "ok-result.json"
+        ok.write_text(
+            '{"schema": "factory-phase-result/v1", "outcome": "pass"}',
+            encoding="utf-8")
+        data, digest, raw = campaign_module.read_phase_result(
+            ws.root, f"{STATE_DIR}/ok-result.json", "fixture")
+        self.assertEqual(data["outcome"], "pass")
+        self.assertEqual(len(digest), 64)
+        self.assertFalse(ok.exists(), "a consumed handoff must be removed")
 
     def test_result_model_validation_fails_closed(self) -> None:
         result = campaign_module.CampaignResult(

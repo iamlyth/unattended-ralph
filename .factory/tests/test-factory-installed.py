@@ -88,12 +88,52 @@ RECEIPTS_DIR = f"{STATE_DIR}/audit-receipts"
 INSTALLER = LOOP / "installer.py"
 CHECK_AUDIT_RECEIPTS = ROOT / "scripts" / "check-audit-receipts.py"
 CHECK_INSTALLED_FUNCTIONAL = ROOT / "scripts" / "check-installed-functional-evidence.sh"
+SMOKE_DIR = ROOT / ".factory" / "smoke"
+FIXTURES_DIR = ROOT / ".factory" / "tests" / "fixtures"
+SMOKE_BRANCH = "fixture-main"
+SMOKE_PLAN_REL = ".factory/artifacts/implementation-plan.md"
+SMOKE_EVIDENCE_REL = ".factory/artifacts/campaign-smoke-evidence.json"
+SMOKE_PHASE_RESULT_REL = ".factory-state/evidence-smoke-phase-result.json"
+SMOKE_AUDIT_RESULT_REL = ".factory-state/evidence-smoke-audit-result.json"
 
 sys.path.insert(0, str(LOOP))
 import evidence as evidence_module  # noqa: E402
 import footprint  # noqa: E402
 import gitutil  # noqa: E402
 import installer as installer_module  # noqa: E402
+
+sys.path.insert(0, str(SMOKE_DIR))
+import evidence_smoke_common as smoke_common  # noqa: E402
+
+sys.path.insert(0, str(FIXTURES_DIR))
+import fixture_plan_tool as fixture_plan_tool  # noqa: E402
+
+# The fixture task shape mirrors the canonical plan's pending set (Task 22
+# the sole runnable pending task, Task 25 the final audit).
+FIXTURE_TASKS: list[dict] = []
+for number in range(1, 26):
+    if number <= 20:
+        status, blocked_on, deps = "complete", None, []
+    elif number == 21:
+        status, blocked_on, deps = "blocked", "external-human-runner-authority", [20]
+    elif number == 22:
+        status, blocked_on, deps = "pending", None, [20]
+    elif number == 23:
+        status, blocked_on, deps = "pending", None, [20, 22]
+    elif number == 24:
+        status, blocked_on, deps = "pending", None, [20, 22, 23]
+    else:
+        status, blocked_on, deps = "pending", None, []
+    FIXTURE_TASKS.append({
+        "number": number,
+        "title": f"Fixture task {number}",
+        "status": status,
+        "priority": 10,
+        "dependencies": deps,
+        "blocked_on": blocked_on,
+        "scope": "fixture-scoped work only.",
+        "verification": f"`src/work-{number}.md`",
+    })
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SKIP_TOKEN = re.compile(r"(?<!\S)(?:SKIP|SKIPPED)(?!\S)")
@@ -744,19 +784,31 @@ class InstalledTierSuite(unittest.TestCase):
             self.assert_pass_receipt("gate-skip")
 
     def test_fresh_installed_functional_evidence_gate(self) -> None:
-        """The fresh installed-functional evidence gate accepts a commit-bound
-        env in the fixture authority and rejects stale/skipped/failing ones."""
+        """The fresh generic installed-functional gate accepts only the
+        exact-HEAD generic namespace backed by a matching installed-harness
+        receipt and rejects stale/skipped/tampered records; the foreign
+        root env is never read."""
         fixture = self.tmp / "ifx"
-        fixture.mkdir()
-        _run([gitutil.GIT_EXECUTABLE, "-C", str(fixture), "init", "-q",
-              "-b", "boilerplate-develop"], check=True)
-        _run([gitutil.GIT_EXECUTABLE, "-C", str(fixture), "config",
-              "user.email", "factory@test"], check=True)
-        _run([gitutil.GIT_EXECUTABLE, "-C", str(fixture), "config",
-              "user.name", "factory"], check=True)
-        scripts = fixture / "scripts"
-        scripts.mkdir()
-        shutil.copy2(CHECK_INSTALLED_FUNCTIONAL, scripts / "check-installed-functional-evidence.sh")
+        self._make_repo(fixture)
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+        for name in ("scripts", ".factory"):
+            shutil.copytree(ROOT / name, fixture / name, ignore=ignore)
+        # A deterministic stub installed-harness suite so the receipt wrapper
+        # executes a clean pass; the real suite runs in
+        # test-factory-generic-evidence.py.
+        suite = fixture / ".factory/tests/test-factory-installed.sh"
+        suite.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "echo 'test-factory-installed: all checks passed'\n",
+            encoding="utf-8",
+        )
+        suite.chmod(0o755)
+        # The runtime evidence namespace is ignored exactly like the live
+        # repository (the generic installed-functional gate requires a clean
+        # tree, so the fixture's own evidence must never be untracked).
+        (fixture / ".gitignore").write_text(
+            ".factory-state/\n__pycache__/\n*.py[cod]\n", encoding="utf-8")
         (fixture / "marker").write_text("x\n", encoding="utf-8")
         _run([gitutil.GIT_EXECUTABLE, "-C", str(fixture), "add", "-A"], check=True)
         _run([gitutil.GIT_EXECUTABLE, "-C", str(fixture), "commit", "-qm",
@@ -766,8 +818,61 @@ class InstalledTierSuite(unittest.TestCase):
         state_dir = fixture / STATE_DIR
         state_dir.mkdir(mode=0o700)
         os.chmod(state_dir, 0o700)
-        evidence_file = state_dir / "installed-functional-evidence.env"
-        evidence_file.write_text(
+        # The fixture audit coordinator binds round 1 and the exact commit.
+        nonce = hashlib.sha256(os.urandom(32)).hexdigest()
+        (state_dir / "audit-coordinator.json").write_text(
+            json.dumps({
+                "schema": "ralph-audit-coordinator/v1",
+                "round": 1,
+                "base_commit": commit,
+                "nonce": nonce,
+                "created_at": int(time.time()),
+            }, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(state_dir / "audit-coordinator.json", 0o600)
+        # The installed-harness receipt is minted through the real wrapper
+        # (the stub suite exits 0) — never hand-fabricated.
+        receipt_ref = f"{RECEIPTS_DIR}/installed-harness-smoke.json"
+        minted = _run(
+            [sys.executable, str(fixture / "scripts" / "machine-receipt.py"),
+             "--root", str(fixture), "--tag", "installed-harness-smoke",
+             "--audit-round", "1", "--evidence-commit", commit,
+             "--nonce", nonce, "--", "./.factory/tests/test-factory-installed.sh"],
+            cwd=str(fixture), env=self.base_env(),
+        )
+        self.assertIn(f"[receipt: {receipt_ref}]", minted.stdout)
+        # The generic evidence record binds the receipt digest/commit/coordinator.
+        namespace = state_dir / "generic-evidence" / commit
+        namespace.mkdir(parents=True)
+        os.chmod(namespace, 0o700)
+        record_path = namespace / "installed-functional.json"
+        record_path.write_text(
+            json.dumps({
+                "schema": "factory-generic-installed-functional/v1",
+                "commit": commit,
+                "test": "test_installed_functional",
+                "result": "PASS",
+                "skipped": 0,
+                "receipt": receipt_ref,
+                "receipt_sha256": _sha256((fixture / receipt_ref).read_bytes()),
+                "suite_stdout_sha256": _sha256(
+                    (fixture / f"{RECEIPTS_DIR}/installed-harness-smoke.stdout").read_bytes()
+                ),
+                "coordinator_round": 1,
+                "coordinator_nonce": nonce,
+            }, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(record_path, 0o600)
+        checker = ["bash", str(fixture / "scripts" /
+                               "check-installed-functional-evidence.sh")]
+        ok = _run(checker, cwd=str(fixture))
+        self.assertIn("PASS", ok.stdout)
+        # A foreign root env is ignored: it never satisfies the exact-HEAD
+        # generic gate and is never rewritten.
+        foreign = state_dir / "installed-functional-evidence.env"
+        foreign.write_text(
             "schema=factory-installed-functional/v1\n"
             f"commit={commit}\n"
             "test=test_installed_functional\n"
@@ -775,35 +880,261 @@ class InstalledTierSuite(unittest.TestCase):
             "skipped=0\n",
             encoding="utf-8",
         )
-        ok = _run(
-            ["bash", str(scripts / "check-installed-functional-evidence.sh")],
-            cwd=str(fixture),
-        )
+        ok = _run(checker, cwd=str(fixture))
         self.assertIn("PASS", ok.stdout)
         # A skipped record is rejected.
-        evidence_file.write_text(
-            "schema=factory-installed-functional/v1\n"
-            f"commit={commit}\n"
-            "test=test_installed_functional\n"
-            "result=PASS\n"
-            "skipped=1\n",
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["skipped"] = 1
+        record_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n",
+                               encoding="utf-8")
+        os.chmod(record_path, 0o600)
+        with self.assertRaises(AssertionError):
+            _run(checker, cwd=str(fixture))
+        record["skipped"] = 0
+        record_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n",
+                               encoding="utf-8")
+        os.chmod(record_path, 0o600)
+        # A stale commit is rejected (even though a valid foreign root env
+        # and a valid receipt exist).
+        record["commit"] = "0" * 40
+        record_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n",
+                               encoding="utf-8")
+        os.chmod(record_path, 0o600)
+        with self.assertRaises(AssertionError):
+            _run(checker, cwd=str(fixture))
+        # A missing exact-HEAD namespace fails even with the foreign root env.
+        shutil.rmtree(namespace)
+        with self.assertRaises(AssertionError):
+            _run(checker, cwd=str(fixture))
+
+    # -- installed evidence-smoke campaign (Task 23/A) -------------------------
+
+    def _build_installed_smoke_fixture(self) -> tuple[Path, str]:
+        """An isolated committed fixture repository shaped like the canonical
+        one: the full hidden loop surface, prompts, audit-objective registry,
+        schemas, the designated smoke seam/gate/operator, the policy
+        authorities, and the **real** git-commit-guard hooks, with a 25-task
+        fixture plan (Task 22 pending, Task 25 the final audit) bound to the
+        fixture's own commit/blob.  Returns ``(workspace, head)``."""
+        ws = self.tmp / "smoke-fixture"
+        ws.mkdir()
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "init", "-q",
+              "-b", SMOKE_BRANCH])
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "config",
+              "user.email", "factory@test"])
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "config",
+              "user.name", "factory"])
+        for rel in ("docs", "scripts", "src",
+                    ".factory/prompts", ".factory/audit-objectives",
+                    ".factory/artifacts", ".factory/schemas",
+                    ".factory/smoke", ".factory/loop"):
+            (ws / rel).mkdir(parents=True)
+        for module in sorted(LOOP.glob("*.py")):
+            shutil.copy2(module, ws / ".factory/loop" / module.name)
+        for name in ("factory-plan-v1.requirements.json",
+                     "factory-campaign-result-v1.schema.json",
+                     "factory-phase-result-v1.schema.json"):
+            shutil.copy2(ROOT / ".factory" / "schemas" / name,
+                         ws / ".factory" / "schemas" / name)
+        shutil.copy2(
+            ROOT / ".factory/audit-objectives/registry.json",
+            ws / ".factory/audit-objectives/registry.json",
+        )
+        for role in ("planner", "developer", "tester", "auditor"):
+            (ws / ".factory/prompts" / f"{role}.md").write_text(
+                f"# {role} fixture role prompt\n", encoding="utf-8")
+        (ws / ".factory/config.toml").write_text(
+            "[project]\n"
+            'spec = "docs/FACTORY-LOOP-SPEC.md"\n'
+            'plan = ".factory/artifacts/implementation-plan.md"\n'
+            f'development_branch = "{SMOKE_BRANCH}"\n'
+            'release_branch = "main"\n',
             encoding="utf-8",
         )
-        with self.assertRaises(AssertionError):
-            _run(["bash", str(scripts / "check-installed-functional-evidence.sh")],
-                 cwd=str(fixture))
-        # A stale foreign commit is rejected.
-        evidence_file.write_text(
-            "schema=factory-installed-functional/v1\n"
-            f"commit={'0' * 40}\n"
-            "test=test_installed_functional\n"
-            "result=PASS\n"
-            "skipped=0\n",
-            encoding="utf-8",
+        shutil.copy2(ROOT / "docs/FACTORY-LOOP-SPEC.md",
+                     ws / "docs/FACTORY-LOOP-SPEC.md")
+        shutil.copy2(ROOT / ".factory/generic-leak-allowlist",
+                     ws / ".factory/generic-leak-allowlist")
+        for policy in ("campaign-receipt-policy.json", "requirement-policy.json",
+                       "capability-contracts.json"):
+            shutil.copy2(ROOT / ".factory" / policy,
+                         ws / ".factory" / policy)
+        for name in ("evidence_smoke_common.py", "evidence_smoke_driver.py",
+                     "evidence_smoke_gate.py", "evidence_smoke.py"):
+            shutil.copy2(SMOKE_DIR / name, ws / ".factory/smoke" / name)
+        for name in ("evidence_smoke_driver.py", "evidence_smoke_gate.py",
+                     "evidence_smoke.py"):
+            os.chmod(ws / ".factory/smoke" / name, 0o755)
+        for script in ("factory_state_io.py", "credential-guard.py",
+                       "check-plan-freshness.sh", "check-generic-leakage.sh",
+                       "check-docs-sync.sh"):
+            shutil.copy2(ROOT / "scripts" / script, ws / "scripts" / script)
+        shutil.copy2(ROOT / "scripts/git-commit-guard.sh",
+                     ws / "scripts/git-commit-guard.sh")
+        shutil.copy2(ROOT / "scripts/install-git-commit-guard.sh",
+                     ws / "scripts/install-git-commit-guard.sh")
+        os.chmod(ws / "scripts/git-commit-guard.sh", 0o755)
+        os.chmod(ws / "scripts/install-git-commit-guard.sh", 0o755)
+        (ws / "scripts/verify-boilerplate.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "echo 'fixture verifier stub'\n", encoding="utf-8")
+        os.chmod(ws / "scripts/verify-boilerplate.sh", 0o755)
+        (ws / ".gitignore").write_text(
+            ".factory-state/\n__pycache__/\n*.pyc\n", encoding="utf-8")
+        # The real Git commit boundary: the production guard and its six
+        # launcher hooks are installed before any fixture commit, so every
+        # campaign commit (and fixture commit) runs through it.
+        _run(["bash", str(ws / "scripts/install-git-commit-guard.sh")],
+             cwd=str(ws))
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "add", "-A"])
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "commit", "-qm",
+              "smoke fixture base"])
+        head1 = _run([gitutil.GIT_EXECUTABLE, "-C", str(ws),
+                      "rev-parse", "HEAD"]).stdout.strip()
+        spec_blob = _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "rev-parse",
+                          f"HEAD:docs/FACTORY-LOOP-SPEC.md"]).stdout.strip()
+        spec = ws / "fixture-spec.json"
+        spec.write_text(json.dumps({
+            "spec_path": "docs/FACTORY-LOOP-SPEC.md",
+            "spec_commit": head1,
+            "spec_blob": spec_blob,
+            "base_commit": head1,
+            "lifecycle": "active",
+            "tasks": FIXTURE_TASKS,
+        }), encoding="utf-8")
+        _run([sys.executable, str(FIXTURES_DIR / "fixture_plan_tool.py"),
+              "--spec", str(spec),
+              "--registry", str(ROOT / ".factory/schemas/factory-plan-v1.requirements.json"),
+              "--out", str(ws / SMOKE_PLAN_REL)],
+             cwd=str(ws))
+        spec.unlink()
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "add", "-A"])
+        _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "commit", "-qm",
+              "smoke fixture plan and seam"])
+        head2 = _run([gitutil.GIT_EXECUTABLE, "-C", str(ws),
+                      "rev-parse", "HEAD"]).stdout.strip()
+        self.assertTrue(SHA1.fullmatch(head2))
+        return ws, head2
+
+    def test_installed_evidence_smoke_campaign_runs_from_installed_copy(self) -> None:
+        """One full 4-phase evidence-smoke campaign (planning -> implementation
+        -> verification -> audit) runs against an isolated committed fixture
+        repository with the real Git commit boundary, driven by the
+        **installed** control-plane copy.  The certified receipt argv/stdout
+        bind the installed root (a source-tree invocation can never mint an
+        equivalent receipt) and carry the phase/state/digest summary: the
+        campaign result JSON with the exact four-phase history, the phase
+        plan/result digests, the terminal state, and the state digests."""
+        self.install(self.external, self.manifest_ext)
+        fixture, head = self._build_installed_smoke_fixture()
+        campaign_id = smoke_common.smoke_campaign_id(head)
+        gate = "./" + smoke_common.GATE_REL
+        acceptance = [gate, "--root", str(fixture), "--evidence",
+                      smoke_common.DESIGNATED_EVIDENCE_REL, "--task", "22",
+                      "--campaign-id", campaign_id, "--mode", "acceptance"]
+        verification = [gate, "--root", str(fixture), "--evidence",
+                        smoke_common.DESIGNATED_EVIDENCE_REL, "--task", "22",
+                        "--campaign-id", campaign_id, "--mode", "verify"]
+        run_argv = [
+            sys.executable, "-m", "factory.loop.campaign",
+            "--root", str(fixture),
+            "run",
+            "--campaign-id", campaign_id,
+            "--rounds", "1",
+            "--branch", SMOKE_BRANCH,
+            "--provider", "synthetic",
+            "--model", "fixture-model",
+            "--role-driver", smoke_common.DESIGNATED_DRIVER_REL,
+            "--developer-evidence-path", smoke_common.DESIGNATED_EVIDENCE_REL,
+            "--phase-result", smoke_common.PHASE_RESULT_REL,
+            "--audit-result", smoke_common.AUDIT_RESULT_REL,
+            "--role-timeout", "900",
+            "--gate-timeout", "1800",
+            "--acceptance-command", json.dumps(acceptance),
+            "--verification-command", json.dumps(verification),
+            "--evidence-smoke",
+            "--evidence-bound-commit", head,
+        ]
+        attested = self.attested_argv(run_argv)
+        tag = "installed-smoke-campaign"
+        minted = self.mint(tag, attested)
+        self.assertIn(f"[receipt: {RECEIPTS_DIR}/{tag}.json]", minted.stdout)
+        self.assert_pass_receipt(tag, expected_installed_root=self.installed_root)
+        stdout = (self.fixture / RECEIPTS_DIR / f"{tag}.stdout").read_bytes()
+        text = stdout.decode("utf-8", "replace")
+        # The certified stdout binds the installed root: the module-form
+        # campaign resolved its `factory.loop` package from the installed
+        # prefix (a source-tree invocation would have exited 90).
+        self.assertIn(f"installed-root: {self.installed_root}", text)
+        # No source module resolution: the campaign's own output is a
+        # machine-readable result JSON (never a traceback importing the
+        # source tree) and the installed-root attestation is in the same
+        # certified stdout.
+        summary, _ = json.JSONDecoder().raw_decode(
+            text[text.index("{"):]
         )
-        with self.assertRaises(AssertionError):
-            _run(["bash", str(scripts / "check-installed-functional-evidence.sh")],
-                 cwd=str(fixture))
+        self.assertEqual(summary["schema"], "factory-campaign-result/v1")
+        self.assertEqual(summary["campaign_id"], campaign_id)
+        self.assertEqual(summary["terminal_phase"], "success")
+        self.assertEqual(summary["terminal_outcome"], "pass")
+        self.assertEqual(summary["rounds_completed"], 1)
+        # The pre-campaign evidence-bound commit (`head`) and the campaign's
+        # final head are distinct: the trusted planner/developer roles commit
+        # the plan revision and the completed evidence task during the round,
+        # advancing the repository HEAD beyond the bound commit the receipt
+        # binds.  The final head must be the actual repo HEAD after the
+        # campaign and the evidence-bound commit must be an ancestor of it
+        # (the campaign never re-binds or rewrites the evidence it observed).
+        final_head = _run(
+            [gitutil.GIT_EXECUTABLE, "-C", str(fixture), "rev-parse", "HEAD"],
+            cwd=str(fixture),
+        ).stdout.strip()
+        self.assertTrue(SHA1.fullmatch(final_head), final_head)
+        self.assertEqual(
+            summary["head_commit"], final_head,
+            "the campaign result head_commit must be the actual repo HEAD "
+            "after the trusted planner/developer commits",
+        )
+        ancestor = _run(
+            [gitutil.GIT_EXECUTABLE, "-C", str(fixture),
+             "merge-base", "--is-ancestor", head, final_head],
+            cwd=str(fixture),
+        )
+        self.assertEqual(
+            ancestor.returncode, 0,
+            f"the pre-campaign evidence-bound commit {head} must be an "
+            f"ancestor of the final head {final_head}",
+        )
+        # Phase/state/digest summary: the exact four-phase round with every
+        # phase's outcome and digest fields.
+        history = [
+            (record["phase"], record["outcome"])
+            for record in summary["phase_history"]
+        ]
+        self.assertEqual(
+            history,
+            [("planning", "planned"),
+             ("implementation", "task_completed"),
+             ("verification", "pass"),
+             ("audit", "pass")],
+        )
+        for record in summary["phase_history"]:
+            self.assertTrue(SHA1.fullmatch(record["head_commit"]), record)
+            self.assertEqual(len(record["plan_digest"]), 64, record)
+        # The evidence-smoke round left the exact task complete in the plan
+        # and the final audit task pending (the round proves one full phase
+        # cycle, not acceptance).
+        committed_plan = _run(
+            [gitutil.GIT_EXECUTABLE, "-C", str(fixture), "show",
+             f"{head}:.factory/artifacts/implementation-plan.md"],
+            cwd=str(fixture),
+        ).stdout.encode("utf-8")
+        self.assertIn("## Task 22: Fixture task 22", committed_plan.decode("utf-8"))
+        self.assertIn("- Status: complete", committed_plan.decode("utf-8"))
+        # The installed copy is byte-identical after the campaign.
+        after = self.installed_inventory(self.external, self.manifest_ext)
+        self.assertEqual(after["errors"], [], after["errors"])
 
     def test_clean_committed_install_never_double_stages(self) -> None:
         """H1 regression: once the Task-20 authorities are committed, a

@@ -343,6 +343,24 @@ def main() -> int:
         if behavior == "findings":
             write_result_file(result_file, root, "findings", findings=["fixture finding"])
             return 1
+        if behavior == "secret-findings":
+            # Task 23 (F): a free-text finding that embeds a raw credential-
+            # shaped value.  The trusted orchestrator must redact it through
+            # the exact-commit credential guard BEFORE any durable storage or
+            # next-planner delivery; the raw value must never appear in the
+            # preserved result, the receipt, the control state, or the next
+            # planner's payload.
+            write_result_file(
+                result_file, root, "findings",
+                findings=["api_token=super-secret-value-123 leak in fixture"],
+            )
+            return 1
+        if behavior == "secret-blocked":
+            write_result_file(
+                result_file, root, "blocked",
+                blocked_on=["GITHUB_TOKEN=ghp_secret_blocker external-capability"],
+            )
+            return 0
         if behavior == "blocked":
             write_result_file(
                 result_file, root, "blocked", blocked_on=["external-capability-required"]
@@ -370,6 +388,12 @@ def main() -> int:
         if behavior == "blocked":
             write_result_file(
                 result_file, root, "blocked", blocked_on=["external-human-authority"]
+            )
+            return 0
+        if behavior == "secret-blocked":
+            write_result_file(
+                result_file, root, "blocked",
+                blocked_on=["GITHUB_TOKEN=ghp_secret_blocker external-capability"],
             )
             return 0
         if behavior == "crash":

@@ -64,6 +64,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 
@@ -128,6 +129,99 @@ def _mkdir(path: Path, mode: int = 0o700) -> Path:
 def _write(path: Path, data: bytes | str) -> Path:
     path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
     return path
+
+
+def _load_machine_receipt() -> object:
+    """Load ``scripts/machine-receipt.py`` as an importable module.
+
+    The hidden evidence suite exercises the wrapper's bounded supervision
+    in-process (baseline-child and foreign-process isolation), so the real
+    wrapper authority is loaded the same way ``generic_evidence.py`` loads
+    it — by committed path with a pinned interpreter, never a copy.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "machine_receipt", ROOT / "scripts" / "machine-receipt.py"
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("cannot load the machine-receipt authority")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["machine_receipt"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _wait_for_pidfile(path: Path, bound: float = 10.0) -> int:
+    """Poll for a written PID barrier file and parse it (bounded wait).
+
+    The escaped/foreign children write their PID to a file as a barrier
+    before holding the pipes; this is the test's deterministic rendezvous
+    with the child (never a sleep-based race) and fails closed if the child
+    never starts.
+    """
+    deadline = time.monotonic() + bound
+    while True:
+        if path.exists():
+            try:
+                return int(path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                pass
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"child pid barrier never appeared: {path}")
+        time.sleep(0.01)
+
+
+def _kill_pid(pid: int | None) -> None:
+    """Best-effort SIGKILL of one PID (test cleanup; never raises)."""
+    if pid is None:
+        return
+    try:
+        os.kill(pid, 9)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _escaped_script(pidfile: Path, *, ignore_term: bool = False) -> Path:
+    """Write an executable escaped-child script with a ready barrier.
+
+    The script writes its PID to ``pidfile``, touches a ``<pidfile>.ready``
+    barrier, then ``exec sleep`` to hold the wrapper's inherited
+    stdout/stderr pipes open.  The leader command runs it under ``setsid``
+    in the background and waits for the ``ready`` barrier before exiting, so
+    the wrapper can only detect the escape **after** the PID barrier file
+    exists — the test's rendezvous with the child never races the wrapper's
+    termination, and the pipes cannot EOF until the wrapper terminates the
+    child.  ``ignore_term`` installs ``trap '' TERM`` (which survives
+    ``exec``) so the wrapper's TERM cannot end the child.
+    """
+    ready = pidfile.with_name(pidfile.name + ".ready")
+    script = pidfile.with_name(pidfile.name + ".sh")
+    body = (
+        f'echo "$$" > {pidfile}\n'
+        f'touch {ready}\n'
+        "exec sleep 60\n"
+    )
+    if ignore_term:
+        body = 'trap "" TERM\n' + body
+    _write(script, "#!/usr/bin/env sh\n" + body)
+    script.chmod(0o755)
+    return script
+
+
+def _escaped_command(pidfile: Path, *, ignore_term: bool = False) -> str:
+    """A leader command that deterministically ``setsid``-escapes a child.
+
+    The background ``setsid`` child is spawned first, the leader waits on the
+    child's ``ready`` barrier (bounded, never a sleep-based race) before
+    exiting, so the wrapper always observes the escape only after the PID
+    barrier file exists.  The child then holds the inherited pipes.
+    """
+    script = _escaped_script(pidfile, ignore_term=ignore_term)
+    ready = pidfile.with_name(pidfile.name + ".ready")
+    return (
+        f"sh -c 'setsid {script} & "
+        f"while [ ! -e {ready} ]; do sleep 0.05; done; "
+        "echo leader-done'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1733,6 +1827,34 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         self.assertEqual(data["round"], 1)
         self.assertEqual(data["base_commit"], head)
         self.assertEqual(len(data["nonce"]), 64)
+        # Coordinator sequencing (Task 23): an exact-matching re-initialization
+        # reuses the existing coordinator — the nonce is preserved, never
+        # overwritten — while a mismatched binding fails closed.
+        nonce_before = data["nonce"]
+        reinit = run(
+            [sys.executable,
+             str(root / "scripts/initialize-campaign-audit.py"),
+             "--round", "1", "--base", head,
+             "--runner-evidence-sha256", "0" * 64],
+            root=root, check=False, env=self._hostile_env(fake_bin),
+        )
+        self.assertEqual(reinit.returncode, 0, reinit.stderr)
+        self.assertIn("reused", reinit.stdout)
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["nonce"], nonce_before,
+                         "the exact-matching coordinator must be reused, not re-minted")
+        mismatch = run(
+            [sys.executable,
+             str(root / "scripts/initialize-campaign-audit.py"),
+             "--round", "2", "--base", head,
+             "--runner-evidence-sha256", "0" * 64],
+            root=root, check=False, env=self._hostile_env(fake_bin),
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("does not match", mismatch.stderr)
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["nonce"], nonce_before,
+                         "a mismatched coordinator must never be overwritten")
 
     def test_validate_campaign_audit_not_redirected(self) -> None:
         fake_bin = self._fake_bin()
@@ -1937,8 +2059,12 @@ class MachineReceiptTests(unittest.TestCase):
             command += ["--audit-round", "1", "--evidence-commit", self.base,
                         "--nonce", self.nonce]
         command += ["--", *argv]
+        # The receipt wrapper's supervision is bounded; a 60s ceiling here
+        # turns any supervision regression into a fast failure instead of an
+        # unbounded hang, and never affects a passing run (<10s).
         return subprocess.run(
             command, cwd=self.root, text=True, capture_output=True, env=env,
+            timeout=60,
         )
 
     def test_mint_records_receipt_and_logs(self) -> None:
@@ -2023,6 +2149,191 @@ class MachineReceiptTests(unittest.TestCase):
         env["FACTORY_CAMPAIGN_AUDIT_NONCE"] = self.nonce
         result = self.mint("envwrong", "true", env=env, bound=False)
         self.assertNotEqual(result.returncode, 0)
+
+    def test_escaped_descendant_can_never_return_pass(self) -> None:
+        """Task 23: a bounded command that ``setsid``-escapes a descendant
+        which survives holding the wrapper's stdout/stderr pipes after the
+        leader exits 0 is detected by the subreaper orphan scan and the run
+        is never certified PASS: no receipt is minted, the wrapper exits
+        nonzero naming the exact escaped PID, and the escaped descendant is
+        terminated so it cannot survive the wrapper's fail-closed path.
+        The child writes its PID as a barrier before holding the pipes, so
+        the test synchronizes on the child, not on a sleep."""
+        pidfile = self.root / "escaped-child.pid"
+        # The escaped child leaves its session (``setsid``) so the wrapper's
+        # TERM -> KILL group termination never reaches it; it holds the
+        # inherited stdout/stderr pipes (the leader already exited), so the
+        # pipes cannot EOF until the wrapper terminates it.  The command is
+        # barrier-synchronized: the child writes its PID file before the
+        # leader exits, so the test's rendezvous with the child never races
+        # the wrapper's termination.
+        escaped = self.mint("escaped", "sh", "-c",
+                            _escaped_command(pidfile))
+        escaped_pid = _wait_for_pidfile(pidfile)
+        try:
+            self.assertNotEqual(
+                escaped.returncode, 0,
+                "an escaped surviving descendant must never mint a PASS "
+                "receipt",
+            )
+            self.assertIn("escaped descendants survived", escaped.stderr)
+            if escaped_pid is not None:
+                self.assertIn(str(escaped_pid), escaped.stderr,
+                              "the wrapper must name the exact escaped PID")
+            # No receipt artifact was minted.
+            self.assertFalse(
+                (self.root / STATE_DIR / "audit-receipts" / "escaped.json").exists()
+            )
+            # The escaped child was terminated during bounded cleanup: it
+            # can never survive the wrapper's fail-closed path.
+            if escaped_pid is not None:
+                try:
+                    os.kill(escaped_pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    self.fail(
+                        "the escaped descendant survived the wrapper's fail "
+                        f"closed path (pid {escaped_pid})"
+                    )
+        finally:
+            # Never leave the escaped sleeper behind.
+            _kill_pid(escaped_pid)
+
+    def test_term_ignoring_escaped_descendant_is_killed(self) -> None:
+        """Task 23: an escaped descendant that ignores SIGTERM is escalated
+        to an unconditional KILL within the bounded grace and can never
+        survive the wrapper's fail-closed path; the run still never mints a
+        PASS receipt.  The child writes its PID as a barrier and ignores
+        TERM deterministically (``trap '' TERM`` survives ``exec``), so the
+        wrapper's TERM cannot end it and only the KILL escalation can."""
+        pidfile = self.root / "term-ignore.pid"
+        stubborn = self.mint("term-ignore", "sh", "-c",
+                             _escaped_command(pidfile, ignore_term=True))
+        stubborn_pid = _wait_for_pidfile(pidfile)
+        try:
+            self.assertNotEqual(
+                stubborn.returncode, 0,
+                "a TERM-ignoring escaped descendant must never mint a PASS "
+                "receipt",
+            )
+            self.assertIn("escaped descendants survived", stubborn.stderr)
+            if stubborn_pid is not None:
+                self.assertIn(str(stubborn_pid), stubborn.stderr)
+                try:
+                    os.kill(stubborn_pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    self.fail(
+                        "a TERM-ignoring escaped descendant survived the "
+                        "wrapper's KILL escalation "
+                        f"(pid {stubborn_pid})"
+                    )
+            self.assertFalse(
+                (self.root / STATE_DIR / "audit-receipts" /
+                 "term-ignore.json").exists()
+            )
+        finally:
+            _kill_pid(stubborn_pid)
+
+    def test_output_overflow_can_never_mint_a_receipt(self) -> None:
+        """Task 23: a bounded command that floods stdout past the receipt
+        limit is terminated and the run is never recorded: no receipt (and no
+        transcript artifacts) may be minted from a truncated run.  The flood
+        is a deterministic fixed-size write (no sleep), and the overflow
+        diagnostic must stay bounded and must not echo the raw transcript."""
+        flood = (
+            "python3 -c 'import sys; "
+            "sys.stdout.buffer.write(b\"x\" * 5000000); "
+            "sys.stdout.flush()'"
+        )
+        result = self.mint("flood", "sh", "-c", flood)
+        self.assertNotEqual(
+            result.returncode, 0,
+            "an overflowing command must never mint a receipt",
+        )
+        self.assertIn("exceeded the receipt limit", result.stderr)
+        # The diagnostic is bounded and secret-free: it never dumps the raw
+        # truncated transcript (a bounded size and no flood payload bytes).
+        self.assertLess(len(result.stderr), 4096)
+        self.assertNotIn("x" * 64, result.stderr)
+        receipts = self.root / STATE_DIR / "audit-receipts"
+        for name in ("flood.json", "flood.stdout", "flood.stderr"):
+            self.assertFalse(
+                (receipts / name).exists(),
+                f"a truncated run must never publish {name}",
+            )
+
+    def test_baseline_and_foreign_processes_are_never_touched(self) -> None:
+        """Task 23: the bounded supervision is identity-pinned and
+        scope-limited.  A baseline child (a pre-existing child of the
+        wrapper process, in its own session — indistinguishable from an
+        escape by pgid alone) and a foreign process (an unrelated process
+        whose ancestry is already gone, parented to PID 1) are never
+        signaled, killed, or reaped by a run, even while the run's own
+        escaped descendant is terminated; the wrapper's failure report names
+        only the run's escaped PID, never the baseline or foreign PID."""
+        machine_receipt = _load_machine_receipt()
+        baseline_pidfile = self.root / "baseline.pid"
+        escaped_pidfile = self.root / "inrun-escaped.pid"
+        foreign_pidfile = self.root / "foreign.pid"
+        baseline = subprocess.Popen(
+            ["setsid", "sh", "-c",
+             f"echo \"$$\" > {baseline_pidfile}; exec sleep 60"]
+        )
+        # A foreign process is double-forked so its parent chain is already
+        # gone: it is neither a child of this process nor a descendant of
+        # the bounded run, and must never be touched by the run.
+        spawner = subprocess.Popen(
+            ["sh", "-c",
+             f"setsid sh -c 'echo \"$$\" > {foreign_pidfile}; exec sleep 60' "
+             "& exit 0"],
+        )
+        spawner.wait()
+        foreign_pid = _wait_for_pidfile(foreign_pidfile)
+        baseline_pid = _wait_for_pidfile(baseline_pidfile)
+        try:
+            try:
+                machine_receipt.run_bounded(
+                    ["sh", "-c", _escaped_command(escaped_pidfile)],
+                    self.root,
+                )
+                self.fail("an escaped descendant must fail run_bounded")
+            except SystemExit as exc:
+                report = str(exc)
+                self.assertIn("escaped descendants survived", report)
+            escaped_pid = _wait_for_pidfile(escaped_pidfile)
+            self.assertIn(str(escaped_pid), report)
+            # The baseline child and the foreign process are untouched: the
+            # report names only the run's escaped PID, and both are alive.
+            self.assertNotIn(str(baseline_pid), report)
+            self.assertNotIn(str(foreign_pid), report)
+            self.assertIsNone(
+                baseline.poll(),
+                f"a baseline child was killed by the bounded run (pid "
+                f"{baseline_pid})",
+            )
+            try:
+                os.kill(foreign_pid, 0)
+            except ProcessLookupError:
+                self.fail(
+                    f"a foreign process was killed by the bounded run "
+                    f"(pid {foreign_pid})"
+                )
+            try:
+                os.kill(escaped_pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                self.fail(
+                    "the run's escaped descendant survived the bounded "
+                    f"termination (pid {escaped_pid})"
+                )
+        finally:
+            _kill_pid(baseline_pid)
+            _kill_pid(foreign_pid)
+            _kill_pid(escaped_pid if 'escaped_pid' in locals() else None)
 
 
 class CheckAuditReceiptsTests(unittest.TestCase):

@@ -1448,10 +1448,17 @@ def read_phase_result(
     unsafe, oversized, malformed, or non-conforming file raises
     :class:`CampaignResultError` — the untrusted phase's structured output
     is only ever interpreted through this gate, and the digest is what the
-    Task 10 findings receipt binds.  The file is removed after it is
-    consumed: it is the orchestrator's own transient handoff channel, never
-    product state.  The raw bytes are what the Task 10 authority preserves
-    as the exact trusted content a findings receipt authenticates (REQ 3).
+    Task 10 findings receipt binds.  The raw bytes are what the Task 10
+    authority preserves as the exact trusted content a findings receipt
+    authenticates (REQ 3).
+
+    **Secure removal on every path (Task 23):** the transient handoff file
+    is removed in a ``finally`` — on a successful parse, on an empty file,
+    and on every parse/schema/oversize/error path — so a malformed or
+    secret-laden raw result can never persist on disk.  The unlink is
+    *secure*: the pathname is removed only when it still names the exact
+    inode that was opened and read (a role rewrite, a symlink substitution,
+    or any swap between the read and the cleanup is never deleted).
     """
     if not relpath:
         return None
@@ -1463,46 +1470,70 @@ def read_phase_result(
         return None
     except OSError as exc:
         raise CampaignResultError(f"cannot open the {label} result file {path}: {exc}") from exc
+    opened_identity: Optional[Tuple[int, int]] = None
+
+    def secure_unlink() -> None:
+        """Remove the handoff pathname only when it still names the read inode."""
+        if opened_identity is None:
+            return
+        try:
+            named = os.lstat(path)
+        except OSError:
+            return
+        if (named.st_dev, named.st_ino) != opened_identity:
+            # The pathname no longer names the file that was read (the role
+            # rewrote it or an attacker substituted it); never delete a
+            # different file.
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
     try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise CampaignResultError(f"{label} result {path} is not a regular file")
-        if info.st_size > MAX_RESULT_FILE:
-            raise CampaignResultError(f"{label} result {path} is oversized")
-        before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-        raw = bytearray()
-        while True:
-            chunk = os.read(descriptor, 65536)
-            if not chunk:
-                break
-            raw.extend(chunk)
-            if len(raw) > MAX_RESULT_FILE:
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise CampaignResultError(f"{label} result {path} is not a regular file")
+            opened_identity = (info.st_dev, info.st_ino)
+            if info.st_size > MAX_RESULT_FILE:
                 raise CampaignResultError(f"{label} result {path} is oversized")
-        after = os.fstat(descriptor)
-        if before != (
-            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
-        ):
-            raise CampaignResultError(f"{label} result {path} changed while being read")
+            before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            raw = bytearray()
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > MAX_RESULT_FILE:
+                    raise CampaignResultError(f"{label} result {path} is oversized")
+            after = os.fstat(descriptor)
+            if before != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                raise CampaignResultError(f"{label} result {path} changed while being read")
+        finally:
+            os.close(descriptor)
+        raw_bytes = bytes(raw)
+        if not raw_bytes:
+            # A pre-created transient handoff file the role never filled is
+            # exactly the same as an absent result (no structured output);
+            # it is removed like every other consumed handoff.
+            return None
+        try:
+            data = json.loads(raw_bytes.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise CampaignResultError(f"{label} result {path} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise CampaignResultError(f"{label} result {path} is not an object")
+        _schema_check(data, phase_result_schema(), "")
+        raw_digest = plan_sha256(raw_bytes)
+        return data, raw_digest, raw_bytes
     finally:
-        os.close(descriptor)
-    raw_bytes = bytes(raw)
-    if not raw_bytes:
-        # A pre-created transient handoff file the role never filled is
-        # exactly the same as an absent result (no structured output).
-        return None
-    try:
-        data = json.loads(raw_bytes.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise CampaignResultError(f"{label} result {path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise CampaignResultError(f"{label} result {path} is not an object")
-    _schema_check(data, phase_result_schema(), "")
-    raw_digest = plan_sha256(raw_bytes)
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-    return data, raw_digest, raw_bytes
+        # Every path — parse, schema, oversize, empty, or success — removes
+        # the transient raw result bytes; a malformed secret-laden result
+        # leaves no bytes and no path.
+        secure_unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -2780,6 +2811,87 @@ class Campaign:
             result.stdout, result.stderr
         )
 
+    def _exact_commit_redactor(self) -> object:
+        """The verified exact-commit credential-guard redactor (fail closed).
+
+        The redactor is bound to the exact committed ``scripts/credential-
+        guard.py`` blob at the current head.  An unverifiable guard fails
+        the campaign closed: no findings/blocked content and no preserved
+        structured result may be stored, delivered to the next planner, or
+        logged while redaction is unavailable (Task 23/F).
+        """
+        if self._redactor is None:
+            try:
+                worktree = output_redaction.read_worktree_guard_source(
+                    self._root
+                )
+                committed = self._git.blob_at(
+                    self._git.head(),
+                    output_redaction.REDACTION_GUARD_RELPATH,
+                )
+                self._redactor = output_redaction.redactor_from_bytes(
+                    worktree, committed, self._git.head()
+                )
+            except (output_redaction.OutputRedactionError, CampaignGitError) as exc:
+                raise CampaignFindingsError(
+                    "findings/phase-result redaction is unavailable because "
+                    f"the credential guard cannot be verified: {exc}; no "
+                    "findings content or preserved structured result may be "
+                    "stored or delivered (Task 23/F)"
+                ) from exc
+        return self._redactor
+
+    def _redact_findings_content(
+        self, result_data: Dict[str, object], phase: str
+    ) -> Tuple[Sequence[str], Sequence[str], bytes]:
+        """Redact findings/blocked_on and the preserved structured result
+        bytes BEFORE any durable storage or next-planner delivery (Task 23/F).
+
+        Every free-text finding and blocked reference is masked through the
+        exact-commit Redactor, and the preserved ``factory-phase-result/v1``
+        bytes are rebuilt from the redacted content (sorted canonical JSON),
+        so a raw secret candidate can never persist in the receipt, the
+        preserved artifact, the control state, a log, or the next planner
+        prompt.  An individual redaction failure carries the fixed
+        ``[REDACTION FAILED]`` marker (never the raw bytes); a redactor that
+        cannot be verified fails the campaign closed.  Returns
+        ``(redacted_findings, redacted_blocked_on, redacted_bytes)``; the
+        caller binds the receipt/state digest to the redacted bytes.
+        """
+        redactor = self._exact_commit_redactor()
+
+        def masked(items: Sequence[str]) -> List[str]:
+            result: List[str] = []
+            for item in items:
+                try:
+                    text = redactor.redact_text(str(item))  # type: ignore[attr-defined]
+                except output_redaction.OutputRedactionError:
+                    text = output_redaction.REDACTION_FAILED
+                if not text.strip():
+                    # The phase-result schema requires non-empty findings/
+                    # blocked strings; a mask that collapsed to nothing is
+                    # replaced by the semantic marker, never the raw bytes.
+                    text = output_redaction.REDACTION_FAILED
+                result.append(text)
+            return result
+
+        findings = masked(list(result_data.get("findings", [])))
+        blocked_on = masked(list(result_data.get("blocked_on", [])))
+        # The redacted rebuild preserves the original field structure: an
+        # optional field that the role never wrote stays absent, so a result
+        # with no credential-shaped content redacts to byte-identical bytes
+        # and the digest binding is unchanged (the redaction only ever masks
+        # credential-shaped values).
+        redacted = dict(result_data)
+        if "findings" in result_data:
+            redacted["findings"] = findings
+        if "blocked_on" in result_data:
+            redacted["blocked_on"] = blocked_on
+        redacted_bytes = json.dumps(
+            redacted, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return findings, blocked_on, redacted_bytes
+
     def _redact_gate_detail(
         self, stdout: Optional[str], stderr: Optional[str]
     ) -> str:
@@ -3313,30 +3425,45 @@ class Campaign:
             # Task 10 §16: verification findings/blocked become next-round
             # planner input through an orchestrator-minted receipt that binds
             # the exact phase-base commit, the exact structured result digest,
-            # the phase tag, and the deterministic-gate evidence.  The exact
-            # structured result bytes are preserved as evidence first (REQ 3)
-            # so the next-round authority authenticates every receipt against
-            # the exact trusted content, never a self-digest only.  External
-            # blockers remain structured findings in that input.
-            self._preserve_phase_result(state, "verification", result_bytes)
+            # the phase tag, and the deterministic-gate evidence.
+            #
+            # Task 23 (F): the exact-commit Redactor masks every free-text
+            # finding and blocked reference and rebuilds the preserved
+            # structured result bytes from the redacted content **before**
+            # any durable storage (the preserved artifact, the receipt, the
+            # control state) and before the next planner can receive them; a
+            # redactor that cannot be verified fails the campaign closed, and
+            # an individual redaction failure carries the fixed marker, never
+            # the raw bytes.  The receipt/state digest binds the redacted
+            # preserved bytes.
+            findings_red, blocked_red, redacted_bytes = (
+                self._redact_findings_content(result_data, "verification")
+            )
+            redacted_digest = plan_sha256(redacted_bytes)
+            self._preserve_phase_result(state, "verification", redacted_bytes)
             self._publish_findings(
                 state, phase="verification", phase_tag=tag,
                 phase_base_commit=head, outcome=outcome,
-                result_digest=result_digest if result_data else "0" * 64,
-                findings=(
-                    list(result_data.get("findings", [])) if result_data else []
-                ),
-                blocked_on=blocked_refs,
+                result_digest=redacted_digest,
+                findings=findings_red,
+                blocked_on=blocked_red,
                 gate_ran=gate_ran, gate_exit=gate_exit,
                 capability_ran=capability_ran,
                 capability_exit=capability_exit,
             )
+            record_result_digest = redacted_digest
+        else:
+            # A clean verification phase has no findings/blocked content to
+            # redact: the phase record still binds the exact structured
+            # phase-result bytes the orchestrator consumed (or the honest
+            # zero marker when no result file was produced).
+            record_result_digest = result_digest or ("0" * 64)
         detail = violation or gate_detail or ""
         state2 = state_module.advance(state, outcome)
         state_module.write_state(self._root, state2)
         return _Step(
             self._record(state, 1, outcome, detail,
-                         result_digest=result_digest or ("0" * 64)),
+                         result_digest=record_result_digest),
             state=state2,
         )
 
@@ -3375,23 +3502,35 @@ class Campaign:
             # input through an orchestrator-minted receipt; a non-final
             # blocked advances to the next planner exactly like findings with
             # the blocker explicit in the plan, and a final-round receipt is
-            # preserved as evidence.  The exact structured result bytes are
-            # preserved first (REQ 3) so the receipt is authenticated against
-            # the exact trusted content at consumption.
-            self._preserve_phase_result(state, "audit", result_bytes)
+            # preserved as evidence.
+            #
+            # Task 23 (F): the exact-commit Redactor masks every free-text
+            # finding and blocked reference and rebuilds the preserved
+            # structured result bytes from the redacted content **before**
+            # any durable storage and before the next planner can receive
+            # them (fail closed on an unverifiable redactor; the fixed marker
+            # on an individual redaction failure).
+            findings_red, blocked_red, redacted_bytes = (
+                self._redact_findings_content(result_data, "audit")
+            )
+            redacted_digest = plan_sha256(redacted_bytes)
+            self._preserve_phase_result(state, "audit", redacted_bytes)
             self._publish_findings(
                 state, phase="audit", phase_tag=tag,
                 phase_base_commit=head, outcome=outcome,
-                result_digest=result_digest if result_data else "0" * 64,
-                findings=(
-                    list(result_data.get("findings", [])) if result_data else []
-                ),
-                blocked_on=(
-                    list(result_data.get("blocked_on", [])) if result_data else []
-                ),
+                result_digest=redacted_digest,
+                findings=findings_red,
+                blocked_on=blocked_red,
                 gate_ran=False, gate_exit=None,
                 capability_ran=False, capability_exit=None,
             )
+            record_result_digest = redacted_digest
+        else:
+            # A clean audit phase has no findings/blocked content to
+            # redact: the phase record still binds the exact structured
+            # audit-result bytes the orchestrator consumed (or the honest
+            # zero marker when no result file was produced).
+            record_result_digest = result_digest or ("0" * 64)
         if outcome in ("interrupted", "infrastructure_failure"):
             # Task 9 review B1: an interrupted audit and an untrusted audit
             # are terminal fail-closed closes with no nonfinal edge; the
@@ -3415,7 +3554,7 @@ class Campaign:
             self._rounds_completed = state2.current_round
         return _Step(
             self._record(state, 1, outcome, "",
-                         result_digest=result_digest or ("0" * 64)),
+                         result_digest=record_result_digest),
             state=state2,
         )
 

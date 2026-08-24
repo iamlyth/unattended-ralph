@@ -51,15 +51,21 @@ Guarantees provided here (the trusted control plane wires them at launch):
   receives (accepted read-only inheritance, F2); the root lock descriptor
   and every other trusted-holder descriptor are never inherited.
 * A bounded child timeout kills and reaps the child's **entire new process
-  group** (F3): TERM to the group, then the *full* bounded grace is always
-  observed (the leader exiting on TERM is never taken as “the group is
-  gone” — a TERM-ignoring descendant that holds the pipe ends survives in
-  the group), then KILL to the group *unconditionally*, then a bounded
-  verification that no live group member survives, then a reaping wait for
-  the leader; the trailing pipe collection is itself bounded and the pipe
-  ends are force-closed when a stubborn member held them open, so a bounded
-  spawn can never hang the holder and a descendant that stays in the group
-  cannot outlive the bounded run.  The failure surfaces as
+  group** (F3): TERM per-PID to the identity-pinned leader and every member
+  of the group (the numeric group id is used only as a ``/proc`` scan key,
+  never as a ``killpg`` target, so a group id reused by a foreign group
+  after the leader is reaped can never signal that foreign group), then the
+  *full* bounded grace is always observed (the leader exiting on TERM is
+  never taken as “the group is gone” — a TERM-ignoring descendant that
+  holds the pipe ends survives in the group), then KILL per-PID to every
+  identity-matching member — including a descendant forked during the
+  grace, which the repeated scan captures while a pinned member still
+  lives — then a bounded verification that no live member survives, then a
+  reaping wait for the leader; the trailing pipe collection is itself
+  bounded and the pipe ends are force-closed when a stubborn member held
+  them open, so a bounded spawn can never hang the holder and a descendant
+  that stays in the group cannot outlive the bounded run.  The failure
+  surfaces as
   :class:`RootLockTimeoutError` under the unified exception contract.
 * Because ``flock`` locks are bound to the *open file description*, a
   separately opened repository descriptor can never unlock the holder:
@@ -775,49 +781,26 @@ class RootLock:
     def _kill_process_group(self, process, grace: float) -> None:
         """TERM then KILL the child's whole new process group and reap it (F3).
 
-        The child was started in a new session/group, so ``killpg(pid)``
-        reaches every member.  TERM is delivered to the group and the *full*
-        bounded grace is always observed before the KILL — the leader exiting
-        on TERM is never taken as “the group is gone”, because a descendant
-        that ignores TERM and keeps the pipe write ends open survives in the
-        group.  After the grace the group is KILLed *unconditionally*
-        (reaching every member that stayed in the group), the group is then
-        verified to have no live member within a bounded window, and the
-        leader is reaped with a bounded wait.  A group that cannot be
-        drained within the bounds raises :class:`RootLockUnsafeError`
-        instead of ever hanging the holder.
+        The child was started in a new session/group, so its group is
+        identified by the leader PID.  Termination is **identity-pinned per
+        member** (see :func:`terminate_pinned_group`): the numeric group id
+        is used only as a ``/proc`` scan key and is **never** passed to
+        ``killpg``, so a numeric id reused by a foreign group after the
+        leader is reaped can never signal that foreign group.  TERM is
+        delivered per-PID to the pinned leader and every identity-matching
+        member and the *full* bounded grace is always observed before the
+        KILL — the leader exiting on TERM is never taken as “the group is
+        gone”, because a descendant that ignores TERM and keeps the pipe
+        write ends open survives in the group.  After the grace every
+        identity-matching member (including a descendant forked during the
+        grace) is KILLed per-PID, the group is then verified to have no live
+        pinned member within a bounded window, and the leader is reaped with
+        a bounded wait.  A group that cannot be drained within the bounds
+        raises :class:`RootLockUnsafeError` instead of ever hanging the
+        holder.
         """
         pid = process.pid
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        deadline = time.monotonic() + grace
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if not _pgid_has_live_members(pid):
-                break
-            time.sleep(min(0.02, remaining))
-        # Unconditional KILL after the grace: a TERM-ignoring descendant that
-        # stayed in the group is reached here even when the leader already
-        # exited on TERM.
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        deadline = time.monotonic() + REAP_TIMEOUT
-        while True:
-            if not _pgid_has_live_members(pid):
-                break
-            if time.monotonic() >= deadline:
-                raise RootLockUnsafeError(
-                    "the bounded process group did not die within the KILL "
-                    f"reap window ({REAP_TIMEOUT:.1f}s); live group members "
-                    "survive"
-                )
-            time.sleep(0.02)
+        terminate_pinned_group(pid, grace=grace, reap_bound=REAP_TIMEOUT)
         # Bounded reap of the group leader (poll reaps; a live leader raises).
         if process.poll() is None:
             try:
@@ -1115,7 +1098,8 @@ def _pgid_has_live_members(pgid: int) -> bool:
     process from its own ``/proc/<pid>/stat`` entry, so a group counts as
     gone only when no non-zombie member remains — a zombie holds no pipe
     ends, no descriptors, and no lock reference and is reaped at the kernel
-    level.
+    level.  This is a read-only probe: the numeric ``pgid`` is used only to
+    scan ``/proc`` and is never used as a signal target.
     """
     for pid in _iter_pids():
         fields = _proc_stat_fields(pid)
@@ -1127,6 +1111,239 @@ def _pgid_has_live_members(pgid: int) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _starttime_of(pid: int) -> Optional[int]:
+    """Starttime (proc stat field 22) of ``pid``, or ``None`` when unknown.
+
+    The starttime is the process identity that survives PID reuse: a PID
+    recycled by an unrelated process carries a different starttime.
+    """
+    fields = _proc_stat_fields(pid)
+    if fields is None or len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _pgid_members_identity(pgid: int) -> Dict[int, int]:
+    """Every live non-zombie member of ``pgid``: ``{pid: starttime}``.
+
+    This is the **only** way a bounded supervisor enumerates group members
+    for signaling: the numeric group id is a ``/proc`` scan key and is never
+    passed to ``killpg``.  A group whose leader was reaped and whose numeric
+    id was then reused by a foreign group enumerates the foreign group's
+    members here, but those members carry starttimes that never match the
+    bounded run's pinned identities, so they are never signaled.
+    """
+    members: Dict[int, int] = {}
+    for pid in _iter_pids():
+        fields = _proc_stat_fields(pid)
+        if fields is None or len(fields) < 3 or fields[0] == "Z":
+            continue
+        try:
+            if int(fields[2]) != pgid:
+                continue
+        except ValueError:
+            continue
+        starttime = _starttime_of(pid)
+        if starttime is not None:
+            members[pid] = starttime
+    return members
+
+
+def _signal_pid_pinned(pid: int, starttime: int, signum: int) -> bool:
+    """``os.kill(pid, signum)`` only while ``pid`` is still the exact process.
+
+    The identity (starttime) is re-verified from the live ``/proc/<pid>/stat``
+    immediately before the signal, so a PID reused by an unrelated process
+    between observation and signaling is never signaled.  Returns ``True``
+    when the signal was actually delivered to the pinned process.
+    """
+    if not _is_live_with_identity(pid, starttime):
+        return False
+    try:
+        os.kill(pid, signum)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _signal_group_pinned(
+    pgid: int, signum: int, pinned: Mapping[int, int]
+) -> Dict[int, int]:
+    """Signal the identity-pinned members of ``pgid`` per-PID (leader first).
+
+    The live group is enumerated by ``/proc`` scan; a member is signaled by
+    its own PID only when its live starttime exactly matches the pinned
+    identity (the leader — the PID that names the group — first).  A member
+    whose PID was reused, or whose identity was never pinned, is never
+    signaled.  Returns the members actually signaled.
+    """
+    signaled: Dict[int, int] = {}
+    members = _pgid_members_identity(pgid)
+    order = sorted(members)
+    if pgid in order:
+        order.remove(pgid)
+        order.insert(0, pgid)
+    for pid in order:
+        pinned_st = pinned.get(pid)
+        if pinned_st is None or members.get(pid) != pinned_st:
+            continue
+        if _signal_pid_pinned(pid, pinned_st, signum):
+            signaled[pid] = pinned_st
+    return signaled
+
+
+def _ancestry_reaches(pid: int, candidates: Iterable[int], depth: int = 32) -> bool:
+    """True when ``pid``'s ppid chain reaches any ``candidates`` PID.
+
+    Used to classify a member that appeared in the group only after
+    termination began: its parent chain (still visible in ``/proc`` while
+    the parent is un-reaped) must reach a known pinned member of the bounded
+    run, so a fork-during-termination descendant is recognized as owned while
+    a foreign process that merely reuses the released numeric group id is
+    not.  ``pid`` itself is never its own ancestor — a member whose own PID
+    merely matches a stale pin (the PGID/PID reuse case) is never classified
+    as owned by that coincidence.
+    """
+    trusted = set(candidates)
+    trusted.discard(pid)
+    seen: set[int] = set()
+    current = pid
+    for _ in range(depth):
+        if current in trusted:
+            return True
+        if current in seen or current <= 1:
+            return False
+        seen.add(current)
+        parent = _ppid_of(current)
+        if parent is None:
+            return False
+        current = parent
+    return False
+
+
+def terminate_pinned_group(
+    pgid: int,
+    *,
+    grace: float = DEFAULT_KILL_GRACE,
+    reap_bound: float = REAP_TIMEOUT,
+    pinned: Optional[Mapping[int, int]] = None,
+    extra: Optional[Mapping[int, int]] = None,
+) -> Dict[int, int]:
+    """TERM -> full bounded grace -> KILL -> verified-gone for a pinned set.
+
+    The numeric ``pgid`` is used **only** as a ``/proc`` scan key — it is
+    **never** passed to ``killpg``, so a numeric id that a foreign group
+    reused after the bounded leader was reaped can never signal that foreign
+    group (F4).  ``pinned`` maps every known member PID to its starttime
+    identity (default: a fresh scan that pins the leader and every live
+    member); ``extra`` maps identity-pinned PIDs outside the group
+    (``setsid``/double-fork escapes) that are signaled per-PID alongside it.
+
+    SIGTERM is delivered per-PID to the pinned leader, every identity-
+    matching member, and every ``extra`` PID; the full bounded grace is
+    always observed (the leader exiting on TERM is never taken as the group
+    being gone); then SIGKILL is delivered per-PID to every identity-
+    matching member and ``extra`` PID.  A member forked during the grace is
+    captured by the repeated scan and killed while the original group is
+    still provably ours (at least one pinned member still lives, so the
+    numeric pgid cannot have been reused by a foreign group) or while its
+    ppid ancestry still reaches a pinned member; once no pinned member
+    survives the numeric id is never used again and an ambiguous member
+    (fork-during-grace whose parent was reaped, or a foreign group that
+    reused the released id) is never signaled.  Baseline and foreign
+    processes are never touched.  Returns the final live pinned accounting
+    (empty when every owned member is gone).
+    """
+    if pinned is None:
+        pinned = _pgid_members_identity(pgid)
+    extra = extra or {}
+    if not pinned and not extra:
+        # Nothing was ever pinned for this numeric id: refusing to signal an
+        # unpinned group id (a foreign group that reused the number is never
+        # touched).  An ``extra`` (escaped) member is always identity-pinned
+        # and is never skipped by the group's state.
+        return {}
+    _signal_group_pinned(pgid, signal.SIGTERM, pinned)
+    for pid, starttime in extra.items():
+        _signal_pid_pinned(pid, starttime, signal.SIGTERM)
+    # The full bounded grace is always observed before the KILL: the leader
+    # exiting on TERM is never taken as the group being gone.  During the
+    # grace the scan keeps capturing fork-during-termination descendants
+    # into the pinned set while a pinned member still lives (the pgid is
+    # provably ours, so the new member cannot be foreign).
+    deadline = time.monotonic() + grace
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if not _pgid_has_live_members(pgid):
+            break
+        for member_pid, member_start in _pgid_members_identity(pgid).items():
+            if pinned.get(member_pid) == member_start:
+                continue
+            if any(
+                _is_live_with_identity(pid, start)
+                for pid, start in pinned.items()
+            ):
+                pinned = {**pinned, member_pid: member_start}
+        time.sleep(min(0.02, remaining))
+    deadline = time.monotonic() + reap_bound
+    while True:
+        current = _pgid_members_identity(pgid)
+        live_pinned = {
+            pid: start for pid, start in pinned.items()
+            if _is_live_with_identity(pid, start)
+        }
+        if not live_pinned:
+            # No pinned member survives: the bounded group is gone and the
+            # numeric id is released.  A member enumerated now is either a
+            # fork-during-grace descendant whose parent was reaped or a
+            # foreign group that reused the released id — never signal an
+            # unpinned group id (F4); classify by ancestry only.
+            for member_pid, member_start in current.items():
+                if _ancestry_reaches(member_pid, pinned):
+                    _signal_pid_pinned(member_pid, member_start, signal.SIGKILL)
+                    pinned = {**pinned, member_pid: member_start}
+        else:
+            # At least one pinned member still lives, so this pgid cannot
+            # have been reused by a foreign group: every enumerated member —
+            # including a descendant forked during the grace — is ours and
+            # is killed by its own identity.
+            for member_pid, member_start in current.items():
+                _signal_pid_pinned(member_pid, member_start, signal.SIGKILL)
+                pinned = {**pinned, member_pid: member_start}
+        # Every identity-pinned ``extra`` PID (a ``setsid``/double-fork
+        # escape outside the group) is KILLed in both branches: the group's
+        # liveness never gates the escape cleanup.
+        for pid, start in extra.items():
+            _signal_pid_pinned(pid, start, signal.SIGKILL)
+        if not _pgid_has_live_members(pgid) and not any(
+            _is_live_with_identity(pid, start)
+            for pid, start in pinned.items()
+        ) and not any(
+            _is_live_with_identity(pid, start)
+            for pid, start in extra.items()
+        ):
+            return {}
+        if time.monotonic() >= deadline:
+            live = sorted(
+                pid for pid, start in pinned.items()
+                if _is_live_with_identity(pid, start)
+            ) + sorted(
+                pid for pid, start in extra.items()
+                if _is_live_with_identity(pid, start)
+            )
+            raise RootLockUnsafeError(
+                "the bounded process group did not die within the KILL "
+                f"reap window ({reap_bound:.1f}s); live group members "
+                f"survive: {live}"
+            )
+        time.sleep(0.02)
 
 
 def capture_descendants(

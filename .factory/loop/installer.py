@@ -133,6 +133,36 @@ PENDING_ALLOWLIST: frozenset = frozenset({
     ".factory/tests/test-factory-installed.sh",
     ".factory/tests/test-factory-migration.py",
     ".factory/artifacts/implementation-plan.md",
+    # Task-23-era pending authorities (uncommitted generic evidence work):
+    # the trusted generic evidence publisher, its operator entrypoint, its
+    # hidden suite, the extended receipt policy, the hardened receipt
+    # wrapper, the freshness/conformance/redaction authorities, and the
+    # updated installed/adversarial/smoke/campaign suites.  They are staged
+    # from the working tree only while they are not yet part of the bound
+    # commit; once the Task-23 commit lands the pending set is empty and the
+    # allowlist is inert.
+    ".factory/loop/generic_evidence.py",
+    ".factory/bin/publish-generic-evidence",
+    ".factory/tests/test-factory-generic-evidence.py",
+    ".factory/tests/test-factory-generic-evidence.sh",
+    ".factory/campaign-receipt-policy.json",
+    ".factory/loop/campaign.py",
+    ".factory/loop/installer.py",
+    ".factory/schemas/conformance.schema.json",
+    ".factory/tests/fixtures/campaign_driver.py",
+    ".factory/tests/test-factory-adversarial.py",
+    ".factory/tests/test-factory-campaign.py",
+    ".factory/tests/test-factory-conformance.py",
+    ".factory/tests/test-factory-evidence.py",
+    ".factory/tests/test-factory-installed.py",
+    ".factory/tests/test-factory-smoke.py",
+    ".factory/smoke/evidence_smoke.py",
+    "scripts/machine-receipt.py",
+    # Task-23 hardening additions/changes: the identity-pinned per-member
+    # group termination authority (lock.py) and its adversarial suite.
+    ".factory/loop/lock.py",
+    ".factory/tests/test-factory-lock.py",
+    ".factory/tests/test-factory-selector.py",
 })
 
 # Secret/credential-shaped path detection.  A path is never staged when

@@ -23,8 +23,14 @@ set -e
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory/artifacts"
+mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.factory/artifacts" "$tmp/.factory/loop"
 cp "$PROJECT_ROOT/scripts/check-plan-freshness.sh" "$tmp/scripts/"
+cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$tmp/.factory/loop/"
+# The Task-23 freshness scope requires the canonical policy authorities to
+# be real tracked files at HEAD.
+cp "$PROJECT_ROOT/.factory/campaign-receipt-policy.json" "$tmp/.factory/"
+cp "$PROJECT_ROOT/.factory/requirement-policy.json" "$tmp/.factory/"
+cp "$PROJECT_ROOT/.factory/capability-contracts.json" "$tmp/.factory/"
 printf '# Trial specification\n' > "$tmp/docs/SPEC.md"
 cat > "$tmp/.factory/config.toml" <<'EOF'
 [project]
@@ -33,7 +39,9 @@ EOF
 git -C "$tmp" init -q
 git -C "$tmp" config user.name test
 git -C "$tmp" config user.email test@example.invalid
-git -C "$tmp" add docs/SPEC.md
+git -C "$tmp" add docs/SPEC.md .factory/campaign-receipt-policy.json \
+    .factory/requirement-policy.json .factory/capability-contracts.json \
+    .factory/loop/gitutil.py
 git -C "$tmp" commit -qm spec
 spec_commit=$(git -C "$tmp" rev-parse HEAD)
 spec_blob=$(git -C "$tmp" rev-parse HEAD:docs/SPEC.md)

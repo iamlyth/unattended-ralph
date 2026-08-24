@@ -77,6 +77,15 @@ FACT_ID = re.compile(r"^FACT-[0-9]{3,}$")
 # boundary match: `.factoryx/…`, `tests2/…`, or `scripts_evil/…` are rejected
 # even though they carry a matching prefix.
 SAFE_REF_PREFIXES = ("src", "tests", "scripts", "data", "docs", "cmake", "packaging", "third_party", ".github", ".forgejo", ".factory")
+# The single runtime namespace whose receipts may be cited in `receipts`:
+# `.factory-state/audit-receipts/<safe>.json`.  These are **live** runtime
+# receipts (the exact-commit coordinator-bounded machine receipts minted
+# under the ignored `.factory-state/` namespace), not Git-tracked artifacts;
+# they are validated against the live filesystem (nofollow, owner 0600,
+# single link, schema, exit 0, digests, coordinator) instead of a Git blob.
+# No other `.factory-state/...` path is ever a valid conformance ref.
+RUNTIME_RECEIPT_PREFIX = ".factory-state/audit-receipts/"
+RUNTIME_RECEIPT_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$")
 PLAN_PATH = ROOT / ".factory/artifacts/implementation-plan.md"
 SIDECAR_DEFAULT = ROOT / ".factory/artifacts/conformance.json"
 FACTS_DEFAULT = ROOT / ".factory/artifacts/blocked-facts.json"
@@ -133,7 +142,15 @@ def load_script_module(name: str, path: Path):
     if spec is None or spec.loader is None:
         fail(f"cannot load factory script: {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register before exec: a loaded authority may declare module-level
+    # dataclasses whose ``cls.__module__`` must resolve through
+    # ``sys.modules`` (a hidden evidence/receipt authority does).
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
     return module
 
 
@@ -237,6 +254,7 @@ def load_facts(root: Path, path: Path) -> dict:
 
 
 FACTS_CACHE: dict[str, object] = {}
+EVIDENCE_CACHE: dict[str, object] = {}
 
 
 def blocked_facts_module(root: Path):
@@ -254,7 +272,11 @@ def validate_ref_safety(ref: str, where: str) -> None:
     Rejections: non-string/empty refs, absolute paths, `..` or `.` components,
     control characters (including NUL), backslash separators, empty path
     components (`//`), prefix-boundary aliases (`.factoryx/…`, `testsrc/…`),
-    and any first component outside the tracked ref namespaces. All ref
+    and any first component outside the tracked ref namespaces — with one
+    explicit exception: a receipt ref of the exact safe shape
+    `.factory-state/audit-receipts/<tag>.json` (a **live runtime receipt**,
+    not a Git-tracked artifact) is allowed in `receipts` and is validated
+    against the live filesystem instead of a Git blob.  All other ref
     existence checks read Git blobs at the declared commit only, so a
     symlinked or tampered working-tree path can never certify (or falsify) a
     claim.
@@ -273,6 +295,20 @@ def validate_ref_safety(ref: str, where: str) -> None:
     parts = path.parts
     if not parts or any(part in ("", ".", "..") for part in parts):
         fail(f"{where} contains an unsafe path component: {ref!r}")
+    # The runtime-receipt namespace is the only `.factory-state` ref allowed,
+    # and only in `receipts`; it must be exactly the safe audit-receipts
+    # shape (no traversal, no symlink, no nested path).
+    if parts[0] == ".factory-state":
+        if where.endswith(".receipts"):
+            remainder = "/".join(parts[1:])
+            if remainder.startswith("audit-receipts/") and RUNTIME_RECEIPT_TAG.fullmatch(
+                remainder[len("audit-receipts/"):]
+            ):
+                return
+        fail(
+            f"{where} uses the runtime namespace outside the only allowed "
+            f"shape `.factory-state/audit-receipts/<tag>.json`: {ref!r}"
+        )
     if len(parts) > 1 and parts[0] not in SAFE_REF_PREFIXES:
         fail(f"{where} first component must be a tracked refs prefix: {ref!r}")
 
@@ -369,6 +405,106 @@ def load_pinned_git(root: Path):
         fail(f"pinned Git authority is unavailable: {exc}")
 
 
+def load_evidence_module(root: Path):
+    """Load the hidden evidence/receipt authority (``.factory/loop/evidence.py``).
+
+    The hardened no-follow receipt validation (owner/mode/link-count/inode,
+    schema, argv digest, adjacent stdout/stderr artifact digests) is the
+    authority's own — the conformance validator never reimplements it.  The
+    authority's flat-import mode resolves ``gitutil`` from the repository's
+    own hidden loop namespace, so that namespace is placed on ``sys.path``
+    for the module (never the caller's own tree).
+    """
+    key = str(Path(root).resolve())
+    if key not in EVIDENCE_CACHE:
+        loop = root / ".factory" / "loop"
+        if str(loop) not in sys.path:
+            sys.path.insert(0, str(loop))
+        path = loop / "evidence.py"
+        try:
+            EVIDENCE_CACHE[key] = load_script_module("factory_evidence", path)
+        except Exception as exc:  # ReceiptError and import failures alike
+            fail(f"hidden evidence authority is unavailable: {exc}")
+    return EVIDENCE_CACHE[key]
+
+
+def runtime_receipt_ref(ref: str) -> bool:
+    """True when ``ref`` is a live runtime receipt (not a Git-tracked artifact)."""
+    parts = Path(ref).parts
+    return bool(parts) and parts[0] == ".factory-state"
+
+
+def validate_runtime_receipt(root: Path, ref: str, evidence_commit: str) -> None:
+    """Validate one live runtime receipt at the declared evidence commit.
+
+    The receipt must pass the hidden authority's hardened no-follow
+    validation (regular single-link current-user-owned mode-0600 files,
+    ``ralph-audit-receipt/v1`` schema, argv digest, stdout/stderr digest
+    artifacts), exit 0, be bound to the exact row ``evidence_commit``, and
+    carry the audit coordinator round/nonce binding of the protected
+    ``.factory-state/audit-coordinator.json`` when it exists.  A missing,
+    symlinked, stale, forged, or non-passing receipt fails closed.  Runtime
+    receipts are validated against the live filesystem — never a Git blob
+    (the ignored runtime namespace is not tracked).
+    """
+    evidence = load_evidence_module(root)
+    try:
+        receipt = evidence.validate_receipt(root, ref)
+    except evidence.EvidenceError as exc:
+        fail(f"runtime receipt {ref} is unsafe or invalid: {exc}")
+    if receipt.get("exit_code") != 0:
+        fail(
+            f"runtime receipt {ref} did not exit 0; a PASS row cannot cite a "
+            "failing receipt"
+        )
+    if receipt.get("evidence_commit") != evidence_commit:
+        fail(
+            f"runtime receipt {ref} evidence_commit "
+            f"{str(receipt.get('evidence_commit'))[:12]} does not equal the "
+            f"row evidence_commit {evidence_commit[:12]} (stale receipt)"
+        )
+    # Coordinator binding: when the protected coordinator state exists, the
+    # receipt's round/nonce must match it exactly (LOW5).
+    coordinator = root / ".factory-state/audit-coordinator.json"
+    if coordinator.exists() or coordinator.is_symlink():
+        if coordinator.is_symlink() or not coordinator.is_file():
+            fail("audit coordinator state is unsafe (symlink or missing file)")
+        try:
+            raw = evidence.secure_read_bytes(
+                coordinator, maximum=16384, what="audit coordinator state"
+            )[0]
+        except evidence.EvidenceError as exc:
+            fail(f"audit coordinator state is unsafe: {exc}")
+        try:
+            state = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            fail(f"audit coordinator state is invalid: {exc}")
+        expected = {"schema", "round", "base_commit", "nonce", "created_at"}
+        if (
+            not isinstance(state, dict)
+            or set(state) != expected
+            or state.get("schema") != "ralph-audit-coordinator/v1"
+            or type(state.get("round")) is not int
+            or state["round"] < 1
+            or not isinstance(state.get("base_commit"), str)
+            or not SHA.fullmatch(state["base_commit"])
+            or not isinstance(state.get("nonce"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", state["nonce"])
+        ):
+            fail("audit coordinator state is invalid")
+        if receipt.get("coordinator_round") != state["round"]:
+            fail(
+                f"runtime receipt {ref} belongs to round "
+                f"{receipt.get('coordinator_round')}, not the active "
+                f"coordinator round {state['round']}"
+            )
+        if receipt.get("coordinator_nonce") != state["nonce"]:
+            fail(
+                f"runtime receipt {ref} does not match the active audit "
+                "coordinator nonce"
+            )
+
+
 def trusted_git_env(module) -> dict:
     """Sanitized environment plus replace-ref disabling for trusted Git calls.
 
@@ -456,6 +592,14 @@ def validate_verified_claim(root: Path, requirement: dict) -> None:
     if not refs:
         fail(f"requirement {requirement_id} claims verified with no receipt or artifact refs (free-text row)")
     for ref in refs:
+        if runtime_receipt_ref(ref):
+            # A live runtime receipt is validated against the live filesystem
+            # (hardened no-follow owner/mode/link-count, schema, exit 0,
+            # exact row evidence_commit, digests, coordinator binding) — it
+            # is runtime evidence under the ignored namespace and can never
+            # be a Git blob at the evidence commit.
+            validate_runtime_receipt(root, ref, commit)
+            continue
         if not reference_exists(root, ref, commit):
             fail(
                 f"requirement {requirement_id} references receipt/artifact {ref} that is not a "

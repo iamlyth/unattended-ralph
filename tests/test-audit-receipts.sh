@@ -20,10 +20,14 @@ ROUND=2
 
 setup_repo() {
     local dir=$1
-    mkdir -p "$dir/scripts" "$dir/.factory" "$dir/.factory/artifacts" "$dir/.ralph/agent" \
+    mkdir -p "$dir/scripts" "$dir/.factory/loop" "$dir/.factory/artifacts" "$dir/.ralph/agent" \
         "$dir/.factory-state/runner-evidence" "$dir/docs"
     chmod 700 "$dir/.factory-state"
     cp "$RECORDER" "$CHECKER" "$RUNNER_EVIDENCE" "$ENV_CHECKER" "$dir/scripts/"
+    # The receipt wrapper's bounded supervised runner resolves the trusted
+    # root-descriptor lock authority from its own tree.
+    cp "$PROJECT_ROOT/.factory/loop/lock.py" "$dir/.factory/loop/"
+    cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$dir/.factory/loop/"
     chmod +x "$dir/scripts/"*.py
     printf '# Spec\n' > "$dir/docs/SPEC.md"
     printf '# Plan\n' > "$dir/.factory/artifacts/implementation-plan.md"
@@ -323,5 +327,90 @@ set +e
 no_base_rc=$?
 set -e
 [[ $no_base_rc -eq 1 ]] || { echo "test: manifest accepted without a base binding" >&2; exit 1; }
+
+# -- identity-pinned bounded supervision (Task 23) --------------------------
+# The previous section removed the coordinator; restore an exact-matching one
+# so the supervised runs below can mint receipts.
+cat > "$tmp/audit/.factory-state/audit-coordinator.json" <<JSON
+{"schema": "ralph-audit-coordinator/v1", "round": $ROUND, "base_commit": "$head", "nonce": "$(printf 'a%.0s' {1..64})", "created_at": 1}
+JSON
+chmod 600 "$tmp/audit/.factory-state/audit-coordinator.json"
+# A command that exits while leaving a TERM-ignoring descendant that forks a
+# new member into the group during the termination grace (fork-during-
+# termination) is fully cleaned by the identity-pinned per-member
+# supervision, and the receipt still mints (no escaped descendant): the
+# numeric group id is never killpg'd, every member is signaled per-PID by
+# starttime identity, and the fork-during-grace member is captured.
+FORK_PY=$(cat <<'PY'
+import os, signal, sys, time
+marker = sys.argv[1]
+def handler(signum, frame):
+    pid = os.fork()
+    if pid == 0:
+        with open(marker, 'w') as f:
+            f.write(str(os.getpid()))
+        time.sleep(300)
+        os._exit(0)
+signal.signal(signal.SIGTERM, handler)
+pid = os.fork()
+if pid == 0:
+    while True:
+        time.sleep(0.05)
+else:
+    os._exit(0)
+PY
+)
+printf '%s\n' "$FORK_PY" > "$tmp/audit/fork-during-term.py"
+rm -f "$tmp/fork-during-term.pid"
+(cd "$tmp/audit" && ./scripts/machine-receipt.py --tag fork-during-term \
+    --audit-round "$ROUND" --evidence-commit "$head" \
+    --nonce "$(printf 'a%.0s' {1..64})" \
+    -- python3 fork-during-term.py "$tmp/fork-during-term.pid" >/dev/null)
+# The run minted a clean receipt (the leader exited 0, the descendant was
+# terminated during stabilization, no escape survived).
+[[ -f "$tmp/audit/.factory-state/audit-receipts/fork-during-term.json" ]]
+python3 - "$tmp/audit/.factory-state/audit-receipts/fork-during-term.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data['exit_code'] == 0, data
+PY
+# The fork-during-termination member is gone: the marker PID, if it was
+# written before KILL, must no longer be alive.
+if [[ -s "$tmp/fork-during-term.pid" ]]; then
+    forked_pid=$(cat "$tmp/fork-during-term.pid")
+    if kill -0 "$forked_pid" 2>/dev/null; then
+        echo "test: fork-during-termination member survived bounded cleanup" >&2
+        exit 1
+    fi
+fi
+
+# A foreign process group is never signaled: it shares no identity pin with
+# the bounded run, so TERM/KILL per-PID by starttime identity leaves it
+# untouched even while the bounded command's own group is terminated.
+FOREIGN_MARKER="$tmp/foreign.pid"
+python3 - "$FOREIGN_MARKER" <<'PY' &
+import os, sys, time
+marker = sys.argv[1]
+with open(marker, 'w') as f:
+    f.write(str(os.getpid()))
+time.sleep(300)
+PY
+foreign_pid=$!
+for _ in $(seq 1 200); do
+    [[ -s "$FOREIGN_MARKER" ]] && break
+    sleep 0.02
+done
+[[ -s "$FOREIGN_MARKER" ]] || { echo "test: foreign marker never appeared" >&2; exit 1; }
+(cd "$tmp/audit" && ./scripts/machine-receipt.py --tag foreign-untouched \
+    --audit-round "$ROUND" --evidence-commit "$head" \
+    --nonce "$(printf 'a%.0s' {1..64})" \
+    -- true >/dev/null)
+[[ -f "$tmp/audit/.factory-state/audit-receipts/foreign-untouched.json" ]]
+if ! kill -0 "$foreign_pid" 2>/dev/null; then
+    echo "test: the foreign process group was signaled by the bounded supervision" >&2
+    exit 1
+fi
+kill "$foreign_pid" 2>/dev/null || true
+wait "$foreign_pid" 2>/dev/null || true
 
 echo "test: machine audit receipt checks passed"

@@ -1669,6 +1669,28 @@ class CaseAdversarialSuite(_AdversarialBase):
                 "allowed_principals": ["factory-signer"],
             }, sort_keys=True, indent=2) + "\n",
             encoding="utf-8")
+        # The generic installed-functional checker needs the hidden evidence
+        # authority, the committed receipt policy, and a deterministic stub
+        # installed-harness suite (the receipt wrapper executes a clean pass).
+        (root / ".factory" / "loop").mkdir()
+        (root / ".factory" / "tests").mkdir()
+        shutil.copy2(ROOT / ".factory/loop/evidence.py",
+                     root / ".factory/loop/evidence.py")
+        shutil.copy2(ROOT / ".factory/loop/gitutil.py",
+                     root / ".factory/loop/gitutil.py")
+        shutil.copy2(ROOT / ".factory/loop/lock.py",
+                     root / ".factory/loop/lock.py")
+        shutil.copy2(ROOT / ".factory/loop/footprint.py",
+                     root / ".factory/loop/footprint.py")
+        shutil.copy2(ROOT / ".factory/campaign-receipt-policy.json",
+                     root / ".factory/campaign-receipt-policy.json")
+        installed_suite = root / ".factory/tests/test-factory-installed.sh"
+        installed_suite.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "echo 'test-factory-installed: all checks passed'\n",
+            encoding="utf-8")
+        installed_suite.chmod(0o755)
         _git(root, "init", "-q", "-b", BRANCH)
         _git(root, "config", "user.email", "factory@test")
         _git(root, "config", "user.name", "factory")
@@ -1945,19 +1967,66 @@ class CaseAdversarialSuite(_AdversarialBase):
                 check=False).returncode, 0,
             "a forged environment binding must fail provenance verification")
 
-        # -- installed receipts: exact-commit installed evidence ------------
-        installed_evidence = root / STATE_DIR / "installed-functional-evidence.env"
-
-        def write_installed(commit: str = head, result: str = "PASS",
-                            skipped: str = "0") -> None:
-            installed_evidence.write_text(
-                "schema=factory-installed-functional/v1\n"
-                f"commit={commit}\n"
-                "test=test_installed_functional\n"
-                f"result={result}\n"
-                f"skipped={skipped}\n", encoding="utf-8")
-
-        write_installed()
+        # -- installed receipts: exact-commit generic evidence --------------.
+        # The generic installed-functional gate accepts only the exact-HEAD
+        # dedicated generic namespace backed by a matching installed-harness
+        # machine receipt; the foreign root env is never read.  The receipt
+        # is minted through the real wrapper (the stub suite exits 0).  The
+        # checker requires an exact clean HEAD, so the modified audit (and
+        # the fixture's other tracked state) is committed first; the generic
+        # evidence namespace then lives at the **evidence commit** (the
+        # exact base at which the receipt was minted, an ancestor of the
+        # final HEAD) exactly like the trusted publisher's contract, and the
+        # checker scans the children and accepts that ancestor namespace
+        # because the implementation/acceptance authority paths are
+        # unchanged since the evidence commit.
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "audit")
+        final_head = _git(root, "rev-parse", "HEAD").stdout.strip()
+        installed_nonce = sha256(b"adversarial-installed-nonce")
+        coordinator = {
+            "schema": "ralph-audit-coordinator/v1",
+            "round": 1,
+            "base_commit": head,
+            "nonce": installed_nonce,
+            "created_at": 1,
+        }
+        (root / STATE_DIR / "audit-coordinator.json").write_text(
+            json.dumps(coordinator, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(root / STATE_DIR / "audit-coordinator.json", 0o600)
+        installed_receipt = root / STATE_DIR / "audit-receipts" / \
+            "installed-harness-smoke.json"
+        (root / STATE_DIR / "audit-receipts").mkdir(exist_ok=True)
+        minted = run(
+            [PY, str(root / "scripts" / "machine-receipt.py"),
+             "--root", str(root), "--tag", "installed-harness-smoke",
+             "--audit-round", "1", "--evidence-commit", head,
+             "--nonce", installed_nonce, "--",
+             "./.factory/tests/test-factory-installed.sh"],
+            root=root, check=False,
+        )
+        self.assertEqual(minted.returncode, 0, minted.stderr[-1000:])
+        installed_stdout = root / STATE_DIR / "audit-receipts" / \
+            "installed-harness-smoke.stdout"
+        installed_ns = root / STATE_DIR / "generic-evidence" / head
+        installed_ns.mkdir(parents=True)
+        os.chmod(installed_ns, 0o700)
+        installed_record = installed_ns / "installed-functional.json"
+        installed_record.write_text(
+            json.dumps({
+                "schema": "factory-generic-installed-functional/v1",
+                "commit": head,
+                "test": "test_installed_functional",
+                "result": "PASS",
+                "skipped": 0,
+                "receipt": ".factory-state/audit-receipts/installed-harness-smoke.json",
+                "receipt_sha256": sha256(installed_receipt.read_bytes()),
+                "suite_stdout_sha256": sha256(installed_stdout.read_bytes()),
+                "coordinator_round": 1,
+                "coordinator_nonce": installed_nonce,
+            }, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8")
+        os.chmod(installed_record, 0o600)
         installed = run(
             ["bash", str(root / "scripts" /
                           "check-installed-functional-evidence.sh")],
@@ -1966,7 +2035,17 @@ class CaseAdversarialSuite(_AdversarialBase):
         self.assertEqual(installed.returncode, 0, installed.stderr[-1000:])
         self.assertIn(f"PASS at {head}", installed.stdout,
                       "the installed checker must name the exact tested commit")
-        write_installed(skipped="1")
+
+        def write_installed(result: str = "PASS", skipped: int = 0) -> None:
+            record = json.loads(installed_record.read_text(encoding="utf-8"))
+            record["result"] = result
+            record["skipped"] = skipped
+            installed_record.write_text(
+                json.dumps(record, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8")
+            os.chmod(installed_record, 0o600)
+
+        write_installed(skipped=1)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
                              "check-installed-functional-evidence.sh")],
@@ -1978,13 +2057,19 @@ class CaseAdversarialSuite(_AdversarialBase):
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "failed installed evidence must fail closed")
-        write_installed(commit="1" * 40)
+        write_installed()
+        record = json.loads(installed_record.read_text(encoding="utf-8"))
+        record["commit"] = "1" * 40
+        installed_record.write_text(
+            json.dumps(record, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8")
+        os.chmod(installed_record, 0o600)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "installed evidence bound to a non-ancestor commit must fail closed")
-        installed_evidence.unlink()
+        shutil.rmtree(installed_ns)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
                              "check-installed-functional-evidence.sh")],

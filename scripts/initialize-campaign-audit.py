@@ -131,7 +131,72 @@ def atomic_write(path: Path, text: str, mode: int | None = None) -> None:
             pass
 
 
+def atomic_write_noreplace(path: Path, text: str, mode: int | None = None) -> None:
+    """Publish one artifact with atomic no-replace semantics (never clobber).
+
+    The coordinator state is the one artifact that may never be overwritten:
+    a raced appearance between the exact-match resolution and the write (or
+    any pre-existing path) fails closed instead of silently replacing an
+    active audit's nonce.  The validated temporary inode is linked into the
+    canonical name (``os.link``, unlike ``rename``, cannot clobber), the
+    published inode is re-validated, and the temporary is unlinked.
+    """
+    if path.is_symlink() or path.exists():
+        raise SystemExit(
+            "initialize-campaign-audit: the audit coordinator state appeared "
+            "during initialization (no-replace); refusing to overwrite an "
+            "active audit"
+        )
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        try:
+            os.link(temporary, str(path))
+        except FileExistsError:
+            raise SystemExit(
+                "initialize-campaign-audit: the audit coordinator state raced "
+                "into existence (no-replace); refusing to overwrite an active "
+                "audit"
+            ) from None
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
+        ):
+            raise SystemExit(
+                "initialize-campaign-audit: published coordinator state is "
+                "unsafe (owner/mode/link-count)"
+            )
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def coordinator_state(round_number: int, base: str) -> dict:
+    """The audit coordinator state for this round/base — or the exact match.
+
+    Coordinator sequencing (Task 23): an existing coordinator is **never
+    overwritten**.  It is accepted (reused) only when its hardened state is
+    valid and its round and base_commit exactly match the requested
+    round/base — the active audit's nonce is then preserved.  Any other
+    pre-existing coordinator (a different round or base) fails closed as a
+    mismatch, so a second initialization can never silently re-bind or
+    re-nonce an active audit.
+    """
     state_dir = ROOT / ".factory-state"
     if state_dir.is_symlink() or not state_dir.is_dir():
         raise SystemExit("initialize-campaign-audit: .factory-state must be a real directory")
@@ -140,9 +205,25 @@ def coordinator_state(round_number: int, base: str) -> dict:
         raise SystemExit("initialize-campaign-audit: unsafe .factory-state directory")
     state_dir.chmod(0o700)
     if COORDINATOR_FILE.exists() or COORDINATOR_FILE.is_symlink():
+        if COORDINATOR_FILE.is_symlink():
+            raise SystemExit(
+                "initialize-campaign-audit: audit coordinator state must "
+                "never be a symlink"
+            )
+        existing = _read_coordinator_state()
+        if existing["round"] == round_number and existing["base_commit"] == base:
+            print(
+                "initialize-campaign-audit: reusing the existing exact-matching "
+                f"audit coordinator for round {round_number} at {base[:12]} "
+                "(nonce preserved, no overwrite)"
+            )
+            return existing
         raise SystemExit(
-            "initialize-campaign-audit: audit coordinator state already exists; "
-            "refusing to mint a new nonce for an active audit"
+            "initialize-campaign-audit: an audit coordinator already exists "
+            "whose round/base does not match the requested binding "
+            f"(round {existing['round']}/{round_number}, base "
+            f"{existing['base_commit'][:12]}/{base[:12]}); refusing to "
+            "overwrite an active audit"
         )
     return json.dumps({
         "schema": "ralph-audit-coordinator/v1",
@@ -151,6 +232,50 @@ def coordinator_state(round_number: int, base: str) -> dict:
         "nonce": hashlib.sha256(os.urandom(32)).hexdigest(),
         "created_at": int(time.time()),
     }, sort_keys=True, indent=2) + "\n"
+
+
+def _read_coordinator_state() -> dict:
+    """Hardened read + schema validation of the existing coordinator state."""
+    if COORDINATOR_FILE.is_symlink() or not COORDINATOR_FILE.is_file():
+        raise SystemExit(
+            "initialize-campaign-audit: audit coordinator state is missing "
+            "or unsafe"
+        )
+    info = COORDINATOR_FILE.lstat()
+    if (
+        info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o022
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_size > 16384
+    ):
+        raise SystemExit(
+            "initialize-campaign-audit: audit coordinator state is unsafe "
+            "(owner/mode/link-count)"
+        )
+    try:
+        data = json.loads(COORDINATOR_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"initialize-campaign-audit: invalid audit coordinator state: {exc}"
+        ) from exc
+    expected = {"schema", "round", "base_commit", "nonce", "created_at"}
+    if (
+        not isinstance(data, dict)
+        or set(data) != expected
+        or data.get("schema") != "ralph-audit-coordinator/v1"
+        or type(data.get("round")) is not int
+        or data["round"] < 1
+        or not isinstance(data.get("base_commit"), str)
+        or not SHA1.fullmatch(data["base_commit"])
+        or not isinstance(data.get("nonce"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", data["nonce"])
+        or not isinstance(data.get("created_at"), int)
+    ):
+        raise SystemExit(
+            "initialize-campaign-audit: audit coordinator state is invalid"
+        )
+    return data
 
 
 def main() -> int:
@@ -177,6 +302,10 @@ def main() -> int:
     for target in (ROOT / ".factory/artifacts/campaign-audit.md", ROOT / ".ralph/agent/scratchpad.md"):
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise SystemExit(f"initialize-campaign-audit: unsafe target {target}")
+    # Resolve the coordinator **before** any write: an existing exact-
+    # matching coordinator is reused (no overwrite) and a mismatched one
+    # fails closed before the report/scratchpad are touched.
+    coordinator = coordinator_state(args.round, args.base)
     report = f"""---
 schema: ralph-campaign-audit/v1
 round: {args.round}
@@ -199,9 +328,17 @@ Fresh independent audit initialized at `{args.base}`.
 """
     atomic_write(ROOT / ".factory/artifacts/campaign-audit.md", report)
     atomic_write(ROOT / ".ralph/agent/scratchpad.md", scratch)
-    atomic_write(COORDINATOR_FILE, coordinator_state(args.round, args.base), mode=0o600)
+    if isinstance(coordinator, str):
+        atomic_write_noreplace(COORDINATOR_FILE, coordinator, mode=0o600)
+        print("initialize-campaign-audit: minted audit coordinator binding "
+              "(nonce protected in .factory-state)")
+    else:
+        # The existing exact-matching coordinator was reused; the report and
+        # scratchpad are (re)written atomically, the coordinator is never
+        # touched again (no overwrite of an active audit's nonce).
+        print("initialize-campaign-audit: reused the existing audit "
+              "coordinator binding (round/base match, nonce preserved)")
     print(f"initialize-campaign-audit: seeded round {args.round} at {args.base[:12]}")
-    print("initialize-campaign-audit: minted audit coordinator binding (nonce protected in .factory-state)")
     return 0
 
 

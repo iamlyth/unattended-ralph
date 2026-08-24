@@ -294,6 +294,14 @@ class SmokeWorkspace:
             ROOT / ".factory" / "generic-leak-allowlist",
             ws / ".factory" / "generic-leak-allowlist",
         )
+        # The plan contract's policy authorities (freshness-scope files the
+        # post-round documentation gates require).
+        for policy in ("campaign-receipt-policy.json", "requirement-policy.json",
+                       "capability-contracts.json"):
+            shutil.copy2(
+                ROOT / ".factory" / policy,
+                ws / ".factory" / policy,
+            )
         (ws / ".gitignore").write_text(
             ".factory-state/\n__pycache__/\n*.pyc\n", encoding="utf-8"
         )

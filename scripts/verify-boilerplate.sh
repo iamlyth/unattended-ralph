@@ -177,6 +177,10 @@ required = [
     '.factory/bin/factory-launch',
     '.factory/tests/test-factory-installed.py',
     '.factory/tests/test-factory-installed.sh',
+    '.factory/loop/generic_evidence.py',
+    '.factory/bin/publish-generic-evidence',
+    '.factory/tests/test-factory-generic-evidence.py',
+    '.factory/tests/test-factory-generic-evidence.sh',
     '.factory/smoke/evidence_smoke_common.py',
     '.factory/smoke/evidence_smoke_driver.py',
     '.factory/smoke/evidence_smoke_gate.py',
@@ -378,6 +382,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-docs-sync.sh
 ./.factory/tests/test-factory-footprint.sh
 ./.factory/tests/test-factory-installed.sh
+./.factory/tests/test-factory-generic-evidence.sh
 ./.factory/tests/test-factory-migration.sh
 ./.factory/tests/test-factory-adversarial.sh
 ./.factory/tests/test-factory-smoke.sh

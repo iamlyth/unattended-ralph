@@ -37,6 +37,7 @@ import re
 import resource
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -48,6 +49,12 @@ SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_LOG = 4 * 1024 * 1024
 COORDINATOR_FILE = ".factory-state/audit-coordinator.json"
+# The wrapper runs against a target repository it must never mutate: bytecode
+# caching is disabled so importing the trusted loop authority (``lock.py``
+# and its imports) can never create a ``__pycache__``/``*.pyc`` artifact in
+# the target tree (a clean-tree checker would otherwise fail on the untracked
+# bytecode files).
+sys.dont_write_bytecode = True
 
 
 def fail(message: str) -> None:
@@ -221,31 +228,173 @@ def coordinator_binding(root: Path, round_number: int | None, evidence_commit: s
     return round_number, evidence_commit, nonce
 
 
+def _load_lock_supervision(root: Path):
+    """Load the trusted root-descriptor lock/supervision authority.
+
+    The wrapper authority reuses the hidden control plane's supervised
+    process boundary (``.factory/loop/lock.py``) for the descendant capture,
+    escaped-descendant detection, and the live group-gone probe — the same
+    trusted launch/lock primitives the campaign and launch supervision use.
+    The authority is resolved from the wrapper's own installed/source tree
+    first (the installed copy always carries the full hidden surface), then
+    from the target repository root.  An unavailable authority fails closed
+    instead of degrading the runner.
+    """
+    candidates = [
+        Path(__file__).resolve().parent.parent / ".factory" / "loop",
+        Path(root).absolute() / ".factory" / "loop",
+    ]
+    seen: set[str] = set()
+    for loop in candidates:
+        if str(loop) in seen or not (loop / "lock.py").is_file():
+            continue
+        seen.add(str(loop))
+        if str(loop) not in sys.path:
+            sys.path.insert(0, str(loop))
+        try:
+            import lock as lock_module  # noqa: PLC0415
+        except Exception:  # ImportError and boundary failures alike
+            continue
+        return lock_module
+    fail("trusted lock supervision is unavailable")
+    return None
+
+
+def _install_subreaper() -> None:
+    """Install this process as a child subreaper (``PR_SET_CHILD_SUBREAPER``).
+
+    Mirrors the launch supervisor's F7 subreaper lifecycle: with the flag
+    set, every orphaned descendant of the bounded command (a double-fork or
+    ``setsid`` escape) is reparented to this process and reaped here, so an
+    escaped descendant can never orphan to PID 1 and be lost.
+    """
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER == 36
+    if result != 0:
+        fail(
+            "cannot install the child subreaper (prctl errno "
+            f"{ctypes.get_errno()})"
+        )
+
+
+def _baseline_children() -> dict[int, int]:
+    """PID -> starttime of every live child of this process before spawn.
+
+    The orphan/reap scope is the command snapshot only (F6/F7): a child
+    that existed before the run is explicitly excluded — identity-pinned by
+    its starttime, so a PID reused after a baseline child exits is never
+    mistaken for a baseline child and never signaled, killed, or reaped by
+    the bounded supervision.
+    """
+    me = os.getpid()
+    baseline: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_fields = (entry / "stat").read_text(
+                encoding="ascii", errors="replace"
+            )
+        except OSError:
+            continue
+        end = stat_fields.rfind(")")
+        if end < 0:
+            continue
+        fields = stat_fields[end + 1:].split()
+        if len(fields) < 20:
+            continue
+        try:
+            if int(fields[1]) == me:
+                baseline[int(entry.name)] = int(fields[19])
+        except ValueError:
+            continue
+    return baseline
+
+
+def _terminate_group(process, lock_module, kill_grace: float) -> None:
+    """TERM -> full bounded grace -> unconditional KILL -> reaped group.
+
+    Mirrors the trusted root-lock group termination (F3): TERM is delivered
+    per-PID to the identity-pinned leader and every member of the new
+    process group and the *full* bounded grace is always observed before the
+    KILL — the leader exiting on TERM is never taken as the group being gone
+    — then the group is KILLed per-PID and verified to have no live pinned
+    member within a bounded window, and the leader is reaped with a bounded
+    wait.  The numeric group id is used only as a ``/proc`` scan key (never
+    ``killpg``), so a group id reused by a foreign group after the leader is
+    reaped is never signaled.
+    """
+    pid = process.pid
+    lock_module.terminate_pinned_group(
+        pid, grace=kill_grace, reap_bound=REAP_BOUND
+    )
+    if process.poll() is None:
+        try:
+            process.wait(timeout=REAP_BOUND)
+        except subprocess.TimeoutExpired as exc:
+            raise SystemExit(
+                "machine-receipt: the bounded process-group leader was not "
+                "reaped within the "
+                f"{REAP_BOUND:.1f}s bound"
+            ) from exc
+
+
+# Bounded suite supervision: the wrapper's command runs in a new session
+# with a subreaper, an identity-pinned baseline snapshot, a captured
+# descendant scope, a bounded timeout, and a termination+stabilization loop
+# that monitors the leader/group and every descendant reparented to this
+# subreaper (``/proc/self/task/<tid>/children``) until the stdout and stderr
+# pipes EOF AND no owned descendant remains for a bounded stabilization
+# window — the same trusted launch/lock supervision contract as the campaign
+# and launch authorities (F1/F3/F4/F6/F7, §9/§12).
+RUN_TIMEOUT = 7200.0  # aligned with the receipt/evidence campaign bound
+KILL_GRACE = 5.0
+REAP_BOUND = 10.0
+STABILIZE_WINDOW = 0.3  # the settled condition must hold for this window
+STABILIZE_BOUND = 15.0  # bounded total window to reach settlement
+DRAIN_BOUND = 10.0      # bounded window for the pipes to EOF after termination
+
+
 def run_bounded(argv: list[str], cwd: Path) -> tuple[int, bytes, bytes, bool]:
     def limit() -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
+    root = Path(cwd).absolute()
+    lock_module = _load_lock_supervision(root)
+    _install_subreaper()
+    baseline = _baseline_children()
+
     process = subprocess.Popen(
-        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, preexec_fn=limit,
+        argv, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True, close_fds=True, preexec_fn=limit,
     )
+    group_pid = process.pid
+    try:
+        captured = lock_module.capture_descendants(process.pid)
+    except lock_module.RootLockUnsafeError as exc:
+        _terminate_group(process, lock_module, KILL_GRACE)
+        fail(f"cannot capture the bounded suite descendant scope: {exc}")
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray(); stderr = bytearray(); overflow = threading.Event()
 
     def drain(stream, output: bytearray) -> None:
-        while True:
-            chunk = stream.read(65_536)
-            if not chunk:
-                return
-            if len(output) + len(chunk) > MAX_LOG:
-                overflow.set()
-                try:
-                    os.killpg(process.pid, 9)
-                except ProcessLookupError:
-                    pass
-                return
-            output.extend(chunk)
+        try:
+            while True:
+                chunk = stream.read(65_536)
+                if not chunk:
+                    return
+                if len(output) + len(chunk) > MAX_LOG:
+                    overflow.set()
+                    return
+                output.extend(chunk)
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
     threads = [
         threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
@@ -253,14 +402,234 @@ def run_bounded(argv: list[str], cwd: Path) -> tuple[int, bytes, bytes, bool]:
     ]
     for thread in threads:
         thread.start()
-    try:
-        process.wait(timeout=7200)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, 9)
-        process.wait()
-        overflow.set()
+
+    def children_of_self() -> dict[int, int]:
+        """PID -> starttime of every child of this process.
+
+        Reads ``/proc/self/task/<tid>/children`` for every thread of this
+        process, so a descendant reparented to the subreaper (an escaped
+        double-fork/``setsid`` child whose parent chain died) is observed
+        with its exact identity — a PID reused by an unrelated process
+        after the original died carries a different starttime and is never
+        counted as an owned child.
+        """
+        found: dict[int, int] = {}
+        try:
+            tids = os.listdir("/proc/self/task")
+        except OSError:
+            return found
+        for tid in tids:
+            try:
+                raw = Path(f"/proc/self/task/{tid}/children").read_text(
+                    encoding="ascii", errors="replace"
+                )
+            except OSError:
+                continue
+            for token in raw.split():
+                try:
+                    pid = int(token)
+                except ValueError:
+                    continue
+                fields = lock_module._proc_stat_fields(pid)
+                if fields is None or len(fields) < 20:
+                    continue
+                try:
+                    found[pid] = int(fields[19])
+                except ValueError:
+                    continue
+        return found
+
+    def pgid_of(pid: int) -> int | None:
+        fields = lock_module._proc_stat_fields(pid)
+        if fields is None or len(fields) < 3:
+            return None
+        try:
+            return int(fields[2])
+        except ValueError:
+            return None
+
+    def is_zombie(pid: int) -> bool:
+        fields = lock_module._proc_stat_fields(pid)
+        return fields is not None and bool(fields) and fields[0] == "Z"
+
+    def alive(pid: int, starttime: int | None) -> bool:
+        """Identity-pinned liveness: exists, is not a zombie, and (when the
+        starttime is known) still carries the recorded starttime."""
+        if starttime is not None:
+            return lock_module._is_live_with_identity(pid, starttime)
+        return os.path.exists(f"/proc/{pid}") and not is_zombie(pid)
+
+    def reap_children() -> None:
+        """waitpid (WNOHANG) every child of this process except the leader.
+
+        The reap is per-PID (never a blanket ``waitpid(-1)`` that could reap
+        a baseline child of the control plane); baseline children are
+        excluded by identity, and the leader's exit status belongs to
+        ``process``."""
+        for pid, starttime in children_of_self().items():
+            if pid == group_pid:
+                continue
+            if pid in baseline and baseline[pid] == starttime:
+                continue
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, InterruptedError):
+                continue
+
+    def owned_descendants() -> dict[int, int | None]:
+        """Every identity-pinned descendant still owned by the bounded run.
+
+        An owned descendant is a live member of the run's original process
+        group, a captured-scope member still carrying its recorded
+        starttime, or a child reparented to this subreaper — with the
+        pre-run baseline children and the leader itself excluded.  The
+        group, reparented-children, and captured-scope views overlap
+        deliberately: a descendant that escapes the group
+        (``setsid``/double-fork) before its parent chain dies is visible
+        through the captured scope or (once its parent exits) as a
+        reparented child, and a descendant spawned *after* the capture
+        snapshot is still caught as a group member or reparented child.
+        """
+        owned: dict[int, int | None] = {}
+        for pid in lock_module._iter_pids():
+            fields = lock_module._proc_stat_fields(pid)
+            if fields is None or len(fields) < 3 or fields[0] == "Z":
+                continue
+            try:
+                if int(fields[2]) == group_pid:
+                    starttime = int(fields[19]) if len(fields) >= 20 else None
+                    owned[pid] = starttime
+            except ValueError:
+                continue
+        for pid, starttime in children_of_self().items():
+            if pid == group_pid or is_zombie(pid):
+                continue
+            if pid in baseline and baseline[pid] == starttime:
+                continue
+            owned.setdefault(pid, starttime)
+        for entry in captured:
+            if entry.pid == group_pid:
+                continue
+            if lock_module._is_live_with_identity(entry.pid, entry.starttime):
+                owned.setdefault(entry.pid, entry.starttime)
+        return owned
+
+    def terminate_owned(owned: dict[int, int | None]) -> None:
+        """TERM -> bounded grace -> unconditional KILL -> bounded reap.
+
+        SIGTERM and SIGKILL are delivered **per-PID by identity** — never by
+        a numeric group id (``killpg``) — so a PGID reused by a foreign
+        group after the leader is reaped can never be signaled (F4).  The
+        leader and every known member are pinned to their starttime;
+        escaped (``setsid``/double-fork) owned PIDs are signaled per-PID
+        too; a member forked during the grace is captured by the repeated
+        ``/proc`` scan and killed while a pinned member still lives (or
+        while its ancestry reaches a pinned member).  Baseline children and
+        foreign PIDs are never signaled; the leader exiting on TERM is never
+        taken as the group being gone.
+        """
+        escaped = {
+            pid: starttime for pid, starttime in owned.items()
+            if starttime is not None and pgid_of(pid) != group_pid
+        }
+        pinned = {
+            pid: starttime for pid, starttime in owned.items()
+            if starttime is not None and pgid_of(pid) == group_pid
+        }
+        lock_module.terminate_pinned_group(
+            group_pid,
+            grace=KILL_GRACE,
+            reap_bound=REAP_BOUND,
+            pinned=pinned,
+            extra=escaped,
+        )
+        deadline = time.monotonic() + REAP_BOUND
+        while True:
+            reap_children()
+            if (
+                not lock_module._pgid_has_live_members(group_pid)
+                and not any(alive(pid, st) for pid, st in owned.items())
+            ):
+                return
+            if time.monotonic() >= deadline:
+                live = sorted(
+                    pid for pid, st in owned.items() if alive(pid, st)
+                )
+                fail(
+                    "the bounded command group/escaped descendants did not "
+                    f"die within the KILL reap window ({REAP_BOUND:.1f}s); "
+                    f"live descendants survive: {live}"
+                )
+            time.sleep(0.02)
+
+    # Wait for the leader (bounded), while the drain threads read the pipes
+    # concurrently; an overflow aborts the wait so termination happens now.
+    timed_out = False
+    deadline = time.monotonic() + RUN_TIMEOUT
+    while not overflow.is_set():
+        if process.poll() is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        time.sleep(min(0.05, remaining))
+
+    # Termination + stabilization: keep monitoring the leader/group and the
+    # reparented descendants until the pipes EOF AND no owned descendant
+    # remains for the bounded stabilization window.  Every owned descendant
+    # is terminated (TERM -> grace -> KILL -> reap); every escaped
+    # descendant seen — even one cleaned up — forces the receipt to fail.
+    escaped_seen: set[int] = set()
+    settle_deadline = time.monotonic() + STABILIZE_BOUND
+    clean_since: float | None = None
+    while True:
+        owned = owned_descendants()
+        pipes_done = not any(thread.is_alive() for thread in threads)
+        if owned:
+            clean_since = None
+            escaped_seen.update(
+                pid for pid in owned if pgid_of(pid) != group_pid
+            )
+            terminate_owned(owned)
+        else:
+            reap_children()
+            if pipes_done:
+                if clean_since is None:
+                    clean_since = time.monotonic()
+                elif time.monotonic() - clean_since >= STABILIZE_WINDOW:
+                    break
+            else:
+                clean_since = None
+        if time.monotonic() >= settle_deadline:
+            current = owned_descendants()
+            live = sorted(pid for pid, st in current.items() if alive(pid, st))
+            fail(
+                "the bounded command descendants did not settle within "
+                f"{STABILIZE_BOUND:.1f}s; live descendants survive: {live}"
+            )
+        time.sleep(0.02)
+
+    if timed_out:
+        fail(
+            "the bounded command exceeded the "
+            f"{RUN_TIMEOUT:.0f}s timeout; the run was terminated and no "
+            "receipt was minted"
+        )
+    if process.returncode is None:
+        process.poll()  # reap the leader if bounded termination killed it
+    if escaped_seen:
+        # Fail closed even though every escaped descendant was cleaned up:
+        # a run whose descendants escaped the bounded group can never be
+        # certified PASS, regardless of the leader's exit status.
+        fail(
+            "escaped descendants survived the bounded command termination: "
+            f"{sorted(escaped_seen)} (all were terminated during bounded "
+            "cleanup; a run with escaped descendants can never mint a "
+            "receipt)"
+        )
     for thread in threads:
-        thread.join(timeout=5)
+        thread.join(timeout=DRAIN_BOUND)
     return process.returncode, bytes(stdout), bytes(stderr), overflow.is_set()
 
 
@@ -328,7 +697,16 @@ def main() -> int:
     started = time.time()
     returncode, stdout, stderr, overflow = run_bounded(argv, root)
     if overflow:
-        fail("command output exceeded the receipt limit")
+        # Overflow keeps a bounded diagnostic on stderr (never the raw
+        # truncated transcript, which can carry secrets) and exits nonzero:
+        # a truncated run is never recorded, and the diagnostic itself is
+        # bounded and secret-free.
+        fail(
+            "command output exceeded the receipt limit (stdout/stderr "
+            f"bounded to {MAX_LOG} bytes); the run was terminated and the "
+            "truncated transcript is withheld from the diagnostic to avoid "
+            "leaking raw secrets; no receipt was minted"
+        )
     receipt_path = record_receipt(
         root, args.tag, argv, returncode, stdout, stderr, started,
         round_number, evidence_commit, nonce,

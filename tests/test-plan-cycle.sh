@@ -6,7 +6,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.ralph/agent" "$tmp/.factory-state" \
-    "$tmp/.factory/artifacts" "$tmp/.factory/bugs"
+    "$tmp/.factory/artifacts" "$tmp/.factory/bugs" "$tmp/.factory/loop"
 cp "$PROJECT_ROOT/scripts/initialize-plan-cycle.py" \
    "$PROJECT_ROOT/scripts/bug-ledger.py" \
    "$PROJECT_ROOT/scripts/check-plan-freshness.sh" \
@@ -16,6 +16,12 @@ cp "$PROJECT_ROOT/scripts/initialize-plan-cycle.py" \
    "$PROJECT_ROOT/scripts/check-scratchpad.sh" \
    "$PROJECT_ROOT/scripts/validate-implementation-plan.py" \
    "$PROJECT_ROOT/scripts/validate-maintenance-plan.py" "$tmp/scripts/"
+cp "$PROJECT_ROOT/.factory/loop/gitutil.py" "$tmp/.factory/loop/"
+# The Task-23 freshness scope requires the canonical policy authorities to
+# be real tracked files at HEAD.
+cp "$PROJECT_ROOT/.factory/campaign-receipt-policy.json" "$tmp/.factory/"
+cp "$PROJECT_ROOT/.factory/requirement-policy.json" "$tmp/.factory/"
+cp "$PROJECT_ROOT/.factory/capability-contracts.json" "$tmp/.factory/"
 chmod +x "$tmp/scripts/"*
 cat > "$tmp/.factory/config.toml" <<'EOF'
 [project]
@@ -64,7 +70,7 @@ Schema: `ralph-bug-ledger/v1`
 []
 ```
 EOF
-printf '.factory-state/\n' > "$tmp/.gitignore"
+printf '.factory-state/\n__pycache__/\n*.py[cod]\n' > "$tmp/.gitignore"
 printf 'OLD IMPLEMENTATION TASKS MUST DISAPPEAR\n' > "$tmp/.factory/artifacts/implementation-plan.md"
 printf 'OLD MAINTENANCE TASKS MUST DISAPPEAR\n' > "$tmp/.factory/artifacts/maintenance-plan.md"
 printf 'OLD SCRATCHPAD MUST DISAPPEAR\n' > "$tmp/.ralph/agent/scratchpad.md"
@@ -127,6 +133,11 @@ FACTORY_FINAL_GATE_ATTEST=1 FACTORY_PLANNING_BASE_COMMIT=$base \
 [[ -z $(git status --porcelain --untracked-files=normal) ]]
 cp .factory/artifacts/implementation-plan.md "$tmp/valid-plan.md"
 sed -i '0,/- Status: pending/s//- Status: complete/' .factory/artifacts/implementation-plan.md
+# Commit the no-pending mutation so the planning final gate (which now
+# requires a clean tree) reaches the deterministic planner validator and
+# rejects the plan with no pending tasks there.
+git add .factory/artifacts/implementation-plan.md
+git commit -qm 'no-pending planning checkpoint'
 set +e
 FACTORY_PLANNING_BASE_COMMIT=$base ./scripts/final-gate.sh --planning >/dev/null 2>&1
 non_pending_rc=$?
@@ -198,6 +209,10 @@ if ./scripts/validate-implementation-plan.py complete .factory/artifacts/impleme
     exit 1
 fi
 cp "$tmp/valid-complete-plan.md" .factory/artifacts/implementation-plan.md
+# Commit the complete plan so the implementation final gate (which now
+# requires a clean tree) reaches the open-bug gate and rejects there.
+git add .factory/artifacts/implementation-plan.md
+git commit -qm 'complete implementation checkpoint'
 set +e
 ./scripts/final-gate.sh --implementation >/dev/null 2>&1
 open_bug_rc=$?

@@ -668,6 +668,52 @@ Proxy evidence must not be promoted to production verification. Three tracked ar
 - `.factory/capability-contracts.json` (schema `ralph-capability-contract/v1`) defines one probe per declared/required capability: probe argv, must-execute marker, must-not-skip tokens, and deny-simulated markers. `scripts/check-capability-contracts.py` rejects contracts for undeclared capabilities and declared capabilities without contracts; `scripts/check-capability-evidence.py` requires a fresh exact-commit runner receipt whose probe section executed (no skip) and shows no simulated marker. Missing contract, probe, or receipt is unevidenced and never auto-reclassified. The generic repository keeps an empty contract instance; per-product contracts belong in the product repository.
 - Audit reports must cite machine receipts: coordinator-executed commands are wrapped by `scripts/machine-receipt.py --tag <tag> -- <argv...>` and recorded under `.factory-state/audit-receipts/`. `scripts/check-audit-receipts.py` requires every executable-evidence line to carry PASS/FAIL/BLOCKED plus a `[receipt: ...]`/`[manifest: ...]` reference, PASS requires exit 0, and any BLOCKED evidence forces `result: findings`. Subagent prose cannot certify runtime.
 
+  **Bounded supervision.** The receipt wrapper runs each command in a new
+  session under the same bounded supervision contract as the launch
+  authorities: a child subreaper, an identity-pinned baseline snapshot, a
+  captured descendant scope, bounded pipe drains, and a bounded timeout.  On
+  leader exit (or timeout/overflow) it keeps monitoring the original process
+  group and every descendant reparented to it
+  (`/proc/self/task/<tid>/children`) until the stdout/stderr pipes EOF **and**
+  no owned descendant remains for a bounded stabilization window — so an
+  escaped `setsid`/double-fork descendant that races reparenting, or holds the
+  pipes open after the leader exits, is still detected and terminated.  Every
+  owned PID is starttime-pinned: a reused PID is never signaled and
+  baseline/foreign processes are never touched.  On timeout, overflow, or
+  leader exit with descendants the wrapper TERM -> KILLs the original
+  group **per-PID by starttime identity — never by the numeric group id
+  (`killpg`)** (so a group id reused by a foreign process after the leader
+  is reaped can never signal the foreign group), plus every
+  identity-pinned escaped PID, then bounded-reaps all; a member forked
+  during the grace is captured by the repeated `/proc` scan and killed
+  while a pinned member still lives.  Any
+  escaped descendant observed — even one cleaned up — fails the receipt with
+  the exact PIDs named.  An overflow keeps a bounded, secret-free diagnostic
+  on stderr and exits nonzero; a truncated or timed-out run is never recorded.
+
+  **Receipt coverage is exactly the asserted command.** A machine receipt
+  certifies only the concretely asserted argv it recorded (`argv == the
+  allowlisted command`, exit 0, byte digests) — never other paths, other
+  products, or prose claims in the same row.  A runtime receipt
+  (`.factory-state/audit-receipts/<tag>.json`) covers only the command it
+  ran, and each conformance row must carry its **own** receipt/artifact refs:
+  a private/unit-tier row is never satisfied by an installed receipt for a
+  different command, and an installed receipt is never read as evidence for
+  a path outside its argv.  In particular, the `installed-harness-smoke`
+  receipt certifies exactly `./.factory/tests/test-factory-installed.sh` —
+  the installed harness suite — and nothing else.
+
+  **Eligibility is machine-checked, not self-declared.** No conformance row
+  is eligible for `verified` unless the evidence behind it actually ran at
+  the required tier with its own exact-commit refs: VIS-01 stays unverified
+  unless the visual provenance machinery was actually run (the boilerplate
+  ships the visual-audit scaffold **disabled by default** with no vision
+  model configured — a scaffold, not a run), RUNNER-01 stays `blocked`
+  until a declared, provisioned, signed hardware runner produces an accepted
+  exact-commit manifest (Task 24, FACT-020), and ACCEPT-01 stays `missing`
+  until the final audit verifies every row.  A scaffold, a declaration, or a
+  private/unit test run is never elevated to an installed/realtime tier.
+
 Pixel/offscreen framebuffer checks are not real visual acceptance, private/session-scoped service instances are not the real system service, a synthetic test producer is not the target consumer, and an evidence declaration is not evidence. `final-gate.sh` `--implementation` and `--campaign-audit` run all three layers; `--planning` validates an existing sidecar so a fresh cycle stays pendable before migration.
 
 ## Installed-tier evidence for the generic harness (Task 20)
@@ -803,6 +849,114 @@ relabeled.  The **live** installed-functional evidence — the fresh
 generic-namespace evidence, the coordinator receipts at the audit base, and
 the check-installed acceptance — is owned by pending Task 23 after Task 22
 runs the live campaign; Task 20 itself never stages live evidence.
+
+## Generic evidence-scope authority for foreign artifacts (Task 23)
+
+The **live** installed-tier evidence for the generic harness is staged by a
+trusted two-stage publisher — `.factory/loop/generic_evidence.py` with the
+operator entrypoint `.factory/bin/publish-generic-evidence` — under a
+dedicated generic evidence namespace `.factory-state/generic-evidence/<exact-commit>/`
+(private 0700 directories, mode-0600 single-link no-replace artifacts).
+The publisher is deterministic control-plane code: no model, runner,
+hardware, or human is invoked, exactly one writer holds the exclusive
+root-descriptor lock, and a failed or skipped suite leaves no artifacts.
+
+- `prepare` (read-only stage): validates the `factory-state/v1` control
+  state (hardened `state.load_state`) and the exact clean HEAD (strict
+  40-hex, empty `git status --porcelain`), verifies the generic namespace,
+  the audit coordinator path, and the receipt paths do not preexist,
+  snapshots every pre-existing `.factory-state` file's bytes digest / mode /
+  mtime, and writes a staging record (commit, control-state round, fresh
+  nonce, state digest, before-snapshot) into a test-owned 0700 staging
+  directory.  No `.factory-state` byte is written by `prepare`.
+- `publish` (write stage): re-validates the exact clean HEAD and the staged
+  binding, re-proves the before-snapshot still matches the live
+  `.factory-state`, runs the installed harness suite
+  (`./.factory/tests/test-factory-installed.sh`) with a sanitized bounded
+  environment (exit 0, no skip marker, bounded transcript, clean tree after),
+  and only then bridges the audit coordinator from the validated
+  control state and the exact HEAD
+  (`.factory-state/audit-coordinator.json`, no-overwrite, mode 0600),
+  mints the installed-harness machine receipt through the trusted
+  `scripts/machine-receipt.py` authority under the allowlisted
+  `installed-harness-smoke` category
+  (`.factory/campaign-receipt-policy.json` argv
+  `[./.factory/tests/test-factory-installed.sh]`), and only after the
+  receipt is accepted publishes the installed-functional evidence record
+  (schema `factory-generic-installed-functional/v1`) binding the receipt
+  reference, the receipt byte digest, the exact commit, and the coordinator
+  round/nonce, plus a preservation proof
+  (`factory-generic-preservation/v1`) showing every pre-existing
+  `.factory-state` file is byte/mode/mtime identical and the only additions
+  are the new generic namespace, the coordinator path, and the receipt
+  paths.
+
+`scripts/check-installed-functional-evidence.sh` is Task 23 scoped: by
+default (boilerplate mode) it scans every hardened child of the dedicated
+generic evidence root `.factory-state/generic-evidence/` and accepts the
+**unique valid namespace** bound to the **exact** live audit coordinator
+base — the strict invariant
+``coordinator.base_commit == receipt.evidence_commit == record.commit ==
+namespace name``.  The evidence commit must also be an ancestor of (or
+equal to) the final HEAD and bind a
+matching installed-harness receipt and the live audit coordinator (round
+and nonce exactly), and have **every implementation/acceptance
+authority path unchanged** between the evidence commit and the final HEAD
+(the checker authority,
+`generic_evidence.py`/`evidence.py`/`gitutil.py`/`state.py`,
+`publish-generic-evidence`, the receipt policy, the installed suite, and
+`machine-receipt.py`).  Later plan/conformance/audit **metadata** commits
+are allowed; a changed authority path is stale and fails closed.  The
+single live coordinator base can equal only one namespace name, so two
+candidate paths can never both be valid under one coordinator: a planted
+descendant, incomparable, or foreign namespace (a self-consistent record
+at any commit other than the coordinator base) is cross-audit evidence,
+is excluded from the candidate set before selection, and can never shadow
+the unique valid namespace (a forged or stale namespace is excluded the
+same way).  The legacy
+foreign root file
+`.factory-state/installed-functional-evidence.env` is never read (an
+adopting-product artifact that is ignored and never rewritten).  `--namespace
+PATH` selects an explicit safe-mode namespace for fixture authorities
+(missing value, `..`/empty-component traversal, a symlink parent, or an
+absolute path outside the repository root fail closed); even then the
+record must be bound to a commit that is an ancestor of the final HEAD.
+Accepting the generic evidence requires a **matching installed-harness
+receipt**: the record binds the receipt reference, receipt digest, exact
+commit, and coordinator round/nonce; the receipt must pass the hardened
+hidden evidence validation (no-follow owner/mode/link-count/inode
+identity, argv/digest/coordinator bindings), exit 0, carry exactly one of
+the allowlisted `installed-harness-smoke` argv arrays, and its certified
+suite stdout transcript must carry no skip marker.  The production/acceptance
+inputs must be unchanged since the tested commit (clean working tree).
+
+**Crash recovery (SIGKILL windows).** Every canonical write is atomic
+no-replace and a crashed publication resumes deterministically on the next
+`publish` with the same staging record.  The installed-harness receipt set
+resumes only when it is complete and byte-exact to the staged artifacts (a
+torn set fails closed with no deletion); the authorizing coordinator is
+reused, never overwritten.  A canonical empty/partial evidence namespace is
+finalized only when the exact staging record + the reused coordinator + the
+validated receipt + the expected record bytes all match; a tampered or
+foreign partial fails closed with **no deletion**.  A fresh namespace is
+published as a privately complete 0700 temp namespace (record fsynced
+inside) moved onto the canonical name with Linux `renameat2`
+`RENAME_NOREPLACE`, so the namespace appears atomically and can never
+clobber an existing one; the publisher's own `.partial-*` temp namespace
+left by a SIGKILL is validated and resumed, or fails closed.  After the
+installed suite the `.factory-state` snapshot must be **fully unchanged** —
+no additions, mutations, or deletions at all — before the first
+coordinator/receipt/evidence canonical write, so a hostile passing suite
+that leaves an extra file can never produce canonical artifacts.
+
+The hidden suite `.factory/tests/test-factory-generic-evidence.py` plus its
+driver `.factory/tests/test-factory-generic-evidence.sh` prove in
+test-owned fixture repositories that the foreign old root env is ignored
+and preserved byte/mode/mtime-identically, symlink/hardlink/mode/commit/
+receipt tampering fails closed, duplicate publication fails closed, stale
+generic namespaces are never read, failed/skipped suites leave no
+artifacts, and the real committed installed suite runs end-to-end at the
+exact fixture commit with the checker accepting the publication.
 
 ## Machine visual-audit scaffold
 

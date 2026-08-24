@@ -1459,7 +1459,112 @@ elevated by prose.
   readers ignore foreign artifacts outside that namespace, so a foreign
   artifact causes no error and is never rewritten. Preservation is proven
   by recording the foreign files' byte digests before and after the task
-  and verifying the digests, mode, and mtime are unchanged.
+  and verifying the digests, mode, and mtime are unchanged.  Implementation:
+  the trusted two-stage publisher
+  `.factory/loop/generic_evidence.py` (operator entrypoint
+  `.factory/bin/publish-generic-evidence`) is implemented and proven by the
+  hidden suite `.factory/tests/test-factory-generic-evidence.py/.sh` in
+  test-owned fixture repositories.  `prepare` validates the
+  `factory-state/v1` control state and the exact clean HEAD, verifies the
+  generic namespace/coordinator/receipt paths do not preexist, snapshots
+  every pre-existing `.factory-state` file's bytes/mode/mtime, and writes
+  a staging record — with no `.factory-state` write.  `publish`
+  re-validates the binding and the before-snapshot, runs the installed
+  harness suite (`./.factory/tests/test-factory-installed.sh`) with a
+  sanitized bounded environment (exit 0, no skip marker, clean tree after),
+  bridges the audit coordinator from the validated control state round and
+  the exact clean HEAD (no-overwrite, mode 0600), mints the installed-harness
+  machine receipt under the new allowlisted `installed-harness-smoke`
+  receipt-policy category (argv `[./.factory/tests/test-factory-installed.sh]`,
+  `.factory/campaign-receipt-policy.json`) through the trusted
+  `scripts/machine-receipt.py` authority, validates the receipt (hardened
+  no-follow validation, exact commit, coordinator round/nonce, allowlisted
+  argv, byte digest, no skip marker), and only after the receipt is accepted
+  publishes the installed-functional evidence record (schema
+  `factory-generic-installed-functional/v1`) binding the receipt
+  digest/commit/coordinator plus a preservation proof
+  (`factory-generic-preservation/v1`) into
+  `.factory-state/generic-evidence/<exact-commit>/` (private 0700
+  directories, mode-0600 single-link no-replace artifacts).  The publisher
+  is two-stage, exact-commit, clean-tree, one-writer, and
+  model/runner/hardware/human-free; a failed or skipped suite leaves no
+  artifacts.  `scripts/check-installed-functional-evidence.sh` is scoped to
+  read ONLY the exact-HEAD dedicated generic namespace by default (or an
+  explicit safe-mode `--namespace`), never the foreign root
+  `.factory-state/installed-functional-evidence.env`, and accepting the
+  generic evidence requires a matching installed-harness receipt.
+  `check-audit-receipts.py` needs no schema change: the installed-harness
+  receipt is a standard `ralph-audit-receipt/v1` record and the audit
+  report cites `[receipt: .factory-state/audit-receipts/installed-harness-smoke.json]`.
+  The hidden suite proves: foreign old root env ignored + preserved
+  byte/mode/mtime, symlink/hardlink/mode/commit/receipt tamper fail closed,
+  duplicate publication fails closed, stale generic namespaces are never
+  read, failed/skipped suites produce no artifacts, and the real committed
+  installed suite runs end-to-end at the exact fixture commit with the
+  checker accepting the publication.
+
+  Final Task-23 blocker remediations (all proven by the hidden suites):
+
+  1. **Identity-pinned group termination.** The numeric-killpg reuse race
+     is eliminated in both `scripts/machine-receipt.py` and
+     `.factory/loop/lock.py`: the numeric group id is used only as a
+     `/proc` scan key and is never passed to `killpg`, every member is
+     signaled per-PID while its starttime identity matches, fork-during-
+     termination descendants are captured by repeated scans, and a foreign
+     group that reuses a released id is never signaled (deterministic
+     PGID/PID-reuse and fork-during-termination tests in
+     `tests/test-factory-lock.py`/`tests/test-audit-receipts.sh`).
+  2. **Full post-suite snapshot delta.** After the installed suite the
+     `.factory-state` snapshot must be fully unchanged (no additions,
+     mutations, or deletions at all) before any coordinator/receipt/
+     evidence canonical write; a hostile passing suite that leaves an extra
+     file produces zero canonical artifacts.
+  3. **Secure transient-result unlink.** `campaign.read_phase_result`
+     secure-unlinks the raw phase result in a `finally` on parse/schema/
+     oversize/empty/error paths (removing the pathname only while it still
+     names the opened inode); a malformed secret-laden result leaves no
+     bytes and no path.
+  4. **Namespace crash resume.** A canonical empty/partial evidence
+     namespace is finalized only when the exact staging record + reused
+     coordinator + validated receipt + expected record bytes all match;
+     tampered/foreign partials fail closed with no deletion.  Fresh
+     namespaces publish as a privately complete 0700 temp namespace moved
+     with Linux `renameat2` `RENAME_NOREPLACE`; SIGKILL-window states
+     (empty/record-only/completed) resume or fail deterministically.
+  5. **Strict evidence binding (coordinator/base == receipt/commit ==
+     namespace).** The checker restores the strict invariant
+     ``coordinator.base_commit == receipt.evidence_commit == record.commit
+     == namespace name``: the record's commit must equal the namespace
+     name and the live audit coordinator's base commit exactly (never a
+     descendant or incomparable commit — a planted descendant receipt
+     under a base coordinator is cross-audit evidence and is excluded/
+     rejected).  The evidence commit may still be an ancestor of (or equal
+     to) the final HEAD and the implementation/acceptance authority paths
+     must be unchanged since the evidence commit, so later
+     plan/conformance/audit metadata commits are allowed; a changed
+     authority path is stale and fails closed.  Because the single live
+     coordinator base can equal only one namespace name, two candidate
+     paths can never both be valid under one coordinator: the selection is
+     always unique (no descendant-most choice or ambiguity resolution is
+     needed), and a planted descendant, incomparable, forged, or stale
+     namespace is excluded before selection and can never shadow it.
+     Positive evidence is minted only through the real publisher and the
+     trusted ``machine-receipt.py`` wrapper; hand-fabricated namespaces are
+     used only in rejection tests and must fail closed.
+  6. **Namespace argument hardening.** `--namespace` requires a non-empty
+     value, rejects traversal/empty components, symlink parents, and
+     absolute paths outside the repository root; the hidden driver bounds
+     its run with a timeout and the internal `run` staging directory is
+     always cleaned up.
+  7. **Coordinator init reuse.** `initialize-campaign-audit.py` reuses an
+     exact-matching coordinator (round/base, nonce preserved) and mints a
+     fresh one with no-replace semantics, so a raced appearance can never
+     overwrite an active audit.
+  8. **Docs eligibility.** Documentation never claims VIS-01 without a real
+     visual run (the scaffold is disabled by default), a receipt covers
+     only its concretely asserted argv (each private/unit row needs its own
+     receipts), and RUNNER-01/ACCEPT-01 stay `blocked`/`missing`.
+
 - Acceptance criteria: the pre-existing foreign `.factory-state` bytes are
   byte-identical after the task (digest snapshot proves untouched); the
   installed suite (Task 20 machinery) runs from the installed copy at the
@@ -1474,7 +1579,8 @@ elevated by prose.
   `.factory-state` files (digest, mode, and mtime recorded and re-verified);
   `scripts/check-installed-functional-evidence.sh`;
   `scripts/check-audit-receipts.py`;
-  `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`.
+  `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`;
+  `./.factory/tests/test-factory-generic-evidence.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 
 ## Task 24: External human runner provisioning (RUNNER-01)

@@ -1298,5 +1298,154 @@ time.sleep(300)
                 child.wait(timeout=10)
 
 
+class PinnedGroupTermination(LockConformanceCase):
+    """Identity-pinned per-member group termination (F3, F4, Task 23).
+
+    Bounded group termination never signals by a numeric group id
+    (``killpg``): the numeric id is only a ``/proc`` scan key, every member
+    is signaled by its own PID while its starttime identity matches, new
+    descendants forked during the grace are captured by the repeated scan,
+    and a foreign group that reuses the released numeric id is never
+    signaled — deterministically simulated here with foreign groups and
+    stale pins.
+    """
+
+    def _foreign_sleeper(self, marker: Path) -> subprocess.Popen:
+        """A foreign process in its own session/group, writing its PID."""
+        script = self.tmp / "foreign.py"
+        script.write_text(
+            "import os, sys, time\n"
+            f"with open({str(marker)!r}, 'w') as s: s.write(str(os.getpid()))\n"
+            "time.sleep(300)\n",
+            encoding="utf-8",
+        )
+        return subprocess.Popen(
+            [sys.executable, str(script)], cwd=self.tmp, start_new_session=True
+        )
+
+    def test_foreign_group_with_unpinned_numeric_id_is_never_signaled(self) -> None:
+        """The PGID-reuse case, deterministic: a foreign group holds a numeric
+        id for which nothing (or only stale identities) is pinned.  The
+        pinned supervisor must never signal it."""
+        marker = self.tmp / "foreign-unpinned.pid"
+        foreign = self._foreign_sleeper(marker)
+        try:
+            foreign_pid = int(self.wait_for_marker(marker))
+            self.assertEqual(foreign_pid, foreign.pid)
+            self.assertEqual(foreign_pid, os.getpgid(foreign_pid))
+            # Nothing pinned for this numeric id: refuse to signal (the
+            # unpinned-id refusal is what makes the post-reap reuse safe).
+            result = lock_module.terminate_pinned_group(
+                foreign_pid, grace=0.1, reap_bound=1.0
+            )
+            self.assertEqual(result, {})
+            self.assertTrue(
+                self._pid_alive(foreign_pid),
+                "a foreign group must survive an unpinned numeric id",
+            )
+            # Stale pins (identities from a long-gone group): the live
+            # starttime mismatch refuses every per-PID signal.
+            stale = {foreign_pid: lock_module._starttime_of(foreign_pid) + 1}
+            result = lock_module.terminate_pinned_group(
+                foreign_pid, grace=0.1, reap_bound=1.0, pinned=stale
+            )
+            self.assertEqual(result, {})
+            self.assertTrue(
+                self._pid_alive(foreign_pid),
+                "a foreign member must survive stale identity pins",
+            )
+        finally:
+            if foreign.poll() is None:
+                foreign.kill()
+                foreign.wait(timeout=10)
+
+    def test_fork_during_termination_is_captured_and_cleaned(self) -> None:
+        """A member that forks a new descendant into the group while the TERM
+        grace is pending is captured by the repeated ``/proc`` scan and
+        killed; no owned member survives the bounded termination."""
+        marker = self.tmp / "leader.pid"
+        child_marker = self.tmp / "forked-child.pid"
+        script = self.tmp / "fork-during-term.py"
+        script.write_text(
+            "import os, signal, sys, time\n"
+            "marker, child_marker = sys.argv[1], sys.argv[2]\n"
+            "def handler(signum, frame):\n"
+            "    pid = os.fork()\n"
+            "    if pid == 0:\n"
+            "        with open(child_marker, 'w') as f: f.write(str(os.getpid()))\n"
+            "        time.sleep(300)\n"
+            "        os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, handler)\n"
+            "with open(marker, 'w') as f: f.write(str(os.getpid()))\n"
+            "while True:\n"
+            "    time.sleep(0.05)\n",
+            encoding="utf-8",
+        )
+        leader = subprocess.Popen(
+            [sys.executable, str(script), str(marker), str(child_marker)],
+            cwd=self.tmp,
+            start_new_session=True,
+        )
+        forked: int | None = None
+        try:
+            leader_pid = int(self.wait_for_marker(marker))
+            self.assertEqual(leader_pid, leader.pid)
+            lock_module.terminate_pinned_group(
+                leader_pid, grace=1.0, reap_bound=5.0
+            )
+            leader.wait(timeout=10)
+            self.assertFalse(self._pid_alive(leader_pid))
+            self.assertFalse(
+                lock_module._pgid_has_live_members(leader_pid),
+                "a fork-during-termination member must be cleaned",
+            )
+            if child_marker.exists():
+                forked = int(child_marker.read_text(encoding="utf-8").strip())
+                # A SIGKILLed descendant may linger as an unreaped zombie
+                # (reparented to init); liveness must exclude zombies exactly
+                # like the supervision identity check.
+                self.assertFalse(
+                    lock_module._is_live_with_identity(
+                        forked, lock_module._starttime_of(forked) or 0
+                    ),
+                    "the fork-during-termination descendant survived",
+                )
+        finally:
+            if leader.poll() is None:
+                leader.kill()
+                leader.wait(timeout=10)
+            if forked is not None:
+                try:
+                    os.kill(forked, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_terminate_pinned_group_clean_exit_reaps_group(self) -> None:
+        """A normal TERM-cooperating group is terminated and verified gone."""
+        marker = self.tmp / "coop.pid"
+        script = self.tmp / "coop.py"
+        script.write_text(
+            "import os, signal, sys, time\n"
+            "def handler(signum, frame): raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, handler)\n"
+            f"with open({str(marker)!r}, 'w') as s: s.write(str(os.getpid()))\n"
+            "while True: time.sleep(0.05)\n",
+            encoding="utf-8",
+        )
+        leader = subprocess.Popen(
+            [sys.executable, str(script)], cwd=self.tmp, start_new_session=True
+        )
+        try:
+            leader_pid = int(self.wait_for_marker(marker))
+            lock_module.terminate_pinned_group(leader_pid, grace=1.0, reap_bound=5.0)
+            leader.wait(timeout=10)
+            self.assertFalse(self._pid_alive(leader_pid))
+            self.assertFalse(lock_module._pgid_has_live_members(leader_pid))
+        finally:
+            if leader.poll() is None:
+                leader.kill()
+                leader.wait(timeout=10)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

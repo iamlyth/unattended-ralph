@@ -479,11 +479,51 @@ An evidence line uses the exact grammar `PASS|FAIL|BLOCKED <shell-quoted argv>
 PASS requires recorded exit 0, and any genuine BLOCKED evidence forces a
 `findings` audit result.
 
+**Receipt wrapper supervision (Task 23).** Every coordinator-executed command
+is wrapped by `scripts/machine-receipt.py` and runs under the same bounded
+supervision contract as the launch authorities (F1/F3/F4/F6/F7): the wrapper
+installs itself as a child subreaper before spawn, snapshots the identity-
+pinned baseline (every pre-existing child's PID + starttime) and the captured
+descendant scope, and runs the command in a new session with bounded pipe
+drains.  After the leader exits (or on timeout/overflow) the wrapper keeps
+monitoring the original process group and every descendant reparented to it
+through `/proc/self/task/<tid>/children` — concurrently with the drains —
+until the stdout/stderr pipes EOF **and** no owned descendant remains for a
+bounded stabilization window, so a later-reparented escape can never slip
+past a single snapshot.  Every owned PID is pinned to its `/proc` starttime:
+a PID reused by an unrelated process is never signaled, killed, or reaped,
+and baseline/foreign processes are never touched.  On timeout, overflow, or
+leader exit with descendants, the wrapper delivers TERM, observes a bounded
+grace, and escalates to KILL — both **per-PID by starttime identity, never
+by the numeric group id (`killpg`)**, so a group id reused by a foreign
+process after the leader is reaped can never signal the foreign group — of
+the original group and of each identity-pinned escaped (`setsid`/
+double-fork) PID; a member forked during the grace is captured by the
+repeated `/proc` scan and killed while a pinned member still lives, and all
+are bounded-reaped so nothing survives.  Any escaped descendant observed
+during the run — even one
+terminated during cleanup — forces the receipt to fail with the exact escaped
+PIDs named; a run with escaped descendants can never mint a receipt.  An
+overflow keeps a bounded, secret-free diagnostic on the wrapper's stderr
+(never the raw truncated transcript) and exits nonzero, and a timed-out or
+truncated run is never recorded.
+
 Machine evidence never elevates tiers: ordinary receipts are capped at
 `installed`, signed runner manifests at `real_system`, and no machine artifact
 can claim `human`. Missing hardware, compositor, target consumer, signer, or
 human review remains a finding. Receipts, manifests, and evidence tiers verify
 claims but never select implementation tasks.
+
+A receipt certifies exactly the argv it recorded — the concretely asserted
+command, exit 0, and byte digests — never other paths, other products, or
+prose in the same conformance row.  Each row must carry its **own**
+receipt/artifact refs (a private/unit row is never satisfied by an installed
+receipt for a different command), and eligibility is machine-checked: VIS-01
+stays unverified unless visual was actually run (the boilerplate visual-audit
+scaffold is disabled by default with no vision model), RUNNER-01 stays
+`blocked` until a provisioned signed hardware runner submits an accepted
+exact-commit manifest, and ACCEPT-01 stays `missing` until the final audit
+verifies every row.
 
 ## Installed-tier smoke suite (Task 20)
 
@@ -568,6 +608,69 @@ relabeled.  The **live** installed-functional evidence — the fresh
 generic-namespace evidence, the coordinator receipts at the audit base, and
 the check-installed acceptance — is owned by pending Task 23 after Task 22
 runs the live campaign; Task 20 itself never stages live evidence.
+
+Task 23 stages the **live** installed-tier evidence through the trusted
+two-stage publisher `.factory/loop/generic_evidence.py`
+(`.factory/bin/publish-generic-evidence prepare|publish`): `prepare`
+validates the `factory-state/v1` control state and the exact clean HEAD and
+snapshots every pre-existing `.factory-state` file's digest/mode/mtime
+without writing anything; `publish` re-validates the binding, runs the
+installed harness suite (`./.factory/tests/test-factory-installed.sh`) with
+a sanitized bounded environment (exit 0, no skip marker, and — before the
+first coordinator/receipt/evidence canonical write — a **fully unchanged**
+`.factory-state` snapshot: no additions, mutations, or deletions at all,
+so a hostile passing suite that leaves an extra file can never produce
+canonical artifacts), bridges the audit
+coordinator from the validated control state and the exact HEAD
+(no-overwrite; an exact-matching existing coordinator is reused, never
+re-minted), mints the installed-harness machine receipt under the
+allowlisted `installed-harness-smoke` receipt-policy category, and only
+after the receipt is accepted publishes the installed-functional evidence
+under `.factory-state/generic-evidence/<exact-commit>/` (private 0700
+directories, mode-0600 single-link no-replace artifacts) plus a
+preservation proof.  The publisher is one-writer, deterministic, and
+model/runner/hardware/human-free; a failed or skipped suite leaves no
+artifacts and no pre-existing `.factory-state` file is ever deleted,
+quarantined, or mutated (the proof records the before/after snapshot).
+
+**Crash recovery (SIGKILL windows).** Every canonical write is atomic
+no-replace and a crashed publication resumes deterministically on the next
+`publish` with the same staging record: the receipt set resumes only when
+complete and byte-exact (a torn set fails closed with no deletion); a
+canonical empty/partial evidence namespace is finalized only when the exact
+staging record + the reused coordinator + the validated receipt + the
+expected record bytes all match, and a tampered or foreign partial fails
+closed with **no deletion**.  A fresh namespace is published as a privately
+complete 0700 temp namespace moved onto the canonical name with Linux
+`renameat2` `RENAME_NOREPLACE` (the namespace appears atomically and can
+never clobber); the publisher's own `.partial-*` temp namespace left by a
+SIGKILL is validated and resumed, or fails closed.
+
+`scripts/check-installed-functional-evidence.sh` scans every hardened child
+of the dedicated generic evidence root by default and accepts the **unique
+valid namespace bound to the exact live audit coordinator base** — the
+strict invariant
+``coordinator.base_commit == receipt.evidence_commit == record.commit ==
+namespace name`` — whose implementation/acceptance authority
+paths are unchanged since the evidence commit (the evidence commit may be
+an ancestor of, not equal to, the final HEAD: later plan/conformance/
+audit metadata commits are allowed; a changed authority path is stale and
+fails closed), and never reads the foreign
+root `.factory-state/installed-functional-evidence.env`; an explicit
+`--namespace` must be a non-empty path inside the repository root with no
+traversal or symlink parent.  The single live coordinator base can equal
+only one namespace name, so two candidate paths can never both be valid
+under one coordinator: a planted descendant, incomparable, or foreign
+namespace at any other commit is cross-audit evidence and is excluded
+before selection (a forged or stale namespace never shadows).  Accepting the
+generic evidence requires a matching installed-harness receipt (hardened
+validation, allowlisted argv, exit 0, exact commit, coordinator
+round/nonce with the coordinator audit base **exactly** the evidence
+commit, byte-digest binding, no skip marker).  The hidden suite
+`.factory/tests/test-factory-generic-evidence.py/.sh` proves the foreign
+old root env is ignored and preserved, tamper/duplicate/stale/failed/
+skipped classes fail closed, crash-window partial namespaces resume only on
+exact binding bytes, and the real installed suite runs end-to-end.
 
 ## Quota states
 

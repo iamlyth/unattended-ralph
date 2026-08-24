@@ -272,6 +272,14 @@ def test_coordinator_env_stripped_from_untrusted_leaf() -> None:
     try:
         shutil.copy2(SOURCE / "scripts" / "machine-receipt.py",
                      root / "scripts" / "machine-receipt.py")
+        (root / ".factory" / "loop").mkdir(parents=True)
+        # The receipt wrapper's bounded supervised runner resolves the
+        # trusted root-descriptor lock authority from its own tree (lock.py
+        # in turn loads the pinned Git runner from the same loop namespace).
+        shutil.copy2(SOURCE / ".factory" / "loop" / "lock.py",
+                     root / ".factory" / "loop" / "lock.py")
+        shutil.copy2(SOURCE / ".factory" / "loop" / "gitutil.py",
+                     root / ".factory" / "loop" / "gitutil.py")
         runtime = root / ".factory-state"
         runtime.mkdir(mode=0o700)
         base = "a" * 40

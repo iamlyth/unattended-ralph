@@ -78,10 +78,12 @@
         "evidence_commit": { "$ref": "#/$defs/commit" },
         "receipts": {
           "type": "array",
+          "description": "Evidence refs certifying executed runtime. Each ref is either a Git-tracked repository path (validated as a Git blob at evidence_commit) or a live runtime receipt of the exact safe shape `.factory-state/audit-receipts/<tag>.json` (validated against the live filesystem: hardened no-follow owner/mode/link-count/single-link, ralph-audit-receipt/v1 schema, exit 0, exact row evidence_commit, argv/stdout/stderr digests, and the protected audit-coordinator round/nonce binding). No other `.factory-state/...` path is a valid ref; a missing, symlinked, stale, forged, or non-passing runtime receipt fails closed.",
           "items": { "$ref": "#/$defs/repo_path" }
         },
         "artifacts": {
           "type": "array",
+          "description": "Git-tracked artifact refs; always validated as Git blobs at the evidence commit (never live working-tree or ignored-runtime files).",
           "items": { "$ref": "#/$defs/repo_path" }
         },
         "fact_refs": {

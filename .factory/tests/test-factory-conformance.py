@@ -35,6 +35,7 @@ live repository and never touches ``.ralph/``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -261,6 +262,203 @@ class ConformanceFixtureTests(unittest.TestCase):
         for script in (CONTRACT_CHECKER, CAPABILITY_CHECKER):
             result = run(["python3", str(script)], self.fixture.root)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RuntimeReceiptTests(unittest.TestCase):
+    """Live runtime receipts (``.factory-state/audit-receipts/<tag>.json``).
+
+    A ``verified`` row may cite a live runtime receipt instead of a tracked
+    Git blob: it is validated against the live filesystem (hardened
+    no-follow owner/mode/link-count, ``ralph-audit-receipt/v1`` schema,
+    exit 0, exact row evidence_commit, argv/stdout/stderr digests, and the
+    protected coordinator round/nonce), while tracked artifacts always
+    require a Git blob at the evidence commit.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="factory-conformance-rt-")
+        self.fixture = ConformanceFixture(Path(self._tmp.name))
+        self.fixture.blessed()
+        root = self.fixture.root
+        # The hidden evidence authority the validator loads for hardened
+        # receipt validation, and the trusted receipt wrapper for minting.
+        shutil.copy2(ROOT / ".factory" / "loop" / "evidence.py",
+                     root / ".factory" / "loop" / "evidence.py")
+        shutil.copy2(ROOT / ".factory" / "loop" / "lock.py",
+                     root / ".factory" / "loop" / "lock.py")
+        shutil.copy2(ROOT / "scripts" / "machine-receipt.py",
+                     root / "scripts" / "machine-receipt.py")
+        self.state_dir = root / ".factory-state"
+        self.state_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(self.state_dir, 0o700)
+        self.nonce = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.head = git(root, "rev-parse", "HEAD").strip()
+        self._write_coordinator(1, self.head, self.nonce)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_coordinator(self, round_number: int, base: str, nonce: str) -> None:
+        (self.state_dir / "audit-coordinator.json").write_text(
+            json.dumps({
+                "schema": "ralph-audit-coordinator/v1",
+                "round": round_number,
+                "base_commit": base,
+                "nonce": nonce,
+                "created_at": 1,
+            }, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(self.state_dir / "audit-coordinator.json", 0o600)
+
+    def _mint(self, tag: str, *argv: str) -> subprocess.CompletedProcess[str]:
+        return run(
+            [sys.executable, "scripts/machine-receipt.py", "--root", str(self.fixture.root),
+             "--tag", tag, "--audit-round", "1", "--evidence-commit", self.head,
+             "--nonce", self.nonce, "--", *argv],
+            self.fixture.root,
+        )
+
+    def _sidecar_with_receipt(self, ref: str, *, in_artifacts: bool = False) -> None:
+        """Commit a sidecar whose REQ-01 cites ``ref``, then rebind the exact
+        evidence head and the coordinator so a freshly minted receipt matches
+        the row binding exactly."""
+        data = json.loads(self.fixture.sidecar_path.read_text(encoding="utf-8"))
+        for req in data["requirements"]:
+            if req["id"] == "REQ-01":
+                req["receipts"] = [] if in_artifacts else [ref]
+                req["artifacts"] = [ref] if in_artifacts else ["tests/probe.c"]
+                req["evidence_commit"] = self.head
+        self.fixture.sidecar_path.write_text(json.dumps(data), encoding="utf-8")
+        self.head = self.fixture.commit_all("sidecar runtime receipt")
+        self._write_coordinator(1, self.head, self.nonce)
+
+    def test_live_runtime_receipt_accepts_verified_row(self) -> None:
+        """A real minted installed-harness receipt under the runtime namespace
+        satisfies the `receipts` field at the exact row evidence commit."""
+        minted = self._mint("installed-harness-smoke", "true")
+        self.assertEqual(minted.returncode, 0, minted.stderr)
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json"
+        )
+        result = self.fixture.validator("planning")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_runtime_receipt_traversal_is_rejected(self) -> None:
+        self._mint("installed-harness-smoke", "true")
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/../audit-coordinator.json"
+        )
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe path component", result.stderr)
+
+    def test_runtime_namespace_outside_audit_receipts_is_rejected(self) -> None:
+        """`.factory-state/...` outside the exact audit-receipts shape is
+        never a valid ref (only the allowlisted runtime shape is permitted)."""
+        (self.state_dir / "installed-functional-evidence.env").write_text(
+            "commit=0" * 20 + "\n", encoding="utf-8")
+        self._sidecar_with_receipt(
+            ".factory-state/installed-functional-evidence.env"
+        )
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the only allowed shape", result.stderr)
+
+    def test_runtime_receipt_in_artifacts_is_rejected(self) -> None:
+        """Tracked artifacts always require a Git blob: the runtime shape is
+        never a valid `artifacts` ref."""
+        self._mint("installed-harness-smoke", "true")
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json",
+            in_artifacts=True,
+        )
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the only allowed shape", result.stderr)
+
+    def test_missing_runtime_receipt_fails_closed(self) -> None:
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/never-minted.json"
+        )
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe or invalid", result.stderr)
+
+    def test_stale_runtime_receipt_fails_closed(self) -> None:
+        """A receipt bound to a different evidence commit never satisfies the
+        row's exact evidence_commit."""
+        ancestor = self.head  # the pre-sidecar commit the receipt predates
+        # Mint the receipt at the pre-sidecar commit first, then commit a
+        # sidecar whose row is bound to that same (older) commit, and finally
+        # rebind the row to the NEWER commit so the receipt's evidence_commit
+        # no longer equals the row's evidence_commit.
+        self._mint("installed-harness-smoke", "true")
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json"
+        )
+        data = json.loads(self.fixture.sidecar_path.read_text(encoding="utf-8"))
+        for req in data["requirements"]:
+            if req["id"] == "REQ-01":
+                req["evidence_commit"] = self.head
+        self.fixture.sidecar_path.write_text(json.dumps(data), encoding="utf-8")
+        self.fixture.commit_all("stale sidecar")
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not equal the row evidence_commit", result.stderr)
+
+    def test_failing_runtime_receipt_never_passes(self) -> None:
+        """A self-consistent receipt that exited non-zero is never PASS."""
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json"
+        )
+        self._mint("installed-harness-smoke", "true")
+        receipts = self.state_dir / "audit-receipts"
+        receipt = receipts / "installed-harness-smoke.json"
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data["exit_code"] = 7
+        # Keep the digest bindings self-consistent so the hardened schema/
+        # digest validation passes and the exit-code gate is what fails.
+        data["stdout_sha256"] = hashlib.sha256(
+            (receipts / "installed-harness-smoke.stdout").read_bytes()
+        ).hexdigest()
+        data["stderr_sha256"] = hashlib.sha256(
+            (receipts / "installed-harness-smoke.stderr").read_bytes()
+        ).hexdigest()
+        receipt.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n",
+                           encoding="utf-8")
+        os.chmod(receipt, 0o600)
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not exit 0", result.stderr)
+
+    def test_symlinked_runtime_receipt_fails_closed(self) -> None:
+        self._mint("installed-harness-smoke", "true")
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json"
+        )
+        receipts = self.state_dir / "audit-receipts"
+        target = receipts / "installed-harness-smoke.json"
+        original = target.read_bytes()
+        target.unlink()
+        os.symlink("audit-coordinator.json", target)
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe or invalid", result.stderr)
+        target.unlink()
+        target.write_bytes(original)
+        os.chmod(target, 0o600)
+
+    def test_wrong_coordinator_binding_fails_closed(self) -> None:
+        """A receipt minted under a different coordinator nonce/round is
+        rejected against the protected coordinator state."""
+        self._mint("installed-harness-smoke", "true")
+        self._sidecar_with_receipt(
+            ".factory-state/audit-receipts/installed-harness-smoke.json"
+        )
+        other_nonce = hashlib.sha256(os.urandom(32)).hexdigest()
+        self._write_coordinator(1, self.head, other_nonce)
+        result = self.fixture.validator("planning")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("coordinator nonce", result.stderr)
 
 
 class ConformanceRegistryTests(unittest.TestCase):
