@@ -43,19 +43,24 @@ state/branch calls of the trusted control plane use this module; the
 committed ``scripts/git-commit-guard.sh`` boundary remains the authority for
 commit creation and is preserved untouched.
 
-Bounded byte capture: :func:`git_bytes_bounded` consumes a trusted Git
-child's output through the pipes with ``select``-bounded ``read1`` chunks,
-draining **stdout and stderr fairly** (both streams are selected together, so
-a child that floods one pipe while the other stalls can never deadlock the
-capture into a spurious timeout), and fails closed the moment a stream
-exceeds its cap, so a blob read is never an unbounded ``subprocess.run``
-capture even when a pre-checked size is the primary defense (Task 15 F1).
-The child runs in its **own process group** (``start_new_session=True``) and
-a wedged, over-bound, or timed-out capture terminates and reaps the child's
-*entire* group (TERM, full bounded grace, unconditional KILL, bounded leader
-reap), so no git helper survives and no zombie is left behind (Task 15).  The
-stdin pipe is written with the same shared bounded deadline, so a child that
-never reads its input cannot stall the capture either.
+Bounded byte capture: :func:`git_bytes_bounded` drives the stdin write and
+both capture pipes through **one fair ``select`` event loop** — stdin,
+stdout, and stderr are serviced together against one shared deadline with
+``select``-bounded ``read1``/``os.write`` chunks, so a child that floods one
+pipe while another stalls can never deadlock the capture into a spurious
+timeout, and a batched child whose request payload *and* transcript each
+exceed a pipe buffer keeps making progress instead of wedging a sequential
+write-then-drain (Task 20).  It fails closed the moment a stream exceeds its
+cap, so a blob read is never an unbounded ``subprocess.run`` capture even
+when a pre-checked size is the primary defense (Task 15 F1).  The child runs
+in its **own process group** (``start_new_session=True``) and a wedged,
+over-bound, or timed-out capture terminates and reaps the child's *entire*
+group (TERM, full bounded grace, unconditional KILL, bounded leader reap),
+so no git helper survives and no zombie is left behind (Task 15).  A broken
+or exhausted stdin pipe (EPIPE/EOF) ends the write side instead of failing,
+and once the input is fully delivered the write end is closed so the child
+observes EOF on stdin; a child that never reads its input cannot stall the
+capture past the shared deadline either.
 
 Every invocation failure (missing binary, broken pipe, bounded timeout) is
 routed through the single fail-closed :class:`GitBoundaryError` contract
@@ -74,7 +79,7 @@ import signal
 import stat
 import subprocess
 import time
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 class GitBoundaryError(RuntimeError):
@@ -522,113 +527,90 @@ def _terminate_pinned_git(proc: subprocess.Popen) -> None:
     _reap_leader_bounded(proc, timeout=5.0)
 
 
-def _bounded_write_stdin(
-    proc: subprocess.Popen, input: bytes, deadline: float, argv: Sequence[str]
-) -> None:
-    """Write ``input`` to the child with the shared bounded deadline.
-
-    The stdin pipe is made non-blocking and written in ``select``-bounded
-    chunks, so a child that never reads its stdin cannot stall the capture
-    past the finite deadline (a wedged pipe fails closed with the same
-    ``GitBoundaryError`` contract and the group-termination path reaps the
-    child).  The write end is always closed, whether the input was fully
-    delivered, cut short by a broken pipe, or abandoned on failure.
-    """
-    try:
-        fd = proc.stdin.fileno()
-    except (AttributeError, OSError):
-        return
-    try:
-        if not input:
-            return
-        try:
-            os.set_blocking(fd, False)
-        except OSError:
-            pass
-        view = memoryview(input)
-        while view:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise GitBoundaryError(
-                    f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
-                    f"bounded timeout while writing stdin: {' '.join(argv)}"
-                )
-            ready, _, _ = select.select([], [fd], [], remaining)
-            if not ready:
-                raise GitBoundaryError(
-                    f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
-                    f"bounded timeout while writing stdin: {' '.join(argv)}"
-                )
-            try:
-                written = os.write(fd, view)
-            except BlockingIOError:
-                continue
-            except (BrokenPipeError, OSError):
-                return  # the child closed its stdin; nothing more to deliver
-            if written <= 0:
-                raise GitBoundaryError(
-                    f"the pinned Git executable {GIT_EXECUTABLE!r} made no "
-                    f"stdin progress: {' '.join(argv)}"
-                )
-            view = view[written:]
-    finally:
-        try:
-            proc.stdin.close()
-        except OSError:
-            pass
-
-
-def _bounded_drain_pair(
+def _bounded_io_loop(
     proc: subprocess.Popen,
     out: bytearray,
     err: bytearray,
     maximum: int,
+    input: bytes,
     deadline: float,
     argv: Sequence[str],
 ) -> None:
-    """Fairly drain the child's stdout and stderr with a shared deadline.
+    """Drive stdin writes and stdout/stderr drains in ONE fair event loop.
 
-    Both streams are selected together and drained as data arrives, so a
-    child that floods one pipe while the other stays silent can never
-    deadlock the capture into a spurious timeout: the stalled stream is
-    simply not ready while the flooded one keeps being consumed.  Each
-    stream accumulates at most ``maximum`` bytes; an over-bound stream fails
-    closed instead of being captured unboundedly, and a stream that reached
-    EOF is removed while its sibling keeps draining.  The pipes are
-    non-blocking (``read1`` raises ``BlockingIOError`` on a spurious wakeup
-    instead of blocking) and the shared deadline bounds the whole call.
+    The stdin write end and both capture pipes are serviced by the *same*
+    ``select`` wakeups against one shared deadline, so a child that produces
+    output faster than the caller pushes its input can never wedge the
+    capture: a batched ``git cat-file --batch`` whose request payload *and*
+    whose transcript each exceed the pipe buffer would stall a sequential
+    write-then-drain into a spurious timeout (the child blocks on a full
+    stdout pipe and stops reading the full stdin pipe, so the sequential
+    writer's stdin select never fires).  Stdin writes and stream drains each
+    make progress whenever the corresponding pipe is ready, and a stream
+    that floods while its sibling stalls is consumed fairly (the stalled
+    sibling is simply never ready).  Each stream accumulates at most
+    ``maximum`` bytes and an over-bound stream fails closed; EOF removes a
+    stream while its siblings keep draining; a broken stdin pipe (the child
+    closed its input, typically by exiting) ends the write side instead of
+    failing.  Once the input is fully delivered the stdin write end is
+    closed so the child observes EOF and can exit.  All pipes are
+    non-blocking (``read1``/``os.write`` raise ``BlockingIOError`` on a
+    spurious wakeup instead of blocking) and the shared deadline bounds the
+    whole call.
     """
-    pending = {
-        proc.stdout: (out, "stdout", maximum),
-        proc.stderr: (err, "stderr", maximum),
-    }
-    while pending:
+    streams: Dict[Any, Tuple[bytearray, str, int]] = {}
+    if proc.stdout is not None:
+        streams[proc.stdout] = (out, "stdout", maximum)
+    if proc.stderr is not None:
+        streams[proc.stderr] = (err, "stderr", maximum)
+    view = memoryview(input)
+    write_fd: Optional[int] = None
+    if proc.stdin is not None and view:
+        try:
+            write_fd = proc.stdin.fileno()
+            os.set_blocking(write_fd, False)
+        except (AttributeError, OSError):
+            write_fd = None
+    elif proc.stdin is not None:
+        # No input to deliver: close the write end immediately so a child
+        # that reads stdin to EOF can exit (a never-closed stdin pipe would
+        # stall the bounded wait into a spurious timeout).
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+    stdin_open = write_fd is not None
+    while streams or (stdin_open and view):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise GitBoundaryError(
                 f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
-                f"bounded timeout while capturing output: {' '.join(argv)}"
+                f"bounded timeout: {' '.join(argv)}"
             )
+        read_set = list(streams)
+        write_set = [write_fd] if stdin_open and view else []
         try:
-            ready, _, _ = select.select(list(pending), [], [], remaining)
+            ready_read, ready_write, _ = select.select(
+                read_set, write_set, [], remaining
+            )
         except (OSError, ValueError) as exc:
             raise GitBoundaryError(
                 f"cannot select the pinned Git executable pipes "
                 f"{GIT_EXECUTABLE!r}: {exc}"
             ) from exc
-        if not ready:
+        if not ready_read and not ready_write:
             raise GitBoundaryError(
                 f"the pinned Git executable {GIT_EXECUTABLE!r} exceeded its "
-                f"bounded timeout while capturing output: {' '.join(argv)}"
+                f"bounded timeout: {' '.join(argv)}"
             )
-        for stream in ready:
-            buffer, label, cap = pending[stream]
+        for stream in ready_read:
+            buffer, label, cap = streams[stream]
             try:
                 chunk = stream.read1(min(65536, cap + 1 - len(buffer)))
             except BlockingIOError:
                 continue
             if not chunk:
-                del pending[stream]
+                del streams[stream]
                 continue
             buffer.extend(chunk)
             if len(buffer) > cap:
@@ -636,6 +618,30 @@ def _bounded_drain_pair(
                     f"the pinned Git executable {GIT_EXECUTABLE!r} wrote more "
                     f"than {cap} bytes of {label}: {' '.join(argv)}"
                 )
+        if write_fd is not None and write_fd in ready_write and view:
+            try:
+                written = os.write(write_fd, view)
+            except BlockingIOError:
+                continue
+            except (BrokenPipeError, OSError):
+                # The child closed its stdin (typically by exiting); the
+                # write side is done and nothing more can be delivered.
+                stdin_open = False
+                continue
+            if written <= 0:
+                raise GitBoundaryError(
+                    f"the pinned Git executable {GIT_EXECUTABLE!r} made no "
+                    f"stdin progress: {' '.join(argv)}"
+                )
+            view = view[written:]
+            if not view:
+                # Input fully delivered: close the write end so the child
+                # observes EOF on stdin and can exit.
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                stdin_open = False
 
 
 def git_bytes_bounded(
@@ -653,17 +659,19 @@ def git_bytes_bounded(
     ``subprocess.run(capture_output=True)`` collects whatever the child
     writes; for a blob that is only *post-hoc* size-checked that is an
     unbounded capture.  This bounded variant consumes the child's output
-    through the pipes with ``select``-bounded ``read1`` chunks — stdout and
-    stderr **drained fairly** against one shared deadline, so a child that
-    floods one pipe while the other stalls can never deadlock the capture —
+    through the pipes with ``select``-bounded ``read1`` chunks and writes
+    the stdin payload in the **same single fair event loop** — stdin, stdout
+    and stderr are serviced together against one shared deadline, so a
+    batched child whose request payload *and* transcript both exceed a pipe
+    buffer can never deadlock the capture into a spurious timeout, and a
+    child that floods one pipe while the other stalls is drained fairly —
     accumulates at most ``maximum`` bytes per stream, and fails closed —
     terminating and reaping the child's *entire* process group, leaving no
     zombie — the moment a stream exceeds its cap, so an over-bound or
     swapped object can never be captured unboundedly and a stalled child can
     never be waited on forever (the finite ``timeout``, default
     :data:`GIT_TIMEOUT`, bounds the whole call).  The child runs in its own
-    new session/process group and the stdin pipe is written with the same
-    shared bounded deadline.  The sanitized environment carries the
+    new session/process group.  The sanitized environment carries the
     ``GIT_NO_REPLACE_OBJECTS=1`` no-replace pin of the other trusted
     invocations.
     """
@@ -695,8 +703,7 @@ def git_bytes_bounded(
     err = bytearray()
     deadline = time.monotonic() + (GIT_TIMEOUT if timeout is None else timeout)
     try:
-        _bounded_write_stdin(proc, input or b"", deadline, argv)
-        _bounded_drain_pair(proc, out, err, maximum, deadline, argv)
+        _bounded_io_loop(proc, out, err, maximum, input or b"", deadline, argv)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise GitBoundaryError(

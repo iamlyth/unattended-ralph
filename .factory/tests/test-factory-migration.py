@@ -1543,6 +1543,101 @@ class GitBytesBoundedTests(unittest.TestCase):
             "the wedged child was left as a zombie",
         )
 
+    def test_bounded_stdin_write_delivers_input(self):
+        """The bounded capture must deliver a batched stdin payload: the
+        write end is selected on the *writable* set, so a batched
+        ``cat-file --batch`` (Task 20 installed-tier blob reads) completes
+        instead of failing closed as a spurious stdin timeout."""
+        fx = FixtureRepo(self)
+        for index in range(32):
+            (fx.root / f"blob-{index}.txt").write_text(
+                f"content-{index}\n", encoding="utf-8"
+            )
+        fx.git("add", "-A")
+        fx.git("-c", "user.name=t", "-c", "user.email=t@t",
+               "commit", "-qm", "blobs")
+        listing = fx.git("ls-tree", "-r", "HEAD")
+        oid_by_name = {}
+        for line in listing.splitlines():
+            parts = line.split()
+            if len(parts) == 4 and parts[1] == "blob" and parts[3].startswith("blob-"):
+                oid_by_name[parts[3]] = parts[2]
+        self.assertEqual(len(oid_by_name), 32)
+        oids = sorted(oid_by_name.values())
+        payload = b"".join(oid.encode("ascii") + b"\n" for oid in oids)
+        result = gitutil.git_bytes_bounded(
+            ["-C", str(fx.root), "cat-file", "--batch"],
+            maximum=1024 * 1024,
+            input=payload,
+            timeout=30.0,
+        )
+        self.assertEqual(result.returncode, 0)
+        blobs = {}
+        pos = 0
+        while pos < len(result.stdout):
+            nl = result.stdout.index(b"\n", pos)
+            header = result.stdout[pos:nl].decode("ascii").split()
+            size = int(header[2])
+            pos = nl + 1
+            blobs[header[0]] = result.stdout[pos : pos + size]
+            pos += size + 1
+        self.assertEqual(len(blobs), 32)
+        self.assertEqual(blobs[oid_by_name["blob-0.txt"]], b"content-0\n")
+        self.assertEqual(blobs[oid_by_name["blob-31.txt"]], b"content-31\n")
+
+    def test_large_stdin_and_large_output_no_deadlock(self):
+        """A single batched ``cat-file --batch`` whose request payload and
+        whose transcript both exceed a pipe buffer (128 KiB each) must
+        complete: stdin is written and stdout drained by ONE fair event
+        loop, so a child that fills its stdout pipe while the caller still
+        holds a full stdin pipe keeps making progress.  A sequential
+        write-then-drain capture wedges here: the child blocks on the full
+        stdout pipe, stops reading stdin, and the writer's stdin select
+        spuriously times out (Task 20 installed-tier batch reads)."""
+        fx = FixtureRepo(self)
+        (fx.root / "blob.txt").write_text("payload\n", encoding="utf-8")
+        fx.git("add", "blob.txt")
+        fx.git(
+            "-c", "user.name=t", "-c", "user.email=t@t",
+            "commit", "-qm", "blob",
+        )
+        oid = fx.git("rev-parse", "HEAD:blob.txt").strip()
+        line = (oid + "\n").encode("ascii")
+        repeats = 4096
+        payload = line * repeats
+        self.assertGreater(
+            len(payload), 128 * 1024, "the request payload must exceed 128 KiB"
+        )
+        started = time.monotonic()
+        result = gitutil.git_bytes_bounded(
+            ["-C", str(fx.root), "cat-file", "--batch"],
+            maximum=4 * 1024 * 1024,
+            input=payload,
+            timeout=30.0,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr[:500])
+        # One ``<oid> blob 8\n<payload\n>\n`` record per request line.
+        header = oid.encode("ascii") + b" blob 8"
+        per_record = len(header) + 1 + len(b"payload\n") + 1
+        self.assertGreater(
+            result.stdout.count(header),
+            0,
+            "the batched transcript must contain the requested blobs",
+        )
+        self.assertGreater(
+            len(result.stdout), 128 * 1024,
+            "the transcript must exceed 128 KiB",
+        )
+        self.assertEqual(
+            len(result.stdout), repeats * per_record,
+            "the transcript must contain every requested record exactly",
+        )
+        self.assertEqual(result.stdout.split(b"\n")[1], b"payload")
+        self.assertLess(
+            elapsed, 20.0, "a large batched capture must not spurious-timeout"
+        )
+
 
 # ---------------------------------------------------------------------------
 # F4: evidence directory/artifact owner/mode/link metadata fails closed

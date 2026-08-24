@@ -651,6 +651,140 @@ Proxy evidence must not be promoted to production verification. Three tracked ar
 
 Pixel/offscreen framebuffer checks are not real visual acceptance, private/session-scoped service instances are not the real system service, a synthetic test producer is not the target consumer, and an evidence declaration is not evidence. `final-gate.sh` `--implementation` and `--campaign-audit` run all three layers; `--planning` validates an existing sidecar so a fresh cycle stays pendable before migration.
 
+## Installed-tier evidence for the generic harness (Task 20)
+
+The `installed` evidence tier proves the *installed harness itself*: a clean
+exact-commit copy of the generic harness is staged into test-owned external
+and hidden prefixes and its production control-plane CLIs are executed from
+that copy — never relabeled source-tree or private-unit runs, and never
+`real_system`/`human`/product evidence. No external model, runner,
+hardware, or human is invoked.
+
+`.factory/loop/installer.py` is the trusted installer/stager. It stages
+**committed harness content** — every file tracked under the hidden
+`.factory/` and `.pi/` namespaces at the exact bound commit — from the exact
+committed blob bytes through the pinned Git boundary (a batched
+`git cat-file --batch` with a hard-capped, fairly drained capture, then a
+batched `git hash-object --no-filters --stdin-paths` blob-exactness proof so
+no content filter can rewrite the hashed bytes), preserves executable modes
+(`100755 -> 0755`, `100644 -> 0644`), creates every installed directory as
+private mode 0700, refuses symlink/gitlink/special-inode/device entries,
+unsafe paths, secret/credential-looking path names (committed content
+included — a committed tree is not an exemption), group/other-writable
+modes, and any pre-existing or in-repository prefix, and writes a
+machine-readable manifest (`factory-install-manifest/v1`) recording per
+file: path, mode, size, sha256, the committed blob id, the pending flag,
+and the exact root/prefix the installer bound (the manifest is written
+outside the repository and never replaces an existing file).
+
+The prefix is **descriptor-anchored**: it is created and opened with
+`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, its `(st_dev, st_ino)` identity is
+recorded from the anchored fd, the named path and the resolved containment
+are verified against that identity *before* the private-0700 mode is pinned
+with `fchmod` (never a pathname chmod), and every staged directory/file is
+created through `openat` dirfd chains with `O_NOFOLLOW` (every created
+directory private 0700) — no pathname write is ever performed.  The root
+fd identity and containment are revalidated before every staged write and
+before the post-staging manifest verify, so a prefix path swapped to a
+symlink or bind-mount into the repository fails closed *before* any
+repository write; the fds are closed on every exit path.  On any failure
+after the prefix is created, the created prefix is rolled back
+identity-safely (the exact directory inode recorded at creation is
+removed).  Every malformed batched-Git transcript (a non-numeric
+`cat-file` size, truncated record framing, non-UTF-8 text, a malformed
+`hash-object` oid) fails closed as an `InstallerError`, never as a raw
+parser exception.
+
+Task-20-era additions that are not yet part of the bound commit are staged
+from the working tree only when they appear on the **exact reviewer
+allowlist** (`PENDING_ALLOWLIST` in the installer — the known Task-20
+authorities) and live under the installed surface; any other pending path
+under `.factory/`/`.pi/` fails closed, a visible-`scripts/` worktree change
+that is not a declared shared authority/entrypoint is never staged, and a
+secret-named path is never staged.  They are recorded in the manifest with
+`pending: true` so a reviewer sees exactly which installed bytes are newer
+than the bound commit.  The declared shared authorities and operator
+entrypoints must live under the allowlisted first segments
+(`.factory`/`.pi`/`scripts`) and are staged **exactly once** — they are
+excluded from the bulk committed staging so a clean committed install can
+never double-stage an entrypoint.
+
+The installed copy carries the shared authority the control plane loads at
+runtime (`scripts/factory_state_io.py`), the operator receipt wrapper
+(`scripts/machine-receipt.py`), and the external-prefix launcher entry
+point `.factory/bin/factory-launch` (which imports the installed package
+under the public name `factory` through a private alias directory and
+forwards every argument to `python -m factory.loop.launch`).  The launcher
+forwards INT/TERM/HUP/QUIT to the child, then **bounded-waits and reaps the
+child before any cleanup**: a child that exits on the forwarded signal is
+reaped with its actual status, a child that ignores the signal is escalated
+to SIGKILL after a bounded grace, and the operator alias directory is
+removed only after the child is truly gone — on every exit path (normal
+completion, a signal, or an early failure) — while the child's actual exit
+status is preserved, including the 128+signal convention.
+
+`.factory/loop/gitutil.py`'s bounded capture drives stdin writes and the
+stdout/stderr drains through **one fair select event loop** against one
+shared deadline: a batched child whose request payload *and* transcript
+both exceed a pipe buffer keeps making progress instead of deadlocking
+into a spurious timeout, an over-bound stream fails closed, EPIPE/EOF end
+the affected side, and a wedged capture terminates and reaps the child's
+entire process group (no zombie).
+
+`.factory/loop/footprint.py` gains the installed physical-file inventory:
+`--installed-inventory PREFIX --manifest MANIFEST` captures every
+installed file's path, mode, owner, link count, size, and sha256, asserts
+the exact physical set equals the manifest + shared authorities + operator
+entrypoints (never a product/foreign namespace — no product pollution),
+rejects symlink/special-inode/device/mount crossings, foreign owners, and
+hardlink aliases, and cross-checks every digest against the manifest.
+
+```bash
+python3 .factory/loop/installer.py install \
+  --root "$PWD" --commit "$(git rev-parse HEAD)" \
+  --prefix "$TMPDIR/external-prefix" --manifest-out "$TMPDIR/manifest.json"
+python3 .factory/loop/footprint.py --root "$PWD" \
+  --installed-inventory "$TMPDIR/external-prefix" --manifest "$TMPDIR/manifest.json"
+./.factory/tests/test-factory-installed.sh
+```
+
+The harness-owned suite `.factory/tests/test-factory-installed.py` plus its
+driver `.factory/tests/test-factory-installed.sh` build both the external
+and the hidden dot-prefixed install, run the production CLIs from the
+installed copy (launch help and excerpt, the external-prefix launcher entry
+point, `factory-campaign`, the parser/selector/state CLIs, the receipt
+wrapper, and the installed footprint inventory) under a sanitized
+environment with no source-tree path and no `.factory-state`/credential/
+legacy/Git/Ollama/campaign-binding surface, and mint every installed-tier
+gate as an exact-commit machine receipt bound to the audit coordinator in
+the fixture authority so `scripts/check-audit-receipts.py` exits 0.  Every
+module-form gate is wrapped in an **installed-root attestation**: the
+certified argv/stdout bind the resolved module root of the installed
+prefix, and a source-tree invocation resolves a different root and can
+never mint an equivalent receipt.  A gate that exits nonzero or prints a
+skip marker is never PASS.  The suite also proves the launcher's signal
+contract (a delayed-termination child keeps the alias until it exits, the
+child's actual or 128+signal status is preserved, and a signal-ignoring
+child is KILLed within the bounded grace) and the installer's adversarial
+prefix-swap rejection (a symlink/bind-mount swap of the prefix path fails
+closed before any repository write).  The suite never mutates the live
+`.factory-state/`: the driver snapshots every foreign runtime file's
+digest, mode, and mtime plus the tracked/untracked Git state and the
+ignored/bytecode inventory before and after and proves byte-for-byte
+preservation.  A clean-commit simulation (the whole installed surface
+committed in a fixture authority) proves the post-commit install never
+double-stages a declared entrypoint and reports an empty pending set,
+which catches the H1 regression before the real Task-20 commit lands.
+
+Task 20's live installed-functional evidence is **two-phase**: this WIP
+phase builds and proves the installed-tier machinery with fixture-authority
+receipts only (the live `.factory-state/` foreign evidence is never
+touched, replaced, or relabeled fixture), and the post-commit phase — once
+the Task-20 commit is the exact bound commit — runs the installed suite at
+that commit and stages the fresh live evidence under the generic evidence
+namespace.  Task 20 stays `pending` in the plan until that post-commit
+phase lands.
+
 ## Machine visual-audit scaffold
 
 A product-neutral, optional machine visual-audit framework ships in the

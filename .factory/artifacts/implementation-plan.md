@@ -1324,6 +1324,30 @@ elevated by prose.
   `.factory/tests/test-factory-footprint.sh` installed inventory;
   `scripts/validate-conformance.py planning`; `scripts/check-docs-sync.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+- Evidence: WIP phase (uncommitted on `develop` at `c4df597`): the
+  installed-tier machinery is implemented and proven by the hidden suite
+  `.factory/tests/test-factory-installed.py/.sh` with fixture-authority
+  receipts only — a descriptor-anchored trusted installer
+  (`.factory/loop/installer.py`, prefix opened `O_DIRECTORY|O_NOFOLLOW|
+  O_CLOEXEC` with fd identity/containment revalidated per stage and
+  `openat` staging), a single fair select event loop in
+  `.factory/loop/gitutil.py` (stdin writes + stdout/stderr drains against
+  one shared deadline, EPIPE/EOF handled, >128 KiB stdin and >128 KiB
+  output regression), the external-prefix launcher
+  `.factory/bin/factory-launch` (forwards INT/TERM/HUP/QUIT, bounded
+  wait/reap before alias cleanup, actual or 128+signal status), the
+  installed physical-file inventory in `.factory/loop/footprint.py`, and
+  the installed-root-attested receipt gates.  The modified
+  `.factory/tests/test-factory-migration.py` `GitBytesBoundedTests`
+  regressions (fair single-loop drain, bounded group termination, the
+  batched-stdin and >128 KiB deadlock tests) are **review authority** for
+  the gitutil refactor and stay pending on the reviewer allowlist until
+  this task commits; the installed suite derives the actual pending set
+  independently so the allowlist is not fragile.  Live installed-functional
+  evidence is **not** staged in this WIP phase (the live `.factory-state/`
+  is never touched); Task 20 stays `pending` until the post-commit phase
+  runs the suite at the bound Task-20 commit and stages the fresh live
+  evidence.
 
 ## Task 21: Round-1 campaign audit objective coverage
 

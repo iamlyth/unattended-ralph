@@ -94,9 +94,11 @@ adversarial fixture repositories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import sys
@@ -118,6 +120,22 @@ class FootprintError(RuntimeError):
 # is never the namespace (a case-insensitive or normalization-blessed
 # filesystem could otherwise alias the namespace with a product path).
 HIDDEN_NAMESPACES: Tuple[str, ...] = (".factory", ".factory-state", ".pi")
+
+# Machine-readable install-manifest schema (Task 20 installed-tier evidence).
+# A trusted installer stages the committed harness into a test-owned prefix
+# and records one manifest entry per staged file: relpath, mode, size,
+# sha256, the committed blob id when the file is tracked at the bound
+# commit, and a ``pending`` flag for Task-20-era additions that are not yet
+# part of the bound commit (the reviewer sees exactly which installed bytes
+# are newer than the bound commit).
+INSTALL_MANIFEST_SCHEMA = "factory-install-manifest/v1"
+
+# Adopting-product / foreign namespaces that must never appear inside an
+# installed harness copy (HIDE-01 ``no product pollution``).
+PRODUCT_POLLUTION_NAMESPACES: frozenset = frozenset({
+    "src", "tests", "packaging", "data", "cmake", "build",
+    ".ralph", ".factory-state", ".git",
+})
 HIDDEN_NAMESPACE_SET: frozenset = frozenset(HIDDEN_NAMESPACES)
 
 # Legacy Ralph recovery history (MIG-01).  The new path never creates or
@@ -721,6 +739,7 @@ def verify_external_install(
     prefix: Path,
     manifest: Optional[Sequence[str]] = None,
     entrypoints: Sequence[str] = (),
+    shared: Sequence[str] = (),
 ) -> List[str]:
     """Validate an operator-installed harness copy under an external prefix.
 
@@ -732,11 +751,14 @@ def verify_external_install(
     every entry must be a harness-owned path, every entry must be present on
     disk under ``prefix`` (no omitted manifest file), and no physical file
     may exist under ``prefix`` outside the manifest — with the sole
-    exception of ``entrypoints``, an explicit list of trusted operator
-    entrypoints that must each be a regular executable file.  Symlinks and
-    special inodes are never allowed anywhere in the installed copy.
-    ``prefix`` must be absolute, a real (never symlinked) directory, and
-    outside the *resolved* product repository.
+    exceptions of ``entrypoints``, an explicit list of trusted operator
+    entrypoints that must each be a regular executable file, and ``shared``,
+    an explicit list of non-executable shared authorities (for example the
+    committed ``scripts/factory_state_io.py`` the hidden control plane loads
+    by its established absolute path) that must each be a regular file.
+    Symlinks and special inodes are never allowed anywhere in the installed
+    copy.  ``prefix`` must be absolute, a real (never symlinked) directory,
+    and outside the *resolved* product repository.
     """
     errors: List[str] = []
     raw_prefix = str(prefix)
@@ -799,6 +821,13 @@ def verify_external_install(
             errors.append(f"entrypoint path is unsafe: {relpath!r}")
             continue
         entrypoint_set.add(relpath)
+    shared_set: Set[str] = set()
+    for relpath in shared:
+        safe = safe_relpath(relpath)
+        if safe is None:
+            errors.append(f"shared authority path is unsafe: {relpath!r}")
+            continue
+        shared_set.add(relpath)
     if not prefix.exists():
         errors.append(f"external install prefix does not exist: {prefix}")
         return errors
@@ -815,8 +844,20 @@ def verify_external_install(
             errors.append(f"external install omits manifest file: {rel!r}")
         elif not stat.S_ISREG(info.st_mode):
             errors.append(f"manifest file is not a regular file: {rel!r}")
-    # Exactness: no physical file outside manifest | entrypoints, and each
-    # entrypoint must be an explicit regular executable file.
+    for rel in sorted(shared_set):
+        info = physical.get(rel)
+        if info is None:
+            errors.append(f"external install omits shared authority: {rel!r}")
+        elif not stat.S_ISREG(info.st_mode):
+            errors.append(f"shared authority is not a regular file: {rel!r}")
+    for rel in sorted(entrypoint_set):
+        info = physical.get(rel)
+        if info is None:
+            errors.append(f"external install omits entrypoint: {rel!r}")
+        elif not (stat.S_ISREG(info.st_mode) and info.st_mode & 0o111):
+            errors.append(f"entrypoint is not an explicit trusted executable: {rel!r}")
+    # Exactness: no physical file outside manifest | shared | entrypoints,
+    # and each entrypoint must be an explicit regular executable file.
     for rel, info in sorted(physical.items()):
         if stat.S_ISDIR(info.st_mode):
             continue
@@ -824,6 +865,12 @@ def verify_external_install(
             if not (stat.S_ISREG(info.st_mode) and info.st_mode & 0o111):
                 errors.append(
                     f"entrypoint is not an explicit trusted executable: {rel!r}"
+                )
+            continue
+        if rel in shared_set:
+            if not stat.S_ISREG(info.st_mode):
+                errors.append(
+                    f"shared authority is not a regular file: {rel!r}"
                 )
             continue
         if rel not in manifest_set:
@@ -898,6 +945,278 @@ def verify_product_install(prefix: Path) -> List[str]:
                 f"product install prefix crosses a mount point: {rel!r}"
             )
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Installed physical-file inventory (Task 20 installed-tier evidence, HIDE-01)
+# ---------------------------------------------------------------------------
+
+
+def _read_regular_bounded(path: Path, size: int, what: str) -> bytes:
+    """Bounded no-follow read of one regular installed file (digests).
+
+    The final component is never followed (``O_NOFOLLOW``) and the read is
+    bounded by the recorded size; a symlink, special file, or oversized
+    entry fails closed instead of being hashed.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(str(path.absolute()), flags)
+    except OSError as exc:
+        raise FootprintError(f"cannot open {what} {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+            raise FootprintError(f"{what} is not the recorded regular file: {path}")
+        chunks: List[bytes] = []
+        remaining = size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining:
+            raise FootprintError(f"{what} shrank while reading: {path}")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def load_install_manifest(path: Path) -> dict:
+    """Bounded, no-follow, schema-checked read of an install manifest.
+
+    The manifest records ``files`` (committed/pending harness paths),
+    ``shared`` (shared authorities), and ``entrypoints`` (operator
+    entrypoints) plus the bound commit and the installed prefix.  Each
+    ``files`` entry carries ``path``/``mode``/``size``/``sha256`` and (for
+    committed content) the exact committed ``blob`` id and ``pending: false``.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(str(path.absolute()), flags)
+    except OSError as exc:
+        raise FootprintError(f"cannot open install manifest {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 16 * 1024 * 1024:
+            raise FootprintError(f"unsafe install manifest {path}")
+        raw = b""
+        while len(raw) <= 16 * 1024 * 1024:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) > 16 * 1024 * 1024:
+            raise FootprintError(f"install manifest exceeds the bound: {path}")
+    finally:
+        os.close(descriptor)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise FootprintError(f"invalid install manifest {path}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("schema") != INSTALL_MANIFEST_SCHEMA:
+        raise FootprintError(f"install manifest schema is invalid: {path}")
+    commit = data.get("commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise FootprintError(f"install manifest commit is invalid: {path}")
+    prefix = data.get("prefix")
+    if not isinstance(prefix, str) or not prefix.startswith("/"):
+        raise FootprintError(f"install manifest prefix is invalid: {path}")
+    files = data.get("files")
+    if not isinstance(files, list) or not files:
+        raise FootprintError(f"install manifest files are invalid: {path}")
+    for entry in files:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("mode"), str)
+            or not isinstance(entry.get("size"), int)
+            or not isinstance(entry.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+        ):
+            raise FootprintError(f"install manifest file entry is invalid: {path}")
+    for key in ("shared", "entrypoints"):
+        value = data.get(key)
+        if not isinstance(value, list) or not all(
+            isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and isinstance(item.get("mode"), str)
+            and isinstance(item.get("size"), int)
+            and isinstance(item.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+            for item in value
+        ):
+            raise FootprintError(f"install manifest {key} is invalid: {path}")
+    return data
+
+
+class InstalledInventory:
+    """Machine-readable physical-file inventory of one installed harness copy.
+
+    ``entries`` records every physical file's path, mode, owner, link count,
+    size, and sha256; ``errors`` is empty exactly when the copy is confined:
+    the physical set equals the declared manifest + shared authorities +
+    operator entrypoints, every file is a regular single-link
+    current-user-owned file, no symlink/special inode/device/mount crossing
+    exists, entrypoints are executable, and no product/foreign namespace
+    appears.
+    """
+
+    __slots__ = ("prefix", "entries", "errors", "expected_count")
+
+    def __init__(self, prefix: Path, expected_count: int) -> None:
+        self.prefix = prefix
+        self.entries: List[Dict[str, object]] = []
+        self.errors: List[str] = []
+        self.expected_count = expected_count
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "schema": "factory-installed-inventory/v1",
+            "prefix": str(self.prefix),
+            "count": len(self.entries),
+            "expected_count": self.expected_count,
+            "entries": self.entries,
+            "errors": self.errors,
+        }
+
+
+def inventory_installed(
+    prefix: Path,
+    manifest: Optional[Sequence[str]] = None,
+    shared: Sequence[str] = (),
+    entrypoints: Sequence[str] = (),
+    digests: Optional[Dict[str, str]] = None,
+) -> InstalledInventory:
+    """Capture and contain the physical installed-file inventory (HIDE-01).
+
+    Every installed file's path, mode, owner, and link count is captured;
+    a symlink, special inode/device, foreign owner, hardlink alias, or mount
+    crossing fails closed; the exact physical set must equal the declared
+    manifest + shared authorities + operator entrypoints (never a product
+    file); and every regular file's sha256 must match the recorded digest
+    when ``digests`` is supplied.  Entrypoints must be under a harness
+    namespace or the shared ``scripts/`` surface so an operator entrypoint
+    can never smuggle a product path into the installed copy.
+    """
+    prefix = Path(prefix).absolute()
+    report = InstalledInventory(
+        prefix,
+        (len(manifest) if manifest else 0) + len(shared) + len(entrypoints),
+    )
+    if os.path.islink(prefix) or not os.path.isdir(prefix):
+        report.errors.append(
+            f"installed prefix is not a real directory: {prefix}"
+        )
+        return report
+    prefix_dev = os.lstat(prefix).st_dev
+    # The trusted installer creates the prefix and every installed directory
+    # as private mode 0700; an installed copy whose directories are readable
+    # by group/other is not a harness-confined copy and fails closed.
+    if stat.S_IMODE(os.lstat(prefix).st_mode) != 0o700:
+        report.errors.append(
+            f"installed prefix is not private (0700): {prefix} "
+            f"({oct(stat.S_IMODE(os.lstat(prefix).st_mode))})"
+        )
+    allowed = (set(manifest) if manifest else set()) | set(shared) | set(entrypoints)
+    physical: Dict[str, os.stat_result] = {}
+    for rel, info in _walk_nofollow(prefix, ""):
+        if stat.S_ISDIR(info.st_mode):
+            if stat.S_IMODE(info.st_mode) != 0o700:
+                report.errors.append(
+                    f"installed directory is not private (0700): {rel!r} "
+                    f"({oct(stat.S_IMODE(info.st_mode))})"
+                )
+            continue
+        physical[rel] = info
+        entry: Dict[str, object] = {
+            "path": rel,
+            "mode": format(stat.S_IMODE(info.st_mode), "04o"),
+            "owner": info.st_uid,
+            "link_count": info.st_nlink,
+            "size": info.st_size,
+        }
+        if stat.S_ISREG(info.st_mode):
+            try:
+                raw = _read_regular_bounded(
+                    prefix / rel, info.st_size, "installed file"
+                )
+            except FootprintError as exc:
+                report.errors.append(str(exc))
+            else:
+                entry["sha256"] = hashlib.sha256(raw).hexdigest()
+        report.entries.append(entry)
+        if stat.S_ISLNK(info.st_mode):
+            report.errors.append(f"installed symlink escapes: {rel!r}")
+        elif not stat.S_ISREG(info.st_mode):
+            report.errors.append(
+                f"installed special file: {rel!r} "
+                f"(mode {oct(stat.S_IMODE(info.st_mode))})"
+            )
+        elif info.st_uid != os.getuid():
+            report.errors.append(f"installed file has foreign owner: {rel!r}")
+        elif info.st_nlink != 1:
+            report.errors.append(f"installed file is hardlinked: {rel!r}")
+        elif info.st_dev != prefix_dev:
+            report.errors.append(f"installed file crosses a mount point: {rel!r}")
+    # Exact set: no physical file outside manifest | shared | entrypoints and
+    # every declared file present (HIDE-01 completeness and no-product-
+    # pollution in one check).
+    for rel in sorted(physical):
+        if rel not in allowed:
+            report.errors.append(
+                f"installed path is outside the manifest/shared/entrypoint "
+                f"set: {rel!r}"
+            )
+    for rel in sorted(allowed):
+        info = physical.get(rel)
+        if info is None:
+            report.errors.append(f"declared installed file is missing: {rel!r}")
+        elif not stat.S_ISREG(info.st_mode):
+            report.errors.append(f"declared installed file is not regular: {rel!r}")
+    for rel in entrypoints:
+        info = physical.get(rel)
+        if info is not None and stat.S_ISREG(info.st_mode) and not (info.st_mode & 0o111):
+            report.errors.append(f"entrypoint is not executable: {rel!r}")
+        first = rel.split("/", 1)[0]
+        if first not in HIDDEN_NAMESPACE_SET and first != "scripts":
+            report.errors.append(
+                f"entrypoint escapes the harness/scripts surface: {rel!r}"
+            )
+    # Product pollution: an adopting-product or foreign namespace must never
+    # appear in the installed copy, and no harness-namespace alias may be
+    # smuggled in as a physical entry.
+    for rel in sorted(physical):
+        first = rel.split("/", 1)[0]
+        if first in PRODUCT_POLLUTION_NAMESPACES:
+            report.errors.append(
+                f"installed copy carries a product/foreign namespace: {rel!r}"
+            )
+        elif _namespace_escape(first) is not None:
+            report.errors.append(
+                f"installed copy carries a namespace alias: {rel!r}"
+            )
+    # Digest cross-check against the recorded install manifest.
+    if digests:
+        for rel, expected in sorted(digests.items()):
+            info = physical.get(rel)
+            if info is None or not stat.S_ISREG(info.st_mode):
+                continue  # already reported by the exact-set check
+            entry = next(
+                (item for item in report.entries if item.get("path") == rel), None
+            )
+            actual = entry.get("sha256") if entry else None
+            if actual != expected:
+                report.errors.append(
+                    f"installed digest mismatch for {rel!r} "
+                    f"(expected {expected}, got {actual})"
+                )
+    return report
 
 
 def _namespace_root_identity(info: os.stat_result) -> Tuple[int, int, int]:
@@ -1177,12 +1496,64 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="print the deterministic product-discovery file set",
     )
     parser.add_argument(
+        "--installed-inventory",
+        metavar="PREFIX",
+        help="capture the physical installed-file inventory of a harness "
+        "install prefix (Task 20 installed-tier evidence)",
+    )
+    parser.add_argument(
+        "--manifest",
+        metavar="FILE",
+        help="install manifest JSON produced by the trusted installer",
+    )
+    parser.add_argument(
+        "--entrypoint",
+        action="append",
+        default=[],
+        metavar="RELPATH",
+        help="trusted operator entrypoint (repeatable; manifest-less mode)",
+    )
+    parser.add_argument(
+        "--shared",
+        action="append",
+        default=[],
+        metavar="RELPATH",
+        help="shared authority file (repeatable; manifest-less mode)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="print the machine-readable inventory report",
     )
     args = parser.parse_args(argv)
     root = Path(args.root).absolute()
+    if args.installed_inventory:
+        try:
+            manifest_data = load_install_manifest(Path(args.manifest)) if args.manifest else None
+            if manifest_data is not None:
+                records = (
+                    list(manifest_data["files"])
+                    + list(manifest_data["shared"])
+                    + list(manifest_data["entrypoints"])
+                )
+                files = [entry["path"] for entry in manifest_data["files"]]
+                digests = {entry["path"]: entry["sha256"] for entry in records}
+                shared = [entry["path"] for entry in manifest_data["shared"]]
+                entrypoints = [entry["path"] for entry in manifest_data["entrypoints"]]
+            else:
+                files, digests, shared, entrypoints = [], {}, list(args.shared), list(args.entrypoint)
+            report = inventory_installed(
+                Path(args.installed_inventory),
+                manifest=files,
+                shared=shared,
+                entrypoints=entrypoints,
+                digests=digests,
+            )
+        except FootprintError as exc:
+            print(f"factory-footprint: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(report.to_dict(), sort_keys=True))
+        return 0 if report.ok else 1
     try:
         report = inventory(root)
     except FootprintError as exc:

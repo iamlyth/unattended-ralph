@@ -173,6 +173,10 @@ required = [
     '.factory/tests/adversarial-manifest.json',
     '.factory/tests/test-factory-adversarial.py',
     '.factory/tests/test-factory-adversarial.sh',
+    '.factory/loop/installer.py',
+    '.factory/bin/factory-launch',
+    '.factory/tests/test-factory-installed.py',
+    '.factory/tests/test-factory-installed.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -349,6 +353,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
 ./scripts/check-docs-sync.sh
 ./.factory/tests/test-factory-footprint.sh
+./.factory/tests/test-factory-installed.sh
 ./.factory/tests/test-factory-migration.sh
 ./.factory/tests/test-factory-adversarial.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by
