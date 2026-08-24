@@ -1398,7 +1398,7 @@ elevated by prose.
 
 ## Task 22: Live campaign and control-state instantiation
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 20
 - Scope: Remediate campaign-audit Finding 5: drive the real production
   campaign machinery at the bound commit — `.factory/loop/campaign.py run`
