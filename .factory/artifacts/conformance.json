@@ -461,14 +461,20 @@
       "spec_sections": [
         "\u00a721"
       ],
-      "classification": "missing",
-      "evidence_tier": "unit",
+      "classification": "partial",
+      "evidence_tier": "private_integration",
       "required_tier": "installed",
       "required_capabilities": [],
-      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
       "receipts": [],
-      "artifacts": [],
-      "fact_refs": [],
+      "artifacts": [
+        ".factory/loop/migration.py",
+        ".factory/tests/test-factory-migration.py",
+        ".factory/tests/test-factory-migration.sh"
+      ],
+      "fact_refs": [
+        "FACT-023"
+      ],
       "reason": ""
     },
     {
@@ -476,14 +482,20 @@
       "spec_sections": [
         "\u00a722"
       ],
-      "classification": "missing",
-      "evidence_tier": "unit",
+      "classification": "partial",
+      "evidence_tier": "private_integration",
       "required_tier": "installed",
       "required_capabilities": [],
-      "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+      "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
       "receipts": [],
-      "artifacts": [],
-      "fact_refs": [],
+      "artifacts": [
+        ".factory/tests/adversarial-manifest.json",
+        ".factory/tests/test-factory-adversarial.py",
+        ".factory/tests/test-factory-adversarial.sh"
+      ],
+      "fact_refs": [
+        "FACT-022"
+      ],
       "reason": ""
     },
     {

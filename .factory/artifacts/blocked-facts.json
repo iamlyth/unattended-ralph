@@ -233,6 +233,28 @@
       ],
       "blocking_evidence": "HIDE-01 requires installed-tier evidence that harness files remain within hidden namespaces and never pollute product/build/package paths. The footprint suite passes, but no installed-tier campaign receipt exists; final verification pending.",
       "resolution": null
+    },
+    {
+      "id": "FACT-022",
+      "title": "TEST-01 installed-tier adversarial evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "TEST-01"
+      ],
+      "blocking_evidence": "TEST-01 requires installed-tier evidence for the complete 27-case adversarial campaign contract. Exact-commit private-integration tests and five-round synthetic campaigns pass at 11a4f8e98497fefcff1c5917568e663c1ab48350, but no installed-tier campaign receipt exists; final audit remains pending.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-023",
+      "title": "MIG-01 installed-tier migration evidence pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "MIG-01"
+      ],
+      "blocking_evidence": "MIG-01 requires installed-tier evidence that migration preserves only plan, code, evidence metadata, blockers, and one control-state authority without importing Ralph or credential content. Exact-commit private-integration migration tests pass at 11a4f8e98497fefcff1c5917568e663c1ab48350, but no installed-tier migration campaign receipt exists.",
+      "resolution": null
     }
   ]
 }

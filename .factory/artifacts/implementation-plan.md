@@ -91,29 +91,29 @@ exact-commit evidence.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
-| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16 |
-| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16 |
-| CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16 |
-| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16 |
-| PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18 |
-| TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16 |
-| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16 |
-| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16 |
-| QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16 |
-| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16 |
-| LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16 |
-| PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16 |
-| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16 |
-| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16 |
-| COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16 |
-| FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16 |
-| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16 |
-| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12, Task 16 |
-| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16 |
-| RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16 |
-| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16 |
-| MIG-01 | §21 | missing | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16 |
-| TEST-01 | §22 | missing | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16, Task 20 |
+| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16, Task 20 |
+| CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools | Task 8, Task 15, Task 16, Task 20 |
+| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16, Task 20 |
+| PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18, Task 20 |
+| TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16, Task 20 |
+| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20 |
+| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 20 |
+| QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 20 |
+| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 19, Task 9, Task 16, Task 20 |
+| LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 20 |
+| PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 20 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20 |
+| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16, Task 20 |
+| COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 20 |
+| FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 20 |
+| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 20 |
+| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained | Task 12, Task 16, Task 20 |
+| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20 |
+| RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 20 |
+| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes | Task 13, Task 16, Task 20 |
+| MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20 |
+| TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization | Task 16, Task 17 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20 |
 
 ## Interaction acceptance inventory
@@ -1056,7 +1056,7 @@ exact-commit evidence.
 
 ## Task 16: Adversarial conformance suite and verification gate
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15
 - Scope: Implement the full §22 conformance suite (tests 1-27: fresh roles
   and allowed inputs, memory/session disabled, deterministic selection, no
@@ -1081,8 +1081,19 @@ exact-commit evidence.
 - Acceptance criteria: every §22 test passes deterministically on clean
   trees; verify-boilerplate.sh fails on any of the adversarial fixtures.
 - Verification: `./scripts/verify-boilerplate.sh`;
-  `tests/test-factory-adversarial.sh`.
-- Documentation impact: `AGENTS.md` validation commands.
+  `.factory/tests/test-factory-adversarial.sh`.
+- Documentation impact: `docs/FACTORY.md`; Task 17 completes synchronized
+  operator and template documentation.
+- Evidence: exact commit `11a4f8e98497fefcff1c5917568e663c1ab48350`
+  contains the machine-complete 27-case manifest, warning-free adversarial
+  suite, five-round success/findings fixtures, atomic freeze guard,
+  descriptor-bound maintenance verifier, and deletion revalidation. The hidden
+  adversarial gate and complete `scripts/verify-boilerplate.sh` both exit 0.
+  Independent specification, security, code-quality, and focused findings-flow
+  reviews accepted the checkpoint after case 5 was made non-vacuous, case 15
+  exercised every retained receipt family, case 22 became a hard Landlock
+  failure, and case 27 scanned the full new control plane. Installed-tier
+  campaign evidence remains honestly open as FACT-022/FACT-023.
 
 ## Task 17: Documentation synchronization
 
