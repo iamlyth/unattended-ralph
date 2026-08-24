@@ -6,13 +6,22 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/bin" "$tmp/docs" "$tmp/.factory" \
-    "$tmp/.factory/artifacts" "$tmp/.factory/prompts" "$tmp/.ralph/agent" "$tmp/.factory-state"
+    "$tmp/.factory/artifacts" "$tmp/.factory/prompts" "$tmp/.ralph/agent" \
+    "$tmp/.factory-state" "$tmp/.factory/loop"
 cp "$PROJECT_ROOT/scripts/ralph-plan.sh" "$PROJECT_ROOT/scripts/ralph-supervision.sh" \
     "$PROJECT_ROOT/scripts/factory-lock.sh" "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
     "$PROJECT_ROOT/scripts/factory_lock.py" "$PROJECT_ROOT/scripts/factory_state_io.py" \
     "$PROJECT_ROOT/scripts/factory-state-file.py" "$PROJECT_ROOT/scripts/ralph-event-boundary.py" \
     "$PROJECT_ROOT/scripts/ralph-final-state.py" "$PROJECT_ROOT/scripts/git-commit-guard.sh" \
     "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" "$tmp/scripts/"
+# Task 15/16: the deprecated ralph-plan launcher routes its freeze decision
+# through the retained hidden authority (.factory/loop/migration.py freeze
+# --guard), so a realistic deployment fixture carries the hidden loop modules
+# exactly like the product tree; factory_state_io.py is already copied above.
+cp "$PROJECT_ROOT/.factory/loop/migration.py" \
+   "$PROJECT_ROOT/.factory/loop/gitutil.py" \
+   "$PROJECT_ROOT/.factory/loop/plan_parser.py" \
+   "$PROJECT_ROOT/.factory/loop/state.py" "$tmp/.factory/loop/"
 chmod 700 "$tmp/.factory-state"
 
 cat > "$tmp/.factory/config.toml" <<'EOF'

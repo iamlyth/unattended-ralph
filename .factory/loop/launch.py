@@ -56,8 +56,8 @@ is the deterministic Task-6 deliverable:
   and never silently overwrites it.
 * **Structured bounded results**.  The only completion signal is the
   machine-readable :class:`LaunchResult` (exit status, signal, reason,
-  bounded per-stream digest/tail, snapshot counts) — never a model
-  completion token and never raw unbounded output, so no credential
+  bounded per-stream digest/tail, snapshot counts) — never a
+  model-completion marker and never raw unbounded output, so no credential
   material can be carried in a result.
 """
 

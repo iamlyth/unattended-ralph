@@ -141,7 +141,6 @@ changed = {key for key in before if before[key] != after[key]}
 if changed != {bug_id}:
     raise SystemExit(f'final-gate: only selected bug may change in a maintenance cycle (changed: {sorted(changed)})')
 PY
-        ./scripts/verify-boilerplate.sh
         mapfile -d '' -t MAINTENANCE_COMMAND < <(python3 - <<'PY'
 import os, tomllib
 with open('.factory/config.toml', 'rb') as stream:
@@ -164,7 +163,31 @@ PY
                 exit 1
             }
         fi
-        "${MAINTENANCE_COMMAND[@]}"
+        # Task 16 (EVID-01 §19): the maintenance verifier is routed through
+        # the retained descriptor authority exactly like the campaign
+        # verifier.  The binding helper is opened before the verifier step
+        # and the configured maintenance_command is bound to its committed
+        # blob/identity; the helper then re-validates and executes the exact
+        # bound inode through the retained descriptor, so a workspace
+        # pathname or byte substitution can never substitute the maintenance
+        # verifier that runs.
+        exec {verifier_helper_fd}<"$SCRIPT_DIR/campaign-verifier-binding.py" || {
+            echo "final-gate: the retained verifier binding helper is unavailable" >&2
+            exit 1
+        }
+        maintenance_binding=$("/proc/self/fd/$verifier_helper_fd" --mode maintenance) || exit $?
+        maintenance_digest=$(python3 - "$maintenance_binding" <<'PY'
+import json, sys
+binding = json.loads(sys.argv[1])
+if set(binding) != {'binding', 'sha256', 'helper'}:
+    raise SystemExit('final-gate: invalid verifier binding output')
+if binding['binding'].get('schema') != 'campaign-verifier-binding/v1':
+    raise SystemExit('final-gate: invalid verifier binding schema')
+print(binding['sha256'])
+PY
+        ) || exit $?
+        "/proc/self/fd/$verifier_helper_fd" \
+            --mode maintenance --expected-digest "$maintenance_digest" --exec
         echo "final-gate: maintenance implementation and audit accepted"
         ;;
     *)

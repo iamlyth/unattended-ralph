@@ -87,7 +87,7 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'scripts/factory-lock.sh', 'scripts/factory-lock-exec.py',
              'scripts/factory_lock.py', 'scripts/factory_state_io.py',
              'scripts/factory-state-file.py', 'scripts/ralph_lock.py',
-             'scripts/ralph-lock-recover.py', 'scripts/ralph-event-boundary.py',
+             'scripts/ralph-lock-recover.py',
              'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
              'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
              'tests/test-git-checkpoint.sh',
@@ -105,7 +105,7 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              'tests/test-ralph-campaign.sh', 'tests/test-ralph-campaign-state.py',
              'tests/test-factory-lock.py', 'tests/test-orchestration-security.py',
              'scripts/pi2-secure-exec.py',
-             'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
+             'scripts/pi-cli-shims/ralph',
              'tests/test-pi2-ollama-wrapper.sh',
              'tests/test-visual-audit-sdk-authority.sh'):
     assert (root / path).is_file(), f'missing maintenance artifact: {path}'

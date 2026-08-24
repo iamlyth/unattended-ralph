@@ -14,8 +14,13 @@ receipt-backed ``factory-findings/v1`` payload of the previous round from its
 environment (``FACTORY_LOOP_CAMPAIGN_FINDINGS``) and fails closed when the
 payload is absent or malformed, so a fixture can prove that
 verification/audit findings reached the next planner before any development
-continued.  It never runs Git: every commit in a campaign is made by the
-trusted orchestrator.
+continued.  The Task 16 ``developer`` behavior likewise receives the exact
+task-excerpt digest of the committed plan at the phase head (derived by the
+real launch authority) and fails closed when it is absent, recording
+evidence of the exact received bytes so the trusted suite can prove the
+developer worked only the revised selected task and never a findings/
+receipt payload.  It never runs Git: every commit in a campaign is made by
+the trusted orchestrator.
 
 It is not evidence of real model acceptance or real confinement; production
 campaigns launch real roles through the launch authority.
@@ -28,6 +33,11 @@ import signal
 import sys
 
 PREFIX = "FACTORY_LOOP_CAMPAIGN_"
+
+
+def sha256(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def env(name: str) -> str:
@@ -120,11 +130,30 @@ def main() -> int:
             # commit, phase tag, result digest, and the receipt digest); any
             # missing/malformed payload fails the planner closed so the
             # campaign never lets a planner that ignored its findings pass.
+            # Task 16 §22.5: the exact payload bytes are digest-bound exactly
+            # like the production planner prompt (:func:`launch.compose_prompt`
+            # refuses substituted findings against ``findings_digest``).  The
+            # campaign authority delivers the verbatim payload plus its
+            # SHA-256; the driver refuses any substituted or tampered payload
+            # whose bytes do not carry the delivered digest, and records the
+            # exact digest of the bytes it consumed as fixture evidence for
+            # the trusted suite (never an authority of any phase).
             findings = os.environ.get(PREFIX + "FINDINGS", "")
+            expected_digest = os.environ.get(PREFIX + "FINDINGS_DIGEST", "")
             if not findings:
                 raise SystemExit(
                     "campaign driver: findings-revised requires the "
                     "receipt-backed findings payload"
+                )
+            if not expected_digest:
+                raise SystemExit(
+                    "campaign driver: findings-revised requires the exact "
+                    "payload digest"
+                )
+            if sha256(findings.encode("utf-8")) != expected_digest:
+                raise SystemExit(
+                    "campaign driver: findings payload digest mismatch; the "
+                    "delivered payload bytes are substituted or tampered"
                 )
             try:
                 payload = json.loads(findings)
@@ -210,6 +239,49 @@ def main() -> int:
         if not task_id:
             raise SystemExit("campaign driver: developer requires a task id")
         behavior = pick(scenario.get("developer", {}), round_no, attempt, "complete")
+        # Task 16 §22.5: the developer receives *only* the exact revised
+        # selected-task bytes.  The campaign authority derives the task-
+        # excerpt digest from the exact committed plan at the phase head
+        # (mirroring the production launch child environment) and the driver
+        # fails closed when that digest is absent — a developer that never
+        # received its exact task bytes cannot proceed.  The developer
+        # records evidence of the exact received bytes (the excerpt digest,
+        # the digest of the plan it worked, and the fact that no findings
+        # env ever reached it) under the fixture output namespace; the
+        # trusted suite re-derives the expected excerpt from the committed
+        # revised plan with the real authority.
+        excerpt_digest = os.environ.get(PREFIX + "TASK_EXCERPT_DIGEST", "")
+        findings_env = os.environ.get(PREFIX + "FINDINGS", "")
+        if not excerpt_digest:
+            raise SystemExit(
+                "campaign driver: developer requires the exact task-excerpt "
+                "digest of the committed plan"
+            )
+        if behavior == "complete":
+            # The exact received bytes are recorded only for the coherent
+            # completion behavior (the deterministic model working the exact
+            # task): the file lives under the fixture output namespace and
+            # the trusted orchestrator commits it with the task work.  Other
+            # behaviors (crash/invalid/scope fixtures) must not add
+            # preservable dirty paths that would change their failure
+            # classification.
+            with open(plan_path, "rb") as stream:
+                plan_bytes = stream.read()
+            evidence = {
+                "schema": "factory-driver-developer-evidence/v1",
+                "round": round_no,
+                "task_id": task_id,
+                "task_excerpt_digest": excerpt_digest,
+                "plan_digest": sha256(plan_bytes),
+                "findings_present": bool(findings_env),
+            }
+            evidence_rel = (
+                f"src/.factory-test-output/developer-evidence-round-{round_no}.json"
+            )
+            evidence_path = os.path.join(root, evidence_rel)
+            os.makedirs(os.path.dirname(evidence_path), exist_ok=True)
+            with open(evidence_path, "w", encoding="utf-8") as stream:
+                json.dump(evidence, stream, sort_keys=True, separators=(",", ":"))
         if behavior == "crash":
             touch(root, f"src/work-{task_id}.md")
             os.kill(os.getpid(), signal.SIGKILL)

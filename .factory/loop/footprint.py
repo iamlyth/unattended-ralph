@@ -900,6 +900,38 @@ def verify_product_install(prefix: Path) -> List[str]:
     return errors
 
 
+def _namespace_root_identity(info: os.stat_result) -> Tuple[int, int, int]:
+    """The identity that pins one namespace root between check and removal.
+
+    ``(st_dev, st_ino, st_mode)``: a bind-mount swap over the namespace
+    changes ``st_dev``/``st_ino`` and a symlink swap changes ``st_mode``, so
+    re-verifying the identity immediately before deletion catches a
+    check-to-use substitution instead of deleting into the swapped tree.
+    """
+    return (info.st_dev, info.st_ino, info.st_mode)
+
+
+def _namespace_tree_identities(
+    root: Path, name: str, root_dev: int
+) -> Dict[str, Tuple[int, int, int]]:
+    """Snapshot every descendant identity of ``root/name`` (fail-closed).
+
+    Returns ``{relpath: (st_dev, st_ino, st_mode)}`` for every entry below
+    the namespace root; a descendant on a different device (a mount point)
+    refuses the removal.
+    """
+    identities: Dict[str, Tuple[int, int, int]] = {}
+    for rel, child in _walk_nofollow(root, name):
+        if child.st_dev != root_dev:
+            raise FootprintError(
+                f"refusing to remove harness namespace {name!r}: "
+                f"descendant {rel!r} crosses a filesystem/mount boundary "
+                f"(st_dev {child.st_dev} != {root_dev})"
+            )
+        identities[rel] = (child.st_dev, child.st_ino, child.st_mode)
+    return identities
+
+
 def remove_harness(root: Path) -> List[str]:
     """Delete the hidden namespaces; product content is never touched.
 
@@ -911,10 +943,24 @@ def remove_harness(root: Path) -> List[str]:
     generated projects to remove the harness without product loss, and by
     the hidden suite to prove that deleting the hidden namespaces leaves
     every product file byte-identical.
+
+    Task 16 closes the Task 13 accepted check-to-use (TOCTOU) residual: the
+    removal is not a single ``stat``-then-``rmtree``.  Every namespace root's
+    identity (``st_dev``/``st_ino``/``st_mode``) and the identity of every
+    descendant are snapshotted during the verification walk, and each
+    namespace is re-walked and re-stat'ed *immediately before* its deletion;
+    a root/descendant that changed identity, a namespace that became a
+    symlink or mount point, or any added/missing/replaced entry refuses the
+    entire removal with nothing deleted.  A privileged bind-mount swap or
+    symlink substitution between the verification pass and the deletion pass
+    therefore fails closed instead of crossing into the mounted tree.
     """
     root = root.absolute()
     root_dev = os.lstat(root).st_dev
-    present: List[str] = []
+    planned: Dict[
+        str,
+        Optional[Tuple[Tuple[int, int, int], Dict[str, Tuple[int, int, int]]]],
+    ] = {}
     for name in HIDDEN_NAMESPACES:
         target = root / name
         try:
@@ -924,7 +970,7 @@ def remove_harness(root: Path) -> List[str]:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             # A symlink or non-directory namespace is removed by unlinking
             # the entry itself; the link is never followed.
-            present.append(name)
+            planned[name] = None
             continue
         if info.st_dev != root_dev:
             raise FootprintError(
@@ -932,22 +978,48 @@ def remove_harness(root: Path) -> List[str]:
                 f"a filesystem/mount boundary (st_dev {info.st_dev} != "
                 f"{root_dev})"
             )
-        for rel, child in _walk_nofollow(root, name):
-            if child.st_dev != root_dev:
-                raise FootprintError(
-                    f"refusing to remove harness namespace {name!r}: "
-                    f"descendant {rel!r} crosses a filesystem/mount boundary "
-                    f"(st_dev {child.st_dev} != {root_dev})"
-                )
-        present.append(name)
+        planned[name] = (
+            _namespace_root_identity(info),
+            _namespace_tree_identities(root, name, root_dev),
+        )
     removed: List[str] = []
-    for name in present:
+    for name in planned:
+        entry = planned[name]
         target = root / name
         info = os.lstat(target)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            target.unlink()
-        else:
-            shutil.rmtree(target)
+        if entry is None:
+            # The entry was verified as a symlink/non-directory; it must
+            # still be one (a swap to a real directory or a mount point is
+            # refused, never followed).
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                target.unlink()
+                removed.append(name)
+                continue
+            raise FootprintError(
+                f"refusing to remove harness namespace {name!r}: entry changed "
+                f"between verification and removal"
+            )
+        root_identity, identities = entry
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or _namespace_root_identity(info) != root_identity
+        ):
+            # The namespace root changed identity since the verification
+            # pass (a bind-mount swap or symlink substitution over the
+            # entry); refuse the removal instead of deleting into the
+            # swapped tree.
+            raise FootprintError(
+                f"refusing to remove harness namespace {name!r}: entry changed "
+                f"between verification and removal"
+            )
+        current = _namespace_tree_identities(root, name, root_dev)
+        if current != identities:
+            raise FootprintError(
+                f"refusing to remove harness namespace {name!r}: tree changed "
+                f"between verification and removal"
+            )
+        shutil.rmtree(target)
         removed.append(name)
     return removed
 

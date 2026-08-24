@@ -38,7 +38,7 @@ Security contract (every claim fails closed):
   plan) are the digest-bound planner input.  The payload is delivered only
   to the next planner prompt; it is never handed to the developer, never
   read by the deterministic selector (a pure function of plan + state), and
-  never stored as a runtime task queue, event stream, memory, or context
+  never stored as a runtime task queue, memory, or context
   summary.
 
 Blocked references (``blocked_on``) remain structured findings in the

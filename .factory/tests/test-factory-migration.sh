@@ -227,10 +227,24 @@ echo "test-factory-migration: legacy store detected metadata-only; external stor
 # bypasses the freeze (the launch then proceeds to a deterministic later
 # failure), a missing marker preserves the legacy not-frozen semantics, and a
 # present but unsafe marker fails closed instead of silently unfreezing.
+# Task 16: the launcher routes the freeze decision through the retained
+# hidden authority, so every freeze fixture provisions the committed loop
+# modules (and the established state I/O authority the loop loads by path)
+# exactly like a real deployment would.
+provision_loop_authority() {
+    local fixture="$1"
+    mkdir -p "$fixture/.factory/loop" "$fixture/scripts"
+    for module in migration gitutil plan_parser state; do
+        cp "$ROOT/.factory/loop/$module.py" "$fixture/.factory/loop/$module.py"
+    done
+    cp "$ROOT/scripts/factory_state_io.py" "$fixture/scripts/factory_state_io.py"
+}
+
 fixture="$tmp/freeze-fixture"
 mkdir -p "$fixture/scripts" "$fixture/.factory"
 cp "$ROOT/scripts/ralph-plan.sh" "$fixture/scripts/ralph-plan.sh"
 chmod +x "$fixture/scripts/ralph-plan.sh"
+provision_loop_authority "$fixture"
 printf '# frozen fixture\n' > "$fixture/.factory/ralph-freeze"
 
 # A regular tracked marker freezes the launch (fail closed with the message).
@@ -278,6 +292,7 @@ echo "test-factory-migration: exact override, missing-marker, and regular-marker
 # launcher refuses and names the freeze without reaching the lock helper.
 fixture="$tmp/freeze-all-fixture"
 mkdir -p "$fixture/scripts" "$fixture/.factory"
+provision_loop_authority "$fixture"
 for launcher in scripts/ralph-campaign.sh scripts/ralph-plan.sh \
     scripts/ralph-run.sh scripts/ralph-audit.sh \
     scripts/ralph-maintenance-plan.sh scripts/ralph-maintenance-run.sh; do

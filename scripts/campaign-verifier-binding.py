@@ -202,32 +202,50 @@ def acceptance_contract() -> tuple[bytes, list[str], list[dict], str]:
     return raw, names, entries, acceptance_blob
 
 
-def binding() -> tuple[dict[str, object], str, list[str], Path, bytes]:
+def binding(mode: str = "campaign") -> tuple[dict[str, object], str, list[str], Path, bytes]:
+    """Bind the configured verifier command (``campaign`` or ``maintenance``).
+
+    ``--mode maintenance`` (Task 16) binds ``verification.maintenance_command``
+    so the deprecated maintenance finalize path routes its maintenance
+    verifier through the same retained descriptor authority as the campaign
+    verifier instead of a bare shell exec.
+    """
     config_bytes, _ = secure_read(CONFIG, 1024 * 1024)
     try:
         config = tomllib.loads(config_bytes.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         fail(f"invalid factory config: {exc}")
-    command = config.get("verification", {}).get("campaign_command")
-    if (
-        not isinstance(command, list)
-        or not command
-        or not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in command)
-    ):
-        fail("verification.campaign_command must be a non-empty argv array")
+    if mode == "maintenance":
+        command = config.get("verification", {}).get("maintenance_command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in command)
+        ):
+            fail("verification.maintenance_command must be a non-empty argv array")
+        label = "maintenance"
+    else:
+        command = config.get("verification", {}).get("campaign_command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in command)
+        ):
+            fail("verification.campaign_command must be a non-empty argv array")
+        label = "campaign"
     executable_arg = command[0]
     if not executable_arg.startswith("./"):
-        fail("campaign verifier executable must be canonical repository-relative ./path")
+        fail(f"{label} verifier executable must be canonical repository-relative ./path")
     relative = PurePosixPath(executable_arg[2:])
     if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
-        fail("campaign verifier executable path is not canonical")
+        fail(f"{label} verifier executable path is not canonical")
     canonical_arg = "./" + relative.as_posix()
     if canonical_arg != executable_arg:
-        fail("campaign verifier executable path is not canonical")
+        fail(f"{label} verifier executable path is not canonical")
     executable = ROOT.joinpath(*relative.parts)
     executable_bytes, executable_info = secure_read(executable, 16 * 1024 * 1024)
     if not executable_info.st_mode & 0o111:
-        fail("campaign verifier is not executable")
+        fail(f"{label} verifier is not executable")
     relative_text = relative.as_posix()
     executable_blob = tracked_blob(relative_text, executable_bytes, "100755")
     config_blob = tracked_blob(".factory/config.toml", config_bytes, "100644")
@@ -289,7 +307,12 @@ def execute_verified(command: list[str], executable: Path, expected_bytes: bytes
         # The descriptor must survive the interpreter's reopen of the script
         # path, so it is explicitly made inheritable across the exec.
         os.set_inheritable(descriptor, True)
-        os.execve(f"/proc/self/fd/{descriptor}", command, os.environ)
+        # Task 16 F1: pin the canonical repository root into the child
+        # environment so a repo-relative shell verifier can resolve its own
+        # root without relying on ``$0`` (the kernel shebang dispatch
+        # replaces the script argument with the descriptor path).
+        environ = {**os.environ, "FACTORY_VERIFIER_ROOT": str(ROOT)}
+        os.execve(f"/proc/self/fd/{descriptor}", command, environ)
     except OSError as exc:
         fail(f"cannot execute bound campaign verifier: {exc}")
     finally:
@@ -298,11 +321,14 @@ def execute_verified(command: list[str], executable: Path, expected_bytes: bytes
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default="campaign",
+                        choices=("campaign", "maintenance"),
+                        help="bind the campaign or maintenance verifier command")
     parser.add_argument("--expected-digest")
     parser.add_argument("--exec", dest="execute", action="store_true")
     args = parser.parse_args()
     helper = retained_helper_binding()
-    bound, digest, command, executable, executable_bytes = binding()
+    bound, digest, command, executable, executable_bytes = binding(args.mode)
     if args.expected_digest is not None and args.expected_digest != digest:
         fail("verification binding changed immediately before execution")
     if args.execute:

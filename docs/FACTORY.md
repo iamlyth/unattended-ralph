@@ -69,6 +69,26 @@ exact-commit, digest-bound, write-once receipt. The next fresh planner alone
 receives the deterministic findings payload and may convert it into canonical
 plan work. Developers see a finding only after it appears in a revised plan;
 no receipt, result file, event stream, or memory participates in selection.
+The findings channel is byte-exact: the planner receives the verbatim
+payload plus its SHA-256 digest, and a payload whose bytes do not carry the
+delivered digest (a paraphrase, subset, or substituted revision) is refused.
+The developer receives only the exact revised selected-task bytes: the
+campaign driver seam derives the task-excerpt digest from the exact committed
+plan at the phase head with the same real launch authority that binds the
+production child environment, and the fixture driver fails closed when that
+digest is absent, recording fixture evidence of the exact task-excerpt
+digest, the digest of the plan it worked, and the absence of any findings
+channel. That evidence lives under the fixture-only
+`src/.factory-test-output/` namespace with a fixture schema; no production
+authority reads it and it is never a model-visible input — the trusted suite
+re-derives every digest from the committed plan with the real authority and
+asserts the exact bytes itself. The hidden §22 conformance suite
+(`.factory/tests/test-factory-adversarial.sh`, case 05) hard-checks every
+authority prerequisite (the loop campaign/findings/launch/plan-parser/
+selector/state modules, the committed fixture driver, the findings campaign
+suite providing `FindingsWorkspace`, the adversarial manifest, and the
+findings schemas) with a named diagnostic before running, so a missing or
+renamed authority can never silently weaken a conformance case.
 
 Verification executes the exact committed verifier through a retained file
 descriptor, not a mutable pathname. Receipt and manifest citations are

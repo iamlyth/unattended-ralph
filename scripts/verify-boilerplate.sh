@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+# Task 16 F1 (EVID-01, §19): the deterministic verifier entrypoint is
+# executed through the retained descriptor authority (the bound inode), so
+# the kernel's shebang dispatch replaces the script argument with
+# ``/proc/self/fd/N`` and ``BASH_SOURCE[0]`` never names the repository.
+# The trusted authority pins the repository root into the child environment
+# as FACTORY_VERIFIER_ROOT; when that is absent (direct invocation) the
+# legacy ``$0``-derived resolution is used, and when neither resolves the
+# verifier fails closed instead of resolving the wrong root.
+if [[ -n "${FACTORY_VERIFIER_ROOT:-}" ]]; then
+    PROJECT_ROOT=${FACTORY_VERIFIER_ROOT%/}
+    SCRIPT_DIR=$PROJECT_ROOT/scripts
+else
+    SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+fi
+for required_marker in scripts/verify-boilerplate.sh .factory/config.toml; do
+    [[ -e "$PROJECT_ROOT/$required_marker" ]] || {
+        echo "verify: cannot resolve the canonical repository root from " \
+            "FACTORY_VERIFIER_ROOT/BASH_SOURCE (missing " \
+            "$PROJECT_ROOT/$required_marker)" >&2
+        exit 1
+    }
+done
 cd -- "$PROJECT_ROOT"
 
 # The scenario suite exercises isolated temporary repositories and must not
@@ -82,7 +103,6 @@ required = [
     'scripts/factory_lock.py', 'scripts/factory_state_io.py',
     'scripts/factory-state-file.py', 'scripts/ralph_lock.py',
     'scripts/ralph-lock-recover.py', 'scripts/repair-scratchpad-handoffs.py',
-    'scripts/ralph-event-boundary.py',
     'scripts/campaign-verifier-binding.py', 'scripts/ralph-supervision-migrate.py',
     'scripts/ralph-final-state.py', 'scripts/finalize-maintenance-planning.sh',
     'tests/test-git-checkpoint.sh',
@@ -105,7 +125,7 @@ required = [
     'scripts/run-factory-runners.py', 'scripts/check-factory-runner-evidence.py',
     'scripts/factory-runner-server.py', 'scripts/factory_runner_policy.py',
     'scripts/pi2-secure-exec.py',
-    'scripts/pi-cli-shims/ralph', 'scripts/pi-ralph-emit-extension.mjs',
+    'scripts/pi-cli-shims/ralph',
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
     'tests/test-campaign-audit.sh', 'tests/test-ralph-campaign.sh',
     'tests/test-ralph-campaign-state.py', 'tests/test-factory-lock.py',
@@ -150,6 +170,9 @@ required = [
     '.factory/loop/migration.py', '.factory/ralph-freeze',
     '.factory/tests/test-factory-migration.py',
     '.factory/tests/test-factory-migration.sh',
+    '.factory/tests/adversarial-manifest.json',
+    '.factory/tests/test-factory-adversarial.py',
+    '.factory/tests/test-factory-adversarial.sh',
 ]
 for name in required:
     assert pathlib.Path(name).is_file(), f'missing {name}'
@@ -326,6 +349,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./scripts/check-generic-leakage.sh
 ./.factory/tests/test-factory-footprint.sh
 ./.factory/tests/test-factory-migration.sh
+./.factory/tests/test-factory-adversarial.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by
 # default, defaults no vision model (consumer-configured placeholder), and keeps
 # every mutable capture/review/calibration/probe path under the ignored

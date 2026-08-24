@@ -40,12 +40,13 @@ Responsibilities (Task 9 scope):
   produced and published under the ignored ``.factory-state/`` evidence
   namespace.  The control state, the digest ledger, and the published result
   are the only lifecycle files the orchestrator touches; no runtime task
-  ledger, Ralph event stream, memory store, or context summary is ever
-  created.
+  ledger, Orchestrator event stream, memory store, or context summary is
+  ever created.
 
 The untrusted model process is the only *untrusted* surface of a phase.  Its
-completion tokens and prose are never control protocol; the machine-readable
-process exit status is one deterministic §13 signal (FACTORY-LOOP-SPEC §13:
+model-completion markers and prose are never control protocol; the
+machine-readable process exit status is one deterministic §13 signal
+(FACTORY-LOOP-SPEC §13:
 the trusted harness derives outcomes from plan state, Git state, exit
 status, and deterministic gates).  The orchestrator derives every phase
 outcome from the plan state, the Git state, the role's exit status,
@@ -2218,10 +2219,37 @@ class Campaign:
         env[CAMPAIGN_ENV_PREFIX + "TASK_ID"] = str(task_id) if task_id is not None else ""
         env[CAMPAIGN_ENV_PREFIX + "BOUND_COMMIT"] = head
         env[CAMPAIGN_ENV_PREFIX + "SCENARIO"] = config.scenario_path
+        # Task 16 §22.5: the developer driver role receives the exact
+        # task-excerpt digest of the committed plan at the phase head,
+        # derived by the real launch authority exactly like the production
+        # child environment (``launch.py``); the driver fails closed when the
+        # digest is absent, so a campaign proves the developer worked the
+        # exact revised selected-task bytes and nothing else (no findings
+        # payload, no receipts).  The excerpt is re-derived from the exact
+        # committed plan blob at ``head`` — never from the mutable worktree —
+        # so a substituted or paraphrased task fails closed.
+        if role == "developer" and task_id is not None:
+            try:
+                plan_blob = self._git.blob_at(head, config.plan_path)
+                excerpt_digest = launch_module.task_excerpt_digest(
+                    plan_blob, task_id
+                )
+            except launch_module.InvocationError as exc:
+                raise CampaignPhaseError(
+                    f"cannot derive the developer task-excerpt digest: {exc}"
+                ) from exc
+            env[CAMPAIGN_ENV_PREFIX + "TASK_EXCERPT_DIGEST"] = excerpt_digest
         # Task 10 §16: the planner role receives the deterministic
         # receipt-backed findings payload of the previous round as its only
         # findings channel (the fixture seam mirrors the digest-bound
         # prompt section of the production launch).  Other roles carry none.
+        # Task 16 §22.5: the exact payload digest is delivered alongside
+        # the verbatim payload bytes, exactly like the production launch
+        # binds ``findings_digest`` to the payload and refuses substituted
+        # prompt bytes (:func:`launch.compose_prompt`); the deterministic
+        # driver fails closed unless ``sha256(FINDINGS bytes)`` equals the
+        # delivered digest, so a substituted or tampered payload can never
+        # satisfy the findings-revised planner.
         if role == "planner" and findings_payload is not None:
             if len(findings_payload) > 64 * 1024:
                 raise CampaignFindingsError(
@@ -2229,6 +2257,9 @@ class Campaign:
                 )
             env[CAMPAIGN_ENV_PREFIX + "FINDINGS"] = findings_payload.decode(
                 "utf-8"
+            )
+            env[CAMPAIGN_ENV_PREFIX + "FINDINGS_DIGEST"] = plan_sha256(
+                findings_payload
             )
         # The structured-result handoff is role-specific: the tester may only
         # write the verification result path and the auditor only the audit
@@ -2542,7 +2573,14 @@ class Campaign:
                 spawn_argv,
                 executable=spawn_executable,
                 pass_fds=spawn_pass_fds,
-                env=sanitized_gate_environment(),
+                env={
+                    **sanitized_gate_environment(),
+                    # Task 16 F1: pin the canonical repository root into the
+                    # verifier child so a repo-relative shell gate can resolve
+                    # its own root without ``$0`` (the kernel shebang dispatch
+                    # replaces the script argument with the descriptor path).
+                    "FACTORY_VERIFIER_ROOT": str(self._root),
+                },
                 timeout=self._config.gate_timeout,
             )
         except lock_module.RootLockTimeoutError:

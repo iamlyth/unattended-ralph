@@ -5,7 +5,7 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/scripts" "$tmp/docs" "$tmp/.ralph/agent" "$tmp/.factory-state" \
-    "$tmp/.factory/artifacts"
+    "$tmp/.factory/artifacts" "$tmp/.factory/loop"
 cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/ralph-campaign-state.py" \
    "$PROJECT_ROOT/scripts/initialize-campaign-audit.py" \
@@ -24,6 +24,15 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/install-git-commit-guard.sh" "$tmp/scripts/"
 cp "$PROJECT_ROOT/.factory/campaign-objectives.json" "$tmp/.factory/"
 cp "$PROJECT_ROOT/.factory/verifier-acceptance.json" "$tmp/.factory/"
+# Task 15/16: the deprecated ralph-campaign launcher routes its freeze
+# decision through the retained hidden authority (.factory/loop/migration.py
+# freeze --guard), so a realistic deployment fixture carries the hidden loop
+# modules (migration, gitutil, plan_parser, state) exactly like the product
+# tree; factory_state_io.py is already copied above.
+cp "$PROJECT_ROOT/.factory/loop/migration.py" \
+   "$PROJECT_ROOT/.factory/loop/gitutil.py" \
+   "$PROJECT_ROOT/.factory/loop/plan_parser.py" \
+   "$PROJECT_ROOT/.factory/loop/state.py" "$tmp/.factory/loop/"
 cat > "$tmp/scripts/assert-no-factory-lock.py" <<'PY'
 #!/usr/bin/env python3
 import os

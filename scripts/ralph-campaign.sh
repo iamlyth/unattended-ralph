@@ -48,20 +48,30 @@ done
 $RESUME && $RESTART && { echo "ralph-campaign: --resume and --restart are mutually exclusive" >&2; exit 2; }
 
 cd -- "$PROJECT_ROOT"
-# Task 15 migration: the legacy Ralph control plane is frozen by the tracked
-# .factory/ralph-freeze marker; the hidden .factory/loop control plane is
-# authoritative. FACTORY_RALPH_FREEZE_OVERRIDE=1 is the documented
-# operator-only escape for recovering an already in-flight legacy cycle.
+# Task 15/16 migration: the legacy Ralph control plane is frozen by the
+# tracked .factory/ralph-freeze marker; the hidden .factory/loop control
+# plane is authoritative. The freeze decision is routed through the retained
+# hidden authority (.factory/loop/migration.py freeze --guard), which re-stats
+# the marker no-follow and fails closed on an unsafe marker, closing the
+# deprecated shell-level local-writer check/launch race. The operator-only
+# FACTORY_RALPH_FREEZE_OVERRIDE=1 escape remains solely for recovering an
+# already in-flight legacy cycle.
 if [[ ${FACTORY_RALPH_FREEZE_OVERRIDE:-0} != 1 ]]; then
-    freeze_marker="$PROJECT_ROOT/.factory/ralph-freeze"
-    if [[ -f "$freeze_marker" && ! -L "$freeze_marker" ]]; then
+    freeze_rc=1
+    if python3 "$PROJECT_ROOT/.factory/loop/migration.py" \
+        --root "$PROJECT_ROOT" freeze --guard 2>/dev/null; then
+        freeze_rc=0
+    else
+        freeze_rc=$?
+    fi
+    if (( freeze_rc == 0 )); then
         echo "ralph-campaign: frozen: the legacy Ralph control plane is deprecated (Task 15 migration)" >&2
         echo "ralph-campaign: the hidden .factory/loop control plane replaces it" >&2
         echo "ralph-campaign: set FACTORY_RALPH_FREEZE_OVERRIDE=1 only to recover an in-flight cycle" >&2
         exit 2
     fi
-    if [[ -e "$freeze_marker" || -L "$freeze_marker" ]]; then
-        echo "ralph-campaign: frozen: the freeze marker exists but is not a regular file; refusing a legacy launch" >&2
+    if (( freeze_rc != 1 )); then
+        echo "ralph-campaign: frozen: the freeze marker check failed (status $freeze_rc); refusing a legacy launch" >&2
         echo "ralph-campaign: inspect .factory/ralph-freeze; FACTORY_RALPH_FREEZE_OVERRIDE=1 is only for bounded recovery" >&2
         exit 2
     fi

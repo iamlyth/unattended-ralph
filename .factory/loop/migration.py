@@ -1214,6 +1214,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_freeze = sub.add_parser(
         "freeze", help="print whether new Ralph launches are frozen"
     )
+    p_freeze.add_argument(
+        "--guard",
+        action="store_true",
+        help=(
+            "exit-code freeze guard for the deprecated shell launchers: "
+            "exit 0 when frozen, exit 1 when not frozen, exit 2 when the "
+            "marker is unsafe or the authority is unavailable (fail closed)"
+        ),
+    )
 
     p_migrate = sub.add_parser(
         "migrate", help="translate the snapshot into the factory-state/v1 file"
@@ -1249,6 +1258,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 0
         if args.command == "freeze":
+            # Task 16: ``--guard`` is the retained-authority freeze gate for
+            # the deprecated shell launchers.  The decision is a single
+            # no-follow re-stat in this process (never a cached ``[ -f ]``
+            # shell check): frozen -> 0, not frozen -> 1, unsafe/unavailable
+            # -> 2 (fail closed), so a same-uid local writer cannot widen the
+            # check-to-launch window with a stale or unsafe marker reading.
+            if args.guard:
+                if not is_ralph_frozen(root):
+                    return 1
+                return 0
             print("frozen" if is_ralph_frozen(root) else "not-frozen")
             return 0
         if args.command == "migrate":
