@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Hidden stdlib Ollama usage guard (Task 7; QUOTA-01, QUOTA-02, §10).
+"""Standalone stdlib Ollama operator utility (Task 7; QUOTA-01, QUOTA-02).
 
 This module is the hardened, standard-library implementation of the retained
-``scripts/ollama-usage-guard.sh`` ``--check``/``--wait`` contract
-(FACTORY-LOOP-SPEC §10).  It is the fixed implementation used only when the
-campaign's ordered pre-round Ollama hook is enabled (the committed registry
-currently disables it); per-model launch never calls it. It satisfies
-QUOTA-02:
+``scripts/ollama-usage-guard.sh`` ``--check``/``--wait`` operator contract.
+It is not a campaign pre-round hook and per-model launch never imports or calls
+it. It satisfies QUOTA-02:
 
 * **Credentials never appear in child argv.**  The settings fetch runs in a
   dedicated fetch child (``factory.loop.usage_fetch``) whose argv is fully
@@ -92,6 +90,20 @@ MAX_HINT_BYTES = 512                # reset-hint / reason field bound
 FETCH_TIMEOUT = 20.0                # finite network/timeout bound (legacy 20s)
 
 DEFAULT_SETTINGS_URL = "https://ollama.com/settings"
+
+
+def _noninstalled_test_transport_available() -> bool:
+    """True only in the tracked source checkout that owns the hidden tests.
+
+    Installed/staged copies have no adjacent repository ``.git`` authority,
+    so their runtime can never enable alternate HTTPS origins or loopback
+    HTTP.  This is deliberately not controlled by environment or CLI flags.
+    """
+    source_root = Path(__file__).resolve().parents[2]
+    return (
+        (source_root / ".git").is_dir()
+        and (source_root / ".factory" / "tests" / "test-factory-usage.py").is_file()
+    )
 DEFAULT_THRESHOLD = 80.0
 DEFAULT_POLL_INTERVAL = 300
 DEFAULT_MAX_WAIT = 0
@@ -353,13 +365,13 @@ def redact(text: str, tokens: Sequence[str]) -> str:
 
 
 def _validate_settings_url(url: str) -> None:
-    """HTTPS-only, with an explicit loopback test seam (Task 7 review, 9).
+    """Validate the exact installed origin or a source-test-only transport.
 
-    Network fetches accept ``https://`` only.  ``http://`` is rejected in
-    production and permitted only for an explicit loopback
-    (``127.0.0.1``/``localhost``) seam used exclusively by the hermetic
-    hidden suite.  The fetch child re-checks the same rule defensively
-    before connecting.
+    Installed/staged runtime accepts only canonical
+    ``https://ollama.com:443/settings``. Alternate HTTPS and explicit loopback
+    HTTP exist only when this module runs from the tracked non-installed source
+    checkout that owns the hidden hermetic suite. The fetch child independently
+    enforces the same split before connecting.
 
     **No URL userinfo** (Task 11 review): a settings URL carrying a
     ``user:password@`` authority component is rejected outright — the URL
@@ -379,6 +391,20 @@ def _validate_settings_url(url: str) -> None:
         )
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
+    if not _noninstalled_test_transport_available():
+        if url != DEFAULT_SETTINGS_URL:
+            raise UsageConfigError(
+                "installed usage transport is pinned to the exact canonical "
+                "https://ollama.com:443/settings origin"
+            )
+        if (
+            scheme == "https" and host == "ollama.com"
+            and (parsed.port is None or parsed.port == 443)
+            and parsed.path == "/settings" and not parsed.query
+            and not parsed.fragment
+        ):
+            return
+        raise UsageConfigError("the installed canonical settings URL is malformed")
     if scheme == "https":
         return
     if scheme == "http" and host in ("127.0.0.1", "localhost"):
@@ -509,6 +535,13 @@ def acquire_credentials(
     owner, multi-link, or group/other-writable path).
     """
     environ = os.environ if environ is None else environ
+    if not _noninstalled_test_transport_available():
+        # Pin and validate the complete production origin before opening a
+        # cookie file, stdin, or operator store. Ambient/store URL settings are
+        # ignored in installed/staged code and cannot redirect credentials.
+        requested = settings_url or DEFAULT_SETTINGS_URL
+        _validate_settings_url(requested)
+        settings_url = DEFAULT_SETTINGS_URL
     cookie = bytearray()
     source = "unset"
     store: Dict[str, str] = {}

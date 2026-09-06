@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,15 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # across an exec boundary into a model/verifier process, even by a child
 # spawned with ``close_fds=False``.
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+# Campaigns may bind this authority to one freshly-created private namespace
+# instead of the repository's legacy shared ``.factory-state`` directory.
+# The override is context-local (never process-global mutable state), and only
+# the trusted campaign coordinator enters it.  Ordinary callers and existing
+# evidence tools retain the canonical legacy directory.
+_STATE_DIRECTORY_OVERRIDE: ContextVar[Path | None] = ContextVar(
+    "factory_state_directory_override", default=None
+)
 
 
 class StateIOError(RuntimeError):
@@ -111,6 +121,30 @@ def _validate_file(
         raise StateIOError("unsafe lifecycle marker")
 
 
+def state_directory_path(root: Path) -> Path:
+    """Return the context-bound state directory without touching it."""
+    override = _STATE_DIRECTORY_OVERRIDE.get()
+    return override if override is not None else Path(root).absolute() / ".factory-state"
+
+
+@contextmanager
+def campaign_state_directory(path: Path) -> Iterator[None]:
+    """Bind lifecycle I/O to one already-created private campaign directory.
+
+    The directory is never created, enumerated, repaired, or replaced here.
+    Its trusted coordinator must have created it with no-replace semantics;
+    this authority validates exact owner/mode/type on every later open.  This
+    lets a campaign avoid reading or sharing any pre-existing ``.factory-state``
+    bytes while preserving the canonical state/receipt writers unchanged.
+    """
+    absolute = Path(path).absolute()
+    token = _STATE_DIRECTORY_OVERRIDE.set(absolute)
+    try:
+        yield
+    finally:
+        _STATE_DIRECTORY_OVERRIDE.reset(token)
+
+
 @contextmanager
 def state_dir(
     root: Path, *, create: bool = False, _expected_uid: int | None = None
@@ -119,6 +153,26 @@ def state_dir(
     expected = _resolve_expected_uid(_expected_uid)
     root = root.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
+    override = _STATE_DIRECTORY_OVERRIDE.get()
+    if override is not None:
+        try:
+            directory_fd = os.open(override, flags)
+        except OSError as exc:
+            raise StateIOError(
+                f"campaign state namespace is unavailable: {override}: {exc}"
+            ) from exc
+        try:
+            opened = os.fstat(directory_fd)
+            _validate_directory(opened, _expected_uid=expected)
+            named = os.stat(override, follow_symlinks=False)
+            _validate_directory(named, _expected_uid=expected)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise StateIOError("campaign state namespace changed while opening")
+            yield directory_fd
+        finally:
+            os.close(directory_fd)
+        return
+
     root_fd = os.open(root, flags)
     directory_fd: int | None = None
     try:

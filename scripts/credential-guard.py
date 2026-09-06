@@ -77,6 +77,12 @@ VERSION = "1"
 # ---------------------------------------------------------------------------
 
 _PROC_RE = re.compile(r"/proc/[^\s\"'`;|&()<>]+/(environ|cmdline)")
+# B1 security review: the openai-codex credential descriptor is referenced
+# only through ``/proc/self/fd/N`` (or ``/proc/<pid>/fd/N``); a model tool
+# that dereferences that path in-process could read the credential memfd, so
+# every ``/proc/.../fd`` reference is blocked in commands and paths (defense
+# in depth; Landlock already denies ``/proc`` to subprocess tools).
+_PROC_FD_RE = re.compile(r"/proc/[^\s\"'`;|&()<>]+/fd(?:/\d+)?")
 _OLLAMA_RE = re.compile(r"(?<![A-Za-z0-9_])\.ollama-usage-env(?![A-Za-z0-9_])")
 _SSH_DIR_RE = re.compile(r"(?<![A-Za-z0-9_])\.ssh(?=[\s\"'`;/]|$)")
 _SSH_KEY_RE = re.compile(
@@ -96,6 +102,7 @@ _CREDENTIALS_PATH_RE = re.compile(r"(?:^|/)(?:\.\./)*credentials(?![A-Za-z0-9_])
 
 _PATH_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("procfs-environ-cmdline", _PROC_RE),
+    ("procfs-fd", _PROC_FD_RE),
     ("credential-store-file", _CRED_STORE_RE),
     ("credential-store-file", _CREDENTIALS_PATH_RE),
     ("dotenv-store", _DOTENV_RE),
@@ -123,7 +130,15 @@ _PROC_TAIL_RE = re.compile(
     r"/proc/[^\s\"'`;|&<>()]+/(?:env|cmd)[A-Za-z0-9_]*[?*\[][^\s\"'`;|&<>()]*"
 )
 _PROC_SUBSTITUTION_RE = re.compile(
-    r"/proc/[^\s\"'`;|&<>()]+/(?:env|cmd)[^\s;|&<>]{0,64}(?:\$\(|`|\$')"
+    r"/proc/[^\s\"'`;|&()<>]+/(?:env|cmd)[^\s;|&<>]{0,64}(?:\$\(|`|\$')"
+)
+# ``/proc/.../fd`` cut short by a glob (``/proc/self/fd/3?``, ``/proc/self/fd*``)
+# or spliced by a substitution (``/proc/self/fd/$(echo 3)``).
+_PROC_FD_TAIL_RE = re.compile(
+    r"/proc/[^\s\"'`;|&<>()]+/fd(?:/\d*)?[?*\[][^\s\"'`;|&<>()]*"
+)
+_PROC_FD_SUBSTITUTION_RE = re.compile(
+    r"/proc/[^\s\"'`;|&<>()]+/fd[^\s;|&<>]{0,64}(?:\$\(|`|\$')"
 )
 # Credential-store file whose extension is globbed (``auth.jso[n]`` is caught
 # by the de-glued scan; ``token.*``/``token.jso?``/``auth.[js]on`` land here).
@@ -155,6 +170,8 @@ _CREDENTIALS_TAIL_GLOB_RE = re.compile(
 _DYNAMIC_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("procfs-environ-cmdline", _PROC_TAIL_RE),
     ("procfs-environ-cmdline", _PROC_SUBSTITUTION_RE),
+    ("procfs-fd", _PROC_FD_TAIL_RE),
+    ("procfs-fd", _PROC_FD_SUBSTITUTION_RE),
     ("credential-store-file", _STORE_EXT_GLOB_RE),
     ("credential-store-file", _CREDENTIALS_TAIL_GLOB_RE),
     ("dotenv-store", _DOTENV_TAIL_GLOB_RE),
@@ -669,6 +686,18 @@ def classify_command(command: str) -> dict:
     """Fail-closed classification. Returns a stable machine-readable dict."""
     text = command.strip()
     reasons: List[str] = []
+
+    # Runner transport is a coordinator-only authority. Model tool calls pass
+    # through this classifier, while the trusted campaign coordinator executes
+    # its retained descriptor directly outside model confinement. Block every
+    # shell spelling that names the entrypoint; no model may probe transport,
+    # mint evidence, or race the one-writer aggregate.
+    runner_spelling = re.sub(r"\\\r?\n", "", text)
+    runner_spelling = runner_spelling.translate(
+        str.maketrans("", "", "'\"\\")
+    )
+    if "run-factory" in runner_spelling:
+        reasons.append("coordinator-only-runner")
 
     # Whole-text sensitive-path scan. Search-tool regex patterns inside quotes
     # are ordinary project grep patterns, never paths.

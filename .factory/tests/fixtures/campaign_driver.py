@@ -112,6 +112,9 @@ def main() -> int:
         if behavior == "planned":
             copy_template(f"planner-{round_no}.md", plan_rel, root)
             return 0
+        if behavior == "planned-exit1":
+            copy_template(f"planner-{round_no}.md", plan_rel, root)
+            return 1
         if behavior == "planned-complete":
             copy_template("planner-complete.md", plan_rel, root)
             return 0
@@ -283,7 +286,12 @@ def main() -> int:
             with open(evidence_path, "w", encoding="utf-8") as stream:
                 json.dump(evidence, stream, sort_keys=True, separators=(",", ":"))
         if behavior == "crash":
-            touch(root, f"src/work-{task_id}.md")
+            crash_path = os.path.join(root, f"src/work-{task_id}.md")
+            os.makedirs(os.path.dirname(crash_path), exist_ok=True)
+            with open(crash_path, "a", encoding="utf-8") as stream:
+                stream.write(f"crash-attempt-{attempt}\n")
+            os.kill(os.getpid(), signal.SIGKILL)
+        if behavior == "clean-crash":
             os.kill(os.getpid(), signal.SIGKILL)
         if behavior == "crash-once":
             if attempt == 1:
@@ -340,8 +348,18 @@ def main() -> int:
         if behavior == "pass":
             write_result_file(result_file, root, "pass")
             return 0
+        if behavior == "no-result":
+            return 0
+        if behavior == "malformed-result":
+            path = os.path.join(root, result_file)
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write('{"schema":"factory-phase-result/v1","outcome":')
+            return 0
         if behavior == "findings":
             write_result_file(result_file, root, "findings", findings=["fixture finding"])
+            return 0
+        if behavior == "pass-exit1":
+            write_result_file(result_file, root, "pass")
             return 1
         if behavior == "secret-findings":
             # Task 23 (F): a free-text finding that embeds a raw credential-
@@ -354,7 +372,7 @@ def main() -> int:
                 result_file, root, "findings",
                 findings=["api_token=super-secret-value-123 leak in fixture"],
             )
-            return 1
+            return 0
         if behavior == "secret-blocked":
             write_result_file(
                 result_file, root, "blocked",
@@ -371,8 +389,6 @@ def main() -> int:
         if behavior == "dirty":
             touch(root, "src/tester-touched.py")
             return 1
-        if behavior == "no-result":
-            return 0
         raise SystemExit(f"campaign driver: unknown tester behavior {behavior!r}")
 
     if role == "auditor":
@@ -384,6 +400,9 @@ def main() -> int:
             write_result_file(
                 result_file, root, "findings", findings=["fixture audit finding"]
             )
+            return 0
+        if behavior == "pass-exit1":
+            write_result_file(result_file, root, "pass")
             return 1
         if behavior == "blocked":
             write_result_file(

@@ -344,6 +344,7 @@ read_bytes = _fio.read_bytes
 atomic_write = _fio.atomic_write
 atomic_write_text = _fio.atomic_write_text
 atomic_write_json = _fio.atomic_write_json
+campaign_state_directory = _fio.campaign_state_directory
 StateIOError = _fio.StateIOError
 
 
@@ -1179,7 +1180,7 @@ def init_state(
     try:
         has_prior_ledger = bool(_read_ledger(root))
     except StateDigestError as exc:
-        if not os.path.exists(root / ".factory-state"):
+        if not os.path.exists(_fio.state_directory_path(root)):
             has_prior_ledger = False
         else:
             raise StateError(
@@ -1223,7 +1224,7 @@ def _state_file_exists(root: Path) -> bool:
             return True
     except StateIOError:
         try:
-            os.stat(root / ".factory-state", follow_symlinks=False)
+            os.stat(_fio.state_directory_path(root), follow_symlinks=False)
         except FileNotFoundError:
             return False
         raise
@@ -1405,7 +1406,7 @@ def recover_state(
     # 19 S2).  A dangling symlink still stats (mode S_IFLNK), so only a real
     # FileNotFoundError means the campaign has nothing to recover.
     try:
-        os.stat(root / ".factory-state", follow_symlinks=False)
+        os.stat(_fio.state_directory_path(root), follow_symlinks=False)
     except FileNotFoundError:
         return {"status": "clean", "removed": 0, "restored": None}
     try:

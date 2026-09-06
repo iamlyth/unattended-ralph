@@ -80,11 +80,21 @@ Run a finite fresh campaign (planning -> implementation -> verification ->
 audit):
 
 ```bash
-python3 .factory/loop/campaign.py --root "$PWD" run \
-  --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
-  --branch boilerplate-develop --provider ollama --model <model> \
-  --backend <absolute-model-backend>
+"${INSTALL_PREFIX:?verified install}/.factory/bin/factory-campaign" --root "$PWD" run \
+  --campaign-id "${CAMPAIGN_ID:?unique id}" --rounds "${ROUNDS:-3}" \
+  --branch boilerplate-develop --provider "${PI_PROVIDER:?real provider}" \
+  --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?immutable pi2 path}" \
+  --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
+  --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
+  --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
+  --verification-command ./scripts/verify-boilerplate.sh \
+  --acceptance-command ./scripts/verify-boilerplate.sh
 ```
+
+Production accepts only the authenticated, immutable Pi2 launch contract;
+`synthetic` and `--role-driver` are explicit fixture-only seams. Capability
+and runner commands are supplied only when the adopting project's committed
+configuration declares them.
 
 Inspect the lifecycle:
 

@@ -254,6 +254,22 @@ class RootDescriptorLockCase(LockConformanceCase):
         with self.acquire(root):
             pass
 
+    def test_live_branch_revalidation_forwards_a_finite_timeout(self) -> None:
+        root = self.make_repo()
+        with self.acquire(root) as held:
+            with unittest.mock.patch.object(
+                held, "_git_run", wraps=held._git_run
+            ) as git_run:
+                self.assertEqual(
+                    held.validate_live_branch("develop", timeout=0.5), "develop"
+                )
+            self.assertEqual(git_run.call_args.kwargs["timeout"], 0.5)
+            for invalid in (None, 0, -1, float("inf"), float("nan"), True):
+                with self.subTest(invalid=invalid), self.assertRaises(
+                    RootLockUnsafeError
+                ):
+                    held.validate_live_branch("develop", timeout=invalid)
+
     def test_no_replaceable_lock_pathname_is_created(self) -> None:
         root = self.make_repo()
         before = sorted(p.name for p in root.iterdir())
@@ -1358,6 +1374,36 @@ class PinnedGroupTermination(LockConformanceCase):
             if foreign.poll() is None:
                 foreign.kill()
                 foreign.wait(timeout=10)
+
+    def test_live_identity_fails_closed_without_pidfd_signaling(self) -> None:
+        """A numeric ``os.kill`` is never a fallback for a live pinned PID."""
+        with unittest.mock.patch.object(
+            lock_module, "_is_live_with_identity", return_value=True
+        ), unittest.mock.patch.object(os, "pidfd_open", None, create=True):
+            with self.assertRaisesRegex(
+                RootLockUnsafeError, "pidfd signaling is unavailable"
+            ):
+                lock_module._signal_pid_pinned(424242, 101, signal.SIGKILL)
+
+    def test_pidfd_identity_is_revalidated_after_open(self) -> None:
+        """A PID recycled before pidfd_open is never signaled via its pidfd."""
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        send = unittest.mock.Mock()
+        with unittest.mock.patch.object(
+            lock_module,
+            "_is_live_with_identity",
+            side_effect=[True, False],
+        ), unittest.mock.patch.object(
+            os, "pidfd_open", return_value=descriptor, create=True
+        ), unittest.mock.patch.object(
+            signal, "pidfd_send_signal", send, create=True
+        ):
+            self.assertFalse(
+                lock_module._signal_pid_pinned(424243, 102, signal.SIGKILL)
+            )
+        send.assert_not_called()
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
 
     def test_fork_during_termination_is_captured_and_cleaned(self) -> None:
         """A member that forks a new descendant into the group while the TERM

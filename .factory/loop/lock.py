@@ -1184,20 +1184,52 @@ def _pgid_members_identity(pgid: int) -> Dict[int, int]:
 
 
 def _signal_pid_pinned(pid: int, starttime: int, signum: int) -> bool:
-    """``os.kill(pid, signum)`` only while ``pid`` is still the exact process.
+    """Signal one exact process through a starttime-revalidated pidfd.
 
-    The identity (starttime) is re-verified from the live ``/proc/<pid>/stat``
-    immediately before the signal, so a PID reused by an unrelated process
-    between observation and signaling is never signaled.  Returns ``True``
-    when the signal was actually delivered to the pinned process.
+    A ``/proc`` identity check followed by ``os.kill(pid, ...)`` still has a
+    PID-reuse window.  Opening a pidfd first pins the kernel process object;
+    the starttime is then re-read and must still match before delivery through
+    ``pidfd_send_signal``.  If pidfd signaling is unavailable for a live
+    identity, cleanup fails closed instead of falling back to a numeric PID.
+    Returns ``True`` only when the signal was delivered to the pinned object.
     """
     if not _is_live_with_identity(pid, starttime):
         return False
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if not callable(pidfd_open) or not callable(pidfd_send_signal):
+        raise RootLockUnsafeError(
+            "identity-safe pidfd signaling is unavailable for live bounded "
+            f"process {pid}; refusing numeric os.kill"
+        )
     try:
-        os.kill(pid, signum)
-        return True
-    except (ProcessLookupError, PermissionError):
+        descriptor = pidfd_open(pid, 0)
+    except ProcessLookupError:
         return False
+    except OSError as exc:
+        raise RootLockUnsafeError(
+            f"cannot pidfd-pin bounded process {pid}: {exc}"
+        ) from exc
+    try:
+        # The numeric PID may have been recycled before pidfd_open.  The pidfd
+        # now pins whichever object was opened, so authorize delivery only
+        # after the current /proc identity still matches the original pin.
+        if not _is_live_with_identity(pid, starttime):
+            return False
+        try:
+            pidfd_send_signal(descriptor, signum, None, 0)
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            raise RootLockUnsafeError(
+                f"cannot pidfd-signal bounded process {pid}: {exc}"
+            ) from exc
+        return True
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _signal_group_pinned(
@@ -1560,6 +1592,7 @@ def detect_escaped_descendants(
     model_pid: Optional[int] = None,
     captured: Optional[Iterable] = None,
     trusted_pids: Optional[Iterable[int]] = None,
+    trusted_identities: Optional[Mapping[int, int]] = None,
 ) -> Tuple[frozenset[int], str]:
     """Detect escaped double-fork/``setsid`` descendants that survive.
 
@@ -1577,7 +1610,9 @@ def detect_escaped_descendants(
       by handle scan but *is* captured in the tree snapshot, and a
       handle-holder that slipped outside the snapshot is caught here.
     * ``trusted_pids`` defaults to this process and its ancestor chain (the
-      control-plane's own tree); supervision may pass its full trusted set.
+      control-plane's own tree). ``trusted_identities`` is the reuse-safe
+      exclusion surface for a supervision baseline: a PID is excluded only
+      while its current starttime still equals the snapshotted starttime.
     """
     root = Path(root).absolute()
     try:
@@ -1595,10 +1630,26 @@ def detect_escaped_descendants(
     if captured is None:
         captured = ()
     trusted = frozenset(trusted_pids or ()) | _self_ancestry()
+    identity_baseline = {
+        int(pid): int(starttime)
+        for pid, starttime in (trusted_identities or {}).items()
+        if (
+            not isinstance(pid, bool) and isinstance(pid, int) and pid > 0
+            and not isinstance(starttime, bool)
+            and isinstance(starttime, int) and starttime > 0
+        )
+    }
+
+    def is_trusted(pid: int) -> bool:
+        if pid in trusted:
+            return True
+        starttime = identity_baseline.get(pid)
+        return starttime is not None and _is_live_with_identity(pid, starttime)
+
     escaped: set[int] = set()
     reasons: List[str] = []
     for pid, starttime in sorted(_captured_pids(captured).items()):
-        if pid in trusted:
+        if is_trusted(pid):
             continue
         if starttime is not None:
             still_live = _is_live_with_identity(pid, starttime)
@@ -1610,9 +1661,16 @@ def detect_escaped_descendants(
                 f"pid {pid} of the model process tree survives termination"
             )
     for pid in sorted(_iter_pids()):
-        if pid in trusted or pid in escaped or pid == os.getpid():
+        if pid in escaped or pid == os.getpid():
+            continue
+        if is_trusted(pid):
             continue
         if _holds_root_handle(pid, root, root_info.st_dev, root_info.st_ino):
+            # Re-check an exact baseline after the potentially long fd scan.
+            # A baseline process that exited and had its numeric PID reused
+            # while /proc was inspected must not exempt the replacement.
+            if is_trusted(pid):
+                continue
             escaped.add(pid)
             reasons.append(
                 f"pid {pid} retains a repository-root or lock inode handle"
@@ -1628,6 +1686,7 @@ def assert_no_escaped_descendants(
     model_pid: Optional[int] = None,
     captured: Optional[frozenset[int]] = None,
     trusted_pids: Optional[Iterable[int]] = None,
+    trusted_identities: Optional[Mapping[int, int]] = None,
 ) -> None:
     """Fail closed when an escaped descendant survives (PROC-01, §12).
 
@@ -1636,7 +1695,8 @@ def assert_no_escaped_descendants(
     while it raises :class:`EscapedDescendantError`.
     """
     escaped, reason = detect_escaped_descendants(
-        root, model_pid=model_pid, captured=captured, trusted_pids=trusted_pids
+        root, model_pid=model_pid, captured=captured, trusted_pids=trusted_pids,
+        trusted_identities=trusted_identities,
     )
     if escaped:
         raise EscapedDescendantError(

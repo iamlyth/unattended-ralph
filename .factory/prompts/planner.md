@@ -25,9 +25,14 @@ and task bytes to the exact bound commit; treat any mismatch as fatal.
    cycle.
 3. Translate verified findings, blockers, and newly discovered work into
    bounded, uniquely numbered `pending` tasks with explicit dependencies,
-   priorities, acceptance criteria, verification commands, and documentation
-   impact. The plan is the sole task ledger; never create a second task
-   queue.
+   acceptance criteria, verification commands, and documentation impact. The
+   plan parser accepts `Priority` only as a positive integer; never write
+   labels such as `high`, `medium`, or `low` (omit Priority unless a numeric
+   ordering is required). Before adding anything, search every existing task
+   title, source, and scope for equivalent work. Task titles must be unique;
+   revise the existing task when the finding is already represented rather
+   than creating a duplicate under a new number.
+   The plan is the sole task ledger; never create a second task queue.
 4. Preserve every conformance requirement ID in the matrix and map every
    non-verified classification to an explicit task. Keep the interaction
    acceptance inventory exhaustive. Never self-declare evidence tiers or
@@ -35,6 +40,20 @@ and task bytes to the exact bound commit; treat any mismatch as fatal.
 5. Preserve unresolved external/human requirements as explicit findings and
    `blocked` task rows with exact fact references; never let a blocked task
    become passing merely because no model can execute it.
+6. The uniquely titled `Final documentation and specification audit` task must
+   remain the final task in the file and depend on every other task. Task
+   numbers must stay unique, increasing, and contiguous. When adding a task,
+   assign the new remediation the current final task number, increment the
+   final audit's number by one, and update its dependencies and any references
+   accordingly. Insert the remediation immediately before the renumbered final
+   audit; never place a higher-numbered task before a lower-numbered task or
+   append anything after the final audit. Once the first `## Task` heading has
+   appeared, every later level-two heading must be another `## Task N:`
+   heading—never add `## Findings`, `## Blockers`, notes, or any other section
+   among the task ledger. Every task field is unique: update an existing
+   `Evidence`, `Source`, `Scope`, `Blocked on`, or `Status` field in place and
+   never add a second field with the same name. Put continuation evidence as
+   two-space-indented text beneath the sole field.
 
 ## Workspace confinement
 

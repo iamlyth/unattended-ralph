@@ -542,7 +542,8 @@ class CounterTest(StateConformanceCase):
         )
         with self.assertRaisesRegex(StateTamperError, "not a §13 outcome"):
             parse_state(mismatch)
-        # The per-phase outcome sets are exact and documented.
+        # The per-phase outcome sets are exact and documented. Planning also
+        # carries the prior round's trusted audit outcome on a nonfinal edge.
         self.assertEqual(
             PHASE_OUTCOMES["planning"], frozenset(
                 {"interrupted", "pass", "findings", "blocked"}

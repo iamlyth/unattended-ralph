@@ -39,7 +39,7 @@ Coverage:
   result file, and gate detail stays bounded;
 * **the actual CLI and the Node extension** (CRED-01, §18): the tracked
   ``scripts/credential-guard.py`` CLI and the exported
-  ``scripts/pi-ralph-emit-extension.mjs`` tool_call/tool_result redaction
+  ``scripts/pi-factory-guard-extension.mjs`` tool_call/tool_result redaction
   helpers are exercised with synthetic secrets through real subprocesses;
 * **model-viewed Git shim** (GIT-01, Task 11): a caller-controlled PATH
   with a forged ``git`` cannot redirect the shim — the real executable is
@@ -55,6 +55,7 @@ Coverage:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -64,6 +65,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -75,7 +77,6 @@ GUARD_RELPATH = "scripts/credential-guard.py"
 
 sys.path.insert(0, str(LOOP))
 import campaign as campaign_module  # noqa: E402
-import confinement as confinement_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
 import redaction  # noqa: E402
@@ -677,6 +678,31 @@ class SanitizedGateEnvironmentTests(unittest.TestCase):
                 )
             self.assertIn("FAKE_COOKIE", str(caught.exception))
 
+    def test_gate_nix_path_must_be_one_immutable_store_source(self) -> None:
+        for value in (".", "nixpkgs=.", "nixpkgs=/tmp/evil", "a=/nix/store/x"):
+            with self.subTest(value=value), self.assertRaises(
+                campaign_module.CampaignError
+            ):
+                campaign_module.sanitized_gate_environment(
+                    {"PATH": "/usr/bin", "NIX_PATH": value}
+                )
+        with self.assertRaises(campaign_module.CampaignError):
+            campaign_module.sanitized_gate_environment(
+                {"PATH": "/usr/bin", "NIX_REMOTE": "local"}
+            )
+        self.assertEqual(
+            campaign_module.sanitized_gate_environment(
+                {"PATH": "/usr/bin", "NIX_REMOTE": "daemon"}
+            )["NIX_REMOTE"],
+            "daemon",
+        )
+        value = os.environ.get("NIX_PATH", "")
+        if value:
+            env = campaign_module.sanitized_gate_environment(
+                {"PATH": "/usr/bin", "NIX_PATH": value}
+            )
+            self.assertEqual(env["NIX_PATH"], value)
+
     def test_sanitized_gate_environment_defaults_to_os_environ(self) -> None:
         with unittest.mock.patch.dict(
             os.environ,
@@ -801,7 +827,7 @@ class CampaignGateEndToEndTests(unittest.TestCase):
         ws = FACTORY_CAMPAIGN.FixtureWorkspace(
             self.tmp / "ws",
             scenario={
-                "planner": {"behavior": "planned"},
+                "planner": {"behavior": "planned-complete"},
                 "developer": {"behavior": "complete"},
                 "tester": {"behavior": "pass"},
                 "auditor": {"behavior": "findings"},
@@ -933,6 +959,110 @@ class CredentialGuardCliTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+TOOL_FD_FIXTURE = r'''
+import assert from 'node:assert/strict';
+import { existsSync, fstatSync, linkSync, readFileSync, readSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+
+const [extensionPath, toolName, fdText, aliasText, limitText, secret, pythonScanner, nodeScanner, authFile] = process.argv.slice(2);
+const fd = Number(fdText);
+const alias = Number(aliasText);
+// Non-vacuity: exact Pi/Node parent really inherited and can read the memfd
+// before the trusted common tool boundary runs.
+for (const inherited of [fd, alias]) {
+  const probe = Buffer.alloc(4096);
+  const count = readSync(inherited, probe, 0, probe.length, 0);
+  assert(probe.subarray(0, count).includes(Buffer.from(secret)));
+}
+assert(readFileSync(authFile).includes(Buffer.from(secret)));
+const handlers = {};
+const registrations = [];
+const extension = await import(pathToFileURL(extensionPath));
+extension.default({
+  on(name, callback) { handlers[name] = callback; },
+  registerProvider(name, config) { registrations.push({ name, config }); },
+});
+await handlers.session_start({}, {});
+assert.equal(registrations.length, 1);
+assert.equal(registrations[0].name, 'openai-codex');
+assert.equal(registrations[0].config.apiKey, secret);
+await handlers.before_agent_start({});
+const input = toolName === 'bash' ? { command: 'printf safe' } : { path: 'README.md' };
+const verdict = await handlers.tool_call({ toolName, input });
+assert.equal(verdict ?? null, null, `tool ${toolName} unexpectedly blocked`);
+assert.throws(() => fstatSync(fd), (error) => error?.code === 'EBADF');
+assert.throws(() => fstatSync(alias), (error) => error?.code === 'EBADF');
+assert.equal(existsSync(authFile), false, 'private auth file survived tool boundary');
+// These generated scanners use numeric syscalls only (never /proc). They are
+// the real child-process shape reached by bash and Node-backed Pi tools.
+for (const [program, scanner] of [[process.argv[0], nodeScanner], [process.env.FACTORY_TEST_PYTHON, pythonScanner]]) {
+  const probe = spawnSync(program, [scanner, fdText, aliasText, limitText, secret], { encoding: 'utf8' });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.equal(probe.stdout.trim(), 'EBADF');
+}
+const restored = await handlers.tool_result({
+  toolName, content: [{ type: 'text', text: 'safe' }], details: {}, isError: false,
+});
+assert(restored !== undefined);
+assert(readFileSync(authFile).includes(Buffer.from(secret)),
+  'auth file was not restored after the redacted tool result');
+// Simulate Pi's legitimate provider refresh between turns. The next common
+// tool boundary must accept only this coherent same-account transition,
+// retain it in extension-owned memory, and detach it before dispatch.
+const rotatedSecret = `${secret}-ROTATED`;
+const rotatedRefresh = 'SYNTHETIC-ROTATED-REFRESH-VALUE';
+const rotatedPayload = Buffer.from(JSON.stringify({
+  'openai-codex': {
+    type: 'oauth', access: rotatedSecret, refresh: rotatedRefresh,
+    accountId: 'synthetic-account', expires: Date.now() + 7_200_000,
+  },
+}));
+writeFileSync(authFile, rotatedPayload, { mode: 0o600 });
+const verdict2 = await handlers.tool_call({ toolName, input });
+assert.equal(verdict2 ?? null, null, `second tool ${toolName} unexpectedly blocked`);
+assert.equal(existsSync(authFile), false, 'auth file survived second tool boundary');
+const restored2 = await handlers.tool_result({
+  toolName, content: [{ type: 'text', text: 'safe-2' }], details: {}, isError: false,
+});
+assert(restored2 !== undefined);
+assert(readFileSync(authFile).includes(Buffer.from(secret)),
+  'auth file was not restored for the next authenticated turn');
+
+// Reproduce the reviewed B1 race for every enabled tool: after a completed
+// tool/result cycle, detach the credential, recreate auth.json, and add a
+// hardlink alias before the next tool_call. The common synchronous boundary
+// must reject the call before any tool-specific implementation can run.
+const detachedAgain = extension.closeToolCredentialBoundary();
+assert.equal(detachedAgain.ok, true);
+assert.equal(existsSync(authFile), false);
+// Pi may first publish its exact safe empty-object placeholder after observing
+// the detached path. It contains no credential and is removed before dispatch.
+writeFileSync(authFile, '{}\n', { mode: 0o600 });
+const placeholder = await handlers.tool_call({ toolName, input });
+assert.equal(placeholder ?? null, null, `safe placeholder blocked ${toolName}`);
+assert.equal(existsSync(authFile), false, 'safe placeholder survived tool boundary');
+// Pi's legitimate single-link recreation is transition-validated, captured,
+// and removed synchronously before the next tool is allowed.
+writeFileSync(authFile, rotatedPayload, { mode: 0o600 });
+const rebound = await handlers.tool_call({ toolName, input });
+assert.equal(rebound ?? null, null, `legitimate detached refresh blocked ${toolName}`);
+assert.equal(existsSync(authFile), false, 'rebound auth file survived tool boundary');
+// The same pathname with a hardlink alias must fail closed.
+writeFileSync(authFile, rotatedPayload, { mode: 0o600 });
+const aliasPath = `${authFile}.hardlink`;
+linkSync(authFile, aliasPath);
+const recreated = await handlers.tool_call({ toolName, input });
+assert.equal(recreated?.block, true,
+  `recreated hardlinked auth file did not block ${toolName}`);
+assert.match(recreated.reason, /tool-file-binding-mismatch/);
+unlinkSync(aliasPath);
+unlinkSync(authFile);
+await handlers.session_shutdown({ reason: 'quit' }, {});
+assert(readFileSync(authFile).includes(Buffer.from(rotatedSecret)));
+console.log(`TOOL_CREDENTIAL_CYCLED:${toolName}`);
+'''
+
 NODE_FIXTURE = r'''
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -997,6 +1127,108 @@ class NodeExtensionRedactionTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_exact_pi_common_tool_boundary_cycles_auth_for_every_enabled_tool(self) -> None:
+        """Every Pi tool detaches the credential file; child scanners cannot
+        inherit the retained memfd, and tool_result restores the next turn."""
+        if not hasattr(os, "memfd_create"):
+            self.skipTest("memfd_create is unavailable")
+        python_scanner = self.tmp / "numeric-fd-scanner.py"
+        python_scanner.write_text(
+            "import errno,os,sys\n"
+            "fd=int(sys.argv[1]); alias=int(sys.argv[2]); limit=int(sys.argv[3]); secret=sys.argv[4].encode()\n"
+            "try: os.fstat(fd)\n"
+            "except OSError as e: assert e.errno==errno.EBADF\n"
+            "else: raise SystemExit('original descriptor remained open')\n"
+            "try: os.fstat(alias)\n"
+            "except OSError as e: assert e.errno==errno.EBADF\n"
+            "else: raise SystemExit('high alias remained open')\n"
+            "for candidate in range(3,limit):\n"
+            " try: data=os.pread(candidate,4096,0)\n"
+            " except OSError: continue\n"
+            " if secret in data: raise SystemExit(f'alias leaked at {candidate}')\n"
+            "print('EBADF')\n",
+            encoding="utf-8",
+        )
+        node_scanner = self.tmp / "numeric-fd-scanner.mjs"
+        node_scanner.write_text(
+            "import { closeSync, fstatSync, readSync } from 'node:fs';\n"
+            "const fd=Number(process.argv[2]), alias=Number(process.argv[3]);\n"
+            "const limit=Number(process.argv[4]), secret=process.argv[5];\n"
+            "try { fstatSync(fd); throw new Error('original descriptor remained open'); }\n"
+            "catch (e) { if (e?.code !== 'EBADF') throw e; }\n"
+            "try { fstatSync(alias); throw new Error('high alias remained open'); }\n"
+            "catch (e) { if (e?.code !== 'EBADF') throw e; }\n"
+            "for (let candidate=3; candidate<limit; candidate++) {\n"
+            " const buffer=Buffer.alloc(4096);\n"
+            " try { const count=readSync(candidate,buffer,0,buffer.length,0);"
+            " if (buffer.subarray(0,count).includes(Buffer.from(secret)))"
+            " throw new Error(`alias leaked at ${candidate}`); }\n"
+            " catch (e) { if (String(e?.message).startsWith('alias leaked')) throw e; }\n"
+            "}\nconsole.log('EBADF');\n",
+            encoding="utf-8",
+        )
+        fixture = self.tmp / "tool-fd-fixture.mjs"
+        fixture.write_text(TOOL_FD_FIXTURE, encoding="utf-8")
+        extension = ROOT / "scripts" / "pi-factory-guard-extension.mjs"
+        guard_digest = hashlib.sha256(REAL_GUARD.read_bytes()).hexdigest()
+        for tool_name in sorted({
+            tool for tools in launch_module.DEFAULT_ALLOWED_TOOLS.values()
+            for tool in tools
+        }):
+            with self.subTest(tool=tool_name):
+                raw_fd = os.memfd_create("factory-pi2-auth-regression", 0)
+                fd = fcntl.fcntl(raw_fd, fcntl.F_DUPFD, 200)
+                alias_fd = fcntl.fcntl(raw_fd, fcntl.F_DUPFD, 1500)
+                os.close(raw_fd)
+                fd_limit = 4096
+                try:
+                    secret = f"SYNTHETIC-AUTH-{tool_name}-VALUE"
+                    auth_payload = json.dumps({
+                        "openai-codex": {
+                            "type": "oauth", "access": secret,
+                            "refresh": "SYNTHETIC-REFRESH-VALUE",
+                            "accountId": "synthetic-account",
+                            "expires": int(time.time() * 1000) + 3_600_000,
+                        },
+                    }).encode("utf-8")
+                    os.write(fd, auth_payload)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    identity = os.fstat(fd)
+                    agent_dir = self.tmp / f"agent-{tool_name}"
+                    agent_dir.mkdir()
+                    auth_file = agent_dir / "auth.json"
+                    auth_file.write_bytes(auth_payload)
+                    auth_file.chmod(0o600)
+                    file_identity = auth_file.stat()
+                    env = dict(os.environ)
+                    env.update({
+                        launch_module.PI_FACTORY_GUARD_DIGEST_ENV: guard_digest,
+                        launch_module.PI_FACTORY_GUARD_PYTHON_ENV:
+                            launch_module.require_trusted_interpreter(),
+                        "PI_FACTORY_TOOL_FD": str(fd),
+                        "PI_FACTORY_TOOL_FD_DEV": str(identity.st_dev),
+                        "PI_FACTORY_TOOL_FD_INO": str(identity.st_ino),
+                        "PI_FACTORY_TOOL_FD_LIMIT": str(fd_limit),
+                        "PI_FACTORY_TOOL_FILE": str(auth_file),
+                        "PI_FACTORY_TOOL_FILE_DEV": str(file_identity.st_dev),
+                        "PI_FACTORY_TOOL_FILE_INO": str(file_identity.st_ino),
+                        "PI_CODING_AGENT_DIR": str(agent_dir),
+                        "FACTORY_TEST_PYTHON": sys.executable,
+                    })
+                    result = subprocess.run(
+                        ["node", str(fixture), str(extension), tool_name, str(fd),
+                         str(alias_fd), str(fd_limit), secret,
+                         str(python_scanner), str(node_scanner), str(auth_file)],
+                        pass_fds=(fd, alias_fd), env=env, capture_output=True, text=True,
+                        timeout=30,
+                    )
+                finally:
+                    os.close(fd)
+                    os.close(alias_fd)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"TOOL_CREDENTIAL_CYCLED:{tool_name}", result.stdout)
+                self.assertNotIn(secret, result.stdout + result.stderr)
+
     def test_exported_tool_call_and_result_redaction(self) -> None:
         # ``--input-type=module`` applies to stdin input only; the fixture
         # is piped through stdin exactly like the visible extension suite.
@@ -1006,10 +1238,10 @@ class NodeExtensionRedactionTests(unittest.TestCase):
         # without any Git access (Task 11 review).
         guard_digest = hashlib.sha256(REAL_GUARD.read_bytes()).hexdigest()
         node_env = dict(os.environ)
-        node_env[launch_module.PI_RALPH_GUARD_DIGEST_ENV] = guard_digest
+        node_env[launch_module.PI_FACTORY_GUARD_DIGEST_ENV] = guard_digest
         result = run(
             ["node", "--input-type=module", "-",
-             str(ROOT / "scripts" / "pi-ralph-emit-extension.mjs")],
+             str(ROOT / "scripts" / "pi-factory-guard-extension.mjs")],
             input_data=self.fixture.read_bytes(),
             check=False,
             env=node_env,
@@ -1052,11 +1284,10 @@ class GitShimTests(unittest.TestCase):
         env["PATH"] = str(self.fake_dir) + os.pathsep + env.get("PATH", "")
         env["FAKE_MARKER"] = str(self.marker)
         result = subprocess.run(
-            [str(self.shim), "--version"],
-            env=env, capture_output=True, text=True,
+            [str(self.shim), "status", "--short"],
+            cwd=ROOT, env=env, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("git version", result.stdout)
         self.assertNotIn("FAKE_GIT_RAN", result.stdout + result.stderr)
         self.assertFalse(self.marker.exists(),
                          "the fake PATH git executed behind the shim")
@@ -1137,6 +1368,19 @@ class ExternalBackendTests(unittest.TestCase):
         shutil.copy2(ROOT / launch_module.SECURE_WRAPPER,
                      scripts / Path(launch_module.SECURE_WRAPPER).name)
         shutil.copy2(REAL_GUARD, scripts / Path(GUARD_RELPATH).name)
+        shutil.copy2(
+            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            scripts / "pi-factory-guard-extension.mjs",
+        )
+        (scripts / "pi-cli-shims").mkdir()
+        shutil.copy2(
+            ROOT / "scripts" / "pi-cli-shims" / "git",
+            scripts / "pi-cli-shims" / "git",
+        )
+        loop = self.workspace / ".factory" / "loop"
+        loop.mkdir(parents=True)
+        for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
+            shutil.copy2(ROOT / ".factory" / "loop" / module, loop / module)
         self.backend = self.workspace / "backend.py"
         self.backend.write_text("#!/usr/bin/env python3\nprint('ok')\n",
                                 encoding="utf-8")
@@ -1198,7 +1442,6 @@ class ExternalBackendTests(unittest.TestCase):
         external = self.tmp / "external-backend.py"
         external.write_text("print('x')\n", encoding="utf-8")
         binding = self.binding(backend=external)
-        proof = confinement_module._mint_synthetic_proof(binding)
         with self.assertRaises(launch_module.InvocationError) as caught:
             launch_module.authorize_launch(
                 binding,
@@ -1206,7 +1449,6 @@ class ExternalBackendTests(unittest.TestCase):
                 agents=self.agents,
                 spec=self.spec,
                 plan=self.plan,
-                _confinement_proof=proof,
             )
         self.assertIn("external", str(caught.exception).lower())
 
@@ -1222,7 +1464,7 @@ class ExternalBackendTests(unittest.TestCase):
                 spec=self.spec,
                 plan=self.plan,
             )
-        self.assertIn("confinement", str(caught.exception).lower())
+        self.assertIn("external", str(caught.exception).lower())
 
     def test_in_workspace_backend_ok_under_synthetic_seam(self) -> None:
         # Task 6's private synthetic-proof path remains authorized for an
@@ -1235,7 +1477,6 @@ class ExternalBackendTests(unittest.TestCase):
             agents=self.agents,
             spec=self.spec,
             plan=self.plan,
-            _confinement_proof=confinement_module._mint_synthetic_proof(binding),
         )
         self.assertIsInstance(authority, launch_module.LaunchAuthority)
 
@@ -1268,26 +1509,19 @@ class ExternalBackendRealConfinementTests(FACTORY_CONFINEMENT._Base):
         # immutable-chain check and accepted.
         external = Path(gitutil.GIT_EXECUTABLE)
         binding = self.binding(role="planner", backend=external)
-        home = FACTORY_CONFINEMENT.wc.sanitized_home_directory()
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = FACTORY_CONFINEMENT.wc.confinement_spec(
-            binding, sanitized_home=home)
         authority = launch_module.authorize_launch(
             binding,
             role_prompt=(self.workspace / "role.md").read_bytes(),
             agents=(self.workspace / "AGENTS.md").read_bytes(),
             spec=(self.workspace / "spec.md").read_bytes(),
             plan=(self.workspace / "plan.md").read_bytes(),
-            _confinement_spec=spec,
-            _sanitized_home=home,
         )
         self.assertIsInstance(authority, launch_module.LaunchAuthority)
-        self.assertFalse(authority._confinement_proof.synthetic)
+        self.assertFalse(hasattr(authority._confinement_proof, "synthetic"))
         resolved = os.path.realpath(str(external))
         self.assertIn(resolved, authority._external_paths)
         self.addCleanup(shutil.rmtree, authority._exec_dir, ignore_errors=True)
-        self.addCleanup(
-            shutil.rmtree, Path(authority._prompt_path).parent, ignore_errors=True)
+        self.addCleanup(os.close, authority._prompt_fd)
         self.addCleanup(
             shutil.rmtree, authority._session_dir, ignore_errors=True)
 
@@ -1298,10 +1532,6 @@ class ExternalBackendRealConfinementTests(FACTORY_CONFINEMENT._Base):
         bogus = self.diag / "external-backend.py"
         bogus.write_text("print('x')\n", encoding="utf-8")
         binding = self.binding(role="planner", backend=bogus)
-        home = FACTORY_CONFINEMENT.wc.sanitized_home_directory()
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = FACTORY_CONFINEMENT.wc.confinement_spec(
-            binding, sanitized_home=home)
         with self.assertRaises(launch_module.InvocationError) as caught:
             launch_module.authorize_launch(
                 binding,
@@ -1309,8 +1539,6 @@ class ExternalBackendRealConfinementTests(FACTORY_CONFINEMENT._Base):
                 agents=(self.workspace / "AGENTS.md").read_bytes(),
                 spec=(self.workspace / "spec.md").read_bytes(),
                 plan=(self.workspace / "plan.md").read_bytes(),
-                _confinement_spec=spec,
-                _sanitized_home=home,
             )
         self.assertIn("external", str(caught.exception).lower())
 

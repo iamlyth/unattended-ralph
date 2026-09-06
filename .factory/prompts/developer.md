@@ -19,24 +19,33 @@ plan; if they differ from the plan section, stop and report.
 1. Implement only the selected task, completely and at its root. Do not
    leave placeholders, stubs, weakened assertions, unexplained skips, or
    test-only production bypasses.
-2. Investigate within the selected task: search existing `src/` utilities
-   before reimplementing; trace real initialization, dispatch, rendering,
-   backend, persistence, and shutdown paths.
-3. Run focused backpressure first, then the relevant regression suite.
-   Follow the exact build/test commands in `AGENTS.md`. A test that fails,
-   including one apparently unrelated to the task, must be investigated;
-   fix it when safe or record a finding — never dismiss it.
+2. Investigate within the selected task: search existing project utilities
+   before reimplementing and trace the real initialization, input/output,
+   persistence, error, and shutdown paths relevant to the adopting project.
+3. Run bounded focused backpressure, not a duplicate complete gate. The
+   trusted orchestrator runs the configured full verifier when a task claims
+   completion: do not start nested environment shells or the project's full
+   verification/acceptance gate inside this confined turn. Run at most three
+   focused commands under `timeout 120`, invoke repository scripts through
+   explicit `bash`/`python3`, and then leave the coherent change promptly. A focused
+   failure must be investigated, fixed when safe, or recorded — never
+   dismissed or retried indefinitely.
 4. Derive tests from specification acceptance criteria: observable
    behavior, performance boundaries, failure modes, and edge cases. Tests
    must use the real production path and assert semantic outcomes; direct
-   callback tests are supplemental only. Proxy evidence (offscreen pixels,
-   private/session-scoped services, synthetic consumers, asserted receipts)
-   never marks a production requirement verified.
-5. Update the selected task's status and evidence in the plan
-   (`.factory/artifacts/implementation-plan.md`): record the exact commands,
-   results, production paths exercised, and semantic outcomes. The
-   machine-readable conformance sidecar and exact-commit receipts remain the
-   acceptance authority; prose never is.
+   unit seams are supplemental only. Simulated substitutes and asserted
+   receipts never mark a production requirement verified.
+5. Update only the selected task's existing status/evidence fields in the plan
+   (`.factory/artifacts/implementation-plan.md`): record exact commands,
+   results, production paths, and semantic outcomes. Every task-body line must
+   remain parser-unambiguous. A task may contain only one `- Evidence:` field:
+   never add a second one; append new evidence as a two-space-indented
+   continuation bullet beneath the existing field. Likewise update the sole
+   `- Status:` field in place. Never insert a bare paragraph, a new level-two heading, or an
+   unindented sentence into a task body.
+   The machine-readable conformance sidecar and exact-commit receipts remain the
+   acceptance authority; prose
+   never is.
 6. Leave one coherent working-tree change for the trusted orchestrator to
    verify and commit. Git metadata and commit authority are outside the model
    sandbox. Never claim final product acceptance; verification and audit are

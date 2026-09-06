@@ -1612,14 +1612,16 @@ elevated by prose.
 - Status: blocked
 - Dependencies: Task 20, Task 23
 - Blocked on: FACT-020 — RUNNER-01 requires real_system evidence from a
-  declared, provisioned, signed hardware runner, an external human action
+  declared, provisioned, signed external runner, an external human action
   this environment cannot perform: declare the runner in
   `.factory/environment.toml`, provision the signer trust in
   `.factory/signer-trust.json`, run the runner against the exact audit base,
   and have the signed manifest accepted by
   `scripts/check-factory-runner-evidence.py`.
 - Scope: Remediate campaign-audit Finding 3 (RUNNER-01 real_system evidence
-  blocked on an undeclared, unprovisioned hardware runner). While the human
+  blocked on an undeclared, unprovisioned external runner). The generic
+  methodology does not assume controller hardware or any product-specific
+  runner class. While the human
   action is outstanding, the task stays blocked, RUNNER-01 stays `blocked`,
   and FACT-020 stays open; private/synthetic evidence is never elevated to
   the real_system tier. When the human completes provisioning, the accepted
@@ -1656,7 +1658,16 @@ elevated by prose.
   inputs at the exact commit. An audit finding becomes a next-round planner
   task; the audit itself never edits product code or the plan. The audit
   report cites `[receipt: …]`/`[manifest: …]` exact references, and any
-  BLOCKED evidence forces result `findings`.
+  BLOCKED evidence forces result `findings`. This audit also covers the
+  post-Task-32 generic runtime upgrade: exact invocation descriptors,
+  authenticated immutable Pi2/Node/CLI identity, FD-backed credential
+  handling and tool-boundary revalidation, bounded high-FD supervision,
+  single-write phase results, role retries, generic optional capability/runner
+  gates, and residual cleanup. The canonical specification remains unchanged.
+  Its §10 mandatory per-invocation Ollama check/wait contract conflicts with
+  the newer no-quota-policy launch surface; that mismatch is an explicit
+  acceptance blocker and must not be reclassified as verified without human
+  specification authority.
 - Acceptance criteria: audit report records every §24 requirement verified
   or an explicit finding; no acceptance-critical audit finding remains; the
   campaign does not claim success unless the final audit is clean, the

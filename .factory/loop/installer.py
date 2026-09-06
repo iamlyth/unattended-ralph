@@ -17,16 +17,12 @@ installer/stager behind that tier:
   with a batched ``git hash-object --no-filters --stdin-paths``, so an
   installed file can never drift from the bound commit and no content
   filter can rewrite the hashed bytes;
-* Task-20-era additions that are not yet part of the bound commit are
-  staged from the working tree only when they appear on the **exact
-  reviewer allowlist** (``PENDING_ALLOWLIST`` — the known Task-20
-  authorities) and live under the installed surface (``.factory/``,
-  ``.pi/``); any other pending path under the surface fails closed, and a
-  secret/credential-looking path is never staged; they are recorded in the
-  manifest with ``pending: true`` so a reviewer sees exactly which
-  installed bytes are newer than the bound commit.  A visible-``scripts/``
-  worktree change that is not a declared shared authority or entrypoint is
-  never staged;
+* production installation rejects every pending executable/control-plane
+  byte and stages only the exact committed blobs; a distinct explicit
+  ``--reviewer-staging`` operation may stage the exact ``PENDING_ALLOWLIST``
+  for source review, but its manifest is marked non-production and cannot be
+  loaded as installed acceptance evidence. Any other pending path or any
+  secret/credential-looking path still fails closed;
 * the declared shared authorities and operator entrypoints must live under
   the allowlisted first segments (``.factory``/``.pi``/``scripts``), must
   be non-secret names, and are staged **exactly once** — they are excluded
@@ -97,11 +93,24 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # path (``scripts/factory_state_io.py``) and the operator entrypoints.
 INSTALLED_SURFACE = (".factory", ".pi", "scripts")
 
+# Legacy synthetic-confinement proof code is retained only as historical test
+# source in this checkout.  It is not imported by production and must never be
+# copied into an installed harness: installed authorize APIs internally mint
+# only the real workspace-confinement proof.
+NON_INSTALLED_MODULES: frozenset = frozenset({
+    ".factory/loop/confinement.py",
+    ".factory/smoke/evidence_smoke_driver.py",
+})
+NON_INSTALLED_PREFIXES: Tuple[str, ...] = (
+    ".factory/tests/",
+)
+
 # The committed shared authority the hidden control plane imports at runtime
 # and the trusted operator entrypoints of the installed copy.
 DEFAULT_SHARED: Tuple[str, ...] = ("scripts/factory_state_io.py",)
 DEFAULT_ENTRYPOINTS: Tuple[str, ...] = (
     ".factory/bin/factory-launch",
+    ".factory/bin/factory-campaign",
     "scripts/machine-receipt.py",
 )
 
@@ -125,62 +134,246 @@ ALLOWED_FIRST_SEGMENTS: frozenset = frozenset({".factory", ".pi", "scripts"})
 # keep the WIP install buildable until the Task-20 commit lands, after
 # which the pending set is empty and the allowlist is inert.
 PENDING_ALLOWLIST: frozenset = frozenset({
-    ".factory/loop/installer.py",
-    ".factory/loop/footprint.py",
-    ".factory/loop/gitutil.py",
-    ".factory/bin/factory-launch",
-    ".factory/tests/test-factory-installed.py",
-    ".factory/tests/test-factory-installed.sh",
-    ".factory/tests/test-factory-migration.py",
-    ".factory/artifacts/implementation-plan.md",
-    # Task-23-era pending authorities (uncommitted generic evidence work):
-    # the trusted generic evidence publisher, its operator entrypoint, its
-    # hidden suite, the extended receipt policy, the hardened receipt
-    # wrapper, the freshness/conformance/redaction authorities, and the
-    # updated installed/adversarial/smoke/campaign suites.  They are staged
-    # from the working tree only while they are not yet part of the bound
-    # commit; once the Task-23 commit lands the pending set is empty and the
-    # allowlist is inert.
-    ".factory/loop/generic_evidence.py",
-    ".factory/bin/publish-generic-evidence",
-    ".factory/tests/test-factory-generic-evidence.py",
-    ".factory/tests/test-factory-generic-evidence.sh",
-    ".factory/campaign-receipt-policy.json",
-    ".factory/loop/campaign.py",
-    ".factory/loop/installer.py",
-    ".factory/schemas/conformance.schema.json",
-    ".factory/tests/fixtures/campaign_driver.py",
-    ".factory/tests/test-factory-adversarial.py",
-    ".factory/tests/test-factory-campaign.py",
-    ".factory/tests/test-factory-conformance.py",
-    ".factory/tests/test-factory-evidence.py",
-    ".factory/tests/test-factory-installed.py",
-    ".factory/tests/test-factory-smoke.py",
-    ".factory/smoke/evidence_smoke.py",
-    "scripts/machine-receipt.py",
-    # Task-23 hardening additions/changes: the identity-pinned per-member
-    # group termination authority (lock.py) and its adversarial suite.
-    ".factory/loop/lock.py",
-    ".factory/tests/test-factory-lock.py",
-    ".factory/tests/test-factory-selector.py",
-    # Task-32 ordered pre-round hook authorities and synthetic coverage.
-    ".factory/pre-round-hooks.json",
-    ".factory/loop/pre_round.py",
-    ".factory/loop/launch.py",
-    ".factory/loop/migration.py",
-    ".factory/loop/state.py",
-    ".factory/schemas/factory-state-v1.schema.md",
-    ".factory/loop/usage.py",
-    ".factory/tests/adversarial-manifest.json",
-    ".factory/tests/test-factory-pre-round.py",
-    ".factory/tests/test-factory-migration.py",
-    ".factory/tests/test-factory-state.py",
-    ".factory/tests/test-factory-usage.py",
-    ".factory/tests/test-factory-confinement.py",
-    ".factory/tests/fixtures/state-digest-valid-initial.json",
-    ".factory/tests/fixtures/state-digest-valid-implementation.json",
-    ".factory/tests/fixtures/state-digest-valid-audit.json",
+    '.factory/__init__.py',
+    '.factory/artifacts/implementation-plan.md',
+    '.factory/audit-objectives/registry.json',
+    '.factory/pre-round-hooks.json',
+    '.factory/bin/factory-launch',
+    '.factory/bin/factory-campaign',
+    '.factory/bin/publish-generic-evidence',
+    '.factory/campaign-receipt-policy.json',
+    '.factory/generic-leak-allowlist',
+    '.factory/loop/__init__.py',
+    '.factory/loop/audit_objectives.py',
+    '.factory/loop/campaign.py',
+    '.factory/loop/confine_launcher.py',
+    '.factory/loop/confinement.py',
+    '.factory/loop/evidence.py',
+    '.factory/loop/findings.py',
+    '.factory/loop/footprint.py',
+    '.factory/loop/generic_evidence.py',
+    '.factory/loop/gitutil.py',
+    '.factory/loop/installer.py',
+    '.factory/loop/launch.py',
+    '.factory/loop/lock.py',
+    '.factory/loop/migration.py',
+    '.factory/loop/plan_parser.py',
+    '.factory/loop/pi2_backend.py',
+    '.factory/loop/pre_round.py',
+    '.factory/loop/promptset.py',
+    '.factory/loop/redaction.py',
+    '.factory/loop/selector.py',
+    '.factory/loop/state.py',
+    '.factory/loop/usage.py',
+    '.factory/loop/usage_fetch.py',
+    '.factory/loop/workspace_confinement.py',
+    '.factory/prompts/auditor.md',
+    '.factory/prompts/developer.md',
+    '.factory/prompts/planner.md',
+    '.factory/prompts/tester.md',
+    '.factory/ralph-freeze',
+    '.factory/schemas/audit-objectives-v1.schema.json',
+    '.factory/schemas/factory-campaign-result-v1.schema.json',
+    '.factory/schemas/factory-confinement-v1.schema.json',
+    '.factory/schemas/factory-findings-receipt-v1.schema.json',
+    '.factory/schemas/factory-findings-v1.schema.json',
+    '.factory/schemas/factory-launch-result-v1.schema.json',
+    '.factory/schemas/factory-phase-result-v1.schema.json',
+    '.factory/schemas/factory-plan-v1.requirements.json',
+    '.factory/schemas/factory-plan-v1.schema.json',
+    '.factory/schemas/factory-plan-v1.schema.md',
+    '.factory/schemas/factory-state-v1.schema.md',
+    '.factory/schemas/ollama-usage-v1.schema.json',
+    '.factory/smoke/evidence_smoke.py',
+    '.factory/smoke/evidence_smoke_common.py',
+    '.factory/smoke/evidence_smoke_driver.py',
+    '.factory/smoke/evidence_smoke_gate.py',
+    '.factory/tests/adversarial-manifest.json',
+    '.factory/tests/fixtures/campaign_driver.py',
+    '.factory/tests/fixtures/conformance/sidecar-below-tier.json',
+    '.factory/tests/fixtures/conformance/sidecar-capability-relax.json',
+    '.factory/tests/fixtures/conformance/sidecar-human-tier.json',
+    '.factory/tests/fixtures/conformance/sidecar-missing-with-refs.json',
+    '.factory/tests/fixtures/conformance/sidecar-ref-absolute.json',
+    '.factory/tests/fixtures/conformance/sidecar-ref-prefix-alias.json',
+    '.factory/tests/fixtures/conformance/sidecar-ref-stale.json',
+    '.factory/tests/fixtures/conformance/sidecar-ref-traversal.json',
+    '.factory/tests/fixtures/fixture_plan_tool.py',
+    '.factory/tests/fixtures/plan-ambiguous-task-section.md',
+    '.factory/tests/fixtures/plan-bad-priority.md',
+    '.factory/tests/fixtures/plan-blocked-without-reference.md',
+    '.factory/tests/fixtures/plan-bom.md',
+    '.factory/tests/fixtures/plan-classification-blocked.md',
+    '.factory/tests/fixtures/plan-classification-not-applicable.md',
+    '.factory/tests/fixtures/plan-cyclic-dependency.md',
+    '.factory/tests/fixtures/plan-dependency-range-oversize.md',
+    '.factory/tests/fixtures/plan-duplicate-field.md',
+    '.factory/tests/fixtures/plan-duplicate-heading.md',
+    '.factory/tests/fixtures/plan-duplicate-task-id.md',
+    '.factory/tests/fixtures/plan-duplicate-task-title.md',
+    '.factory/tests/fixtures/plan-duplicate-title.md',
+    '.factory/tests/fixtures/plan-empty-interaction.md',
+    '.factory/tests/fixtures/plan-empty-required-value.md',
+    '.factory/tests/fixtures/plan-final-audit-misplaced.md',
+    '.factory/tests/fixtures/plan-final-audit-missing-dependency.md',
+    '.factory/tests/fixtures/plan-front-matter-absolute-path.md',
+    '.factory/tests/fixtures/plan-front-matter-bad-sha.md',
+    '.factory/tests/fixtures/plan-front-matter-duplicate-key.md',
+    '.factory/tests/fixtures/plan-front-matter-missing.md',
+    '.factory/tests/fixtures/plan-front-matter-traversal-path.md',
+    '.factory/tests/fixtures/plan-lifecycle-inconsistent.md',
+    '.factory/tests/fixtures/plan-malformed-dependencies.md',
+    '.factory/tests/fixtures/plan-matrix-bad-classification.md',
+    '.factory/tests/fixtures/plan-matrix-bad-header.md',
+    '.factory/tests/fixtures/plan-matrix-complete-nonverified.md',
+    '.factory/tests/fixtures/plan-matrix-complete-only-pending.md',
+    '.factory/tests/fixtures/plan-matrix-duplicate-id.md',
+    '.factory/tests/fixtures/plan-matrix-extra-id.md',
+    '.factory/tests/fixtures/plan-matrix-missing-id.md',
+    '.factory/tests/fixtures/plan-matrix-range-oversize.md',
+    '.factory/tests/fixtures/plan-matrix-unknown-task.md',
+    '.factory/tests/fixtures/plan-missing-field.md',
+    '.factory/tests/fixtures/plan-missing-interaction-boundary.md',
+    '.factory/tests/fixtures/plan-missing-interactions.md',
+    '.factory/tests/fixtures/plan-missing-title.md',
+    '.factory/tests/fixtures/plan-no-tasks.md',
+    '.factory/tests/fixtures/plan-no-title.md',
+    '.factory/tests/fixtures/plan-noncontiguous-ids.md',
+    '.factory/tests/fixtures/plan-out-of-order-dependency.md',
+    '.factory/tests/fixtures/plan-range-overflow.md',
+    '.factory/tests/fixtures/plan-select-blocked.md',
+    '.factory/tests/fixtures/plan-select-dependency-gate.md',
+    '.factory/tests/fixtures/plan-select-inconsistent-in-progress.md',
+    '.factory/tests/fixtures/plan-select-lexicographic-tiebreak.md',
+    '.factory/tests/fixtures/plan-select-priority-order.md',
+    '.factory/tests/fixtures/plan-select-resume-in-progress.md',
+    '.factory/tests/fixtures/plan-select-stale.md',
+    '.factory/tests/fixtures/plan-select-work-exhausted.md',
+    '.factory/tests/fixtures/plan-self-dependency.md',
+    '.factory/tests/fixtures/plan-structured-field-continuation.md',
+    '.factory/tests/fixtures/plan-trailing-blank-line.md',
+    '.factory/tests/fixtures/plan-two-in-progress.md',
+    '.factory/tests/fixtures/plan-unknown-dependency.md',
+    '.factory/tests/fixtures/plan-unknown-field.md',
+    '.factory/tests/fixtures/plan-unknown-lifecycle-status.md',
+    '.factory/tests/fixtures/plan-unknown-status.md',
+    '.factory/tests/fixtures/plan-unrecognized-heading.md',
+    '.factory/tests/fixtures/plan-valid-base.md',
+    '.factory/tests/fixtures/plan-verified-empty-refs.md',
+    '.factory/tests/fixtures/plan-verified-in-active-plan.md',
+    '.factory/tests/fixtures/plan-verified-pending.md',
+    '.factory/tests/fixtures/smoke_build.py',
+    '.factory/tests/fixtures/smoke_scenarios.py',
+    '.factory/tests/fixtures/state-attempt-before-phase.json',
+    '.factory/tests/fixtures/state-attempt-marker-without-attempt.json',
+    '.factory/tests/fixtures/state-attempt-monotonic-negative.json',
+    '.factory/tests/fixtures/state-attempt-number-bool.json',
+    '.factory/tests/fixtures/state-attempt-number-negative.json',
+    '.factory/tests/fixtures/state-attempt-without-task.json',
+    '.factory/tests/fixtures/state-attempt-without-timestamp.json',
+    '.factory/tests/fixtures/state-audit-digest-invalid.json',
+    '.factory/tests/fixtures/state-branch-empty.json',
+    '.factory/tests/fixtures/state-campaign-empty.json',
+    '.factory/tests/fixtures/state-current-round-bool.json',
+    '.factory/tests/fixtures/state-current-round-exceeds-requested.json',
+    '.factory/tests/fixtures/state-current-round-zero.json',
+    '.factory/tests/fixtures/state-digest-uppercase.json',
+    '.factory/tests/fixtures/state-digest-valid-audit.json',
+    '.factory/tests/fixtures/state-digest-valid-implementation.json',
+    '.factory/tests/fixtures/state-digest-valid-initial.json',
+    '.factory/tests/fixtures/state-empty-object.json',
+    '.factory/tests/fixtures/state-field-extra.json',
+    '.factory/tests/fixtures/state-field-missing.json',
+    '.factory/tests/fixtures/state-identity-empty.json',
+    '.factory/tests/fixtures/state-identity-malformed.json',
+    '.factory/tests/fixtures/state-ledger-bad-digest.jsonl',
+    '.factory/tests/fixtures/state-ledger-bad-tag.jsonl',
+    '.factory/tests/fixtures/state-ledger-empty-line.jsonl',
+    '.factory/tests/fixtures/state-ledger-extra-key.jsonl',
+    '.factory/tests/fixtures/state-ledger-malformed.jsonl',
+    '.factory/tests/fixtures/state-ledger-repeated-tag.jsonl',
+    '.factory/tests/fixtures/state-outcome-number.json',
+    '.factory/tests/fixtures/state-outcome-phase-mismatch.json',
+    '.factory/tests/fixtures/state-outcome-unknown.json',
+    '.factory/tests/fixtures/state-phase-base-commit-invalid.json',
+    '.factory/tests/fixtures/state-phase-base-commit-uppercase.json',
+    '.factory/tests/fixtures/state-phase-monotonic-negative.json',
+    '.factory/tests/fixtures/state-phase-monotonic-zero.json',
+    '.factory/tests/fixtures/state-phase-unknown.json',
+    '.factory/tests/fixtures/state-plan-digest-invalid.json',
+    '.factory/tests/fixtures/state-role-digest-empty-role.json',
+    '.factory/tests/fixtures/state-role-digest-invalid.json',
+    '.factory/tests/fixtures/state-role-digests-empty.json',
+    '.factory/tests/fixtures/state-role-digests-not-object.json',
+    '.factory/tests/fixtures/state-rounds-requested-bool.json',
+    '.factory/tests/fixtures/state-rounds-requested-negative.json',
+    '.factory/tests/fixtures/state-rounds-requested-zero.json',
+    '.factory/tests/fixtures/state-schema-missing.json',
+    '.factory/tests/fixtures/state-schema-wrong.json',
+    '.factory/tests/fixtures/state-spec-digest-invalid.json',
+    '.factory/tests/fixtures/state-task-id-bool.json',
+    '.factory/tests/fixtures/state-task-id-zero.json',
+    '.factory/tests/fixtures/state-task-outside-implementation.json',
+    '.factory/tests/fixtures/state-task-without-attempt.json',
+    '.factory/tests/fixtures/state-terminal-outcome-mismatch.json',
+    '.factory/tests/fixtures/state-terminal-outcome-null.json',
+    '.factory/tests/fixtures/state-transition-audit-final.json',
+    '.factory/tests/fixtures/state-transition-audit-nonfinal.json',
+    '.factory/tests/fixtures/state-transition-implementation-completed.json',
+    '.factory/tests/fixtures/state-transition-planning-failed.json',
+    '.factory/tests/fixtures/state-transition-planning-planned.json',
+    '.factory/tests/fixtures/state-transition-verification-pass.json',
+    '.factory/tests/fixtures/state-unsafe-binary.json',
+    '.factory/tests/fixtures/state-unsafe-not-json.json',
+    '.factory/tests/fixtures/state-unsafe-oversized.json',
+    '.factory/tests/fixtures/state-valid-audit.json',
+    '.factory/tests/fixtures/state-valid-final-round-audit.json',
+    '.factory/tests/fixtures/state-valid-implementation-planned.json',
+    '.factory/tests/fixtures/state-valid-implementation.json',
+    '.factory/tests/fixtures/state-valid-initial.json',
+    '.factory/tests/fixtures/state-valid-planning-post-audit.json',
+    '.factory/tests/fixtures/state-valid-retry-planning.json',
+    '.factory/tests/fixtures/state-valid-terminal-blocked.json',
+    '.factory/tests/fixtures/state-valid-terminal-failed.json',
+    '.factory/tests/fixtures/state-valid-terminal-findings.json',
+    '.factory/tests/fixtures/state-valid-terminal-infrastructure-failure.json',
+    '.factory/tests/fixtures/state-valid-terminal-interrupted.json',
+    '.factory/tests/fixtures/state-valid-terminal-success.json',
+    '.factory/tests/fixtures/state-valid-verification.json',
+    '.factory/tests/fixtures/usage-malformed.html',
+    '.factory/tests/fixtures/usage-partial.html',
+    '.factory/tests/fixtures/usage-secret-hint.html',
+    '.factory/tests/test-factory-adversarial.py',
+    '.factory/tests/test-factory-adversarial.sh',
+    '.factory/tests/test-factory-campaign.py',
+    '.factory/tests/test-factory-confinement.py',
+    '.factory/tests/test-factory-conformance.py',
+    '.factory/tests/test-factory-evidence.py',
+    '.factory/tests/test-factory-findings.py',
+    '.factory/tests/test-factory-footprint.py',
+    '.factory/tests/test-factory-footprint.sh',
+    '.factory/tests/test-factory-generic-evidence.py',
+    '.factory/tests/test-factory-generic-evidence.sh',
+    '.factory/tests/test-factory-installed.py',
+    '.factory/tests/test-factory-installed.sh',
+    '.factory/tests/test-factory-launch.py',
+    '.factory/tests/test-factory-lock.py',
+    '.factory/tests/test-factory-migration.py',
+    '.factory/tests/test-factory-migration.sh',
+    '.factory/tests/test-factory-plan-parser.py',
+    '.factory/tests/test-factory-pre-round.py',
+    '.factory/tests/test-factory-redaction.py',
+    '.factory/tests/test-factory-selector.py',
+    '.factory/tests/test-factory-smoke.py',
+    '.factory/tests/test-factory-smoke.sh',
+    '.factory/tests/test-factory-state.py',
+    '.factory/tests/test-factory-supervision.sh',
+    '.factory/tests/test-factory-usage.py',
+    'scripts/factory_state_io.py',
+    'scripts/machine-receipt.py',
 })
+
+
 
 # Secret/credential-shaped path detection.  A path is never staged when
 # its basename looks like an actual credential artifact: a dot-env file, a
@@ -426,6 +619,28 @@ def _validate_declared(rel: str) -> None:
         )
     if _is_secret_name(rel):
         raise InstallerError(f"declared path is a secret name: {rel!r}")
+
+
+def _pending_is_production_authority(root: Path, rel: str) -> bool:
+    """Whether pending bytes could execute or control an installed harness."""
+    authority_prefixes = (
+        ".factory/bin/", ".factory/loop/", ".factory/prompts/",
+        ".factory/schemas/", ".pi/", "scripts/",
+    )
+    authority_exact = {
+        ".factory/__init__.py", ".factory/campaign-receipt-policy.json",
+        ".factory/capability-contracts.json", ".factory/environment.toml",
+        ".factory/generic-leak-allowlist", ".factory/ralph-freeze",
+    }
+    if rel in authority_exact or rel.startswith(authority_prefixes):
+        return True
+    try:
+        info = os.lstat(root / rel)
+    except OSError:
+        # A deleted authority cannot be safely distinguished by worktree mode;
+        # source-like installed bytes remain control-plane bytes.
+        return Path(rel).suffix in (".py", ".sh", ".mjs", ".js")
+    return bool(stat.S_IMODE(info.st_mode) & 0o111)
 
 
 def _validate_pending(rel: str) -> None:
@@ -776,6 +991,7 @@ def install_harness(
     shared: Sequence[str] = DEFAULT_SHARED,
     entrypoints: Sequence[str] = DEFAULT_ENTRYPOINTS,
     manifest_out: Optional[Path] = None,
+    reviewer_staging: bool = False,
 ) -> Dict[str, object]:
     """Stage the committed harness into a fresh test-owned prefix.
 
@@ -784,8 +1000,9 @@ def install_harness(
     group/other-writable mode, pre-existing prefix entry, or prefix that is
     not absolute/outside the resolved repository; a declared shared
     authority/entrypoint outside the allowlisted first segments, a
-    secret-named path, or a pending worktree file outside the exact
-    reviewer allowlist also fails closed.  The created prefix is rolled
+    secret-named path, or (in production) pending executable/control-plane
+    bytes also fails closed. Reviewer staging remains allowlist-bound and is
+    acceptance-ineligible. The created prefix is rolled
     back identity-safely on any failure after its creation.
     """
     root = Path(root).absolute()
@@ -821,7 +1038,20 @@ def install_harness(
         prefix_created = True
 
         committed = _ls_tree_surface(root, commit)
-        pending = _pending_paths(root, commit)
+        worktree_pending = _pending_paths(root, commit)
+        pending_authorities = sorted(
+            rel for rel in worktree_pending
+            if _pending_is_production_authority(root, rel)
+        )
+        if pending_authorities and not reviewer_staging:
+            raise InstallerError(
+                "production install rejects pending executable/control-plane "
+                f"bytes at the older bound commit: {pending_authorities[:8]}"
+            )
+        # Reviewer staging is a distinct non-production operation.  Production
+        # always stages committed blobs; benign pending docs/tests are ignored,
+        # never copied into or recorded as acceptance-eligible installed bytes.
+        pending = worktree_pending if reviewer_staging else set()
 
         manifest_files: List[Dict[str, object]] = []
 
@@ -835,6 +1065,8 @@ def install_harness(
             if rel not in pending
             and (rel.startswith(".factory/") or rel.startswith(".pi/"))
             and rel not in declared
+            and rel not in NON_INSTALLED_MODULES
+            and not rel.startswith(NON_INSTALLED_PREFIXES)
         }
         blobs = _committed_blobs(
             root, [oid for _, oid in committed_only.values()]
@@ -862,12 +1094,20 @@ def install_harness(
         #    visible-``scripts/`` worktree change that is not a declared
         #    authority is never an installed authority and is never staged.
         for rel in sorted(pending):
+            if rel in NON_INSTALLED_MODULES or rel.startswith(NON_INSTALLED_PREFIXES):
+                continue
             if rel in declared:
                 # Staged below as a shared authority or operator entrypoint.
                 continue
             if rel.startswith("scripts/"):
                 continue
             if rel.startswith(".factory/") or rel.startswith(".pi/"):
+                if not os.path.lexists(root / rel):
+                    # A pending path deleted from the worktree is a removal,
+                    # not an addition: the installed copy is built from the
+                    # committed blobs plus pending additions, so a deleted
+                    # path is never staged.
+                    continue
                 _validate_pending(rel)
                 manifest_files.append(
                     _stage_pending(root, prefix, root_fd, created_identity, rel)
@@ -928,6 +1168,8 @@ def install_harness(
         manifest: Dict[str, object] = {
             "schema": INSTALL_MANIFEST_SCHEMA,
             "installer": INSTALLER_VERSION,
+            "installation_mode": "reviewer" if reviewer_staging else "production",
+            "acceptance_eligible": not reviewer_staging,
             "commit": commit,
             "root": str(root),
             "prefix": str(prefix),
@@ -1211,6 +1453,60 @@ def verify_staged(root: Path, prefix: Path, manifest: Dict[str, object]) -> List
     return errors
 
 
+def load_production_manifest(path: Path) -> Dict[str, object]:
+    """Load one external no-follow mode-0600 production manifest."""
+    path = Path(path).absolute()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise InstallerError(f"cannot open install manifest {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > MANIFEST_MAX
+            or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise InstallerError("install manifest is not a safe mode-0600 file")
+        chunks: List[bytes] = []
+        remaining = MANIFEST_MAX + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named_after = path.lstat()
+        if (
+            len(raw) > MANIFEST_MAX
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)
+        ):
+            raise InstallerError("install manifest changed while being read")
+    finally:
+        os.close(descriptor)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise InstallerError(f"install manifest is invalid JSON: {exc}") from exc
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != INSTALL_MANIFEST_SCHEMA
+        or data.get("installation_mode") != "production"
+        or data.get("acceptance_eligible") is not True
+    ):
+        raise InstallerError("install manifest is not production acceptance eligible")
+    return data
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1226,24 +1522,59 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument(
-        "command", choices=("install",), help="the only installer operation"
+        "command", choices=("install", "verify"),
+        help="install a fresh prefix or verify an existing production prefix",
     )
     parser.add_argument("--root", required=True, metavar="ROOT")
     parser.add_argument("--commit", required=True, metavar="SHA")
     parser.add_argument("--prefix", required=True, metavar="PREFIX")
+    parser.add_argument(
+        "--manifest", metavar="FILE", default=None,
+        help="existing mode-0600 production manifest used by verify",
+    )
     parser.add_argument(
         "--manifest-out", metavar="FILE", default=None,
         help="write the install manifest JSON to FILE (outside the repo, "
         "never replacing an existing file)",
     )
     parser.add_argument("--json", action="store_true", help="print the manifest JSON")
+    parser.add_argument(
+        "--reviewer-staging",
+        action="store_true",
+        help=(
+            "NON-PRODUCTION: stage exact allowlisted pending bytes for source "
+            "review; resulting manifests are not installed acceptance evidence"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "verify":
+            if not args.manifest or args.manifest_out or args.reviewer_staging:
+                raise InstallerError(
+                    "verify requires --manifest and rejects install-only options"
+                )
+            manifest = load_production_manifest(Path(args.manifest))
+            if manifest.get("commit") != args.commit:
+                raise InstallerError(
+                    "install manifest commit does not equal --commit"
+                )
+            errors = verify_staged(Path(args.root), Path(args.prefix), manifest)
+            if errors:
+                raise InstallerError(
+                    "installed production verification failed:\n  "
+                    + "\n  ".join(errors)
+                )
+            print(
+                f"factory-installer: verified production install at "
+                f"{args.prefix} bound to {args.commit[:12]}"
+            )
+            return 0
         manifest = install_harness(
             Path(args.root),
             Path(args.prefix),
             args.commit,
             manifest_out=Path(args.manifest_out) if args.manifest_out else None,
+            reviewer_staging=args.reviewer_staging,
         )
     except InstallerError as exc:
         print(f"factory-installer: {exc}", file=sys.stderr)

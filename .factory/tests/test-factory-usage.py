@@ -50,6 +50,7 @@ Coverage:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import http.server
 import inspect
@@ -76,10 +77,10 @@ FIXTURES = ROOT / ".factory" / "tests" / "fixtures"
 VISIBLE_FIXTURES = ROOT / "tests" / "fixtures"
 
 sys.path.insert(0, str(LOOP))
-import confinement  # noqa: E402
 import usage  # noqa: E402
 import usage_fetch  # noqa: E402
 import launch  # noqa: E402
+import pi2_backend  # noqa: E402
 
 PY = sys.executable
 GUARD = LOOP / "usage.py"
@@ -235,17 +236,25 @@ class _Base(unittest.TestCase):
         return result
 
     def assertNoLiveFetchChildren(self) -> None:
-        """No synthetic fetch child survives any guard outcome."""
-        for pid in os.listdir("/proc"):
-            if not pid.isdigit():
-                continue
-            try:
-                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-            except OSError:
-                continue
-            if b"usage_fetch.py" not in cmdline:
-                continue
-            self.fail(f"surviving fetch child pid {pid}")
+        """No synthetic fetch child survives a bounded reap grace."""
+        deadline = time.monotonic() + 3.0
+        found: list[str] = []
+        while True:
+            found = []
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+                except OSError:
+                    continue
+                if _is_fetch_child_cmdline(cmdline):
+                    found.append(pid)
+            if not found:
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"surviving fetch child pid(s) {found}")
+            time.sleep(0.02)
 
     def make_cookie_file(self, cookie: str = SYNTH_COOKIE, mode: int = 0o600) -> Path:
         path = self.tmp / "cookie.txt"
@@ -594,13 +603,26 @@ def _children_of(parent_pid: int) -> list[int]:
     return children
 
 
+def _is_fetch_child_cmdline(cmdline: bytes) -> bool:
+    """Match an actual argv element, not a parent shell command string."""
+    for raw in cmdline.split(b"\x00"):
+        if not raw:
+            continue
+        try:
+            if Path(os.fsdecode(raw)).name == "usage_fetch.py":
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _find_fetch_child(parent_pid: int) -> int | None:
     for pid in _children_of(parent_pid):
         try:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
         except OSError:
             continue
-        if b"usage_fetch.py" in cmdline:
+        if _is_fetch_child_cmdline(cmdline):
             return pid
     return None
 
@@ -990,6 +1012,19 @@ class LaunchIntegrationTests(_Base):
         scripts.mkdir()
         shutil.copy2(ROOT / "scripts" / "pi2-secure-exec.py",
                      scripts / "pi2-secure-exec.py")
+        shutil.copy2(ROOT / "scripts" / "credential-guard.py",
+                     scripts / "credential-guard.py")
+        shutil.copy2(ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+                     scripts / "pi-factory-guard-extension.mjs")
+        (scripts / "pi-cli-shims").mkdir()
+        shutil.copy2(ROOT / "scripts" / "pi-cli-shims" / "git",
+                     scripts / "pi-cli-shims" / "git")
+        loop = self.workspace / ".factory" / "loop"
+        loop.mkdir(parents=True)
+        for module in (
+            "confine_launcher.py", "usage.py", "usage_fetch.py", "pi2_backend.py",
+        ):
+            shutil.copy2(ROOT / ".factory" / "loop" / module, loop / module)
         backend = self.workspace / "backend.py"
         backend.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
         os.chmod(backend, 0o700)
@@ -1046,95 +1081,187 @@ class LaunchIntegrationTests(_Base):
             **guard_kwargs,
         )
 
-    def _proof(self, binding, **kwargs) -> "object":
-        """The private synthetic Task 8 confinement proof (test-only seam)."""
-        return confinement._mint_synthetic_proof(binding, **kwargs)
-
-    def test_ollama_provider_ok_proceeds(self) -> None:
-        """Ollama authorization applies confinement but never quota policy."""
-        binding = self._binding("ollama")
-        with mock.patch.object(launch.usage_guard, "require_quota") as quota:
-            authority = self._authorize(
-                binding, _confinement_proof=self._proof(binding)
-            )
-        quota.assert_not_called()
+    def test_ollama_provider_authorization_never_runs_quota(self) -> None:
+        self.assertFalse(hasattr(launch, "usage_guard"))
+        before_modules = {
+            name for name in sys.modules if name.startswith("_factory_committed_usage_")
+        }
+        authority = self._authorize(self._binding("ollama"))
+        after_modules = {
+            name for name in sys.modules if name.startswith("_factory_committed_usage_")
+        }
+        self.assertEqual(after_modules, before_modules)
         self.assertIsInstance(authority, launch.LaunchAuthority)
-
-    def test_ollama_provider_blocked_fixture_is_not_launch_policy(self) -> None:
-        binding = self._binding("ollama")
-        authority = self._authorize(
-            binding, _confinement_proof=self._proof(binding)
-        )
-        self.assertIsInstance(authority, launch.LaunchAuthority)
+        self.assertFalse(hasattr(authority, "_usage_guard_module"))
+        staged_usage = authority._exec_dir / "usage.py"
+        staged_fetch = authority._exec_dir / "usage_fetch.py"
+        for path in (staged_usage, staged_fetch):
+            self.assertIn(str(path), authority._staged_digests)
 
     def test_per_model_usage_driver_parameters_are_absent(self) -> None:
         parameters = inspect.signature(launch.authorize_launch).parameters
         for name in (
             "usage_guard_cookie_file", "usage_guard_cookie_stdin",
-            "usage_guard_settings_url", "usage_guard_poll_interval",
-            "usage_guard_max_wait", "usage_guard_max_polls",
-            "_usage_guard_html_file", "_usage_guard_allow_loopback",
+            "usage_guard_poll_interval", "usage_guard_max_wait",
+            "usage_guard_max_polls", "usage_guard_settings_url",
         ):
             self.assertNotIn(name, parameters)
+            with self.assertRaises(TypeError):
+                self._authorize(self._binding("ollama"), **{name: "x"})
 
     def test_non_ollama_provider_never_runs_the_guard(self) -> None:
         binding = self._binding("synthetic")
-        authority = self._authorize(
-            binding, _confinement_proof=self._proof(binding)
+        authority = self._authorize(binding)
+        self.assertIsInstance(authority, launch.LaunchAuthority)
+
+    def test_valid_openai_workspace_backend_never_provisions_auth(self) -> None:
+        """A structurally valid committed backend still cannot satisfy the
+        complete external pi2/Node/CLI identity, and auth is never opened."""
+        binding = self._binding("openai-codex")
+        launch.verify_invocation(binding)  # prove this is not an invalid-binding test
+        with mock.patch.object(
+            launch, "_prepare_private_pi2_home"
+        ) as provision:
+            with self.assertRaisesRegex(
+                launch.InvocationError, "exact immutable external pi2"
+            ):
+                self._authorize(binding)
+        provision.assert_not_called()
+
+    def test_pi2_cli_authority_inclusion_and_pre_auth_pre_exec_revalidation(self) -> None:
+        """A positive exact-Pi mint carries wrapper/Node/CLI identities; the
+        revalidation happens before provisioning and a CLI mutation blocks
+        the live supervisor before Popen."""
+        pi2 = shutil.which("pi2")
+        self.assertIsNotNone(pi2, "the production exact-Pi regression requires pi2")
+        assert pi2 is not None
+        binding = dataclasses.replace(
+            self._binding("openai-codex"), backend=Path(pi2).absolute()
         )
-        self.assertIsInstance(authority, launch.LaunchAuthority)
+        events = []
+        real_revalidate = launch._revalidate_external_runtimes
 
-    def test_missing_cookie_is_not_consulted_by_authorization(self) -> None:
+        def record_revalidation(bindings):
+            events.append("revalidate")
+            return real_revalidate(bindings)
+
+        def synthetic_provision(_home):
+            events.append("provision")
+            fd = os.memfd_create("factory-positive-pi2-auth", 0)
+            os.write(fd, b'{"synthetic":"auth"}\n')
+            os.lseek(fd, 0, os.SEEK_SET)
+            return fd
+
+        with mock.patch.object(
+            launch, "_revalidate_external_runtimes", side_effect=record_revalidation
+        ), mock.patch.object(
+            launch, "_prepare_private_pi2_home", side_effect=synthetic_provision
+        ):
+            authority = self._authorize(binding)
+        self.assertEqual(events[:2], ["revalidate", "provision"])
+        paths = tuple(authority._external_paths)
+        identities = tuple(authority._external_runtime_bindings)
+        self.assertEqual(paths, tuple(item.path for item in identities))
+        self.assertEqual(len(paths), 3)
+        wrapper, node, cli = identities
+        self.assertEqual(cli.path, os.path.realpath(cli.path))
+        self.assertTrue(cli.path.startswith("/nix/store/"))
+        self.assertIn(cli.path, paths)
+        self.assertRegex(cli.sha256, r"^[0-9a-f]{64}$")
+        self.assertGreater(cli.device, 0)
+        self.assertGreater(cli.inode, 0)
+
+        real_bind = launch._bind_external_runtime
+
+        def mutate_cli(path: str, *, executable: bool):
+            current = real_bind(path, executable=executable)
+            if path == cli.path:
+                return dataclasses.replace(current, sha256="0" * 64)
+            return current
+
+        supervisor = launch.LaunchSupervision(binding, kill_grace=0.1)
+        redactor = launch.output_redaction.redactor_for(
+            binding.workspace, binding.bound_commit
+        )
+        with mock.patch.object(
+            launch, "_bind_external_runtime", side_effect=mutate_cli
+        ), mock.patch.object(
+            launch.output_redaction, "redactor_for", return_value=redactor
+        ), mock.patch.object(launch.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(
+                launch.SupervisionError, "immediately before exec"
+            ):
+                supervisor.run(authority)
+        popen.assert_not_called()
+
+    def test_bound_commit_origin_is_checked_before_channel_proof(self) -> None:
+        usage_source = self.workspace / ".factory" / "loop" / "usage.py"
+        original = usage_source.read_text(encoding="utf-8")
+        usage_source.write_text(
+            original.replace(
+                'DEFAULT_SETTINGS_URL = "https://ollama.com/settings"',
+                'DEFAULT_SETTINGS_URL = "https://evil.invalid/settings"',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        _work(["add", str(usage_source.relative_to(self.workspace))], self.workspace)
+        _work(["commit", "-qm", "malicious origin"], self.workspace)
+        self.head = _work(
+            ["rev-parse", "HEAD"], self.workspace
+        ).stdout.decode().strip()
+        with mock.patch.object(
+            launch.real_confinement_authority, "prove_confinement"
+        ) as prove:
+            with self.assertRaises(launch.InvocationError) as caught:
+                self._authorize(self._binding("ollama"))
+        self.assertIn("canonical Ollama", str(caught.exception))
+        prove.assert_not_called()
+
+    def test_usage_proof_rejects_nonmatching_bound_commit_source(self) -> None:
+        """Self-hashing worktree guard source cannot satisfy commit binding."""
+        usage_source = self.workspace / ".factory" / "loop" / "usage.py"
+        usage_source.write_text(
+            "# malicious committed replacement\nDEFAULT_SETTINGS_URL='x'\n",
+            encoding="utf-8",
+        )
+        _work(["add", str(usage_source.relative_to(self.workspace))], self.workspace)
+        _work(["commit", "-qm", "tamper usage guard"], self.workspace)
+        self.head = _work(
+            ["rev-parse", "HEAD"], self.workspace
+        ).stdout.decode().strip()
         binding = self._binding("ollama")
+        with self.assertRaises(launch.InvocationError):
+            self._authorize(binding)
+
+    def test_missing_cookie_is_not_consulted_by_per_model_authorization(self) -> None:
         with _scrubbed_ollama_env():
-            authority = self._authorize(
-                binding, _confinement_proof=self._proof(binding)
-            )
+            authority = self._authorize(self._binding("ollama"))
+        self.assertFalse(hasattr(launch, "usage_guard"))
         self.assertIsInstance(authority, launch.LaunchAuthority)
 
-    def test_production_launch_rejects_loopback_settings_before_fetch(self) -> None:
-        """A production launch rejects http:// loopback settings before any fetch.
-
-        The ordinary launch path (the private loopback seam off) fails closed
-        on a ``127.0.0.1``/``localhost`` ``http://`` settings URL in the launch
-        authority *before* the guard runs, so an in-flight loopback server
-        never observes a request (Task 7 review, obligation 14 residual).
-        """
+    def test_production_launch_has_no_settings_origin_override(self) -> None:
+        """Caller-selected origins are absent before any credential can be read."""
+        parameters = inspect.signature(launch.authorize_launch).parameters
+        self.assertNotIn("usage_guard_settings_url", parameters)
         server = _ScriptedServer([(200, b"unreachable")], hold=True)
         self.addCleanup(server.close)
-        with _scrubbed_ollama_env():
-            with self.assertRaises(TypeError):
-                self._authorize(
-                    self._binding("ollama"),
-                    usage_guard_settings_url=f"http://127.0.0.1:{server.port}/",
-                )
-        self.assertFalse(
-            server.request_seen.is_set(),
-            "a production launch fetched despite rejecting loopback settings",
-        )
-
-    def test_loopback_seam_without_proof_fails_closed(self) -> None:
-        """The private loopback seam cannot be enabled without a proof.
-
-        Setting ``_usage_guard_allow_loopback`` without a valid synthetic
-        confinement proof fails closed before any transport/guard logic: the
-        seam enables a transport the ordinary production launch rejects, so it
-        is gated on a proof exactly like the Task 8 authority.
-        """
         with self.assertRaises(TypeError):
             self._authorize(
                 self._binding("ollama"),
-                _usage_guard_allow_loopback=True,
+                usage_guard_settings_url=f"http://127.0.0.1:{server.port}/",
             )
+        self.assertFalse(server.request_seen.is_set())
 
-    def test_loopback_seam_with_synthetic_proof_proceeds(self) -> None:
-        """With a valid synthetic proof the hidden suite can use loopback.
+    def test_launch_module_exposes_no_usage_guard_callable(self) -> None:
+        self.assertFalse(hasattr(launch, "usage_guard"))
+        self.assertFalse(any(
+            "quota" in name or "cookie" in name
+            for name, value in inspect.getmembers(launch, inspect.isfunction)
+        ))
 
-        The private seam plus a validated synthetic confinement proof lets the
-        hermetic suite exercise the loopback http transport end-to-end: the
-        guard fetches the committed fixture page from a loopback server and
-        the authority is minted.
-        """
+    def test_loopback_test_transport_is_absent_from_authorize_api(self) -> None:
+        """Installed callers cannot opt into loopback test transport."""
         with self.assertRaises(TypeError):
             self._authorize(
                 self._binding("ollama"),
@@ -1168,7 +1295,9 @@ class ProviderRegistryTests(_Base):
                     launch.verify_invocation(binding)
 
     def test_known_providers_accepted_case_insensitively(self) -> None:
-        for provider in ("ollama", "OLLAMA", "synthetic"):
+        for provider in (
+            "ollama", "OLLAMA", "openai-codex", "OPENAI-CODEX", "synthetic"
+        ):
             binding = launch.InvocationBinding(
                 role="planner",
                 model="m",
@@ -1184,10 +1313,213 @@ class ProviderRegistryTests(_Base):
             )
             self.assertIsNone(launch.verify_invocation(binding))
 
-    def test_no_provider_has_per_model_quota_policy(self) -> None:
-        self.assertFalse(hasattr(launch, "PROVIDER_GUARD_REQUIRED"))
+    def test_ollama_is_the_only_guard_required_provider(self) -> None:
+        self.assertEqual(launch.PROVIDER_GUARD_REQUIRED, frozenset({"ollama"}))
         self.assertIn("ollama", launch.SUPPORTED_PROVIDERS)
+        self.assertIn("openai-codex", launch.SUPPORTED_PROVIDERS)
         self.assertIn("synthetic", launch.SUPPORTED_PROVIDERS)
+
+    def test_pi2_credentials_are_copied_only_to_private_launch_home(self) -> None:
+        operator = self.tmp / "operator"
+        source = operator / ".pi" / "agent2"
+        source.mkdir(parents=True)
+        (source / "auth.json").write_bytes(b'{"token":"synthetic"}\n')
+        (source / "models.json").write_bytes(b'{"models":[]}\n')
+        for path in source.iterdir():
+            path.chmod(0o600)
+        private = self.tmp / "private-home"
+        private.mkdir(mode=0o700)
+        auth_fd = -1
+        with mock.patch.object(Path, "home", return_value=operator):
+            auth_fd = launch._prepare_private_pi2_home(private)
+        self.addCleanup(lambda: os.close(auth_fd) if auth_fd >= 0 else None)
+        copied = private / ".pi" / "agent2"
+        # B1 security review: the credential is never materialised in any
+        # model/tool-readable path; only the non-secret catalog and an empty
+        # settings file live in the private home.
+        self.assertFalse((copied / "auth.json").exists())
+        self.assertFalse((copied / "auth.json").is_symlink())
+        self.assertEqual((copied / "models.json").read_bytes(), b'{"models":[]}\n')
+        self.assertEqual((copied / "settings.json").read_bytes(), b"{}\n")
+        self.assertTrue(all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in copied.iterdir()))
+        # The credential travels only as an anonymous memfd descriptor.
+        self.assertGreaterEqual(auth_fd, 0)
+        os.lseek(auth_fd, 0, os.SEEK_SET)
+        self.assertEqual(
+            os.read(auth_fd, 1 << 20), b'{"token":"synthetic"}\n'
+        )
+
+    def test_pi2_private_copy_rejects_loose_operator_credentials(self) -> None:
+        operator = self.tmp / "operator-loose"
+        source = operator / ".pi" / "agent2"
+        source.mkdir(parents=True)
+        for name in ("auth.json", "models.json"):
+            (source / name).write_text("{}\n", encoding="utf-8")
+            (source / name).chmod(0o644)
+        private = self.tmp / "private-loose"
+        private.mkdir(mode=0o700)
+        with mock.patch.object(Path, "home", return_value=operator):
+            with self.assertRaises(launch.InvocationError):
+                launch._prepare_private_pi2_home(private)
+
+    def test_pi2_refresh_persistence_is_identity_bound_atomic_and_strict(self) -> None:
+        operator = self.tmp / "refresh-operator"
+        target_dir = operator / ".pi" / "agent2"
+        target_dir.mkdir(parents=True, mode=0o700)
+        target = target_dir / "auth.json"
+        private = self.tmp / "refresh-private"
+        source = private / ".pi" / "agent2" / "auth.json"
+        source.parent.mkdir(parents=True, mode=0o700)
+        now = int(time.time() * 1000)
+        original = {
+            "openai-codex": {
+                "type": "oauth", "access": "A" * 32,
+                "refresh": "R" * 32, "accountId": "account-123",
+                "expires": now + 3_600_000,
+            },
+            "ollama": {"type": "api_key", "key": "unchanged-provider"},
+        }
+
+        def publish(path: Path, document: object) -> bytes:
+            raw = (json.dumps(document, sort_keys=True) + "\n").encode()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            return raw
+
+        publish(target, original)
+        rotated = json.loads(json.dumps(original))
+        rotated["openai-codex"].update({
+            "access": "B" * 32, "refresh": "S" * 32,
+            "expires": now + 7_200_000,
+        })
+        refreshed = publish(source, rotated)
+        self.assertTrue(
+            launch._persist_private_pi2_auth(private, operator_home=operator)
+        )
+        self.assertEqual(target.read_bytes(), refreshed)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+
+        # Shape-only OAuth documents and incoherent refresh rotation never
+        # replace the exact operator credential. Each case starts from the same
+        # bound account/refresh/provider identity and must leave it byte-exact.
+        invalid_cases = []
+        for field, value in (
+            ("access", ""), ("refresh", ""), ("accountId", "other-account"),
+            ("expires", now - 1), ("expires", float("inf")),
+        ):
+            candidate = json.loads(json.dumps(original))
+            candidate["openai-codex"][field] = value
+            invalid_cases.append((field, candidate))
+        incoherent = json.loads(json.dumps(original))
+        incoherent["openai-codex"]["refresh"] = "T" * 32
+        invalid_cases.append(("refresh-without-provider-rotation", incoherent))
+        foreign = json.loads(json.dumps(original))
+        foreign["ollama"]["key"] = "substituted-provider"
+        invalid_cases.append(("unrelated-provider", foreign))
+        for label, candidate in invalid_cases:
+            with self.subTest(label=label):
+                expected = publish(target, original)
+                publish(source, candidate)
+                with self.assertRaises(launch.SupervisionError):
+                    launch._persist_private_pi2_auth(
+                        private, operator_home=operator
+                    )
+                self.assertEqual(target.read_bytes(), expected)
+
+        sentinel = self.tmp / "refresh-sentinel"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        publish(source, rotated)
+        target.unlink()
+        target.symlink_to(sentinel)
+        with self.assertRaises(launch.SupervisionError):
+            launch._persist_private_pi2_auth(private, operator_home=operator)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
+
+    def test_committed_pi2_adapter_has_single_runtime_markers(self) -> None:
+        source = (LOOP / "pi2_backend.py").read_bytes()
+        self.assertEqual(source.count(b"@@FACTORY_PI2_NODE@@"), 1)
+        self.assertEqual(source.count(b"@@FACTORY_PI2_CLI@@"), 1)
+
+    def test_pi2_adapter_runtime_binding_is_exact_and_fail_closed(self) -> None:
+        self.assertEqual(
+            pi2_backend._runtime_binding([
+                "--provider", "openai-codex", "--model",
+                "openai-codex/gpt-5.6-luna",
+            ]),
+            ("openai-codex", "gpt-5.6-luna"),
+        )
+        for argv in (
+            ["--model", "gpt-5.6-luna"],
+            ["--provider", "ollama", "--model", "gpt-5.6-luna"],
+            ["--provider", "openai-codex", "--provider", "openai-codex",
+             "--model", "gpt-5.6-luna"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(SystemExit):
+                    pi2_backend._runtime_binding(argv)
+
+    def test_staged_pi2_adapter_materializes_bound_file_and_alias_limit(self) -> None:
+        """The confined adapter gives Pi a private regular credential file
+        while binding its inode and the complete descriptor scan range."""
+        self.assertTrue(hasattr(os, "memfd_create"), "Linux memfd is mandatory")
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "the exact-Pi adapter test requires Node")
+        assert node is not None
+        runtime = self.tmp / "runtime" / "a" / "b" / "c"
+        runtime.mkdir(parents=True)
+        cli = runtime / "cli.mjs"
+        cli.write_text(
+            "import { fstatSync, lstatSync, readFileSync } from 'node:fs';\n"
+            "const fd=Number(process.env.PI_FACTORY_TOOL_FD); fstatSync(fd);\n"
+            "const auth=process.env.PI_FACTORY_TOOL_FILE;\n"
+            "const identity=lstatSync(auth,{bigint:true});\n"
+            "if (!identity.isFile() || identity.isSymbolicLink() || "
+            "String(identity.dev)!==process.env.PI_FACTORY_TOOL_FILE_DEV || "
+            "String(identity.ino)!==process.env.PI_FACTORY_TOOL_FILE_INO || "
+            "readFileSync(auth,'utf8')!=='{\\\"synthetic\\\":\\\"auth\\\"}\\n') process.exit(8);\n"
+            "const line=readFileSync('/proc/self/limits','utf8').split('\\n')"
+            ".find((item)=>item.startsWith('Max open files'));\n"
+            "const match=/Max open files\\s+(\\d+)\\s+(\\d+)/.exec(line);\n"
+            "if (!match || match[1] !== '4096' || match[2] !== '4096' || "
+            "process.env.PI_FACTORY_TOOL_FD_LIMIT !== '4096') process.exit(9);\n"
+            "console.log(`BOUND:${match[1]}:${match[2]}`);\n",
+            encoding="utf-8",
+        )
+        adapter_data = (LOOP / "pi2_backend.py").read_bytes().replace(
+            b"@@FACTORY_PI2_NODE@@", os.path.realpath(node).encode()
+        ).replace(b"@@FACTORY_PI2_CLI@@", str(cli).encode())
+        adapter = self.tmp / "staged-pi2-adapter.py"
+        adapter.write_bytes(adapter_data)
+        private_home = self.tmp / "adapter-home"
+        private_agent = private_home / ".pi" / "agent2"
+        private_agent.mkdir(parents=True)
+        (private_agent / "settings.json").write_text("{}\n", encoding="utf-8")
+        (private_agent / "settings.json").chmod(0o600)
+        auth_fd = os.memfd_create("factory-adapter-hard-limit", 0)
+        try:
+            os.write(auth_fd, b'{"synthetic":"auth"}\n')
+            env = dict(os.environ)
+            env["HOME"] = str(private_home)
+            result = subprocess.run(
+                [sys.executable, str(adapter), "--auth-fd", str(auth_fd),
+                 "--provider", "openai-codex", "--model",
+                 "openai-codex/gpt-5.6-luna"],
+                pass_fds=(auth_fd,), env=env, capture_output=True, text=True,
+                timeout=30,
+            )
+        finally:
+            os.close(auth_fd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "BOUND:4096:4096")
+        auth_file = private_home / ".pi" / "agent2" / "auth.json"
+        self.assertTrue(auth_file.is_file())
+        self.assertFalse(auth_file.is_symlink())
+        self.assertEqual(stat.S_IMODE(auth_file.stat().st_mode), 0o600)
+        self.assertEqual(auth_file.read_bytes(), b'{"synthetic":"auth"}\n')
+        self.assertEqual(
+            json.loads((private_home / ".pi" / "agent2" / "settings.json").read_text()),
+            {"defaultModel": "gpt-5.6-luna", "defaultProvider": "openai-codex"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1195,156 +1527,25 @@ class ProviderRegistryTests(_Base):
 # ---------------------------------------------------------------------------
 
 class ConfinementProofTests(_Base):
-    def _binding(self, provider: str = "ollama") -> launch.InvocationBinding:
-        return launch.InvocationBinding(
-            role="planner",
-            model="m",
-            provider=provider,
-            backend=TRUSTED_EXECUTABLE,
-            workspace=self.tmp,
-            bound_commit="0" * 40,
-            role_prompt_digest=hashlib.sha256(b"r").hexdigest(),
-            prompt_set_digest=hashlib.sha256(b"s").hexdigest(),
-            plan_digest=hashlib.sha256(b"p").hexdigest(),
-            policy_digest=hashlib.sha256(b"a").hexdigest(),
-            specification_digest=hashlib.sha256(b"sp").hexdigest(),
+    """Regression: installed authorization carries no synthetic proof surface."""
+
+    def test_no_caller_proof_transport(self) -> None:
+        parameters = inspect.signature(launch.authorize_launch).parameters
+        self.assertNotIn("_confinement_proof", parameters)
+        self.assertNotIn("confinement_proof", parameters)
+        self.assertNotIn("synthetic", parameters)
+
+    def test_no_saved_html_or_loopback_transport(self) -> None:
+        parameters = inspect.signature(launch.authorize_launch).parameters
+        self.assertNotIn("_usage_guard_html_file", parameters)
+        self.assertNotIn("_usage_guard_allow_loopback", parameters)
+
+    def test_workspace_authority_has_no_synthetic_mint(self) -> None:
+        import workspace_confinement as authority
+        self.assertFalse(hasattr(authority, "_mint_synthetic_proof"))
+        self.assertNotIn(
+            "synthetic", inspect.signature(authority.prove_confinement).parameters
         )
-
-    def test_production_prove_confinement_unavailable(self) -> None:
-        """The Task 8 production authority is absent: every call fails closed."""
-        with self.assertRaises(confinement.ConfinementUnavailable):
-            confinement.prove_confinement(self._binding())
-
-    def test_ollama_launch_without_proof_fails_closed(self) -> None:
-        """No production Ollama launch proceeds without a confinement proof."""
-        workspace = self.tmp / "workspace"
-        workspace.mkdir()
-        scripts = workspace / "scripts"
-        scripts.mkdir()
-        shutil.copy2(ROOT / "scripts" / "pi2-secure-exec.py",
-                     scripts / "pi2-secure-exec.py")
-        backend = workspace / "backend.py"
-        backend.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
-        os.chmod(backend, 0o700)
-        (workspace / "plan.md").write_bytes(
-            (FIXTURES / "plan-valid-base.md").read_bytes()
-        )
-        (workspace / "spec.md").write_text("SPEC\n", encoding="utf-8")
-        (workspace / "role.md").write_text("# ROLE\n", encoding="utf-8")
-        (workspace / "AGENTS.md").write_text("POLICY\n", encoding="utf-8")
-        _work(["init", "-q"], workspace)
-        _work(["config", "user.email", "factory@test"], workspace)
-        _work(["config", "user.name", "factory"], workspace)
-        _work(["add", "-A"], workspace)
-        _work(["commit", "-qm", "fixture"], workspace)
-        head = _work(["rev-parse", "HEAD"], workspace).stdout.decode().strip()
-
-        def digest(data: bytes) -> str:
-            return hashlib.sha256(data).hexdigest()
-
-        binding = launch.InvocationBinding(
-            role="planner",
-            model="m",
-            provider="ollama",
-            backend=backend,
-            workspace=workspace,
-            bound_commit=head,
-            role_prompt_digest=digest((workspace / "role.md").read_bytes()),
-            prompt_set_digest=digest(b"set"),
-            plan_digest=digest((workspace / "plan.md").read_bytes()),
-            policy_digest=digest((workspace / "AGENTS.md").read_bytes()),
-            specification_digest=digest((workspace / "spec.md").read_bytes()),
-        )
-        with _scrubbed_ollama_env():
-            with self.assertRaises(launch.InvocationError) as caught:
-                launch.authorize_launch(
-                    binding,
-                    role_prompt=(workspace / "role.md").read_bytes(),
-                    agents=(workspace / "AGENTS.md").read_bytes(),
-                    spec=(workspace / "spec.md").read_bytes(),
-                    plan=(workspace / "plan.md").read_bytes(),
-                )
-        self.assertIn("confinement", str(caught.exception).lower())
-        self.assertIn("Task 8", str(caught.exception))
-
-    def test_synthetic_proof_binds_exact_invocation(self) -> None:
-        binding = self._binding()
-        proof = confinement._mint_synthetic_proof(binding)
-        confinement.validate_proof(proof, binding)
-        self.assertEqual(proof.bound_commit, binding.bound_commit)
-        self.assertEqual(proof.provider, binding.provider)
-        self.assertEqual(proof.credential_stores, (usage._default_env_file(),))
-
-    def test_synthetic_proof_wrong_commit_rejected(self) -> None:
-        proof = confinement._mint_synthetic_proof(self._binding())
-        other = self._binding()
-        other = launch.InvocationBinding(
-            role=other.role, model=other.model, provider=other.provider,
-            backend=other.backend, workspace=other.workspace,
-            bound_commit="1" * 40, role_prompt_digest=other.role_prompt_digest,
-            prompt_set_digest=other.prompt_set_digest, plan_digest=other.plan_digest,
-            policy_digest=other.policy_digest,
-            specification_digest=other.specification_digest,
-        )
-        with self.assertRaises(confinement.ConfinementError):
-            confinement.validate_proof(proof, other)
-
-    def test_synthetic_proof_wrong_workspace_rejected(self) -> None:
-        proof = confinement._mint_synthetic_proof(self._binding())
-        other = self._binding()
-        other = launch.InvocationBinding(
-            role=other.role, model=other.model, provider=other.provider,
-            backend=other.backend, workspace=self.tmp / "elsewhere",
-            bound_commit=other.bound_commit,
-            role_prompt_digest=other.role_prompt_digest,
-            prompt_set_digest=other.prompt_set_digest, plan_digest=other.plan_digest,
-            policy_digest=other.policy_digest,
-            specification_digest=other.specification_digest,
-        )
-        with self.assertRaises(confinement.ConfinementError):
-            confinement.validate_proof(proof, other)
-
-    def test_synthetic_proof_wrong_provider_rejected(self) -> None:
-        proof = confinement._mint_synthetic_proof(self._binding())
-        other = self._binding(provider="synthetic")
-        with self.assertRaises(confinement.ConfinementError):
-            confinement.validate_proof(proof, other)
-
-    def test_synthetic_proof_wrong_guard_source_digest_rejected(self) -> None:
-        """A caller-supplied guard-source digest never matches the executing bytes."""
-        proof = confinement._mint_synthetic_proof(
-            self._binding(),
-            guard_source_digests=["0" * 64, "1" * 64],
-        )
-        with self.assertRaises(confinement.ConfinementError):
-            confinement.validate_proof(proof, self._binding())
-
-    def test_proof_cannot_be_forged_from_operator_claims(self) -> None:
-        with self.assertRaises(confinement.ConfinementError):
-            confinement.ConfinementProof(
-                bound_commit="0" * 40,
-                workspace=str(self.tmp),
-                provider="ollama",
-                guard_source_digests=("0" * 64, "1" * 64),
-                credential_stores=(str(self.tmp / "store"),),
-                _mint=object(),
-            )
-
-    def test_synthetic_proof_rejects_in_workspace_store(self) -> None:
-        inside = self.tmp / "workspace" / ".ollama-usage-env"
-        with self.assertRaises(confinement.ConfinementError):
-            confinement._mint_synthetic_proof(
-                self._binding(), credential_stores=[str(inside)]
-            )
-
-    def test_synthetic_proof_is_never_evidence(self) -> None:
-        """The capability evidence checker must never accept a synthetic proof."""
-        proof = confinement._mint_synthetic_proof(self._binding())
-        # The private mint marker is not the production authority's marker and
-        # the proof object carries no capability-claim surface: it is a
-        # skeleton token whose only producer is the hidden suite.
-        self.assertFalse(hasattr(proof, "evidence"))
-        self.assertTrue(proof._mint is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -1855,11 +2056,25 @@ class CatchAllNoTracebackTests(_Base):
 # ---------------------------------------------------------------------------
 
 class ProductionSurfaceTests(_Base):
-    def test_authorize_launch_has_no_quota_or_cookie_surface(self) -> None:
+    def test_installed_guard_rejects_alternate_origin_before_cookie_read(self) -> None:
+        cookie = self.make_cookie_file()
+        with mock.patch.object(
+            usage, "_noninstalled_test_transport_available", return_value=False
+        ), mock.patch.object(usage, "read_secure_file", wraps=usage.read_secure_file) as read:
+            with self.assertRaises(usage.UsageConfigError):
+                usage.acquire_credentials(
+                    cookie_file=str(cookie),
+                    settings_url="https://evil.invalid/settings",
+                )
+        read.assert_not_called()
+
+    def test_authorize_launch_public_surface_has_no_html_file(self) -> None:
         parameters = inspect.signature(launch.authorize_launch).parameters
-        self.assertFalse(any(
-            "usage_guard" in name or "cookie" in name for name in parameters
-        ))
+        self.assertNotIn("usage_guard_html_file", parameters)
+        self.assertNotIn("_usage_guard_html_file", parameters)
+        self.assertNotIn("_usage_guard_allow_loopback", parameters)
+        self.assertNotIn("usage_guard_settings_url", parameters)
+        self.assertNotIn("_confinement_proof", parameters)
 
     def test_launch_cli_help_has_no_html_file(self) -> None:
         out = io.StringIO()
@@ -1883,8 +2098,7 @@ class ProductionSurfaceTests(_Base):
     def test_launch_cli_has_no_loopback_optin(self) -> None:
         """The production launch CLI/argparse exposes no loopback opt-in.
 
-        ``_usage_guard_allow_loopback`` is a private authority seam absent
-        from the CLI (Task 7 review, obligations 9 and 14): the help text must
+        No loopback authority seam exists in the API or CLI: the help text must
         not advertise it, and argparse must refuse the flag outright on an
         otherwise-valid command line rather than silently accepting it.
         """

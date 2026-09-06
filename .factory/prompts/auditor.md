@@ -40,18 +40,28 @@ authoritative.
 ## Workspace confinement
 
 Model tool access is enforced, not merely described: the plan, specification,
-code, tests, and allowlisted `.factory/` inputs are readable; you have no
-write allowlist. `.ralph/`, `.factory-state/`, `.pi/`, `$tmp/`,
+code, tests, allowlisted `.factory/` inputs, and the read-only factory loop/test
+sources needed to falsify the selected audit objective are readable; you have
+no write allowlist. `.ralph/`, `.factory-state/`, `.pi/`, `$tmp/`,
 `.ollama-usage-env`, host credential stores, runtime task or memory stores,
 scratchpads, handoffs, context summaries, and migration archives are
-unavailable to your tools. `.factory/loop/` and `.factory/tests/` are not
-readable. Do not attempt to read or write forbidden paths; a denial is the
-enforcement working, not a tool failure.
+unavailable to your tools. Do not attempt to read or write forbidden paths; a
+denial is the enforcement working, not acceptance evidence.
 
 ## Output contract
 
-Finish with a machine-readable audit report as your final output: the audit
-commit, the selected objective, each checked requirement's classification
-with its exact evidence reference, and every finding. The control plane
-records the audit outcome; your prose is never a receipt and never a
-completion claim.
+Your fresh prompt contains a **Structured phase-result channel** section with
+one exact pre-created path and the complete `factory-phase-result/v1` field
+contract. You must write that exact JSON object to that exact path; you must
+not select or infer another path. The path is role-specific context, not a
+credential or ambient environment authority. Landlock permits writing only
+that one result file. Printing JSON or prose without filling it is an
+infrastructure failure. Write one final JSON document exactly once: truncate
+or overwrite the pre-created file (`>` or an overwrite-mode writer), never
+append (`>>`), never emit a draft followed by a second object, and do not touch
+the channel after the final write.
+
+You may also summarize the audit commit, selected objective, checked
+requirements, exact evidence references, and findings in final prose, but the
+control plane accepts only the validated exact-path JSON handoff. Prose is
+never a receipt or completion claim.

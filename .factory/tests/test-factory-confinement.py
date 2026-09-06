@@ -75,7 +75,11 @@ Coverage:
   ``LaunchSupervision`` re-validates the proof immediately before exec, and
   the full ``python -m factory.loop.launch`` CLI runs the model child through
   the staged confine launcher so the leaf's own environment and forbidden-path
-  probes prove real confinement at the production boundary;
+  probes prove real confinement at the production boundary; a raw
+  ``clone(CLONE_UNTRACED)`` backend is denied, clone3 is denied with the safe
+  ENOSYS fallback where the kernel supports it, and bounded return leaves no
+  survivor or later workspace
+  mutation;
 * **Task 10 exact-file result handoff** (REQ 4): the confined tester/auditor
   holds exact read/write access to exactly its configured transient
   phase/audit result file — never the ``.factory-state/`` breadth.  Real
@@ -104,7 +108,10 @@ is removed.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import dataclasses
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import inspect
@@ -113,10 +120,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock as mock
 
@@ -130,7 +139,6 @@ sys.path.insert(0, str(LOOP))
 import audit_objectives  # noqa: E402
 import campaign as campaign_module  # noqa: E402
 import confine_launcher  # noqa: E402
-import confinement  # noqa: E402  (Task 7 private synthetic seam)
 import launch  # noqa: E402
 import promptset  # noqa: E402
 import usage  # noqa: E402
@@ -147,7 +155,7 @@ FACTORY_CAMPAIGN = importlib.util.module_from_spec(_campaign_spec)
 assert _campaign_spec.loader is not None
 _campaign_spec.loader.exec_module(FACTORY_CAMPAIGN)
 
-PY = sys.executable
+PY = os.path.realpath(sys.executable)
 GIT = "git"
 REAL_WRAPPER = ROOT / launch.SECURE_WRAPPER
 WRAPPER_BASENAME = Path(launch.SECURE_WRAPPER).name
@@ -196,7 +204,7 @@ def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
 # paths so self/other/fd credential reads are probed with the child's own
 # identity.
 PROBE_SOURCE = r'''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import ctypes, json, os, subprocess, sys
 targets = json.loads(sys.argv[1])
 out = {}
 self_pid = os.getpid()
@@ -260,6 +268,7 @@ out["env"] = {
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
                 "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR")
 }
+out["no_new_privs"] = ctypes.CDLL(None).prctl(39, 0, 0, 0, 0)
 print("FACTORY_CONFINEMENT_PROBE " + json.dumps(out, sort_keys=True))
 sys.stdout.flush()
 '''
@@ -315,6 +324,18 @@ class _Base(unittest.TestCase):
             ROOT / "scripts" / "credential-guard.py",
             ws / "scripts" / "credential-guard.py",
         )
+        # Task 11: every fixture repo commits the exact model-side Pi guard
+        # extension so the launch authority can verify and always load it
+        # through ``--extension`` in the child argv.
+        shutil.copy2(
+            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            ws / "scripts" / "pi-factory-guard-extension.mjs",
+        )
+        (ws / "scripts" / "pi-cli-shims").mkdir()
+        shutil.copy2(
+            ROOT / "scripts" / "pi-cli-shims" / "git",
+            ws / "scripts" / "pi-cli-shims" / "git",
+        )
         (ws / "src").mkdir()
         (ws / "src" / "main.py").write_text("def main(): pass\n", encoding="utf-8")
         # An *existing* developer-allowlisted test artifact directory: the
@@ -331,6 +352,11 @@ class _Base(unittest.TestCase):
         (ws / "spec.md").write_text("spec\n", encoding="utf-8")
         (ws / "role.md").write_text("role\n", encoding="utf-8")
         (ws / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+        # If the adopting project commits a Nix shell, keep the fixture's
+        # toolchain closure bound to that exact expression. Generic projects
+        # are not required to provide ``shell.nix``.
+        if (ROOT / "shell.nix").is_file():
+            shutil.copy2(ROOT / "shell.nix", ws / "shell.nix")
         backend = ws / "backend.py"
         backend.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
         os.chmod(backend, 0o700)
@@ -371,7 +397,11 @@ class _Base(unittest.TestCase):
         # The exact committed confine-launcher blob (F2) plus prompt files.
         loop_dir = factory / "loop"
         loop_dir.mkdir()
-        shutil.copy2(LOOP / "confine_launcher.py", loop_dir / "confine_launcher.py")
+        for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
+            shutil.copy2(LOOP / module, loop_dir / module)
+        factory_tests = factory / "tests"
+        factory_tests.mkdir()
+        (factory_tests / "__init__.py").write_text("# verifier fixture\n", encoding="utf-8")
         prompts_dir = factory / "prompts"
         prompts_dir.mkdir()
         for role in promptset.ROLES:
@@ -411,12 +441,118 @@ class _Base(unittest.TestCase):
         wc.validate_confinement_spec(spec, binding)
         return spec
 
+    def _run_confine_launcher(
+        self,
+        spec: object,
+        spec_path: Path,
+        command: list[str],
+        *,
+        exec_fd_placeholders: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Run with production descriptor transport plus an optional fd contract.
+
+        A descriptor-sensitive probe must not enumerate ``/proc/self/fd`` from
+        inside Landlock merely to discover the protected executable table.
+        When placeholders are requested, this test fixture passes one owned
+        high-numbered ``/dev/null`` descriptor to make the broker's table base
+        deterministic, derives the exact production-approved path ordering,
+        and substitutes each requested path's exact protected slot into the
+        child argv.  The extra descriptor controls only allocation geometry;
+        the production launcher still opens, protects, and brokers every exec
+        descriptor normally.
+        """
+        descriptors: tuple[int, ...] = ()
+        contract_fd: int | None = None
+        try:
+            if isinstance(spec, dict):
+                opened: list[int] = []
+                try:
+                    for rule in spec.get("rules", []):
+                        descriptor = wc._open_path_anchor(
+                            str(rule["path"]), "test confinement rule"
+                        )
+                        if wc._descriptor_identity(descriptor) != rule["identity"]:
+                            os.close(descriptor)
+                            raise wc.ConfinementError("test rule identity mismatch")
+                        opened.append(descriptor)
+                    descriptors = tuple(opened)
+                except (KeyError, TypeError, wc.ConfinementError):
+                    for descriptor in opened:
+                        os.close(descriptor)
+                    descriptors = ()
+            inherited = descriptors
+            if exec_fd_placeholders:
+                self.assertIsInstance(spec, dict)
+                approved = confine_launcher._approved_exec_targets(spec, descriptors)
+                try:
+                    approved_paths = sorted(
+                        path for path, _descriptor in approved.values()
+                    )
+                finally:
+                    for _path, descriptor in approved.values():
+                        os.close(descriptor)
+                source_fd = os.open(
+                    "/dev/null", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                )
+                try:
+                    # Leave room for every approved source descriptor that
+                    # the fresh launcher opens before reserving its protected
+                    # table. A fixed +64 leaked the previous executable-set
+                    # size into this fixture and became order-dependent when
+                    # the exact project-shell closure admitted more tools.
+                    contract_fd = fcntl.fcntl(
+                        source_fd,
+                        fcntl.F_DUPFD,
+                        max([127, *descriptors]) + len(approved_paths) + 64,
+                    )
+                finally:
+                    os.close(source_fd)
+                # ``contract_fd`` is the highest inherited/open descriptor.
+                # The production table starts 32 slots above that exact number.
+                slots = {
+                    path: contract_fd + 32 + index
+                    for index, path in enumerate(approved_paths)
+                }
+                for placeholder, path in exec_fd_placeholders.items():
+                    self.assertIn(path, slots, f"no approved exec slot for {path}")
+                    command = [
+                        argument.replace(placeholder, str(slots[path]))
+                        for argument in command
+                    ]
+                inherited = (*descriptors, contract_fd)
+            fd_text = ",".join(str(fd) for fd in descriptors) or "999999"
+            return subprocess.run(
+                [
+                    PY, str(LOOP / "confine_launcher.py"),
+                    "--spec-file", str(spec_path),
+                    "--rule-fds", fd_text,
+                    "--", *command,
+                ],
+                pass_fds=inherited,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self.workspace),
+                timeout=60,
+            )
+        finally:
+            if contract_fd is not None:
+                try:
+                    os.close(contract_fd)
+                except OSError:
+                    pass
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
     def run_confined(
         self,
         role: str,
         targets: list,
         *,
         spec: dict | None = None,
+        exec_fd_placeholders: dict[str, str] | None = None,
     ) -> dict:
         """Exec the real confine launcher against a real spec; probe the child."""
         binding = self.binding(role=role)
@@ -430,17 +566,11 @@ class _Base(unittest.TestCase):
             json.dumps(spec, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
-        proc = subprocess.run(
-            [
-                PY, str(LOOP / "confine_launcher.py"),
-                "--spec-file", str(spec_path),
-                "--", PY, str(self.workspace / "probe.py"),
-                json.dumps(targets),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(self.workspace),
-            timeout=60,
+        proc = self._run_confine_launcher(
+            spec,
+            spec_path,
+            [PY, str(self.workspace / "probe.py"), json.dumps(targets)],
+            exec_fd_placeholders=exec_fd_placeholders,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-2000:])
         line = next(
@@ -591,6 +721,32 @@ class LandlockSubprocessMatrixTests(_Base):
                 f"the planner wrote {path} outside the plan allowlist",
             )
 
+    def test_tester_auditor_read_factory_implementation_without_write(self) -> None:
+        ws = str(self.workspace)
+        for role in ("tester", "auditor"):
+            with self.subTest(role=role):
+                result = self.run_confined(role, _probe_targets(
+                    f"read:{ws}/.factory/loop/confine_launcher.py",
+                    f"read:{ws}/.factory/tests/__init__.py",
+                    f"write:{ws}/.factory/loop/confine_launcher.py",
+                    f"write:{ws}/.factory/tests/__init__.py",
+                ))
+                self.assertProbe(
+                    result, "read",
+                    f"{ws}/.factory/loop/confine_launcher.py", "ok",
+                )
+                self.assertProbe(
+                    result, "read", f"{ws}/.factory/tests/__init__.py", "ok",
+                )
+                self.assertProbe(
+                    result, "write",
+                    f"{ws}/.factory/loop/confine_launcher.py", "PermissionError",
+                )
+                self.assertProbe(
+                    result, "write", f"{ws}/.factory/tests/__init__.py",
+                    "PermissionError",
+                )
+
     def test_developer_write_allowlist(self) -> None:
         ws = str(self.workspace)
         result = self.run_confined(
@@ -692,6 +848,16 @@ class LandlockSubprocessMatrixTests(_Base):
             "the confined child read the operator credential store",
         )
 
+    def test_unicode_symlink_escape_target_denied(self) -> None:
+        """Unicode path names do not weaken no-follow containment checks."""
+        escape = self.workspace / "src" / "Stéphanie"
+        os.symlink(str(self.operator_store), escape)
+        targets = [{"label": "unicode-symlink", "path": str(escape), "op": "read"}]
+        free = self.run_unconfined(targets)["read:unicode-symlink"]
+        self.assertEqual(free, "ok")
+        confined = self.run_confined("developer", targets)["read:unicode-symlink"]
+        self.assertIn("permission", confined.lower())
+
     def test_nested_symlink_escape_target_denied(self) -> None:
         """A nested symlink whose resolved target escapes the workspace is
         denied by the *effective* confinement (finding 1, resolved-target
@@ -712,6 +878,410 @@ class LandlockSubprocessMatrixTests(_Base):
         )
         result = self.run_confined("developer", targets)
         self.assertProbe(result, "read", str(escape), "PermissionError")
+
+    def test_absolute_copied_loader_and_interpreted_git_execution_denied(self) -> None:
+        """Only exact approved executable inodes cross the kernel boundary.
+
+        Direct Git, copied Git/helper ELF in a model-writable directory, an
+        explicit dynamic-loader invocation, generated/sourced script, and an
+        interpreter subprocess are denied. Ordinary approved executables still
+        work with the loader readable-only.
+        """
+        real_git = os.path.realpath(shutil.which("git") or "")
+        real_helper = os.path.realpath(sys.executable)
+        self.assertTrue(real_git and os.path.isfile(real_git))
+        self.assertTrue(real_helper and os.path.isfile(real_helper))
+        loader = ""
+        with open("/proc/self/maps", encoding="utf-8") as stream:
+            for line in stream:
+                mapped = line.rsplit(" ", 1)[-1].strip()
+                if ("ld-linux" in mapped or "ld-musl" in mapped) and os.path.isfile(mapped):
+                    loader = os.path.realpath(mapped)
+                    break
+        self.assertTrue(loader, "cannot locate the executing dynamic loader")
+        copied_git = self.workspace / "src" / "copied-git"
+        copied_helper = self.workspace / "src" / "copied-helper"
+        shutil.copy2(real_git, copied_git)
+        shutil.copy2(real_helper, copied_helper)
+        copied_git.chmod(0o700)
+        copied_helper.chmod(0o700)
+        generated = self.workspace / "src" / "generated-git.sh"
+        generated.write_text(
+            "#!/bin/sh\n" + real_git + " --version\n", encoding="utf-8"
+        )
+        generated.chmod(0o700)
+        commands = [
+            {"op": "cmd", "cmd": [real_git, "--version"], "label": "absolute-git"},
+            {"op": "cmd", "cmd": [str(copied_git), "--version"], "label": "copied-git"},
+            {"op": "cmd", "cmd": [str(copied_helper), "--version"], "label": "copied-helper"},
+            {"op": "cmd", "cmd": [loader, real_git, "--version"], "label": "loader-git"},
+            {"op": "cmd", "cmd": ["sh", str(generated)], "label": "generated-script"},
+            {"op": "cmd", "cmd": ["sh", "-c", '. "$1"', "sh", str(generated)],
+             "label": "sourced-script"},
+            {"op": "cmd", "cmd": [PY, "-c",
+             "import subprocess,sys;sys.exit(subprocess.run(sys.argv[1:]).returncode)",
+             real_git, "--version"], "label": "interpreter-subprocess"},
+        ]
+        free = self.run_unconfined(commands)
+        for command in commands:
+            self.assertEqual(free[f"cmd:{command['label']}"]["returncode"], 0)
+        confined = self.run_confined("developer", commands)
+        approved = self.run_confined("developer", [
+            {"op": "cmd", "cmd": [PY, "-c", "pass"], "label": "approved-python"},
+        ])
+        self.assertEqual(
+            approved["cmd:approved-python"]["returncode"], 0,
+            approved["cmd:approved-python"],
+        )
+        for command in commands:
+            result = confined[f"cmd:{command['label']}"]
+            self.assertTrue(
+                result.get("returncode", 0) != 0 or result.get("error"),
+                f"real Git executed through {command['label']}: {result}",
+            )
+        self.assertEqual(confined["no_new_privs"], 1)
+
+    def test_high_word_fd_aliases_cannot_replace_protected_exec_slot(self) -> None:
+        """Kernel-low-32-bit fd aliases cannot retarget an approved exec.
+
+        The production launcher reserves the approved Python inode in its
+        retained exec table.  Five raw syscalls then name that exact slot as
+        ``(1 << 32) | slot``.  Linux converts fd/range parameters to 32 bits,
+        so a filter that compared the full seccomp register would miss these
+        aliases.  Each attack tries to replace/close/CLOEXEC-mark the slot
+        with the dynamic loader, then requests approved Python with argv that
+        makes only the loader execute a copied workspace ELF.  The protected
+        inode must remain unchanged and the copied ELF marker must never run.
+        """
+        loader = ""
+        with open("/proc/self/maps", encoding="utf-8") as stream:
+            for line in stream:
+                mapped = line.rsplit(" ", 1)[-1].strip()
+                if (
+                    ("ld-linux" in mapped or "ld-musl" in mapped)
+                    and os.path.isfile(mapped)
+                ):
+                    loader = os.path.realpath(mapped)
+                    break
+        self.assertTrue(loader, "cannot locate the executing dynamic loader")
+        copied_python = self.workspace / "src" / "high-fd-copy"
+        shutil.copy2(PY, copied_python)
+        copied_python.chmod(0o700)
+        marker_prefix = self.workspace / "src" / ".factory-test-output" / "high-fd"
+        probe = r'''
+import ctypes, errno, fcntl, json, os, platform, sys
+slot_text, approved, loader, copied, marker_prefix = sys.argv[1:]
+slot = int(slot_text)
+machine = platform.machine().lower()
+if machine in ("x86_64", "amd64"):
+    numbers = {"close": 3, "fcntl": 72, "dup2": 33, "dup3": 292,
+               "close_range": 436, "execve": 59}
+elif machine in ("aarch64", "arm64"):
+    numbers = {"close": 57, "fcntl": 25, "dup3": 24,
+               "close_range": 436, "execve": 221}
+else:
+    raise SystemExit(80)
+libc = ctypes.CDLL(None, use_errno=True)
+identity = os.stat(approved)
+try:
+    original = os.fstat(slot)
+except OSError:
+    raise SystemExit(81)
+if (original.st_dev, original.st_ino) != (identity.st_dev, identity.st_ino):
+    raise SystemExit(81)
+operations = ["close", "fcntl", "dup3", "close_range"]
+if "dup2" in numbers:
+    operations.insert(2, "dup2")
+
+def syscall(number, *arguments):
+    ctypes.set_errno(0)
+    result = libc.syscall(
+        ctypes.c_long(number),
+        *(ctypes.c_ulonglong(value) for value in arguments),
+    )
+    return int(result), ctypes.get_errno()
+
+reports = []
+for kind in operations:
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        loader_fd = os.open(
+            loader,
+            getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0),
+        )
+        high_alias = (1 << 32) | slot
+        refill = None
+        if kind == "close":
+            result, error = syscall(numbers[kind], high_alias)
+            if result == 0:
+                refill, _ = syscall(
+                    numbers["fcntl"], loader_fd, fcntl.F_DUPFD, slot
+                )
+        elif kind == "fcntl":
+            result, error = syscall(
+                numbers[kind], high_alias, fcntl.F_SETFD, fcntl.FD_CLOEXEC
+            )
+        elif kind == "dup2":
+            result, error = syscall(numbers[kind], loader_fd, high_alias)
+        elif kind == "dup3":
+            result, error = syscall(numbers[kind], loader_fd, high_alias, 0)
+        else:
+            result, error = syscall(numbers[kind], high_alias, high_alias, 0)
+            if result == 0:
+                refill, _ = syscall(
+                    numbers["fcntl"], loader_fd, fcntl.F_DUPFD, slot
+                )
+        try:
+            current = os.fstat(slot)
+            same_inode = (
+                current.st_dev, current.st_ino
+            ) == (original.st_dev, original.st_ino)
+        except OSError:
+            same_inode = False
+        report = {
+            "kind": kind, "result": result, "errno": error,
+            "refill": refill, "same_inode": same_inode,
+        }
+        os.write(write_fd, (json.dumps(report) + "\n").encode())
+        os.close(write_fd)
+        marker = marker_prefix + "-" + kind
+        code = ("open(" + repr(marker) + ", 'w').write('EXECUTED')").encode()
+        argv = (ctypes.c_char_p * 5)(
+            loader.encode(), copied.encode(), b"-c", code, None
+        )
+        envp = (ctypes.c_char_p * 1)(None)
+        syscall(
+            numbers["execve"],
+            ctypes.cast(ctypes.c_char_p(approved.encode()), ctypes.c_void_p).value,
+            ctypes.cast(argv, ctypes.c_void_p).value,
+            ctypes.cast(envp, ctypes.c_void_p).value,
+        )
+        os._exit(82)
+    os.close(write_fd)
+    payload = b""
+    while True:
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break
+        payload += chunk
+    os.close(read_fd)
+    os.waitpid(pid, 0)
+    reports.append(json.loads(payload))
+
+expected = set(operations)
+if {report["kind"] for report in reports} != expected:
+    raise SystemExit(83)
+for report in reports:
+    if not report["same_inode"]:
+        raise SystemExit(84)
+    if report["kind"] == "close_range":
+        if report["result"] != 0 or report["refill"] == slot:
+            raise SystemExit(85)
+    elif report["result"] != -1 or report["errno"] != errno.EACCES:
+        raise SystemExit(86)
+for kind in operations:
+    if os.path.exists(marker_prefix + "-" + kind):
+        raise SystemExit(87)
+print("HIGH_FD_SLOTS_PROTECTED")
+'''
+        command = [{
+            "op": "cmd",
+            "cmd": [
+                PY, "-c", probe, "@factory-test-python-exec-fd@", PY,
+                loader, str(copied_python), str(marker_prefix),
+            ],
+            "label": "high-word-fd-aliases",
+        }]
+        confined = self.run_confined(
+            "developer",
+            command,
+            exec_fd_placeholders={"@factory-test-python-exec-fd@": PY},
+        )["cmd:high-word-fd-aliases"]
+        self.assertEqual(confined.get("returncode"), 0, confined)
+        self.assertIn("HIGH_FD_SLOTS_PROTECTED", confined.get("stdout", ""))
+        for kind in ("close", "fcntl", "dup2", "dup3", "close_range"):
+            self.assertFalse(
+                Path(f"{marker_prefix}-{kind}").exists(),
+                f"the copied workspace ELF executed after {kind}",
+            )
+
+    def test_concurrent_symlink_swap_never_authorizes_exec(self) -> None:
+        """A pathname race cannot borrow an approved inode then execute a copy."""
+        approved_true = os.path.realpath(shutil.which("true") or "")
+        copied = self.workspace / "src" / "race-copy"
+        shutil.copy2(sys.executable, copied)
+        copied.chmod(0o700)
+        link = self.workspace / "src" / "race-exec"
+        race = r'''
+import os, subprocess, sys, threading
+link, approved, copied = sys.argv[1:]
+try:
+    os.unlink(link)
+except FileNotFoundError:
+    pass
+os.symlink(approved, link)
+stop = False
+def swap():
+    index = 0
+    while not stop:
+        temporary = link + ".next"
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        os.symlink(approved if index & 1 else copied, temporary)
+        os.replace(temporary, link)
+        index += 1
+thread = threading.Thread(target=swap)
+thread.start()
+succeeded = False
+try:
+    for _ in range(200):
+        try:
+            result = subprocess.run([link, "--version"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=5)
+            succeeded = succeeded or result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            pass
+finally:
+    stop = True
+    thread.join()
+sys.exit(1 if succeeded else 0)
+'''
+        command = [{
+            "op": "cmd", "cmd": [PY, "-c", race, str(link), approved_true, str(copied)],
+            "label": "symlink-swap",
+        }]
+        free = self.run_unconfined(command)["cmd:symlink-swap"]
+        self.assertNotEqual(free["returncode"], 0, free)
+        confined = self.run_confined("developer", command)["cmd:symlink-swap"]
+        self.assertEqual(confined.get("returncode"), 0, confined)
+
+    def test_shared_buffer_approved_path_loader_race_never_executes_copy(self) -> None:
+        """A second thread cannot retarget a validated exec buffer to ld-linux.
+
+        The approved selector is the immutable Python inode, but its argv makes
+        Python reject the copied ELF.  The alternate selector is the dynamic
+        loader, which would run that copied ELF successfully.  Thus exit 0 is
+        an unambiguous loader-race escape.  Unconfined execution observes the
+        escape; under confinement every attempt is denied or executes the
+        descriptor-bound Python inode and no attempt exits 0.
+        """
+        loader = ""
+        with open("/proc/self/maps", encoding="utf-8") as stream:
+            for line in stream:
+                mapped = line.rsplit(" ", 1)[-1].strip()
+                if ("ld-linux" in mapped or "ld-musl" in mapped) and os.path.isfile(mapped):
+                    loader = os.path.realpath(mapped)
+                    break
+        self.assertTrue(loader, "cannot locate the executing dynamic loader")
+        copied_python = self.workspace / "src" / "shared-buffer-copy"
+        shutil.copy2(PY, copied_python)
+        copied_python.chmod(0o700)
+        probe = r'''
+import ctypes, os, platform, sys, threading
+approved, loader, copied = sys.argv[1:]
+libc = ctypes.CDLL(None, use_errno=True)
+execve_nr = 59 if platform.machine().lower() in ("x86_64", "amd64") else 221
+size = max(len(approved), len(loader)) + 2
+
+def one_attempt():
+    pid = os.fork()
+    if pid == 0:
+        buffer = ctypes.create_string_buffer(size)
+        address = ctypes.addressof(buffer)
+        stop = False
+        ready = threading.Event()
+        def write(value):
+            raw = value.encode() + b"\0"
+            ctypes.memmove(address, raw, len(raw))
+        def mutate():
+            nonlocal stop
+            ready.set()
+            while not stop:
+                write(approved)
+                write(loader)
+        write(approved)
+        thread = threading.Thread(target=mutate)
+        thread.start(); ready.wait()
+        argv = (ctypes.c_char_p * 5)(
+            loader.encode(), copied.encode(), b"-c", b"pass", None
+        )
+        envp = (ctypes.c_char_p * 1)(None)
+        libc.syscall(execve_nr, ctypes.c_void_p(address), argv, envp)
+        stop = True; thread.join()
+        os._exit(93)
+    _pid, status = os.waitpid(pid, 0)
+    return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+escaped = any(one_attempt() for _ in range(40))
+sys.exit(1 if escaped else 0)
+'''
+        command = [{
+            "op": "cmd",
+            "cmd": [PY, "-c", probe, PY, loader, str(copied_python)],
+            "label": "shared-buffer-loader-race",
+        }]
+        free = self.run_unconfined(command)["cmd:shared-buffer-loader-race"]
+        self.assertNotEqual(free.get("returncode"), 0, free)
+        confined = self.run_confined("developer", command)[
+            "cmd:shared-buffer-loader-race"
+        ]
+        self.assertEqual(confined.get("returncode"), 0, confined)
+
+    def test_relative_procfd_and_execveat_forms_denied(self) -> None:
+        """Only canonical absolute execve is in policy; execveat is all-deny."""
+        approved_true = os.path.realpath(shutil.which("true") or "")
+        probe = r'''
+import ctypes, errno, os, platform, sys
+path = sys.argv[1]
+libc = ctypes.CDLL(None, use_errno=True)
+execveat_nr = 322 if platform.machine().lower() in ("x86_64", "amd64") else 281
+AT_FDCWD, AT_EMPTY_PATH = -100, 0x1000
+argv = (ctypes.c_char_p * 2)(path.encode(), None)
+envp = (ctypes.c_char_p * 1)(None)
+def wait_ok(pid):
+    _pid, status = os.waitpid(pid, 0)
+    return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+def denied_execve(value, cwd=None):
+    pid = os.fork()
+    if pid == 0:
+        try:
+            if cwd is not None:
+                os.chdir(cwd)
+            os.execve(value, [value], {})
+        except OSError as exc:
+            os._exit(0 if exc.errno in (errno.EACCES, errno.EPERM) else 90)
+        os._exit(91)
+    return wait_ok(pid)
+def denied_execveat(dirfd, value, flags):
+    pid = os.fork()
+    if pid == 0:
+        ctypes.set_errno(0)
+        result = libc.syscall(execveat_nr, dirfd, ctypes.c_char_p(value),
+                              argv, envp, flags)
+        error = ctypes.get_errno()
+        os._exit(0 if result == -1 and error in (errno.EACCES, errno.EPERM) else 92)
+    return wait_ok(pid)
+fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY))
+dirfd = os.open(os.path.dirname(path), getattr(os, "O_PATH", os.O_RDONLY))
+checks = [
+    denied_execve("./" + os.path.basename(path), os.path.dirname(path)),
+    denied_execve("/proc/self/fd/%d" % fd),
+    denied_execveat(AT_FDCWD, path.encode(), 0),
+    denied_execveat(dirfd, os.path.basename(path).encode(), 0),
+    denied_execveat(fd, b"", AT_EMPTY_PATH),
+]
+os.close(dirfd); os.close(fd)
+sys.exit(0 if all(checks) else 1)
+'''
+        result = self.run_confined("developer", [{
+            "op": "cmd", "cmd": [PY, "-c", probe, approved_true],
+            "label": "unsafe-exec-forms",
+        }])["cmd:unsafe-exec-forms"]
+        self.assertEqual(result.get("returncode"), 0, result)
 
     def test_git_and_git_show_denied(self) -> None:
         """The model holds no ``.git`` read and cannot read repository history
@@ -743,10 +1313,10 @@ class LandlockSubprocessMatrixTests(_Base):
         result = self.run_confined("developer", targets)
         for target in targets[:3]:
             self.assertProbe(result, "read", target["path"], "PermissionError")
-        self.assertNotEqual(
-            result["cmd:git-show"]["returncode"], 0,
-            f"git show read repository history under confinement: "
-            f"{result['cmd:git-show']}",
+        git_show = result["cmd:git-show"]
+        self.assertTrue(
+            git_show.get("returncode", 0) != 0 or git_show.get("error"),
+            f"git show read repository history under confinement: {git_show}",
         )
 
     def test_proc_credential_reads_denied(self) -> None:
@@ -860,6 +1430,39 @@ class LandlockSubprocessMatrixTests(_Base):
 # ---------------------------------------------------------------------------
 
 class ConfineLauncherFailClosedTests(_Base):
+    @unittest.skipUnless(
+        confine_launcher.platform.machine().lower() in ("x86_64", "amd64"),
+        "compat int 0x80/x32 probes are x86_64-specific",
+    )
+    def test_seccomp_kills_compat_int80_and_x32_before_dispatch(self) -> None:
+        """The BPF architecture prologue kills both x86 alternate ABIs."""
+        import mmap
+
+        # mov eax, __NR_getpid; int 0x80/syscall; ret. If either call returns,
+        # the child exits 88 and the regression fails; correct filters SIGSYS.
+        probes = {
+            "int80": b"\xb8\x14\x00\x00\x00\xcd\x80\xc3",
+            "x32": b"\xb8\x27\x00\x00\x40\x0f\x05\xc3",
+        }
+        for label, machine_code in probes.items():
+            with self.subTest(label=label):
+                pid = os.fork()
+                if pid == 0:
+                    region = mmap.mmap(
+                        -1, mmap.PAGESIZE,
+                        prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC,
+                    )
+                    region.write(machine_code)
+                    address = ctypes.addressof(ctypes.c_char.from_buffer(region))
+                    function = ctypes.CFUNCTYPE(ctypes.c_long)(address)
+                    confine_launcher._set_no_new_privs()
+                    confine_launcher._install_exec_trace_filter()
+                    function()
+                    os._exit(88)
+                _waited, status = os.waitpid(pid, 0)
+                self.assertTrue(os.WIFSIGNALED(status), status)
+                self.assertEqual(os.WTERMSIG(status), signal.SIGSYS)
+
     def _run_launcher(self, spec: object, *, as_symlink: bool = False,
                       raw: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
         spec_path = self.diag / "bad-spec.json"
@@ -875,16 +1478,8 @@ class ConfineLauncherFailClosedTests(_Base):
             target.write_bytes(spec_path.read_bytes())
             spec_path.unlink()
             os.symlink(target, spec_path)
-        return subprocess.run(
-            [
-                PY, str(LOOP / "confine_launcher.py"),
-                "--spec-file", str(spec_path),
-                "--", PY, "-c", "print('EXECUTED')",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(self.workspace),
-            timeout=60,
+        return self._run_confine_launcher(
+            spec, spec_path, [PY, "-c", "print('EXECUTED')"]
         )
 
     def _valid_spec(self) -> dict:
@@ -895,23 +1490,123 @@ class ConfineLauncherFailClosedTests(_Base):
 
     def test_valid_spec_executes(self) -> None:
         spec_path = self.diag / "ok-spec.json"
+        spec = self._valid_spec()
         spec_path.write_text(
-            json.dumps(self._valid_spec(), sort_keys=True, separators=(",", ":")),
+            json.dumps(spec, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
-        proc = subprocess.run(
-            [
-                PY, str(LOOP / "confine_launcher.py"),
-                "--spec-file", str(spec_path),
-                "--", PY, "-c", "print('EXECUTED')",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(self.workspace),
-            timeout=60,
+        proc = self._run_confine_launcher(
+            spec, spec_path, [PY, "-c", "print('EXECUTED')"]
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-1000:])
         self.assertIn(b"EXECUTED", proc.stdout)
+
+    def test_ordinary_threads_and_process_creation_remain_traced(self) -> None:
+        """clone3 denial still permits libc's ordinary legacy-clone fallback."""
+        spec_path = self.diag / "ordinary-clone-spec.json"
+        spec = self._valid_spec()
+        spec_path.write_text(
+            json.dumps(spec, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        script = (
+            "import os,threading\n"
+            "seen=[]\n"
+            "thread=threading.Thread(target=lambda: seen.append('thread'))\n"
+            "thread.start();thread.join()\n"
+            "pid=os.fork()\n"
+            "if pid == 0: os._exit(0)\n"
+            "waited,status=os.waitpid(pid,0)\n"
+            "assert seen == ['thread'] and waited == pid and os.WIFEXITED(status)\n"
+            "print('ORDINARY_CLONE_OK')\n"
+        )
+        proc = self._run_confine_launcher(spec, spec_path, [PY, "-c", script])
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-1000:])
+        self.assertIn(b"ORDINARY_CLONE_OK", proc.stdout)
+
+    def test_released_target_pgid_is_never_used_for_signal_forwarding(self) -> None:
+        """A reused target PGID is excluded after ptrace releases identity."""
+        group_calls: list[tuple[int, int]] = []
+        identity_calls: list[tuple[int, int]] = []
+        target = 500
+        pinned_tracees = {501, 502}
+        foreign_reuser = 700
+        with mock.patch.object(
+            confine_launcher.os, "killpg",
+            side_effect=lambda pgid, signum: group_calls.append((pgid, signum)),
+        ), mock.patch.object(
+            confine_launcher.os, "kill",
+            side_effect=lambda pid, signum: identity_calls.append((pid, signum)),
+        ):
+            confine_launcher._forward_broker_signal(
+                target, pinned_tracees, True, signal.SIGTERM
+            )
+            confine_launcher._forward_broker_signal(
+                target, pinned_tracees, False, signal.SIGHUP
+            )
+
+        self.assertEqual(group_calls, [(target, signal.SIGTERM)])
+        self.assertEqual(
+            identity_calls,
+            [(501, signal.SIGHUP), (502, signal.SIGHUP)],
+        )
+        self.assertNotIn(
+            (target, signal.SIGHUP), group_calls,
+            "the released numeric target/PGID was signaled after reuse",
+        )
+        self.assertNotIn(
+            foreign_reuser, {pid for pid, _signum in identity_calls},
+            "a foreign member of the reused group was not ptrace-pinned",
+        )
+
+    def test_broker_bounds_and_reaps_setsid_descendant_after_target_exit(self) -> None:
+        """A tracee that outlives the target cannot hold the launcher open."""
+        spec_path = self.diag / "descendant-spec.json"
+        spec = self._valid_spec()
+        spec_path.write_text(
+            json.dumps(spec, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        marker = self.workspace / "src" / ".factory-test-output" / "broker-child.pid"
+        script = (
+            "import os,signal,subprocess,sys\n"
+            "sink=open('src/.factory-test-output/broker-child.log','wb')\n"
+            "child=subprocess.Popen([sys.executable,'-c',"
+            "'import os,signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);'"
+            "'os.setsid();time.sleep(300)'],stdin=sink,stdout=sink,stderr=sink)\n"
+            f"open({str(marker)!r},'w').write(str(child.pid))\n"
+            "sink.close()\n"
+        )
+        started = time.monotonic()
+        pid: int | None = None
+        try:
+            proc = self._run_confine_launcher(
+                spec, spec_path, [PY, "-c", script]
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-1000:])
+            self.assertLess(
+                elapsed, 10.0,
+                "the ptrace broker waited for an escaped descendant instead "
+                "of bounded-terminating it",
+            )
+            self.assertTrue(marker.is_file(), "the descendant probe never started")
+            pid = int(marker.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and os.path.exists(f"/proc/{pid}"):
+                time.sleep(0.02)
+            self.assertFalse(
+                os.path.exists(f"/proc/{pid}"),
+                f"the ptrace broker did not reap escaped descendant {pid}",
+            )
+        finally:
+            if pid is None and marker.is_file():
+                pid = int(marker.read_text(encoding="utf-8"))
+            if pid is not None:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_wrong_schema_fails_closed(self) -> None:
         spec = self._valid_spec()
@@ -1003,6 +1698,129 @@ class ConfinementSpecTests(_Base):
         self.assertNotEqual(wc.spec_digest(first), wc.spec_digest(other))
         self.assertNotEqual(first["home"], other["home"])
 
+    def test_file_substitution_cannot_change_retained_anchor(self) -> None:
+        """Same-name regular-file replacement never becomes the granted inode."""
+        binding = self.binding(role="planner")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        descriptors: list[int] = []
+        spec = wc.confinement_spec(
+            binding, sanitized_home=home, _rule_descriptors=descriptors
+        )
+        self.addCleanup(lambda: [os.close(fd) for fd in descriptors])
+        target = self.workspace / "plan.md"
+        target.unlink()
+        target.write_text("substituted\n", encoding="utf-8")
+        with self.assertRaises(wc.ConfinementError) as caught:
+            wc.validate_rule_anchors(spec, descriptors)
+        self.assertIn("nlink", str(caught.exception))
+
+    def test_symlink_substitution_cannot_change_retained_anchor(self) -> None:
+        """A final-component symlink swap is never followed after validation."""
+        binding = self.binding(role="planner")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        descriptors: list[int] = []
+        spec = wc.confinement_spec(
+            binding, sanitized_home=home, _rule_descriptors=descriptors
+        )
+        self.addCleanup(lambda: [os.close(fd) for fd in descriptors])
+        target = self.workspace / "plan.md"
+        target.unlink()
+        target.symlink_to(self.workspace / ".factory-state" / "factory-loop.json")
+        with self.assertRaises(wc.ConfinementError) as caught:
+            wc.validate_rule_anchors(spec, descriptors)
+        self.assertIn("nlink", str(caught.exception))
+        with self.assertRaises(wc.ConfinementError):
+            wc._open_path_anchor(str(target))
+
+    def test_directory_substitution_cannot_change_retained_anchor(self) -> None:
+        """A same-name directory replacement never inherits the broad grant."""
+        binding = self.binding(role="developer")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        descriptors: list[int] = []
+        spec = wc.confinement_spec(
+            binding, sanitized_home=home, _rule_descriptors=descriptors
+        )
+        self.addCleanup(lambda: [os.close(fd) for fd in descriptors])
+        target = self.workspace / "src"
+        original = self.workspace / "src.original"
+        target.rename(original)
+        target.mkdir()
+        wc.validate_rule_anchors(spec, descriptors)
+        identities = [rule["identity"] for rule in spec["rules"]
+                      if rule["path"] == str(target)]
+        self.assertTrue(identities)
+        self.assertTrue(all(identity != wc._path_identity(str(target))
+                            for identity in identities))
+
+    def test_post_anchor_path_swap_never_reopened_by_child(self) -> None:
+        """Inherited descriptors, not swapped pathnames, feed Landlock."""
+        binding = self.binding(role="planner")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        retained: list[int] = []
+        spec = wc.confinement_spec(
+            binding, sanitized_home=home, _rule_descriptors=retained
+        )
+        descriptors = tuple(retained)
+        self.addCleanup(lambda: [os.close(fd) for fd in descriptors])
+        target = self.workspace / "plan.md"
+        target.rename(self.workspace / "plan.original")
+        target.symlink_to(self.workspace / ".factory-state" / "factory-loop.json")
+        spec_path = self.diag / "anchored-swap.json"
+        spec_path.write_text(
+            json.dumps(spec, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [
+                PY, str(LOOP / "confine_launcher.py"),
+                "--spec-file", str(spec_path),
+                "--rule-fds", ",".join(str(fd) for fd in descriptors),
+                "--", PY, str(self.workspace / "probe.py"),
+                json.dumps(_probe_targets(f"read:{target}")),
+            ],
+            pass_fds=descriptors,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(self.workspace),
+            timeout=60,
+        )
+        # The launcher succeeded using the old retained inode, while opening
+        # the swapped pathname/denied target remained denied to the model.
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-1000:])
+        line = next(line for line in proc.stdout.decode().splitlines()
+                    if line.startswith("FACTORY_CONFINEMENT_PROBE "))
+        result = json.loads(line.split(" ", 1)[1])
+        self.assertEqual(result[f"read:{target}"], "PermissionError")
+
+    def test_allowlisted_hardlink_rejected_without_forbidden_scan(self) -> None:
+        """Single-link allowlist checks never enumerate denied namespaces."""
+        binding = self.binding(role="planner")
+        home = wc.sanitized_home_directory()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # A normal spec build must not walk .ralph/.factory-state (or call
+        # os.walk at all); denied namespaces remain opaque.
+        with mock.patch.object(
+            wc.os, "walk", side_effect=AssertionError("forbidden enumeration")
+        ):
+            wc.confinement_spec(binding, sanitized_home=home)
+        allowed = self.workspace / ".factory" / "bugs" / "open.md"
+        denied = self.workspace / ".factory-state" / "factory-loop.json"
+        allowed.unlink()
+        os.link(denied, allowed)
+        with self.assertRaises(wc.ConfinementError) as caught:
+            wc.confinement_spec(binding, sanitized_home=home)
+        self.assertIn("link count", str(caught.exception))
+
+    def test_authorize_accepts_no_caller_confinement_spec(self) -> None:
+        """A caller cannot widen confinement because no spec input exists."""
+        parameters = inspect.signature(launch.authorize_launch).parameters
+        self.assertNotIn("_confinement_spec", parameters)
+        self.assertNotIn("confinement_spec", parameters)
+
     def test_forbidden_namespaces_never_appear_in_rules(self) -> None:
         workspace_abs = self.workspace.absolute()
         for role in ("planner", "developer", "tester", "auditor"):
@@ -1022,17 +1840,26 @@ class ConfinementSpecTests(_Base):
                             f"rule {path} grants a forbidden namespace "
                             f"({forbidden}) for role {role}",
                         )
-                    # Only the documented ``.factory/`` inputs are granted:
-                    # the control-plane source, harness tests, prompts, and
-                    # runtime state are never allowlisted.
-                    for denied in (".factory/loop", ".factory/tests",
-                                   ".factory/prompts", ".factory/state",
-                                   ".factory/ralph"):
+                    # Tester/auditor receive read-only loop/test source for
+                    # executable verifier and audit inspection. Prompts and
+                    # runtime/legacy state remain denied to every role; planner
+                    # and developer also cannot read control-plane source.
+                    denied_paths = [
+                        ".factory/prompts", ".factory/state", ".factory/ralph",
+                    ]
+                    if role not in ("tester", "auditor"):
+                        denied_paths.extend([".factory/loop", ".factory/tests"])
+                    for denied in denied_paths:
                         self.assertFalse(
                             str(relative).startswith(denied),
                             f"rule {path} grants a control-plane source "
                             f"({denied}) for role {role}",
                         )
+                if role in ("tester", "auditor"):
+                    rule_paths = {str(Path(r["path"]).absolute())
+                                  for r in spec["rules"]}
+                    self.assertIn(str(self.workspace / ".factory" / "loop"), rule_paths)
+                    self.assertIn(str(self.workspace / ".factory" / "tests"), rule_paths)
                 # The plan/spec/product entries and allowlisted factory
                 # inputs are present for every role.
                 rule_paths = {str(Path(r["path"]).absolute())
@@ -1149,19 +1976,25 @@ class ConfinementSpecTests(_Base):
         )
 
     def test_external_backend_is_executable_and_readable(self) -> None:
-        """An external backend's file + parents are allowlisted read+execute."""
+        """Only an exact immutable external backend receives EXECUTE."""
         external = self.diag / "toolchain" / "bin"
         external.mkdir(parents=True)
-        tool = external / "synthetic-backend"
-        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        os.chmod(tool, 0o700)
-        binding = self.binding(backend=tool)
+        mutable = external / "synthetic-backend"
+        mutable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(mutable, 0o700)
         home = wc.sanitized_home_directory()
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = wc.confinement_spec(binding, sanitized_home=home)
+        with self.assertRaisesRegex(wc.ConfinementError, "not an immutable"):
+            wc.confinement_spec(
+                self.binding(backend=mutable), sanitized_home=home
+            )
+        trusted = Path(PY)
+        spec = wc.confinement_spec(
+            self.binding(backend=trusted), sanitized_home=home
+        )
         rule_paths = {str(Path(r["path"]).absolute()) for r in spec["rules"]}
-        self.assertIn(str(tool.absolute()), rule_paths)
-        self.assertIn(str(external.absolute()), rule_paths)
+        self.assertIn(str(trusted), rule_paths)
+        self.assertNotIn(str(trusted.parent), rule_paths)
 
     def test_top_level_symlink_allowlist_escape_fails_closed(self) -> None:
         """A symlink in any top-level allowlist component fails closed
@@ -1297,7 +2130,7 @@ class ConfinementProofTests(_Base):
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         spec = wc.confinement_spec(binding, sanitized_home=home)
         proof = wc.prove_confinement(binding, confinement_spec=spec)
-        self.assertFalse(proof.synthetic)
+        self.assertFalse(hasattr(proof, "synthetic"))
         self.assertEqual(proof.bound_commit, binding.bound_commit)
         self.assertEqual(proof.workspace, str(self.workspace.absolute()))
         self.assertEqual(proof.provider, binding.provider)
@@ -1426,7 +2259,6 @@ class ConfinementProofTests(_Base):
                 guard_source_digests=("0" * 64, "1" * 64),
                 credential_channels=(),
                 confinement_spec_digest="0" * 64,
-                synthetic=False,
                 _mint=object(),
             )
 
@@ -1461,44 +2293,53 @@ class ConfinementProofTests(_Base):
             guard_source_digests=("0" * 64, "0" * 64),
             credential_channels=proof.credential_channels,
             confinement_spec_digest=proof.confinement_spec_digest,
-            synthetic=False,
             _mint=wc._PROOF_MINT_SECRET,
         )
         with self.assertRaises(wc.ConfinementError):
             wc.validate_proof(forged, binding, confinement_spec=spec)
 
-    def test_synthetic_proof_never_satisfies_real_authority(self) -> None:
-        """The Task 7 synthetic seam is never evidence of real confinement.
-
-        A synthetic proof token (``confinement._mint_synthetic_proof``) is a
-        different token type that the real authority rejects outright, and
-        even the real type minted synthetically never binds a specification
-        digest and so can never satisfy a production launch.
-        """
+    def test_installed_authority_has_no_synthetic_proof_surface(self) -> None:
+        """Only real proof minting exists in the production authority."""
+        self.assertFalse(hasattr(wc, "_mint_synthetic_proof"))
+        self.assertNotIn("synthetic", inspect.signature(wc.prove_confinement).parameters)
         binding = self.binding()
         home = wc.sanitized_home_directory()
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = wc.confinement_spec(binding, sanitized_home=home)
-        synthetic = confinement._mint_synthetic_proof(binding)
-        with self.assertRaises(wc.ConfinementError):
-            wc.validate_proof(synthetic, binding, confinement_spec=spec)
-        # The real authority's own private seam likewise can never satisfy a
-        # production re-validation against the exact specification: a
-        # synthetic proof carries no Landlock claim and no bound digest.
-        with self.assertRaises(wc.ConfinementError):
-            wc.validate_proof(
-                wc._mint_synthetic_proof(binding), binding,
-                confinement_spec=spec,
-            )
-        # The production authority never mints a synthetic proof.
-        self.assertFalse(
-            wc.prove_confinement(binding, confinement_spec=spec).synthetic
+        proof = wc.prove_confinement(
+            binding,
+            confinement_spec=wc.confinement_spec(binding, sanitized_home=home),
         )
+        self.assertFalse(hasattr(proof, "synthetic"))
 
     def test_landlock_primitive_is_real(self) -> None:
         self.assertTrue(wc.confinement_primitive_available())
         self.assertGreaterEqual(wc._landlock_abi(), 1)
-        wc.require_confinement_primitive()  # must not raise
+        wc.require_confinement_primitive()  # full nnp/add-rule/restrict sequence
+
+    def test_probe_sequence_closes_descriptors(self) -> None:
+        """The primitive probe applies nnp + add_rule + restrict and closes FDs."""
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                before = len(os.listdir("/proc/self/fd"))
+                wc._probe_apply_ruleset(
+                    wc._handled_access_bits(wc._landlock_abi())
+                )
+                after = len(os.listdir("/proc/self/fd"))
+                os.write(write_fd, f"{before}:{after}".encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        os.close(write_fd)
+        payload = os.read(read_fd, 100).decode("ascii")
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        before_text, after_text = payload.split(":")
+        self.assertEqual(int(after_text), int(before_text))
 
 
 # ---------------------------------------------------------------------------
@@ -1514,22 +2355,37 @@ class ProductionLaunchConfinementTests(_Base):
                 "confinement launch path cannot run (fail closed)"
             )
 
-    def _authorize(self, binding, *, spec=None, home=None, **kwargs):
-        if home is None:
-            home = wc.sanitized_home_directory()
-            self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        if spec is None:
-            spec = wc.confinement_spec(binding, sanitized_home=home)
-        return launch.authorize_launch(
+    def _authorize(self, binding, **kwargs):
+        authority = launch.authorize_launch(
             binding,
             role_prompt=(self.workspace / "role.md").read_bytes(),
             agents=(self.workspace / "AGENTS.md").read_bytes(),
             spec=(self.workspace / "spec.md").read_bytes(),
             plan=(self.workspace / "plan.md").read_bytes(),
-            _confinement_spec=spec,
-            _sanitized_home=home,
             **kwargs,
         )
+
+        def cleanup() -> None:
+            for descriptor in (
+                *getattr(authority, "_confinement_rule_fds", ()),
+                getattr(authority, "_prompt_fd", -1),
+                getattr(authority, "_auth_fd", -1),
+            ):
+                if descriptor is not None and descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            for path in (
+                getattr(authority, "_exec_dir", None),
+                getattr(authority, "_session_dir", None),
+                getattr(authority, "_sanitized_home", None),
+            ):
+                if path is not None:
+                    shutil.rmtree(path, ignore_errors=True)
+
+        self.addCleanup(cleanup)
+        return authority
 
     def test_authorize_with_real_spec_mints_real_proof(self) -> None:
         binding = self.binding(role="planner")
@@ -1538,7 +2394,7 @@ class ProductionLaunchConfinementTests(_Base):
         self.assertIsNotNone(authority._confinement_spec)
         proof = authority._confinement_proof
         self.assertIsNotNone(proof)
-        self.assertFalse(proof.synthetic)
+        self.assertFalse(hasattr(proof, "synthetic"))
         self.assertEqual(
             proof.confinement_spec_digest,
             wc.spec_digest(authority._confinement_spec),
@@ -1549,37 +2405,117 @@ class ProductionLaunchConfinementTests(_Base):
             sha256(authority._confined_launcher.read_bytes()),
             sha256((LOOP / "confine_launcher.py").read_bytes()),
         )
+        staged_git = authority._exec_dir / launch.STAGED_GIT_SHIM_NAME
+        self.assertTrue(staged_git.is_file())
+        self.assertEqual(staged_git.stat().st_mode & 0o111, 0)
+        self.assertFalse(
+            any(rule["path"] == "/nix/store"
+                for rule in authority._confinement_spec["rules"]),
+            "the broad Nix store root must never enter the model read view",
+        )
+        closure_rules = [
+            rule for rule in authority._confinement_spec["rules"]
+            if str(rule["path"]).startswith("/nix/store/")
+            and wc.ACCESS_EXECUTE not in rule["access"]
+        ]
+        self.assertTrue(closure_rules, "the exact immutable toolchain closure is absent")
+        for rule in closure_rules:
+            root = str(rule["path"])
+            self.assertRegex(root, wc.NIX_STORE_ROOT_RE)
+            self.assertIn(wc.ACCESS_READ, rule["access"])
+            self.assertNotIn(wc.ACCESS_WRITE, rule["access"])
+        executable_rules = {
+            rule["path"]
+            for rule in authority._confinement_spec["rules"]
+            if wc.ACCESS_EXECUTE in rule["access"]
+        }
+        self.assertNotIn(str(authority._exec_dir), executable_rules)
+        self.assertFalse(
+            any(Path(path).is_relative_to(authority._exec_dir) for path in executable_rules),
+            "caller-owned staging paths must never receive Landlock EXECUTE",
+        )
+        for executable in executable_rules:
+            self.assertTrue(
+                Path(executable).is_file(),
+                f"EXECUTE was granted to a directory instead of an exact inode: {executable}",
+            )
+        real_git = os.path.realpath(shutil.which("git") or "")
+        self.assertNotIn(real_git, executable_rules)
+        with open("/proc/self/maps", encoding="utf-8") as stream:
+            loaders = {
+                os.path.realpath(line.rsplit(" ", 1)[-1].strip())
+                for line in stream
+                if ("ld-linux" in line or "ld-musl" in line)
+                and os.path.isfile(line.rsplit(" ", 1)[-1].strip())
+            }
+        self.assertTrue(loaders)
+        self.assertTrue(loaders.issubset(executable_rules))
+        approved_identities = confine_launcher._approved_exec_identities(
+            authority._confinement_spec
+        )
+        for loader in loaders:
+            info = os.stat(loader)
+            self.assertNotIn((info.st_dev, info.st_ino), approved_identities)
 
-    def test_spec_without_sanitized_home_fails_closed(self) -> None:
+    def test_nix_closure_query_rejects_path_escape_and_environment_injection(self) -> None:
+        seed = wc._nix_store_root(PY)
+        self.assertIsNotNone(seed)
+        assert seed is not None
+        observed: dict = {}
+
+        def escaped(argv, **kwargs):
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(
+                argv, 0, f"{seed}\n/tmp/attacker-closure\n".encode(), b""
+            )
+
+        trusted_nix_store = shutil.which("nix-store")
+        self.assertIsNotNone(trusted_nix_store)
+        hostile = dict(os.environ)
+        hostile.update({
+            "TOKEN": "must-not-leak", "NIX_CONFIG": "extra-access-tokens = leak",
+            "GIT_CONFIG_COUNT": "1",
+        })
+        with mock.patch.dict(os.environ, hostile, clear=True), \
+             mock.patch.object(wc.shutil, "which", return_value=trusted_nix_store), \
+             mock.patch.object(wc.subprocess, "run", side_effect=escaped):
+            with self.assertRaises(wc.ConfinementError):
+                wc._toolchain_closure_paths([PY])
+        child_env = observed["env"]
+        self.assertEqual(child_env["HOME"], "/")
+        self.assertNotIn("TOKEN", child_env)
+        self.assertNotIn("NIX_CONFIG", child_env)
+        self.assertNotIn("GIT_CONFIG_COUNT", child_env)
+
+    def test_mutable_path_cannot_substitute_nix_closure_authority(self) -> None:
+        fake = self.diag / "nix-store"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(self.diag)}, clear=False):
+            with self.assertRaises(wc.ConfinementUnavailable):
+                wc._toolchain_closure_paths([PY])
+
+    def test_caller_sanitized_home_keyword_is_rejected(self) -> None:
         binding = self.binding(role="planner")
-        home = wc.sanitized_home_directory()
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = wc.confinement_spec(binding, sanitized_home=home)
-        with self.assertRaises(launch.InvocationError) as caught:
-            launch.authorize_launch(
-                binding,
-                role_prompt=b"r", agents=b"a", spec=b"sp", plan=b"pl",
-                _confinement_spec=spec,
-            )
-        self.assertIn("sanitized home", str(caught.exception))
+        with self.assertRaises(TypeError):
+            self._authorize(binding, _sanitized_home=self.diag)
 
-    def test_ollama_authorization_never_runs_quota(self) -> None:
-        """Ollama still requires a real proof but launch runs no quota policy."""
+    def test_ollama_authorization_has_real_proof_without_quota_channel(self) -> None:
+        """Ollama launch keeps real confinement but opens no quota channel."""
         binding = self.binding(role="planner", provider="ollama")
-        with mock.patch.object(launch.usage_guard, "require_quota") as quota:
-            authority = self._authorize(binding)
-        quota.assert_not_called()
-        self.assertFalse(authority._confinement_proof.synthetic)
+        self.assertFalse(hasattr(launch, "usage_guard"))
+        authority = self._authorize(binding)
+        self.assertFalse(hasattr(authority._confinement_proof, "synthetic"))
+        self.assertEqual(
+            {c.to_tuple() for c in authority._confinement_proof.credential_channels},
+            {("env_store", usage._default_env_file())},
+        )
 
-    def test_ollama_without_real_confinement_fails_closed(self) -> None:
-        """A caller cannot claim a spec without its real proof (fail closed)."""
+    def test_caller_proof_keyword_is_rejected(self) -> None:
+        """No installed caller can inject any proof, synthetic or otherwise."""
         binding = self.binding(role="planner", provider="ollama")
-        with self.assertRaises(launch.InvocationError) as caught:
-            launch.authorize_launch(
-                binding,
-                role_prompt=b"r", agents=b"a", spec=b"sp", plan=b"pl",
-            )
-        self.assertIn("confinement", str(caught.exception).lower())
+        with self.assertRaises(TypeError):
+            self._authorize(binding, _confinement_proof=object())
 
     def test_supervisor_revalidates_proof_before_exec(self) -> None:
         """A token whose proof binds a different spec is refused at run time."""
@@ -1596,34 +2532,24 @@ class ProductionLaunchConfinementTests(_Base):
         self.assertIsNone(supervisor._child, "no child may be spawned")
 
     def test_sibling_launch_private_paths_denied(self) -> None:
-        """A sibling launch's private directories are never granted to another
-        launch (finding 4): launch A's exec-staging, prompt, session, and
-        sanitized-home paths are denied to launch B's confined child, even
-        though both live under the shared temporary directory.
+        """A sibling launch's private directories are never granted to another.
+
+        The prompt is not among them: it is an anonymous sealed memfd with no
+        pathname or Landlock rule.
         """
         binding = self.binding(role="planner")
-        # Mint authority A with its own sanitized home and a real proof.
-        home_a = wc.sanitized_home_directory()
-        self.addCleanup(shutil.rmtree, home_a, ignore_errors=True)
-        spec_a = wc.confinement_spec(binding, sanitized_home=home_a)
-        authority_a = launch.authorize_launch(
-            binding,
-            role_prompt=(self.workspace / "role.md").read_bytes(),
-            agents=(self.workspace / "AGENTS.md").read_bytes(),
-            spec=(self.workspace / "spec.md").read_bytes(),
-            plan=(self.workspace / "plan.md").read_bytes(),
-            _confinement_spec=spec_a,
-            _sanitized_home=home_a,
-        )
-        self.assertFalse(authority_a._confinement_proof.synthetic)
+        # Mint authority A with its internally created home and real proof.
+        authority_a = self._authorize(binding)
+        home_a = authority_a._sanitized_home
+        self.assertFalse(hasattr(authority_a._confinement_proof, "synthetic"))
+        self.assertFalse(hasattr(authority_a, "_prompt_path"))
+        with self.assertRaises(OSError):
+            os.pwrite(authority_a._prompt_fd, b"tamper", 0)
         sibling_dirs = [
             authority_a._exec_dir,
-            Path(authority_a._prompt_path).parent,
             authority_a._session_dir,
             home_a,
         ]
-        for path in sibling_dirs:
-            self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         # B gets its own private home and spec; B's allowlist never grants A's
         # paths, and there is no broad /tmp grant (finding 4).
         home_b = wc.sanitized_home_directory()
@@ -1640,8 +2566,6 @@ class ProductionLaunchConfinementTests(_Base):
                          "the model received a broad /tmp grant")
         # Unconfined control: A's private paths are real and accessible.
         targets = [
-            {"op": "read", "path": str(authority_a._prompt_path),
-             "label": "sibling-prompt"},
             {"op": "read", "path": str(authority_a._exec_dir / "pi2-secure-exec.py"),
              "label": "sibling-staging"},
             {"op": "write", "path": str(authority_a._session_dir / "probe"),
@@ -1650,7 +2574,7 @@ class ProductionLaunchConfinementTests(_Base):
              "label": "sibling-home"},
         ]
         free = self.run_unconfined(targets)
-        for key in ("read:sibling-prompt", "read:sibling-staging",
+        for key in ("read:sibling-staging",
                     "write:sibling-session", "write:sibling-home"):
             self.assertEqual(
                 free[key], "ok",
@@ -1659,7 +2583,7 @@ class ProductionLaunchConfinementTests(_Base):
             )
         # B's confined child cannot touch A's private paths.
         result = self.run_confined("developer", targets, spec=spec_b)
-        for key in ("read:sibling-prompt", "read:sibling-staging",
+        for key in ("read:sibling-staging",
                     "write:sibling-session", "write:sibling-home"):
             self.assertEqual(
                 result.get(key), "PermissionError",
@@ -1667,35 +2591,13 @@ class ProductionLaunchConfinementTests(_Base):
             )
 
     def test_every_provider_and_direct_api_requires_real_confinement(self) -> None:
-        """Real confinement is mandatory for every provider and every public
-        authorize API, CLI or programmatic (finding 5): a direct programmatic
-        authorize carrying neither the real specification nor the explicit
-        private synthetic seam fails closed for every provider.
-        """
+        """Every programmatic provider receives internally minted real confinement."""
         for provider in ("synthetic", "ollama"):
             with self.subTest(provider=provider):
                 binding = self.binding(role="planner", provider=provider)
-                with self.assertRaises(launch.InvocationError) as caught:
-                    launch.authorize_launch(
-                        binding,
-                        role_prompt=b"r", agents=b"a", spec=b"sp", plan=b"pl",
-                    )
-                self.assertIn(
-                    "confinement", str(caught.exception).lower(),
-                    f"provider {provider} authorized without confinement",
-                )
-        # A real specification without the sanitized home also fails closed.
-        binding = self.binding(role="planner")
-        home = wc.sanitized_home_directory()
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = wc.confinement_spec(binding, sanitized_home=home)
-        with self.assertRaises(launch.InvocationError) as caught:
-            launch.authorize_launch(
-                binding,
-                role_prompt=b"r", agents=b"a", spec=b"sp", plan=b"pl",
-                _confinement_spec=spec,
-            )
-        self.assertIn("sanitized home", str(caught.exception).lower())
+                authority = self._authorize(binding)
+                self.assertFalse(hasattr(authority._confinement_proof, "synthetic"))
+                self.assertTrue(authority._confinement_rule_fds)
 
     def test_direct_api_with_real_spec_mints_real_proof(self) -> None:
         """The programmatic (non-CLI) authorize API applies real confinement
@@ -1712,28 +2614,23 @@ class ProductionLaunchConfinementTests(_Base):
                     proof, f"provider {provider} got no confinement proof"
                 )
                 self.assertFalse(
-                    proof.synthetic,
-                    f"provider {provider} was satisfied by a synthetic proof",
+                    hasattr(proof, "synthetic"),
+                    f"provider {provider} exposed a synthetic-proof marker",
                 )
                 # Re-validate against the exact channels the invocation
                 # consumed (the strict channel equality the launch path uses).
                 wc.validate_proof(
                     proof, binding,
                     confinement_spec=authority._confinement_spec,
+                    cookie_file=None,
                 )
 
-    def test_authorize_failure_cleans_four_private_dirs(self) -> None:
-        """Any authorization failure removes every per-launch private
-        directory the mint created (finding 6): the exec-staging directory,
-        the prompt directory, the session directory, and the sanitized home
-        — so no private or credential material survives a failed
-        authorization.
-        """
+    def test_authorize_failure_cleans_private_dirs_and_prompt_fd(self) -> None:
+        """Authorization failure removes dirs and closes the sealed prompt."""
         binding = self.binding(role="planner")
         tracked: dict = {}
         for name, prefix in (
             ("exec_dir", "factory-loop-exec-"),
-            ("prompt_dir", "factory-loop-launch-"),
             ("session_dir", "factory-loop-session-"),
         ):
             path = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
@@ -1742,16 +2639,20 @@ class ProductionLaunchConfinementTests(_Base):
             self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         home = wc.sanitized_home_directory()
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        good = wc.confinement_spec(binding, sanitized_home=home)
-        # A spec that cannot bind the invocation fails the mint *after* the
-        # private paths exist (staging, prompt, session, home).
-        tampered = dict(good, workspace=str(self.diag / "elsewhere"))
+        prompt_fd = launch._sealed_prompt_memfd(b"prompt")
+        # Exercise cleanup with a proof-mint failure after every private
+        # directory and the anonymous prompt channel have been created.
         with mock.patch.object(launch, "_exec_staging_dir",
                                return_value=tracked["exec_dir"]), \
-             mock.patch.object(launch, "_prompt_directory",
-                               return_value=tracked["prompt_dir"]), \
+             mock.patch.object(launch, "_sealed_prompt_memfd",
+                               return_value=prompt_fd), \
              mock.patch.object(launch, "_session_directory",
-                               return_value=tracked["session_dir"]):
+                               return_value=tracked["session_dir"]), \
+             mock.patch.object(wc, "sanitized_home_directory", return_value=home), \
+             mock.patch.object(
+                 wc, "prove_confinement",
+                 side_effect=wc.ConfinementError("proof-mint failure"),
+             ):
             with self.assertRaises(launch.InvocationError) as caught:
                 launch.authorize_launch(
                     binding,
@@ -1759,8 +2660,6 @@ class ProductionLaunchConfinementTests(_Base):
                     agents=(self.workspace / "AGENTS.md").read_bytes(),
                     spec=(self.workspace / "spec.md").read_bytes(),
                     plan=(self.workspace / "plan.md").read_bytes(),
-                    _confinement_spec=tampered,
-                    _sanitized_home=home,
                 )
             self.assertIn("confinement", str(caught.exception).lower())
         for path in (*tracked.values(), home):
@@ -1768,6 +2667,210 @@ class ProductionLaunchConfinementTests(_Base):
                 path.exists(),
                 f"private directory {path} survived a failed authorization",
             )
+        with self.assertRaises(OSError):
+            os.fstat(prompt_fd)
+
+    def test_production_denies_untraced_clone_and_clone3_without_late_mutation(
+        self,
+    ) -> None:
+        """Raw clone escape primitives are denied on the full launch path.
+
+        The committed Python backend is a small raw-syscall helper. If
+        CLONE_UNTRACED were ever continued, its untraced child would close the
+        launch pipes, outlive the backend, and mutate a workspace sentinel
+        after the launch returned. The production seccomp/ptrace path must
+        instead return EACCES within a bound; clone3 returns the deliberate
+        ENOSYS denial on kernels that implement it because pointer-backed flags
+        cannot be authorized race-free (and libc can safely fall back to clone).
+        """
+        machine = confine_launcher.platform.machine().lower()
+        syscalls = confine_launcher._brokered_scalar_syscalls()
+        self.assertIn(machine, ("x86_64", "amd64", "aarch64", "arm64"))
+
+        # Non-destructive unconfined support probe: a null, zero-sized
+        # clone_args never creates a process. ENOSYS alone means unsupported.
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        ctypes.set_errno(0)
+        probe_result = libc.syscall(
+            ctypes.c_long(syscalls["clone3"]), ctypes.c_void_p(), ctypes.c_size_t(0)
+        )
+        clone3_supported = not (
+            probe_result == -1 and ctypes.get_errno() == errno.ENOSYS
+        )
+
+        backend = self.workspace / "backend.py"
+        result_path = (
+            self.workspace / "src" / ".factory-test-output" / "raw-clone.json"
+        )
+        survivor_path = result_path.with_name("raw-clone-survivor.pid")
+        late_path = result_path.with_name("raw-clone-late.marker")
+        sentinel = result_path.with_name("raw-clone-sentinel.txt")
+        sentinel.write_text("stable\n", encoding="utf-8")
+        backend.write_text(
+            "#!/usr/bin/env python3\n"
+            "import ctypes, errno, json, os, platform, signal, time\n"
+            f"result_path = {str(result_path)!r}\n"
+            f"survivor_path = {str(survivor_path)!r}\n"
+            f"late_path = {str(late_path)!r}\n"
+            f"sentinel = {str(sentinel)!r}\n"
+            "numbers = {'x86_64': (56, 435), 'amd64': (56, 435), "
+            "'aarch64': (220, 435), 'arm64': (220, 435)}\n"
+            "clone_nr, clone3_nr = numbers[platform.machine().lower()]\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "libc.syscall.restype = ctypes.c_long\n"
+            "ctypes.set_errno(0)\n"
+            "clone_result = libc.syscall(ctypes.c_long(clone_nr), "
+            "ctypes.c_ulonglong(0x00800000 | signal.SIGCHLD), "
+            "ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p(), "
+            "ctypes.c_void_p())\n"
+            "clone_errno = ctypes.get_errno() if clone_result == -1 else 0\n"
+            "if clone_result == 0:\n"
+            "    for descriptor in (0, 1, 2):\n"
+            "        try: os.close(descriptor)\n"
+            "        except OSError: pass\n"
+            "    time.sleep(1.0)\n"
+            "    with open(sentinel, 'a', encoding='utf-8') as stream:\n"
+            "        stream.write('MUTATED\\n')\n"
+            "    with open(late_path, 'w', encoding='utf-8') as stream:\n"
+            "        stream.write(str(os.getpid()))\n"
+            "    os._exit(0)\n"
+            "if clone_result > 0:\n"
+            "    with open(survivor_path, 'w', encoding='utf-8') as stream:\n"
+            "        stream.write(str(clone_result))\n"
+            "ctypes.set_errno(0)\n"
+            "clone3_result = libc.syscall(ctypes.c_long(clone3_nr), "
+            "ctypes.c_void_p(), ctypes.c_size_t(0))\n"
+            "clone3_errno = ctypes.get_errno() if clone3_result == -1 else 0\n"
+            "payload = {'clone_result': clone_result, "
+            "'clone_errno': clone_errno, 'clone3_result': clone3_result, "
+            "'clone3_errno': clone3_errno}\n"
+            "with open(result_path, 'w', encoding='utf-8') as stream:\n"
+            "    json.dump(payload, stream, sort_keys=True)\n"
+            "print('RAW_CLONE_RESULT ' + json.dumps(payload, sort_keys=True))\n",
+            encoding="utf-8",
+        )
+        os.chmod(backend, 0o700)
+        _git("add", "backend.py", "src/.factory-test-output/raw-clone-sentinel.txt",
+             cwd=self.workspace)
+        _git("commit", "-qm", "add raw clone confinement helper", cwd=self.workspace)
+        self.head = _git("rev-parse", "HEAD", cwd=self.workspace).stdout.strip()
+        binding = self.binding()
+        plan = self.workspace / "plan.md"
+        _, excerpt_digest = launch.derive_task_excerpt(plan.read_bytes(), 1)
+        argv = [
+            "launch", "--root", str(self.workspace), "--role", "developer",
+            "--model", "synthetic-model", "--provider", "synthetic",
+            "--backend", str(backend), "--role-prompt",
+            str(self.workspace / "role.md"), "--role-prompt-digest", sha256(b"role\n"),
+            "--prompt-set-digest", sha256(b"set"), "--policy",
+            str(self.workspace / "AGENTS.md"), "--policy-digest", sha256(b"agents\n"),
+            "--spec", str(self.workspace / "spec.md"), "--spec-digest",
+            sha256(b"spec\n"), "--plan", str(plan), "--plan-digest",
+            sha256(plan.read_bytes()), "--bound-commit", self.head,
+            "--allowed-tools", "read,bash", "--runtime-limit", "30",
+            "--inactivity-limit", "20", "--task-id", "1",
+            "--task-excerpt-digest", excerpt_digest,
+        ]
+        out = io.StringIO()
+        err = io.StringIO()
+        survivor_pid: int | None = None
+        started = time.monotonic()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                status = launch.main(argv)
+            elapsed = time.monotonic() - started
+            self.assertEqual(status, launch.EXIT_COMPLETED, err.getvalue()[-2000:])
+            self.assertLess(elapsed, 10.0, "raw clone denial exceeded its bound")
+            self.assertTrue(result_path.is_file(), "the raw helper produced no result")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["clone_result"], -1, result)
+            self.assertEqual(result["clone_errno"], errno.EACCES, result)
+            if clone3_supported:
+                self.assertEqual(result["clone3_result"], -1, result)
+                self.assertEqual(result["clone3_errno"], errno.ENOSYS, result)
+            if survivor_path.is_file():
+                survivor_pid = int(survivor_path.read_text(encoding="utf-8"))
+            self.assertIsNone(
+                survivor_pid,
+                f"CLONE_UNTRACED unexpectedly created survivor {survivor_pid}",
+            )
+            # Wait beyond the hostile child's programmed mutation point. The
+            # launch has already returned, so any surviving escape would now
+            # alter both the sentinel and the late marker.
+            time.sleep(1.2)
+            self.assertEqual(sentinel.read_bytes(), b"stable\n")
+            self.assertFalse(late_path.exists(), "workspace mutated after return")
+        finally:
+            if survivor_pid is None and survivor_path.is_file():
+                survivor_pid = int(survivor_path.read_text(encoding="utf-8"))
+            if survivor_pid is not None:
+                try:
+                    os.kill(survivor_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(survivor_pid, 0)
+                except ChildProcessError:
+                    pass
+
+    def test_confined_leaf_executes_exact_project_toolchain(self) -> None:
+        """The real broker executes the generic project tool closure, not 126.
+
+        This runs below the full Landlock+seccomp launch path. The confined
+        process must start the adopting project's immutable generic Python/Nix
+        toolchain; product-specific graphics tools are not required. A mere
+        command lookup or simulated marker is insufficient, and the broad
+        /nix/store root remains absent from the spec.
+        """
+        backend = self.workspace / "backend.py"
+        marker = self.workspace / "src" / ".factory-test-output" / "toolchain.txt"
+        backend.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, subprocess, sys\n"
+            "sys.stdin.buffer.read()\n"
+            "root = os.environ['FACTORY_LOOP_LAUNCH_WORKSPACE']\n"
+            "commands = [['nix-shell','--version'], ['python3','-c','print(123)']]\n"
+            "runs = [subprocess.run(item, cwd=root, capture_output=True, text=True, timeout=30) for item in commands]\n"
+            "result = type('Result', (), {'returncode': next((r.returncode for r in runs if r.returncode), 0), "
+            "'stdout': ''.join(r.stdout for r in runs), 'stderr': ''.join(r.stderr for r in runs)})()\n"
+            f"path = pathlib.Path({str(marker)!r})\n"
+            "path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "path.write_text(f'{result.returncode}\\nSTDOUT:\\n{result.stdout}\\nSTDERR:\\n{result.stderr}', encoding='utf-8')\n"
+            "raise SystemExit(result.returncode)\n",
+            encoding="utf-8",
+        )
+        os.chmod(backend, 0o700)
+        _git("add", "backend.py", cwd=self.workspace)
+        _git("commit", "-qm", "add exact toolchain probe", cwd=self.workspace)
+        self.head = _git("rev-parse", "HEAD", cwd=self.workspace).stdout.strip()
+        plan = self.workspace / "plan.md"
+        _, excerpt_digest = launch.derive_task_excerpt(plan.read_bytes(), 1)
+        argv = [
+            "launch", "--root", str(self.workspace), "--role", "developer",
+            "--model", "synthetic-model", "--provider", "synthetic",
+            "--backend", str(backend), "--role-prompt",
+            str(self.workspace / "role.md"), "--role-prompt-digest", sha256(b"role\n"),
+            "--prompt-set-digest", sha256(b"set"), "--policy",
+            str(self.workspace / "AGENTS.md"), "--policy-digest", sha256(b"agents\n"),
+            "--spec", str(self.workspace / "spec.md"), "--spec-digest", sha256(b"spec\n"),
+            "--plan", str(plan), "--plan-digest", sha256(plan.read_bytes()),
+            "--bound-commit", self.head, "--allowed-tools", "read,bash",
+            "--runtime-limit", "180", "--inactivity-limit", "150", "--task-id", "1",
+            "--task-excerpt-digest", excerpt_digest,
+        ]
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = launch.main(argv)
+        payload = marker.read_text(encoding="utf-8") if marker.exists() else "missing marker"
+        self.assertEqual(
+            status, launch.EXIT_COMPLETED,
+            (err.getvalue() + "\n" + out.getvalue() + "\n" + payload)[-6000:],
+        )
+        self.assertTrue(payload.startswith("0\n"), payload[-2000:])
+        self.assertIn("123", payload)
+        self.assertIn("nix-shell", payload.lower())
 
     def test_cli_runs_leaf_through_staged_confine_launcher(self) -> None:
         """The full CLI runs the model child through the confine launcher.
@@ -2127,7 +3230,7 @@ class ApiAndSchemaTests(unittest.TestCase):
         # every key the authority emits is documented (no undocumented drift).
         binding = launch.InvocationBinding(
             role="planner", model="m", provider="synthetic",
-            backend=Path("/bin/true"), workspace=ROOT,
+            backend=Path(sys.executable), workspace=ROOT,
             bound_commit="0" * 40,
             role_prompt_digest=sha256(b"r"), prompt_set_digest=sha256(b"s"),
             plan_digest=sha256(b"p"), policy_digest=sha256(b"a"),
@@ -2140,7 +3243,10 @@ class ApiAndSchemaTests(unittest.TestCase):
         spec = wc.confinement_spec(binding, sanitized_home=home)
         self.assertTrue(set(spec) <= properties)
         for rule in spec["rules"]:
-            self.assertTrue(set(rule) <= {"path", "access"})
+            self.assertEqual(set(rule), {"path", "access", "identity"})
+            self.assertEqual(
+                set(rule["identity"]), {"dev", "ino", "type", "uid", "nlink"}
+            )
             self.assertTrue(
                 set(rule["access"]) <= {"read", "write", "execute"}
             )
@@ -2154,15 +3260,16 @@ class ApiAndSchemaTests(unittest.TestCase):
     def test_public_launch_surface_has_no_synthetic_proof_option(self) -> None:
         """The public CLI cannot be satisfied by a synthetic proof.
 
-        ``_confinement_proof``/``_usage_guard_html_file``/``_usage_guard_allow_loopback``
-        are private authority seams; the public launch surface carries only
-        the real-confinement spec path and no synthetic-proof opt-in.
+        The production API constructs and mints confinement internally and
+        exposes no proof/spec/home or usage-transport test seam.
         """
         parameters = inspect.signature(launch.authorize_launch).parameters
-        self.assertIn("_confinement_spec", parameters)
-        self.assertNotIn("confinement_spec", parameters)
-        self.assertNotIn("confinement_proof", parameters)
-        self.assertNotIn("synthetic", parameters)
+        for forbidden in (
+            "_confinement_spec", "confinement_spec", "_confinement_proof",
+            "confinement_proof", "_sanitized_home", "_usage_guard_html_file",
+            "_usage_guard_allow_loopback", "synthetic",
+        ):
+            self.assertNotIn(forbidden, parameters)
 
 
 if __name__ == "__main__":

@@ -16,15 +16,15 @@ This module is the *real* Task 8 confinement authority.  It implements:
   actually consumes (the default operator env store, an explicitly
   specified cookie file, and stdin-provided credential provenance), and the
   exact executing usage-guard source (``usage.py`` / ``usage_fetch.py``) to
-  the confinement specification that will be applied.  A *synthetic* proof
-  (the private hidden-suite seam) is never evidence of real confinement;
+  the confinement specification that will be applied.  Installed code has
+  no synthetic-proof mint or caller proof transport;
 * **fail-closed primitive gating**: the confinement is applied through the
   Linux Landlock LSM (``landlock_create_ruleset`` / ``landlock_add_rule`` /
   ``landlock_restrict_self``) — a real, unprivileged, deny-by-default
   filesystem confinement primitive.  If the primitive is unavailable on the
   host, ``prove_confinement`` raises :class:`ConfinementUnavailable` and the
-  production Ollama launch fails closed; no simulated or synthetic
-  acceptance is ever minted by the production authority.
+  production Ollama launch fails closed; no simulated acceptance is ever
+  minted by the production authority.
 
 The confinement is *applied* by the confined-launch child
 (:mod:`.confine_launcher`, staged from its exact committed blob per F2)
@@ -42,13 +42,46 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import stat
+import subprocess
+import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package-import mode (the hidden control-plane package)
-    from . import usage as usage_guard
+    from . import gitutil
 except ImportError:  # flat-import mode used by the hidden harness suite
-    import usage as usage_guard  # type: ignore[no-redef]
+    import gitutil  # type: ignore[no-redef]
+
+
+class UsageConfigError(Exception):
+    """Inert credential-path configuration error; no quota implementation."""
+
+
+class _UsagePathAdapter:
+    @staticmethod
+    def _default_env_file() -> str:
+        override = os.environ.get("OLLAMA_USAGE_ENV_FILE")
+        if override:
+            return override
+        base = Path(os.environ["XDG_CONFIG_HOME"]) if os.environ.get(
+            "XDG_CONFIG_HOME"
+        ) else Path.home() / ".config"
+        return str(base / "unattended-ralph" / "ollama-usage-env")
+
+    @staticmethod
+    def assert_store_outside_workspace(path_text: str, workspace: object) -> None:
+        try:
+            store = Path(path_text).resolve()
+            root = Path(str(workspace)).resolve()
+        except OSError as exc:
+            raise UsageConfigError("cannot resolve operator usage store") from exc
+        if store == root or store.is_relative_to(root):
+            raise UsageConfigError("operator usage store is inside model workspace")
+
+
+_USAGE_PATHS = _UsagePathAdapter()
 
 # ---------------------------------------------------------------------------
 # Confinement specification (schema ``factory-confinement/v1``)
@@ -83,8 +116,9 @@ FORBIDDEN_WORKSPACE_TOP = frozenset({
 # configuration).  Everything else starting with ``.`` is denied.
 ALLOWED_HIDDEN_TOP = frozenset({".github", ".forgejo", ".gitignore"})
 
-# ``.factory/`` control-plane namespaces that are *never* readable by any
-# role (the allowlisted plan/policy/evidence sidecars live outside them).
+# ``.factory/`` control-plane namespaces denied by default. Tester/auditor
+# receive explicit read-only loop/test grants below so verifier and state
+# integrity can be inspected; no role receives runtime-state or prompt bytes.
 FORBIDDEN_FACTORY_SUB = frozenset({
     ".factory/loop", ".factory/tests", ".factory/prompts",
     ".factory/state", ".factory/ralph",
@@ -92,9 +126,13 @@ FORBIDDEN_FACTORY_SUB = frozenset({
 
 # The narrow explicit system-path allowlist (Task 8 review, findings 3/7).
 # The model has no broad ``/proc``, ``/tmp``, ``/etc``, ``/dev``, ``/run``,
-# or ``/var`` grant.  ``SYSTEM_READ_EXECUTE`` are the required trusted
-# runtime roots (immutable Nix store, the tool binary roots and their
-# libraries); ``SYSTEM_READ`` is the narrowest explicit set of host files
+# or ``/var`` grant.  ``SYSTEM_READ_ROOTS`` are non-Nix runtime/library roots.
+# The Nix store root is deliberately absent: :func:`_toolchain_closure_paths`
+# resolves only the immutable transitive closures of exact approved tools and
+# backend runtimes, and each closure member receives its own read-only rule.
+# Executable files are granted one by one by :func:`_tool_execute_paths`,
+# excluding every real Git entrypoint. ``SYSTEM_READ`` is the narrowest
+# explicit set of host files
 # the tooling actually needs, each entry justified:
 #
 # * ``/etc/passwd``, ``/etc/group`` — uid/gid lookups (git, python, tools);
@@ -110,12 +148,43 @@ FORBIDDEN_FACTORY_SUB = frozenset({
 # component on the deployment host (finding 1); on hosts where an entry is
 # a symlink (for example a NixOS ``/etc/ssl/certs`` link), the confinement
 # fails closed and the entry is removed from the allowlist.
-SYSTEM_READ_EXECUTE = (
-    "/nix/store", "/usr", "/bin", "/lib", "/lib64", "/sbin",
+SYSTEM_READ_ROOTS = (
+    "/usr", "/bin", "/lib", "/lib64", "/sbin",
 )
+NIX_STORE_ROOT_RE = re.compile(r"^/nix/store/[0-9a-z]{32}-[^/]+$")
+MAX_TOOLCHAIN_CLOSURE_PATHS = 2048
+MAX_TOOLCHAIN_QUERY_BYTES = 256 * 1024
+MAX_PROJECT_SHELL_INPUTS = 256
+MAX_PROJECT_SHELL_OUTPUTS = 512
+SYSTEM_EXECUTABLE_DIRS = (
+    "/usr/bin", "/usr/sbin", "/bin", "/sbin",
+)
+# Bounded executable capability set required by the backend, model tools,
+# build/test gates, and ordinary diagnostics.  Product binaries created under
+# the workspace are covered by role workspace rules; this list controls host
+# executables only and intentionally contains no Git family entry.
+ALLOWED_SYSTEM_EXECUTABLE_NAMES = frozenset({
+    "sh", "bash", "dash", "env", "python", "python3", "node", "pi",
+    "cmake", "ctest", "ninja", "make", "meson", "nix", "nix-shell",
+    "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar", "ranlib",
+    "pkg-config", "xvfb-run", "Xvfb", "xauth", "xdotool",
+    "import", "convert", "magick", "compare", "identify",
+    "awk", "sed", "grep", "egrep", "fgrep", "find", "cat", "head", "tail",
+    "cp", "mv", "rm", "mkdir", "rmdir", "ln", "chmod", "touch", "tee",
+    "sort", "uniq", "cut", "tr", "wc", "xargs", "printf", "date", "sleep",
+    "timeout", "which", "whereis", "uname", "id", "pwd", "basename",
+    "dirname", "realpath", "readlink", "stat", "install", "tar", "gzip",
+    "bzip2", "xz", "zstd", "patch", "diff", "cmp", "file", "ldd",
+})
 SYSTEM_READ = (
     "/etc/passwd", "/etc/group", "/etc/ssl/certs",
     "/dev/null", "/dev/urandom", "/dev/random", "/dev/zero", "/dev/tty",
+    # Exact daemon endpoint directory required by NIX_REMOTE=daemon. No other
+    # /nix/var state is visible; store data remains closure-granular above.
+    "/nix/var/nix/daemon-socket",
+)
+NETWORK_CONFIG_LINKS = (
+    "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
 )
 
 # The ``.factory/`` inputs each role may read (the plan, policy, and
@@ -138,12 +207,16 @@ ROLE_FACTORY_READS: Mapping[str, frozenset] = {
     }),
     "developer": frozenset({".factory/bugs/open.md"}),
     "tester": frozenset({
+        ".factory/loop",
+        ".factory/tests",
         ".factory/artifacts/conformance.json",
         ".factory/requirement-policy.json",
         ".factory/capability-contracts.json",
         ".factory/bugs/open.md",
     }),
     "auditor": frozenset({
+        ".factory/loop",
+        ".factory/tests",
         ".factory/artifacts/campaign-audit.md",
         ".factory/artifacts/conformance.json",
         ".factory/requirement-policy.json",
@@ -231,7 +304,7 @@ def is_trusted_policy_path(relpath: str) -> bool:
 # broad ``/tmp``, ``/proc``, ``/etc``, ``/dev``, ``/run``, or ``/var``
 # grant (Task 8 review, findings 3/4/7): the shared temporary directory
 # is *not* allowlisted at all — each launch is granted only its own exact
-# per-launch private home/scratch/staging/prompt paths (see
+# per-launch private home/scratch/staging paths (the prompt is a sealed memfd; see
 # :func:`private_launch_rules`), and everything outside the explicit
 # narrow enumeration (host credentials, the real HOME, sockets, device
 # nodes, host config, process state, secrets, outside paths) is denied by
@@ -307,6 +380,118 @@ def normalize_channels(
 def _existing(path_text: str) -> Optional[str]:
     """Return ``path_text`` when it exists on disk, else ``None``."""
     return path_text if os.path.lexists(path_text) else None
+
+
+def _open_path_anchor(path_text: str, label: str = "allowlisted path") -> int:
+    """Open ``path_text`` by a no-follow descriptor walk from ``/``.
+
+    Every component is resolved relative to the descriptor for its verified
+    parent.  The returned ``O_PATH`` descriptor therefore names the exact
+    filesystem object that was validated; no later pathname reopen is needed
+    to apply the Landlock rule.  Intermediate or final symlinks, ``..``
+    components, missing objects, and non-directory parents fail closed.
+    """
+    path = Path(path_text)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ConfinementError(
+            f"{label} {path_text!r} is not a clean absolute path"
+        )
+    path_flags = (
+        getattr(os, "O_PATH", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    if not getattr(os, "O_PATH", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise ConfinementUnavailable(
+            "descriptor-anchored confinement requires O_PATH and O_NOFOLLOW"
+        )
+    try:
+        current = os.open("/", path_flags | os.O_DIRECTORY)
+    except OSError as exc:
+        raise ConfinementError(f"cannot open filesystem root: {exc}") from exc
+    try:
+        parts = path.parts[1:]
+        if not parts:
+            return os.dup(current)
+        for index, part in enumerate(parts):
+            try:
+                descriptor = os.open(part, path_flags, dir_fd=current)
+            except OSError as exc:
+                raise ConfinementError(
+                    f"cannot descriptor-anchor {label} {path_text} at "
+                    f"component {part!r}: {exc}"
+                ) from exc
+            info = os.fstat(descriptor)
+            if stat.S_ISLNK(info.st_mode):
+                os.close(descriptor)
+                raise ConfinementError(
+                    f"{label} {path_text} has a symlink component {part!r}; "
+                    "descriptor anchoring never follows symlinks"
+                )
+            if index != len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                os.close(descriptor)
+                raise ConfinementError(
+                    f"{label} {path_text} has a non-directory parent "
+                    f"component {part!r}"
+                )
+            os.close(current)
+            current = descriptor
+        result = current
+        current = -1
+        return result
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def _descriptor_identity(descriptor: int) -> Dict[str, int]:
+    """Security identity bound into one confinement rule."""
+    info = os.fstat(descriptor)
+    return {
+        "dev": int(info.st_dev),
+        "ino": int(info.st_ino),
+        "type": int(stat.S_IFMT(info.st_mode)),
+        "uid": int(info.st_uid),
+        "nlink": int(info.st_nlink),
+    }
+
+
+def _path_identity(path_text: str, label: str = "allowlisted path") -> Dict[str, int]:
+    descriptor = _open_path_anchor(path_text, label)
+    try:
+        return _descriptor_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def validate_rule_anchors(
+    spec: Mapping[str, object], descriptors: Sequence[int]
+) -> None:
+    """Revalidate retained descriptors against all bound rule identities."""
+    rules = spec.get("rules")
+    if not isinstance(rules, list) or len(rules) != len(descriptors):
+        raise ConfinementError(
+            "the confinement rule descriptor count does not match the specification"
+        )
+    if len(set(descriptors)) != len(descriptors):
+        raise ConfinementError("the confinement rule descriptors are not unique")
+    for rule, descriptor in zip(rules, descriptors):
+        if not isinstance(rule, Mapping) or not isinstance(
+            rule.get("identity"), Mapping
+        ):
+            raise ConfinementError("a confinement rule lacks path identity")
+        try:
+            actual = _descriptor_identity(descriptor)
+        except OSError as exc:
+            raise ConfinementError(
+                f"a confinement rule descriptor is closed or invalid: {exc}"
+            ) from exc
+        if actual != dict(rule["identity"]):
+            raise ConfinementError(
+                f"retained descriptor for {rule.get('path')} no longer matches "
+                "its dev/ino/type/owner/nlink identity"
+            )
+
 
 
 def _no_symlink_components(path_text: str, label: str = "allowlisted path") -> None:
@@ -399,112 +584,26 @@ def _resolved_is_self(path_text: str, label: str) -> None:
         )
 
 
-# Filesystem entries under forbidden namespaces that are scanned for a
-# hardlink alias against allowlisted workspace files (Task 8 review,
-# finding 8): the secret-bearing legacy/control namespaces plus the Git
-# metadata that can carry credentials.  Git *objects* are content-addressed
-# and excluded from the scan; ``.git/config``, ``.git/logs`` (reflog),
-# ``.git/refs``, ``.git/HEAD``, and ``.git/hooks`` can carry credentials or
-# historical secrets and are scanned.  Diagnostic/scratch build trees
-# (``.diag-prefix-build``, ``.install-prefix``, ``.test-diag-inspect``) and
-# the ``$tmp`` scratch dir are not secret-bearing and are excluded from the
-# scan (documented in ``docs/OPERATIONS.md``).
-_HARDLINK_SCAN_FILES = frozenset({
-    ".git/config", ".git/HEAD", ".git/hooks", ".git/logs", ".git/refs",
-})
-_HARDLINK_SCAN_TOPS = frozenset({
-    ".ralph", ".factory-state", ".pi", ".ollama-usage-env",
-    ".bug-ledger.lock",
-})
-_HARDLINK_SCAN_CAP = 20000
+def _assert_single_link_allowlisted_file(path_text: str) -> None:
+    """Reject hardlinked regular files without enumerating denied state.
 
-
-def _forbidden_inode_map(workspace: Path) -> Dict[Tuple[int, int], str]:
-    """``(st_dev, st_ino) -> path`` for files under forbidden namespaces.
-
-    A bounded scan (capped at :data:`_HARDLINK_SCAN_CAP` entries): a
-    hardlink is an inode alias, and an allowlisted workspace file that
-    aliases a forbidden file would make the forbidden bytes readable under
-    an allowlisted name.  Build/scratch trees are excluded (not
-    secret-bearing).
-    """
-    inodes: Dict[Tuple[int, int], str] = {}
-    count = 0
-    for top in sorted(_HARDLINK_SCAN_TOPS):
-        root = workspace / top
-        if not os.path.lexists(str(root)):
-            continue
-        if top == ".bug-ledger.lock" and root.is_file():
-            try:
-                info = os.lstat(str(root))
-                if stat.S_ISREG(info.st_mode):
-                    inodes[(info.st_dev, info.st_ino)] = str(root)
-            except OSError:
-                pass
-            continue
-        for dirpath, _dirnames, filenames in os.walk(str(root)):
-            for name in filenames:
-                if count >= _HARDLINK_SCAN_CAP:
-                    return inodes
-                path = os.path.join(dirpath, name)
-                try:
-                    info = os.lstat(path)
-                except OSError:
-                    continue
-                if stat.S_ISREG(info.st_mode):
-                    inodes[(info.st_dev, info.st_ino)] = path
-                count += 1
-    for relative in sorted(_HARDLINK_SCAN_FILES):
-        path = workspace / relative
-        try:
-            info = os.lstat(str(path))
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            inodes[(info.st_dev, info.st_ino)] = str(path)
-    for relative in sorted(FORBIDDEN_FACTORY_SUB):
-        root = workspace / relative
-        if not os.path.lexists(str(root)):
-            continue
-        for dirpath, _dirnames, filenames in os.walk(str(root)):
-            for name in filenames:
-                if count >= _HARDLINK_SCAN_CAP:
-                    return inodes
-                path = os.path.join(dirpath, name)
-                try:
-                    info = os.lstat(path)
-                except OSError:
-                    continue
-                if stat.S_ISREG(info.st_mode):
-                    inodes[(info.st_dev, info.st_ino)] = path
-                count += 1
-    return inodes
-
-
-def _assert_no_forbidden_hardlink_alias(
-    path_text: str, workspace: Path, forbidden_inodes: Mapping[Tuple[int, int], str]
-) -> None:
-    """Fail closed when an allowlisted file aliases a forbidden inode.
-
-    Landlock grants by path, so a hardlink of a forbidden file placed under
-    an allowlisted name would make the forbidden bytes readable.  A regular
-    allowlisted file whose ``(st_dev, st_ino)`` appears in the forbidden
-    scan is rejected; bind-mount aliases of a forbidden path into the
-    workspace require mount privileges and are covered by the documented
-    boundary (``docs/OPERATIONS.md``).
+    The old inode scanner walked ``.ralph/`` and ``.factory-state/`` and
+    silently stopped at a fixed entry cap.  That both crossed the denied
+    namespace boundary and failed open.  An exact-file allowlist entry is
+    now accepted only when a no-follow ``lstat`` proves a regular file has
+    exactly one link.  No forbidden namespace is enumerated or read.
     """
     try:
         info = os.lstat(path_text)
-    except OSError:
-        return
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink <= 1:
-        return
-    alias = forbidden_inodes.get((info.st_dev, info.st_ino))
-    if alias is not None:
+    except OSError as exc:
         raise ConfinementError(
-            f"allowlisted path {path_text} is a hardlink alias of the "
-            f"forbidden file {alias}; an inode alias would make forbidden "
-            "bytes readable under an allowlisted name (fail closed)"
+            f"cannot inspect allowlisted path {path_text}: {exc} (fail closed)"
+        ) from exc
+    if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+        raise ConfinementError(
+            f"allowlisted regular file {path_text} has link count "
+            f"{info.st_nlink}, not exactly one; hardlinked allowlist entries "
+            "are never accepted (fail closed)"
         )
 
 
@@ -545,14 +644,11 @@ def _role_read_paths(role: str, workspace: Path) -> List[Path]:
     if role not in ("planner", "developer", "tester", "auditor"):
         raise ConfinementError(f"unknown role {role!r}")
     paths: List[Path] = []
-    forbidden_inodes = _forbidden_inode_map(workspace)
     for entry in _workspace_read_entries(workspace):
         path = workspace / entry
         if _existing(str(path)) is not None:
             _validate_allowlist_path(str(path), workspace, "workspace read path")
-            _assert_no_forbidden_hardlink_alias(
-                str(path), workspace, forbidden_inodes
-            )
+            _assert_single_link_allowlisted_file(str(path))
             paths.append(path)
     for relative in sorted(
         _BASE_FACTORY_READS | ROLE_FACTORY_READS.get(role, frozenset())
@@ -562,9 +658,7 @@ def _role_read_paths(role: str, workspace: Path) -> List[Path]:
             _validate_allowlist_path(
                 str(path), workspace, "workspace .factory read path"
             )
-            _assert_no_forbidden_hardlink_alias(
-                str(path), workspace, forbidden_inodes
-            )
+            _assert_single_link_allowlisted_file(str(path))
             paths.append(path)
     return paths
 
@@ -634,13 +728,11 @@ def _role_write_paths(role: str, workspace: Path) -> List[Path]:
     belongs to the trusted orchestrator (Task 8 review, finding 2; Task 9
     review HIGH).
     """
-    forbidden_inodes = _forbidden_inode_map(workspace)
-
     def validated(path: Path) -> Optional[Path]:
         if _existing(str(path)) is None:
             return None
         _validate_allowlist_path(str(path), workspace, "workspace write path")
-        _assert_no_forbidden_hardlink_alias(str(path), workspace, forbidden_inodes)
+        _assert_single_link_allowlisted_file(str(path))
         return path
 
     if role == "planner":
@@ -678,35 +770,413 @@ def _role_write_paths(role: str, workspace: Path) -> List[Path]:
     return []
 
 
-def _tool_read_paths() -> List[str]:
+def _canonical_nix_path() -> Optional[str]:
+    value = os.environ.get("NIX_PATH")
+    if not value:
+        return None
+    match = re.fullmatch(r"nixpkgs=(/nix/store/[0-9a-z]{32}-[^:]+)", value)
+    if match is None:
+        raise ConfinementError("refusing a non-canonical model NIX_PATH")
+    _validate_immutable_store_root(match.group(1))
+    return value
+
+
+def _nix_store_root(path_text: str) -> Optional[str]:
+    """Return the canonical immutable store item containing ``path_text``."""
+    resolved = os.path.realpath(path_text)
+    if not resolved.startswith("/nix/store/"):
+        return None
+    parts = resolved.split("/")
+    if len(parts) < 4:
+        raise ConfinementError(f"malformed Nix-store tool path {resolved!r}")
+    root = "/".join(parts[:4])
+    if not NIX_STORE_ROOT_RE.fullmatch(root):
+        raise ConfinementError(f"non-canonical Nix-store tool root {root!r}")
+    return root
+
+
+def _validate_immutable_store_root(path_text: str) -> str:
+    if not NIX_STORE_ROOT_RE.fullmatch(path_text):
+        raise ConfinementError(
+            f"Nix closure query returned a path outside the store: {path_text!r}"
+        )
+    try:
+        info = os.lstat(path_text)
+    except OSError as exc:
+        raise ConfinementError(
+            f"Nix closure item is unavailable: {path_text}: {exc}"
+        ) from exc
+    if (
+        not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid == os.getuid() or info.st_mode & 0o022
+        or os.path.realpath(path_text) != path_text
+    ):
+        raise ConfinementError(
+            f"Nix closure item is not immutable canonical store data: {path_text}"
+        )
+    return path_text
+
+
+def _trusted_nix_command(name: str) -> Tuple[str, str]:
+    """Return the immutable PATH spelling and real executable for one Nix CLI."""
+    argv0 = shutil.which(name)
+    if not argv0:
+        raise ConfinementUnavailable(f"{name} is unavailable for exact Nix binding")
+    executable = os.path.realpath(argv0)
+    try:
+        gitutil.require_trusted_executable(executable)
+    except gitutil.GitBoundaryError as exc:
+        raise ConfinementUnavailable(
+            f"{name} authority is not immutable: {exc}"
+        ) from exc
+    return argv0, executable
+
+
+def _nix_query_environment(executable: str) -> Dict[str, str]:
+    environment = {
+        "HOME": "/",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": os.path.dirname(executable),
+    }
+    if os.environ.get("NIX_REMOTE") == "daemon":
+        environment["NIX_REMOTE"] = "daemon"
+    nix_path = _canonical_nix_path()
+    if nix_path is not None:
+        environment["NIX_PATH"] = nix_path
+    return environment
+
+
+def _run_nix_query(
+    argv: Sequence[str], *, argv0: str, executable: str, cwd: Path
+) -> bytes:
+    """Run one immutable Nix metadata query with bounded, credential-free I/O."""
+    try:
+        result = subprocess.run(
+            [argv0, *argv], executable=executable, cwd=cwd,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=_nix_query_environment(executable),
+            timeout=30.0, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ConfinementUnavailable(f"exact Nix metadata query failed: {exc}") from exc
+    if result.returncode != 0:
+        raise ConfinementUnavailable("exact Nix metadata query returned nonzero")
+    if len(result.stdout) > MAX_TOOLCHAIN_QUERY_BYTES:
+        raise ConfinementError("exact Nix metadata query output is oversized")
+    return result.stdout
+
+
+def _project_shell_input_paths(workspace: Path) -> List[str]:
+    """Resolve the exact direct input outputs of committed ``shell.nix``.
+
+    A nested ``nix-shell`` changes PATH only after Landlock is active. Binding
+    executable policy to the parent's ambient PATH therefore made display
+    tools such as xdotool order-dependent: a focused test entered Nix first,
+    while the complete boilerplate process did not. The trusted parent now
+    evaluates the clean, commit-bound ``shell.nix`` as Nix metadata, extracts
+    only its selected direct input outputs, and later grants only allowlisted
+    executable *files* from their bounded immutable closure. It never grants
+    ``/nix/store`` or EXECUTE on a package directory.
+    """
+    shell = workspace / "shell.nix"
+    if not os.path.lexists(shell):
+        return []
+    _validate_allowlist_path(str(shell), workspace, "project shell expression")
+    _assert_single_link_allowlisted_file(str(shell))
+    if not stat.S_ISREG(os.lstat(shell).st_mode):
+        raise ConfinementError("project shell expression is not a regular file")
+
+    instantiate_argv0, instantiate = _trusted_nix_command("nix-instantiate")
+    raw_drv = _run_nix_query(
+        ["--readonly-mode", str(shell)], argv0=instantiate_argv0,
+        executable=instantiate, cwd=workspace,
+    )
+    try:
+        drv_lines = raw_drv.decode("utf-8", "strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ConfinementError("project shell derivation output is not UTF-8") from exc
+    if len(drv_lines) != 1:
+        raise ConfinementError("project shell did not produce exactly one derivation")
+    drv = drv_lines[0]
+    if not NIX_STORE_ROOT_RE.fullmatch(drv) or not drv.endswith(".drv"):
+        raise ConfinementError("project shell produced a non-canonical derivation")
+
+    nix_argv0, nix = _trusted_nix_command("nix")
+    metadata_raw = _run_nix_query(
+        ["--extra-experimental-features", "nix-command",
+         "derivation", "show", drv],
+        argv0=nix_argv0, executable=nix, cwd=workspace,
+    )
+    try:
+        metadata = json.loads(metadata_raw)
+        derivations = metadata["derivations"]
+        if not isinstance(derivations, dict) or len(derivations) != 1:
+            raise ValueError
+        shell_meta = next(iter(derivations.values()))
+        input_drvs = shell_meta["inputs"]["drvs"]
+    except (UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ConfinementError("project shell derivation metadata is malformed") from exc
+    if not isinstance(input_drvs, dict) or not 0 < len(input_drvs) <= MAX_PROJECT_SHELL_INPUTS:
+        raise ConfinementError("project shell input derivation count is invalid")
+
+    store_argv0, store = _trusted_nix_command("nix-store")
+    outputs: List[str] = []
+    for drv_name, selection in sorted(input_drvs.items()):
+        input_drv = f"/nix/store/{drv_name}"
+        if not NIX_STORE_ROOT_RE.fullmatch(input_drv) or not input_drv.endswith(".drv"):
+            raise ConfinementError("project shell input derivation is non-canonical")
+        if not isinstance(selection, dict) or set(selection) != {"dynamicOutputs", "outputs"}:
+            raise ConfinementError("project shell input selection is malformed")
+        if selection["dynamicOutputs"] not in ({}, []):
+            raise ConfinementError("dynamic project shell outputs are unsupported")
+        names = selection["outputs"]
+        if not isinstance(names, list) or not names or not all(
+            isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9+._?-]+", name)
+            for name in names
+        ):
+            raise ConfinementError("project shell selected output names are invalid")
+        for name in sorted(names):
+            raw_output = _run_nix_query(
+                ["-q", "--binding", name, input_drv], argv0=store_argv0,
+                executable=store, cwd=workspace,
+            )
+            try:
+                lines = raw_output.decode("utf-8", "strict").splitlines()
+            except UnicodeDecodeError as exc:
+                raise ConfinementError("project shell output path is not UTF-8") from exc
+            if len(lines) != 1:
+                raise ConfinementError("project shell output binding is malformed")
+            outputs.append(_validate_immutable_store_root(lines[0]))
+            if len(outputs) > MAX_PROJECT_SHELL_OUTPUTS:
+                raise ConfinementError("project shell selected too many outputs")
+    if len(set(outputs)) != len(outputs):
+        raise ConfinementError("project shell selected duplicate outputs")
+    return sorted(outputs)
+
+
+def _toolchain_closure_paths(seed_paths: Sequence[str]) -> List[str]:
+    """Resolve a bounded exact immutable Nix closure for approved runtimes.
+
+    The trusted parent queries only store items containing already selected
+    exact executable/backend paths. Caller PATH text cannot add a mutable root:
+    every seed is canonicalized, every query result must be one canonical
+    foreign-owned non-writable store directory, output is byte/count bounded,
+    and no ``/nix/store`` ancestor rule is ever granted.
+    """
+    roots = sorted({
+        root for path in seed_paths
+        if (root := _nix_store_root(path)) is not None
+    })
+    if not roots:
+        return []
+    nix_store_argv0, nix_store = _trusted_nix_command("nix-store")
+    raw = _run_nix_query(
+        ["-qR", *roots], argv0=nix_store_argv0,
+        executable=nix_store, cwd=Path("/"),
+    )
+    try:
+        lines = raw.decode("utf-8", "strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ConfinementError("Nix toolchain closure output is not UTF-8") from exc
+    if not lines or len(lines) > MAX_TOOLCHAIN_CLOSURE_PATHS:
+        raise ConfinementError("Nix toolchain closure count is empty or oversized")
+    closure = sorted(set(lines))
+    if len(closure) != len(lines):
+        raise ConfinementError("Nix toolchain closure output contains duplicates")
+    for root in roots:
+        if root not in closure:
+            raise ConfinementError(
+                f"Nix toolchain closure omitted its seed root {root}"
+            )
+    return [_validate_immutable_store_root(path) for path in closure]
+
+
+def _tool_read_paths(toolchain_closure: Sequence[str] = ()) -> List[str]:
     """Existing system/tool read paths (deny-by-default keeps the rest out).
 
     Each entry is validated with the no-symlink-component check: the narrow
     explicit enumeration (findings 3/7) is the containment contract, and a
     host where an entry resolves through a symlink fails closed (the entry
-    is dropped only when it does not exist at all).
+    is dropped only when it does not exist at all). Nix reads are exact
+    immutable closure items, never the broad store root.
     """
     paths: List[str] = []
-    for path in SYSTEM_READ + SYSTEM_READ_EXECUTE:
+    for path in SYSTEM_READ + SYSTEM_READ_ROOTS:
         existing = _existing(path)
         if existing is None:
             continue
         _no_symlink_components(existing, "system read path")
         _resolved_is_self(existing, "system read path")
         paths.append(existing)
-    return paths
-
-
-def _tool_execute_paths() -> List[str]:
-    paths: List[str] = []
-    for path in SYSTEM_READ_EXECUTE:
-        existing = _existing(path)
-        if existing is None:
+    for link in NETWORK_CONFIG_LINKS:
+        resolved = os.path.realpath(link)
+        try:
+            info = os.stat(resolved)
+        except OSError:
             continue
-        _no_symlink_components(existing, "system execute path")
-        _resolved_is_self(existing, "system execute path")
-        paths.append(existing)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid == os.getuid()
+            or info.st_mode & 0o022
+        ):
+            raise ConfinementError(
+                f"network configuration target {resolved!r} is not trusted read-only data"
+            )
+        _no_symlink_components(resolved, "network configuration target")
+        if resolved not in paths:
+            paths.append(resolved)
+    for path in toolchain_closure:
+        validated = _validate_immutable_store_root(path)
+        if validated not in paths:
+            paths.append(validated)
     return paths
+
+
+def _tool_alias_seed_paths() -> List[str]:
+    """Immutable PATH spellings for selected tool names (including symlinks)."""
+    paths: List[str] = []
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or not os.path.isabs(directory):
+            continue
+        resolved_dir = os.path.realpath(directory)
+        if not os.path.isdir(resolved_dir):
+            continue
+        try:
+            names = sorted(os.listdir(resolved_dir))
+        except OSError:
+            continue
+        for name in names:
+            lowered = name.lower()
+            if not (
+                name in ALLOWED_SYSTEM_EXECUTABLE_NAMES
+                or lowered.startswith(("python", "node"))
+            ) or lowered == "git" or lowered.startswith("git-"):
+                continue
+            candidate = os.path.join(resolved_dir, name)
+            try:
+                info = os.stat(candidate)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_mode & 0o111:
+                paths.append(candidate)
+    return sorted(set(paths))
+
+
+def _tool_execute_paths(toolchain_closure: Sequence[str] = ()) -> List[str]:
+    """Exact executable files available to model subprocesses, never Git.
+
+    Granting EXECUTE on ``/usr`` or ``/nix/store`` lets a generated/sourced
+    script bypass the staged broker with an absolute Git pathname.  Landlock
+    execution is therefore file-granular: immutable executable directories
+    remain readable for libraries/data, while each executable reachable from
+    the sanitized PATH is resolved to its real regular file and granted
+    separately.  Git names and the pinned real Git inode are omitted, so
+    direct argv, absolute argv, shell source/eval, generated scripts, and
+    interpreter subprocesses all hit the same kernel execution denial.  The
+    launch-owned staging directory is granted separately and contains the
+    only executable named ``git``: the exact-commit shim/broker.
+    """
+    directories: List[str] = []
+    closure_bin_dirs = [
+        os.path.join(root, "bin") for root in toolchain_closure
+        if NIX_STORE_ROOT_RE.fullmatch(root)
+    ]
+    for candidate in [*os.environ.get("PATH", "").split(os.pathsep),
+                      *SYSTEM_EXECUTABLE_DIRS, *closure_bin_dirs]:
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        resolved_dir = os.path.realpath(candidate)
+        if resolved_dir not in directories and os.path.isdir(resolved_dir):
+            directories.append(resolved_dir)
+    pinned_git = os.path.realpath(str(gitutil.GIT_EXECUTABLE))
+    try:
+        git_info = os.stat(pinned_git)
+        git_identity = (git_info.st_dev, git_info.st_ino)
+    except OSError:
+        git_identity = None
+    paths: List[str] = []
+    for directory in sorted(directories):
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            lowered = name.lower()
+            allowed_name = (
+                name in ALLOWED_SYSTEM_EXECUTABLE_NAMES
+                or lowered.startswith(("python", "node"))
+            )
+            if (
+                not allowed_name
+                or lowered == "git"
+                or lowered.startswith("git-")
+            ):
+                continue
+            candidate = os.path.join(directory, name)
+            resolved = os.path.realpath(candidate)
+            try:
+                info = os.stat(resolved)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+                continue
+            try:
+                gitutil.require_trusted_executable(resolved)
+            except gitutil.GitBoundaryError:
+                # Landlock EXECUTE must never cover caller-owned/mutable files;
+                # the atomic exec broker binds only this immutable set to its
+                # protected descriptor table.
+                continue
+            if git_identity is not None and (info.st_dev, info.st_ino) == git_identity:
+                continue
+            if resolved in paths:
+                continue
+            _no_symlink_components(resolved, "system executable file")
+            _resolved_is_self(resolved, "system executable file")
+            paths.append(resolved)
+    # The executing Python may not be present in the inherited PATH of a
+    # hermetic caller; it remains explicitly selected.
+    python = os.path.realpath(sys.executable)
+    if python != pinned_git and python not in paths:
+        _no_symlink_components(python, "Python executable")
+        _resolved_is_self(python, "Python executable")
+        try:
+            gitutil.require_trusted_executable(python)
+        except gitutil.GitBoundaryError as exc:
+            raise ConfinementUnavailable(
+                f"executing Python is not immutable: {exc}"
+            ) from exc
+        paths.append(python)
+    # Linux applies Landlock EXECUTE to the PT_INTERP loader while starting a
+    # normal dynamic ELF, so the exact loader inode must be present in this
+    # low-level Landlock set. It is *not* an approved userspace exec target:
+    # the staged confine launcher omits loaders from its protected descriptor
+    # table and rewrites approved execve requests to inode-bound execveat.
+    # Thus ``ld-linux <readable-elf>`` is denied without breaking an approved
+    # dynamic ELF, including under a shared pathname-buffer race.
+    try:
+        with open("/proc/self/maps", "r", encoding="utf-8") as stream:
+            for line in stream:
+                mapped = line.rsplit(" ", 1)[-1].strip()
+                if ("ld-linux" in mapped or "ld-musl" in mapped) and os.path.isfile(mapped):
+                    resolved_loader = os.path.realpath(mapped)
+                    try:
+                        gitutil.require_trusted_executable(resolved_loader)
+                    except gitutil.GitBoundaryError as exc:
+                        raise ConfinementUnavailable(
+                            f"executing ELF interpreter is not immutable: {exc}"
+                        ) from exc
+                    if resolved_loader not in paths:
+                        paths.append(resolved_loader)
+    except OSError as exc:
+        raise ConfinementUnavailable(
+            f"cannot bind the executing ELF interpreter: {exc}"
+        ) from exc
+    # Nix symlinks are resolved above. Grant only each selected regular-file
+    # inode, never its package root: a package directory can contain multicall
+    # or helper entrypoints outside the approved name set.
+    return sorted(set(paths))
 
 
 def _backend_paths(backend: Path, workspace: Path) -> Tuple[List[str], List[str]]:
@@ -729,12 +1199,15 @@ def _backend_paths(backend: Path, workspace: Path) -> Tuple[List[str], List[str]
         backend.relative_to(Path(workspace).absolute())
     except ValueError:
         resolved = os.path.realpath(str(backend))
-        parents = [Path(resolved).parent, Path(resolved).parent.parent]
-        paths = [resolved]
-        for parent in parents:
-            if parent and os.path.isdir(str(parent)):
-                paths.append(str(parent))
-        return paths, paths
+        try:
+            gitutil.require_trusted_executable(resolved)
+        except gitutil.GitBoundaryError as exc:
+            raise ConfinementError(
+                f"external backend is not an immutable trusted executable: {exc}"
+            ) from exc
+        # Exact file only. Granting EXECUTE on its parent/install root would
+        # reopen absolute host executables (including Git) behind the broker.
+        return [resolved], [resolved]
     return [], []
 
 
@@ -763,14 +1236,20 @@ def home_environment(home: Path) -> Dict[str, str]:
     caches, or credentials through the environment either.
     """
     home = Path(home).absolute()
-    return {
+    environment = {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_DATA_HOME": str(home / ".local" / "share"),
         "XDG_STATE_HOME": str(home / ".local" / "state"),
         "XDG_RUNTIME_DIR": str(home / "run"),
+        "TMPDIR": str(home / "run"),
+        "NIX_REMOTE": "daemon",
     }
+    nix_path = _canonical_nix_path()
+    if nix_path is not None:
+        environment["NIX_PATH"] = nix_path
+    return environment
 
 
 def confinement_spec(
@@ -779,6 +1258,7 @@ def confinement_spec(
     sanitized_home: Path,
     extra_read: Sequence[str] = (),
     extra_write: Sequence[str] = (),
+    _rule_descriptors: Optional[List[int]] = None,
 ) -> Dict[str, object]:
     """The deterministic per-launch confinement specification.
 
@@ -793,26 +1273,56 @@ def confinement_spec(
     workspace = Path(binding.workspace).absolute()
     role = binding.role
     rules: List[Dict[str, object]] = []
+    if _rule_descriptors is not None and _rule_descriptors:
+        raise ConfinementError("the retained rule descriptor list must start empty")
 
     def add_rule(path_text: str, access: Sequence[str]) -> None:
         path = Path(path_text).absolute()
-        rules.append({
-            "path": str(path),
+        path_value = str(path)
+        descriptor = _open_path_anchor(path_value, "confinement rule")
+        rule = {
+            "path": path_value,
             "access": sorted(set(access)),
-        })
+            "identity": _descriptor_identity(descriptor),
+        }
+        rules.append(rule)
+        if _rule_descriptors is None:
+            os.close(descriptor)
+        else:
+            # Keep the descriptor from the exact validation operation.  It is
+            # never closed/reopened by pathname before Landlock consumes it.
+            _rule_descriptors.append(descriptor)
 
     for path in _role_read_paths(role, workspace):
-        add_rule(str(path), (ACCESS_READ, ACCESS_EXECUTE))
+        add_rule(str(path), (ACCESS_READ,))
     for path in _role_write_paths(role, workspace):
-        add_rule(str(path), (ACCESS_READ, ACCESS_EXECUTE, ACCESS_WRITE))
-    for path in _tool_read_paths():
-        add_rule(path, (ACCESS_READ,))
-    for path in _tool_execute_paths():
-        add_rule(path, (ACCESS_READ, ACCESS_EXECUTE))
+        # Model-writable workspace paths are never executable. Scripts remain
+        # usable as data through an exact approved interpreter.
+        add_rule(str(path), (ACCESS_READ, ACCESS_WRITE))
+    ambient_tool_execute = _tool_execute_paths()
     backend_read, backend_execute = _backend_paths(
         Path(binding.backend), workspace
     )
+    # Include immutable PATH package roots and the exact selected inputs of the
+    # commit-bound project shell. Nix exposes multicall tools such as nix-shell
+    # through immutable store symlinks; the broker validates those aliases and
+    # resolves them only to already approved exact inodes.
+    nix_path = _canonical_nix_path()
+    nixpkgs_source = nix_path.split("=", 1)[1] if nix_path is not None else ""
+    project_shell_inputs = _project_shell_input_paths(workspace)
+    toolchain_closure = _toolchain_closure_paths([
+        *ambient_tool_execute, *backend_read, *backend_execute,
+        *_tool_alias_seed_paths(), *project_shell_inputs,
+        *([nixpkgs_source] if nixpkgs_source else []),
+    ])
+    tool_execute = _tool_execute_paths(toolchain_closure)
+    for path in _tool_read_paths(toolchain_closure):
+        add_rule(path, (ACCESS_READ,))
+    for path in tool_execute:
+        add_rule(path, (ACCESS_READ, ACCESS_EXECUTE))
     for path in backend_read:
+        add_rule(path, (ACCESS_READ,))
+    for path in backend_execute:
         add_rule(path, (ACCESS_READ, ACCESS_EXECUTE))
     for path in extra_read:
         # Task 10 review (REQ 4): every extra allowlist entry is validated
@@ -820,6 +1330,7 @@ def confinement_spec(
         # resolved containment), so an extra grant can never smuggle a
         # symlink or an escaping alias.
         _validate_allowlist_path(path, workspace, "extra read path")
+        _assert_single_link_allowlisted_file(path)
         add_rule(path, (ACCESS_READ,))
     for path in extra_write:
         # The exact transient phase/audit result file of the confined
@@ -857,14 +1368,15 @@ def confinement_spec(
                 "exact-file write grant must name one transient result "
                 "file, never a directory or special file (fail closed)"
             )
-        add_rule(path, (ACCESS_READ, ACCESS_EXECUTE, ACCESS_WRITE))
+        _assert_single_link_allowlisted_file(path)
+        add_rule(path, (ACCESS_READ, ACCESS_WRITE))
 
     # The exact per-launch private home (Task 8 review, finding 4): the
     # model receives no broad ``/tmp`` grant — only this launch's own
     # mode-0700 private home (with its scratch subdirectories) is granted
-    # read+write+execute, so a sibling launch's private directories stay
+    # read+write, never execute, so a sibling launch's private directories stay
     # denied by default.  The launch authority additionally adds this
-    # launch's exact staging/prompt/session paths through
+    # launch's exact staging/session paths through
     # :func:`with_private_launch_paths` before the proof is minted.  The
     # home path is validated like every other allowlist entry (no symlink
     # component; the fresh private directory resolves to itself).
@@ -872,13 +1384,20 @@ def confinement_spec(
     _resolved_is_self(str(Path(sanitized_home).absolute()), "sanitized home")
     add_rule(
         str(Path(sanitized_home).absolute()),
-        (ACCESS_READ, ACCESS_EXECUTE, ACCESS_WRITE),
+        (ACCESS_READ, ACCESS_WRITE),
     )
 
     # The sanitized home is inside the shared temporary directory, which is
     # *not* granted; only the exact home path above is writable.  Nothing
     # else is needed for it.
-    rules.sort(key=lambda rule: str(rule["path"]))
+    if _rule_descriptors is None:
+        rules.sort(key=lambda rule: str(rule["path"]))
+    else:
+        pairs = sorted(
+            zip(rules, _rule_descriptors), key=lambda pair: str(pair[0]["path"])
+        )
+        rules[:] = [pair[0] for pair in pairs]
+        _rule_descriptors[:] = [pair[1] for pair in pairs]
     spec: Dict[str, object] = {
         "schema": CONFINEMENT_SCHEMA,
         "version": CONFINEMENT_SCHEMA_VERSION,
@@ -897,22 +1416,20 @@ def confinement_spec(
 def private_launch_rules(
     *,
     staging_dir: Path,
-    prompt_path: Path,
     session_dir: Path,
+    _rule_descriptors: Optional[List[int]] = None,
 ) -> List[Dict[str, object]]:
     """The exact per-launch private-path rules (Task 8 review, finding 4).
 
     The model receives no broad ``/tmp`` grant: only this launch's own
     private paths are granted, each with the *least* rights it needs —
 
-    * ``staging_dir`` — read+execute: the staged exact-commit wrapper,
-      backend, confine launcher, and the published confinement spec all
-      live beneath the private mode-0700 exec staging directory and must
-      be traversed/executed, never written;
-    * ``prompt_path`` — read: the mode-0600 prompt file the secure wrapper
-      reads;
-    * ``session_dir`` — read+write+execute: the backend's scratch/session
-      directory.
+    * ``staging_dir`` — read only, never execute; committed scripts and
+      modules remain data consumed by an approved immutable interpreter;
+    * ``session_dir`` — read+write, never execute.
+
+    The composed prompt has no pathname rule: production carries it only in
+    an inherited sealed memfd, from composition through the secure wrapper.
 
     Every path is validated like every other allowlist entry (finding 1):
     a symlink in any component fails closed and the resolved target must
@@ -921,15 +1438,30 @@ def private_launch_rules(
     stay denied by default.
     """
     rules: List[Dict[str, object]] = []
-    for path, access in (
-        (staging_dir, (ACCESS_READ, ACCESS_EXECUTE)),
-        (prompt_path, (ACCESS_READ,)),
-        (session_dir, (ACCESS_READ, ACCESS_WRITE, ACCESS_EXECUTE)),
-    ):
-        path_text = str(Path(path).absolute())
-        _no_symlink_components(path_text, "private per-launch path")
-        _resolved_is_self(path_text, "private per-launch path")
-        rules.append({"path": path_text, "access": sorted(set(access))})
+
+    def append_rule(path: Path, access: Sequence[str], what: str) -> None:
+        path_text = str(path.absolute())
+        _no_symlink_components(path_text, what)
+        _resolved_is_self(path_text, what)
+        descriptor = _open_path_anchor(path_text, what)
+        rules.append({
+            "path": path_text,
+            "access": sorted(set(access)),
+            "identity": _descriptor_identity(descriptor),
+        })
+        if _rule_descriptors is None:
+            os.close(descriptor)
+        else:
+            _rule_descriptors.append(descriptor)
+
+    staging = Path(staging_dir).absolute()
+    session = Path(session_dir).absolute()
+    append_rule(staging, (ACCESS_READ,), "private staging directory")
+    append_rule(session, (ACCESS_READ, ACCESS_WRITE), "private session directory")
+    # No staging entry receives Landlock EXECUTE. A private caller-owned path
+    # is absent from the broker's immutable protected descriptor table;
+    # Python/shell scripts are passed as readable arguments to approved
+    # immutable interpreters instead of crossing execve by pathname.
     return rules
 
 
@@ -937,16 +1469,16 @@ def with_private_launch_paths(
     spec: Mapping[str, object],
     *,
     staging_dir: Path,
-    prompt_path: Path,
     session_dir: Path,
+    _rule_descriptors: Optional[List[int]] = None,
 ) -> Dict[str, object]:
     """A copy of ``spec`` augmented with the exact per-launch private rules.
 
     The launch authority (``launch.authorize_launch``) adds these rules
     *before* the real confinement proof is minted, so the proof's
     specification digest binds the exact allowlists the confined child
-    applies — including this launch's own staging/prompt/session paths and
-    never the broad shared temporary directory.
+    applies — including this launch's own staging/session paths and never the
+    broad shared temporary directory. The prompt is an inherited sealed memfd.
     """
     augmented = json.loads(json.dumps(spec))
     if not isinstance(augmented, dict) or not isinstance(
@@ -955,14 +1487,29 @@ def with_private_launch_paths(
         raise ConfinementError(
             "cannot augment a confinement specification without a rules list"
         )
-    augmented["rules"].extend(
-        private_launch_rules(
-            staging_dir=staging_dir,
-            prompt_path=prompt_path,
-            session_dir=session_dir,
+    existing_rules = list(augmented["rules"])
+    if _rule_descriptors is not None and len(_rule_descriptors) != len(existing_rules):
+        raise ConfinementError(
+            "retained base-rule descriptor count does not match the specification"
         )
+    private_descriptors: Optional[List[int]] = (
+        [] if _rule_descriptors is not None else None
     )
-    augmented["rules"].sort(key=lambda rule: str(rule["path"]))
+    private_rules = private_launch_rules(
+        staging_dir=staging_dir,
+        session_dir=session_dir,
+        _rule_descriptors=private_descriptors,
+    )
+    if _rule_descriptors is None:
+        augmented["rules"].extend(private_rules)
+        augmented["rules"].sort(key=lambda rule: str(rule["path"]))
+    else:
+        assert private_descriptors is not None
+        pairs = list(zip(existing_rules, _rule_descriptors))
+        pairs.extend(zip(private_rules, private_descriptors))
+        pairs.sort(key=lambda pair: str(pair[0]["path"]))
+        augmented["rules"] = [pair[0] for pair in pairs]
+        _rule_descriptors[:] = [pair[1] for pair in pairs]
     return augmented
 
 
@@ -1011,10 +1558,25 @@ def validate_confinement_spec(
             raise ConfinementError("a confinement rule must be an object")
         path = rule.get("path")
         access = rule.get("access")
+        identity = rule.get("identity")
+        if set(rule) != {"path", "access", "identity"}:
+            raise ConfinementError(
+                "a confinement rule must carry exactly path/access/identity"
+            )
         if not isinstance(path, str) or not path:
             raise ConfinementError("a confinement rule must carry a path")
         if not isinstance(access, list) or not access:
             raise ConfinementError(f"rule {path} must carry an access list")
+        expected_identity_keys = {"dev", "ino", "type", "uid", "nlink"}
+        if (
+            not isinstance(identity, Mapping)
+            or set(identity) != expected_identity_keys
+            or not all(type(identity[key]) is int and identity[key] >= 0
+                       for key in expected_identity_keys)
+        ):
+            raise ConfinementError(
+                f"rule {path} has an invalid dev/ino/type/owner/nlink identity"
+            )
         for right in access:
             if right not in (ACCESS_READ, ACCESS_WRITE, ACCESS_EXECUTE):
                 raise ConfinementError(f"rule {path} has unknown right {right!r}")
@@ -1052,6 +1614,8 @@ _LANDLOCK_ADD_RULE = 445
 _LANDLOCK_RESTRICT_SELF = 446
 _LANDLOCK_CREATE_RULESET_VERSION = 0x1
 _LANDLOCK_RULE_PATH_BENEATH = 0x1
+_PR_SET_NO_NEW_PRIVS = 38
+_PR_GET_NO_NEW_PRIVS = 39
 
 # FS access bits handled by this authority.  IOCTL_DEV (ABI 4+) is left
 # unhandled so ordinary device ioctls (tty, etc.) keep working; REFER and
@@ -1148,10 +1712,12 @@ def require_confinement_primitive() -> None:
         )
     pid = os.fork()
     if pid == 0:
-        # Child: prove create + restrict work.  Never return to the parent
-        # path; _exit with the probe outcome.
+        # Child: prove the complete production sequence — set+verify
+        # no_new_privs, create a ruleset, add a real descriptor-anchored rule,
+        # restrict_self, and close every descriptor.  Never return to the
+        # parent path; _exit with the probe outcome.
         try:
-            _create_ruleset(_handled_access_bits(abi))
+            _probe_apply_ruleset(_handled_access_bits(abi))
             os._exit(0)
         except Exception:
             os._exit(1)
@@ -1161,6 +1727,63 @@ def require_confinement_primitive() -> None:
             "the Landlock ruleset probe failed in a fresh child; model "
             "workspace confinement cannot be applied (fail closed)"
         )
+
+
+def _set_no_new_privs() -> None:
+    """Set and verify PR_SET_NO_NEW_PRIVS for unprivileged Landlock."""
+    import ctypes
+    import errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise ConfinementUnavailable(
+            "PR_SET_NO_NEW_PRIVS failed: "
+            + errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+        )
+    if libc.prctl(_PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1:
+        raise ConfinementUnavailable(
+            "PR_SET_NO_NEW_PRIVS could not be verified"
+        )
+
+
+def _probe_apply_ruleset(handled_bits: int) -> None:
+    """Apply one real rule and restrict this disposable probe child."""
+    import ctypes
+    import errno
+
+    class PathBeneath(ctypes.Structure):
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+    ruleset = -1
+    anchor = -1
+    try:
+        _set_no_new_privs()
+        ruleset = _create_ruleset(handled_bits)
+        anchor = os.open(
+            "/", getattr(os, "O_PATH", os.O_RDONLY)
+            | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+        )
+        allowed = (_ACCESS_READ_FILE | _ACCESS_READ_DIR) & handled_bits
+        beneath = PathBeneath(allowed, anchor)
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.syscall(
+            _LANDLOCK_ADD_RULE, ruleset, _LANDLOCK_RULE_PATH_BENEATH,
+            ctypes.byref(beneath), 0,
+        ) != 0:
+            raise ConfinementUnavailable(
+                "landlock_add_rule probe failed: "
+                + errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+            )
+        if libc.syscall(_LANDLOCK_RESTRICT_SELF, ruleset, 0) != 0:
+            raise ConfinementUnavailable(
+                "landlock_restrict_self probe failed: "
+                + errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+            )
+    finally:
+        if anchor >= 0:
+            os.close(anchor)
+        if ruleset >= 0:
+            os.close(ruleset)
 
 
 def _create_ruleset(handled_bits: int) -> int:
@@ -1197,6 +1820,8 @@ GUARD_SOURCE_MODULES = ("usage.py", "usage_fetch.py")
 
 _BLOB_READ_CHUNK = 65536
 _MAX_GUARD_SOURCE_BYTES = 512 * 1024
+_GUARD_GIT_TIMEOUT = 30.0
+_GUARD_SOURCE_PREFIX = ".factory/loop"
 
 
 class ConfinementProof:
@@ -1216,9 +1841,8 @@ class ConfinementProof:
     * the confinement specification digest — the exact allowlists that the
       confined launch child applies.
 
-    ``_mint_synthetic_proof`` (the private hidden-suite seam) mints proofs
-    marked ``synthetic``; a synthetic proof is *never* evidence of real
-    confinement and is never minted by the production authority.
+    Only :func:`prove_confinement` mints this token; the installed module has
+    no synthetic-proof mint or caller-supplied proof transport.
     """
 
     __slots__ = (
@@ -1228,7 +1852,6 @@ class ConfinementProof:
         "_guard_source_digests",
         "_credential_channels",
         "_confinement_spec_digest",
-        "_synthetic",
         "_mint",
     )
 
@@ -1241,7 +1864,6 @@ class ConfinementProof:
         guard_source_digests: Tuple[str, str],
         credential_channels: Tuple[CredentialChannel, ...],
         confinement_spec_digest: str,
-        synthetic: bool,
         _mint: object,
     ) -> None:
         if _mint is not _PROOF_MINT_SECRET:
@@ -1255,7 +1877,6 @@ class ConfinementProof:
         self._guard_source_digests = tuple(guard_source_digests)
         self._credential_channels = normalize_channels(credential_channels)
         self._confinement_spec_digest = confinement_spec_digest
-        self._synthetic = bool(synthetic)
         self._mint = _mint
 
     @property
@@ -1291,11 +1912,6 @@ class ConfinementProof:
     def confinement_spec_digest(self) -> str:
         return self._confinement_spec_digest
 
-    @property
-    def synthetic(self) -> bool:
-        return self._synthetic
-
-
 def _module_bytes(module: str) -> str:
     """Bounded no-follow read of one executing guard-source module."""
     path = Path(__file__).resolve().with_name(module)
@@ -1326,8 +1942,64 @@ def _module_bytes(module: str) -> str:
 
 
 def _executing_guard_source_digests() -> Tuple[str, str]:
-    """SHA-256 of the exact executing ``usage.py`` / ``usage_fetch.py``."""
+    """SHA-256 of the loaded-tree ``usage.py`` / ``usage_fetch.py`` files."""
     return tuple(_module_bytes(module) for module in GUARD_SOURCE_MODULES)  # type: ignore[return-value]
+
+
+def _committed_guard_source_digests(binding: object) -> Tuple[str, str]:
+    """Read both guard modules from ``binding.bound_commit`` via trusted Git.
+
+    A digest of the current worktree proves only self-consistency.  The proof
+    authority instead binds the exact committed blobs using the pinned,
+    sanitized, bounded Git authority; missing/oversized blobs fail closed.
+    """
+    try:
+        workspace = Path(binding.workspace).absolute()
+        commit = binding.bound_commit
+    except AttributeError as exc:
+        raise ConfinementError(
+            f"cannot bind committed guard source to the invocation: {exc}"
+        ) from exc
+    if not isinstance(commit, str) or len(commit) != 40 or any(
+        char not in "0123456789abcdef" for char in commit
+    ):
+        raise ConfinementError(
+            "committed usage-guard binding requires a strict 40-hex commit"
+        )
+    digests: List[str] = []
+    for module in GUARD_SOURCE_MODULES:
+        relpath = f"{_GUARD_SOURCE_PREFIX}/{module}"
+        try:
+            result = gitutil.git_bytes_bounded(
+                ["-C", str(workspace), "show", f"{commit}:{relpath}"],
+                maximum=_MAX_GUARD_SOURCE_BYTES,
+                timeout=_GUARD_GIT_TIMEOUT,
+            )
+        except gitutil.GitBoundaryError as exc:
+            raise ConfinementError(
+                f"cannot read committed usage-guard blob {relpath}: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise ConfinementError(
+                f"usage-guard source {relpath} is not a blob at bound commit "
+                f"{commit}; proof minting fails closed"
+            )
+        digests.append(hashlib.sha256(result.stdout).hexdigest())
+    return tuple(digests)  # type: ignore[return-value]
+
+
+def _bound_guard_source_digests(
+    binding: object, executing: Optional[Sequence[str]] = None
+) -> Tuple[str, str]:
+    """Require executing/staged guard bytes to equal the committed blobs."""
+    committed = _committed_guard_source_digests(binding)
+    actual = tuple(executing) if executing is not None else _executing_guard_source_digests()
+    if actual != committed:
+        raise ConfinementError(
+            "the usage guard being imported/executed is not the exact "
+            "usage.py / usage_fetch.py blob pair at the bound commit"
+        )
+    return committed
 
 
 def _derive_credential_channels(
@@ -1335,6 +2007,7 @@ def _derive_credential_channels(
     cookie_file: Optional[str],
     cookie_stdin: bool,
     env_store: Optional[str],
+    guard_module: object = _USAGE_PATHS,
 ) -> Tuple[CredentialChannel, ...]:
     """The exact credential channels this guard invocation will consume.
 
@@ -1343,7 +2016,7 @@ def _derive_credential_channels(
     provenance are additional channels when requested.
     """
     channels: List[CredentialChannel] = []
-    store = env_store or usage_guard._default_env_file()
+    store = env_store or guard_module._default_env_file()
     channels.append(CredentialChannel("env_store", store))
     if cookie_file:
         channels.append(CredentialChannel("cookie_file", cookie_file))
@@ -1353,13 +2026,14 @@ def _derive_credential_channels(
 
 
 def _assert_channel_outside_workspace(
-    channel: CredentialChannel, workspace: Path
+    channel: CredentialChannel, workspace: Path,
+    guard_module: object = _USAGE_PATHS,
 ) -> None:
     """Fail closed when a file channel is scoped inside the model workspace."""
     if channel.kind == "stdin":
         return
     assert isinstance(channel.path, str)
-    _assert_store_outside(channel.path, workspace)
+    _assert_store_outside(channel.path, workspace, guard_module)
 
 
 def prove_confinement(
@@ -1369,6 +2043,8 @@ def prove_confinement(
     cookie_stdin: bool = False,
     env_store: Optional[str] = None,
     confinement_spec: Optional[Mapping[str, object]] = None,
+    _executing_guard_digests: Optional[Sequence[str]] = None,
+    _usage_guard_module: Optional[object] = None,
 ) -> ConfinementProof:
     """Mint the *real* Task 8 confinement proof for one invocation.
 
@@ -1385,8 +2061,7 @@ def prove_confinement(
        proven outside the model workspace *and* outside the confinement
        allowlist, so the confined model tools cannot reach it.
 
-    This authority never mints a synthetic proof; the synthetic seam is the
-    private hidden-suite-only ``_mint_synthetic_proof``.
+    This installed authority has no synthetic proof path.
     """
     require_confinement_primitive()
     if confinement_spec is None:
@@ -1396,11 +2071,13 @@ def prove_confinement(
         )
     validate_confinement_spec(confinement_spec, binding)
     workspace = Path(binding.workspace).absolute()
+    guard_module = _usage_guard_module or _USAGE_PATHS
     channels = _derive_credential_channels(
-        cookie_file=cookie_file, cookie_stdin=cookie_stdin, env_store=env_store
+        cookie_file=cookie_file, cookie_stdin=cookie_stdin,
+        env_store=env_store, guard_module=guard_module,
     )
     for channel in channels:
-        _assert_channel_outside_workspace(channel, workspace)
+        _assert_channel_outside_workspace(channel, workspace, guard_module)
         if _channel_covered_by_spec(channel, confinement_spec):
             raise ConfinementError(
                 f"the {channel.kind} credential channel "
@@ -1408,22 +2085,30 @@ def prove_confinement(
                 "and cannot be proven inaccessible to model tools (fail "
                 "closed)"
             )
+    committed_guard_digests = _bound_guard_source_digests(
+        binding, _executing_guard_digests
+    )
     return ConfinementProof(
         bound_commit=binding.bound_commit,
         workspace=str(workspace),
         provider=binding.provider.lower(),
-        guard_source_digests=_executing_guard_source_digests(),
+        guard_source_digests=committed_guard_digests,
         credential_channels=channels,
         confinement_spec_digest=spec_digest(confinement_spec),
-        synthetic=False,
         _mint=_PROOF_MINT_SECRET,
     )
 
 
-def _assert_store_outside(store: str, workspace: object) -> None:
+def _assert_store_outside(
+    store: str, workspace: object, guard_module: object = _USAGE_PATHS
+) -> None:
     try:
-        usage_guard.assert_store_outside_workspace(store, workspace)
-    except usage_guard.UsageConfigError as exc:
+        guard_module.assert_store_outside_workspace(store, workspace)
+    except Exception as exc:
+        # The exact committed usage module owns the configuration error type;
+        # never depend on the mutable worktree module's class identity.
+        if exc.__class__.__name__ != "UsageConfigError":
+            raise
         raise ConfinementError(str(exc)) from exc
 
 
@@ -1436,6 +2121,8 @@ def validate_proof(
     env_store: Optional[str] = None,
     confinement_spec: Optional[Mapping[str, object]] = None,
     _strict_channels: bool = True,
+    _executing_guard_digests: Optional[Sequence[str]] = None,
+    _usage_guard_module: Optional[object] = None,
 ) -> None:
     """Bind a proof to the exact invocation and the applied confinement.
 
@@ -1466,18 +2153,21 @@ def validate_proof(
                 "the confinement proof binds a different provider "
                 f"({proof.provider!r} != {binding.provider.lower()!r})"
             )
-        executing = _executing_guard_source_digests()
+        executing = _bound_guard_source_digests(
+            binding, _executing_guard_digests
+        )
         if proof.guard_source_digests != executing:
             raise ConfinementError(
-                "the confinement proof does not bind the exact executing "
+                "the confinement proof does not bind the exact committed "
                 "guard source (usage.py / usage_fetch.py digests differ); "
                 "an operator-claimed or caller-controlled guard source is "
                 "never accepted"
             )
         workspace = Path(binding.workspace).absolute()
+        guard_module = _usage_guard_module or _USAGE_PATHS
         for channel in proof.credential_channels:
-            _assert_channel_outside_workspace(channel, workspace)
-        if not proof.synthetic and not proof.confinement_spec_digest:
+            _assert_channel_outside_workspace(channel, workspace, guard_module)
+        if not proof.confinement_spec_digest:
             raise ConfinementError(
                 "a real confinement proof must bind a confinement "
                 "specification digest"
@@ -1502,6 +2192,7 @@ def validate_proof(
                 cookie_file=cookie_file,
                 cookie_stdin=cookie_stdin,
                 env_store=env_store,
+                guard_module=guard_module,
             )
             if proof.credential_channels != expected:
                 raise ConfinementError(
@@ -1513,65 +2204,3 @@ def validate_proof(
         raise ConfinementError(
             f"the confinement proof cannot be bound to this invocation: {exc}"
         ) from exc
-
-
-def _mint_synthetic_proof(
-    binding: object,
-    *,
-    credential_stores: Optional[Sequence[str]] = None,
-    guard_source_digests: Optional[Sequence[str]] = None,
-    credential_channels: Optional[Sequence[CredentialChannel]] = None,
-    confinement_spec: Optional[Mapping[str, object]] = None,
-) -> ConfinementProof:
-    """**PRIVATE test seam** — mints a synthetic Task 8 proof.
-
-    This seam exists only for the hermetic hidden suite so the Task 7
-    guard/decision-table machinery can be exercised end-to-end without
-    applying real confinement.  It is never exported on the public package
-    surface and never accepted as real confinement evidence.
-
-    The *binding* parts of the proof are still real: the guard-source
-    digests are the SHA-256 of the exact executing ``usage.py`` /
-    ``usage_fetch.py`` bytes (or caller-supplied values), and every file
-    credential channel is verified to live outside the model workspace.
-    Only the confinement claim itself (that the Landlock allowlists were
-    actually applied to the model tools) is synthetic.
-    """
-    workspace = str(binding.workspace)
-    if credential_channels is None:
-        stores = tuple(
-            str(path) for path in (credential_stores or ())
-        )
-        if not stores:
-            stores = (usage_guard._default_env_file(),)
-        channels = [
-            CredentialChannel("env_store", store) for store in stores
-        ]
-    else:
-        channels = list(credential_channels)
-    channels = normalize_channels(channels)
-    for channel in channels:
-        if channel.path is not None:
-            _assert_store_outside(channel.path, binding.workspace)
-    if guard_source_digests is None:
-        digests = _executing_guard_source_digests()
-    else:
-        digests = tuple(str(value) for value in guard_source_digests)
-        if len(digests) != len(GUARD_SOURCE_MODULES):
-            raise ConfinementError(
-                "a synthetic proof must carry one digest per guard-source "
-                "module"
-            )
-    spec_digest_value = (
-        spec_digest(confinement_spec) if confinement_spec is not None else ""
-    )
-    return ConfinementProof(
-        bound_commit=binding.bound_commit,
-        workspace=workspace,
-        provider=binding.provider.lower(),
-        guard_source_digests=digests,  # type: ignore[arg-type]
-        credential_channels=channels,
-        confinement_spec_digest=spec_digest_value,
-        synthetic=True,
-        _mint=_PROOF_MINT_SECRET,
-    )

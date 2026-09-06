@@ -367,6 +367,18 @@ per-launch invariants (new session, stripped environment, no root-inode
 descriptor) are re-verified against `/proc` (a crash before the read-back
 window is recorded as `unverifiable-crashed`, never a stale handle).
 
+**Authenticated Pi2 backend.** Production real-provider launches accept only
+an externally installed, immutable `pi2` path whose wrapper chain resolves to
+one exact Node executable and one exact Pi CLI module. The control plane binds
+path, digest, device, and inode, then revalidates them immediately before exec.
+Provider credentials cross the parent boundary only through a sealed anonymous
+file descriptor; the exact staged adapter materializes the launch-private
+mode-0600 Pi credential, and the exact guard extension detaches and revalidates
+all bounded descriptor/file aliases before every tool call. Raw Pi fallback,
+ambient auth variables, mutable backend substitution, and persisted model
+sessions are rejected. Rotated OAuth state is validated and atomically returned
+to the operator store only after the full process group is reaped.
+
 **Supervision.** The supervisor snapshots the role's *own* live descendant
 closure once (`capture_descendants`), pinning every PID to its `/proc`
 starttime and parent identity (F6), installs itself as a child subreaper
@@ -402,10 +414,15 @@ The autonomous lifecycle runs only on the configured development branch. `main` 
 Campaigns are unattended and headless; there is no TUI.
 
 ```bash
-python3 .factory/loop/campaign.py --root "$PWD" run \
-  --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
-  --branch boilerplate-develop --provider ollama --model <model> \
-  --backend <absolute-model-backend>
+"${INSTALL_PREFIX:?verified install}/.factory/bin/factory-campaign" --root "$PWD" run \
+  --campaign-id "${CAMPAIGN_ID:?unique id}" --rounds "${ROUNDS:-3}" \
+  --branch boilerplate-develop --provider "${PI_PROVIDER:?real provider}" \
+  --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?immutable pi2 path}" \
+  --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
+  --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
+  --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
+  --verification-command ./scripts/verify-boilerplate.sh \
+  --acceptance-command ./scripts/verify-boilerplate.sh
 python3 .factory/loop/state.py --root "$PWD" show
 ```
 

@@ -345,19 +345,26 @@ A campaign removes the human-operated outer loop while retaining objective
 stopping boundaries:
 
 ```bash
-python3 .factory/loop/campaign.py --root "$PWD" run \
-  --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
-  --branch boilerplate-develop --provider ollama --model <model> \
-  --backend <absolute-model-backend>
+"${INSTALL_PREFIX:?verified install}/.factory/bin/factory-campaign" --root "$PWD" run \
+  --campaign-id "${CAMPAIGN_ID:?unique id}" --rounds "${ROUNDS:-3}" \
+  --branch boilerplate-develop --provider "${PI_PROVIDER:?real provider}" \
+  --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?immutable pi2 path}" \
+  --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
+  --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
+  --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
+  --verification-command ./scripts/verify-boilerplate.sh \
+  --acceptance-command ./scripts/verify-boilerplate.sh
 python3 .factory/loop/state.py --root "$PWD" show
 ```
 
 Campaigns are headless and unattended; there is no TUI. Each mandatory round
 records the current clean `HEAD` as a new base, runs a fresh planning phase,
-runs the resulting plan through implementation attempts, executes
-`verification.campaign_command`, validates installed-functional evidence,
-transfers the exact clean Git tree to every declared runner, and validates
-commit-bound runner receipts.
+runs the resulting plan through implementation attempts, executes the
+explicit digest-bound verification and acceptance commands, and validates
+installed-functional evidence. Capability and runner acquisition commands run
+only when the adopting project's committed configuration declares and supplies
+them; an empty generic capability set does not invent a hardware or product
+gate.
 Immediately before local verification, the campaign opens and retains an immutable descriptor to the binding helper before any untrusted phase, recomputes and compares the tracked config and executable Git blobs, content digests, canonical argv, and secure modes, then executes the exact opened verifier inode through the retained `/proc/self/fd` descriptor; implementation-time replacement, same-size rewrite, writable modes, or binding drift fails before the verifier runs. It then launches an independent adversarial audit as a fresh auditor role. A prior completion claim never shortens the requested
 round count. The next round's fresh planner consumes the preceding
 `.factory/artifacts/campaign-audit.md`; prior plans and audit reports remain in Git history.
@@ -377,8 +384,22 @@ run only after the orchestrator closes the dynamic repository-root descriptor an
 open-file description. Migration first acquires any safe legacy `.factory-lock`,
 fails if it is busy or ambiguous, then quarantines and validates it before
 removal.
-Quota waits and bounded retry/stale recovery remain inside each leaf.
-The campaign does not retry arbitrary nonzero leaf or gate results: it returns
+Production real-provider roles run only through the authenticated Pi2 adapter:
+the external `pi2`, its resolved Node executable, and Pi CLI module are bound by
+canonical path, digest, device, and inode and revalidated immediately before
+exec. Credentials travel through a sealed anonymous descriptor into the
+launch-private mode-0600 store, are detached and revalidated before every tool
+call, and never enter prompt, argv, ambient environment, result, or evidence
+bytes. Raw Pi fallback and mutable backend substitution are rejected. High-FD
+pipes are monitored without `select(2)` limits, and all private homes, staged
+executables, sessions, handoffs, and non-persisting caches are removed after
+success, timeout, interruption, or authorization failure.
+
+Bounded role retry and stale-state recovery remain inside the campaign.
+Provider quota policy is not a model-facing launch surface; the canonical §10
+Ollama check/wait mismatch remains explicitly unresolved in the plan rather
+than being treated as accepted conformance. The campaign does not retry
+arbitrary nonzero leaf or gate results: it returns
 nonzero with durable state still active at the same resumable phase. Invalid or
 corrupt state, rewritten bases, dirty boundaries, and conflicting options fail
 the same way. Intermediate audit findings become mandatory input to the

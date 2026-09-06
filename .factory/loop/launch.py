@@ -23,32 +23,28 @@ is the deterministic Task-6 deliverable:
   documented ``FACTORY_LOOP_LAUNCH_*`` invocation fields — never from the
   parent's environment wholesale, so credentials and legacy
   lock/Git/context variables cannot leak into a leaf.
-* **Descendant-scoped supervision (review-owned F6/F7)**.  The supervisor
-  snapshots the role's *own* live descendant closure once
-  (:func:`lock.capture_descendants`) with every PID pinned to its starttime
-  and parent (:class:`lock.CapturedProcess`) and re-enumerates only that
-  captured scope (:func:`lock.live_scope`) — descendant accounting is never
-  stale and a PID reused by an unrelated process is never treated as a
-  descendant.  The captured scope is supplied to the Task-5 lock-detector
-  API (:func:`lock.detect_escaped_descendants`) so the escaped-descendant
-  verdict is exact.
-* **Subreaper / reaping (F7)**.  The supervisor installs itself as a child
-  subreaper *before* spawning, so a double-fork or ``setsid`` descendant
-  that orphans is reparented to the supervisor and is always reaped when it
-  dies; an escaped descendant that survives bounded termination — including
-  a reparented survivor discovered through its parent identity — fails
-  closed with :class:`EscapedDescendantError` for operator inspection
-  (§12).  The launch snapshot guards the crash-before-snapshot window (a
-  leader that dies before its scope can be captured cannot fork further and
-  every prior descendant is reparented to the subreaper) and the captured
-  starttime identity makes PID reuse harmless.
+* **Dedicated-broker supervision (review-owned F6/F7)**.  Every role runs
+  beneath the exact-commit confinement/exec broker.  That fresh process has
+  no pre-existing children, installs itself as a child subreaper before its
+  target fork, and ptrace-pins the complete target lineage.  It therefore
+  kills and reaps only identities proved by its own child namespace; the
+  outer coordinator never infers ownership by subtracting a baseline of
+  unrelated children.  A pre-existing coordinator child may fork and exit
+  during an attempt without its worker or exit status being touched.
+* **Subreaper / reaping (F7)**.  A double-fork or ``setsid`` descendant is
+  adopted inside the dedicated broker lineage and is ptrace-pinned,
+  bounded-SIGKILLed, reaped, and reported over the broker-only lifecycle
+  channel before the outer launch can complete.  The broker's one-byte
+  clean/escaped/failure verdict is unforgeable by the target, and PID/PGID
+  reuse outside that lineage cannot widen cleanup ownership.
 * **Bounded termination**.  A hard runtime limit and an inactivity limit
   bound every run.  Termination delivers **TERM, INT, and HUP to the full
   process group**, observes a bounded grace, escalates to **KILL** of the
   whole group, then verifies the group is gone and reaps the leader within
   a bound.  Escaped descendants and un-reaped groups fail closed.
-* **Lock boundary**.  The child inherits no lock descriptor (``close_fds``,
-  no ``pass_fds``, close-on-exec) and no lock/Git metadata; the invariants
+* **Lock boundary**.  The child inherits no lock descriptor (``close_fds``;
+  only descriptor-anchored Landlock rules are passed and consumed before
+  model exec) and no lock/Git metadata; the invariants
   are re-verified against ``/proc/<pid>`` per launch (session identity,
   environment strip, no root-inode descriptor).
 * **Dirty work preservation**.  Supervision never touches the workspace
@@ -65,13 +61,15 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fcntl
+import functools
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
-import select
+import selectors
 import shutil
 import signal
 import stat
@@ -85,15 +83,14 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:  # package-import mode (the hidden control-plane package)
-    from . import confinement as confinement_authority
     from . import workspace_confinement as real_confinement_authority
-    from . import usage as usage_guard
     from . import redaction as output_redaction
     from .gitutil import (
         GIT_ENV_STRIP,
         GitBoundaryError,
         git_bytes,
         require_trusted_executable,
+        require_trusted_regular_file,
         resolve_head,
         sanitize_git_environment,
     )
@@ -112,15 +109,14 @@ try:  # package-import mode (the hidden control-plane package)
     )
     from .plan_parser import Plan, PlanError, parse_plan
 except ImportError:  # flat-import mode used by the hidden harness test suite
-    import confinement as confinement_authority  # type: ignore[no-redef]
     import workspace_confinement as real_confinement_authority  # type: ignore[no-redef]
-    import usage as usage_guard  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
         GitBoundaryError,
         git_bytes,
         require_trusted_executable,
+        require_trusted_regular_file,
         resolve_head,
         sanitize_git_environment,
     )
@@ -182,7 +178,6 @@ __all__ = [
     "verify_child_env",
     "verify_invocation",
     "verify_task_excerpt",
-    "write_prompt_file",
 ]
 
 # --------------------------------------------------------------------------
@@ -201,13 +196,23 @@ STAGED_CONFINE_LAUNCHER_NAME = "confine_launcher.py"
 CONFINEMENT_SPEC_SCHEMA = "factory-confinement/v1"
 MAX_CONFINEMENT_SPEC_BYTES = 1024 * 1024
 
-# Strict known-provider registry. Provider identity remains launch-bound, but
-# launch authorization exposes and executes no quota/cookie policy; ordered
-# campaign pre-round hooks are the only pre-round policy authority.
-SUPPORTED_PROVIDERS = frozenset({"ollama", "synthetic"})
+# Strict known-provider registry (Task 7 review, obligation 5):
+# ``verify_invocation`` rejects any provider outside this set, so an unknown
+# or caller-claimed provider fails closed and can never bypass fixed provider
+# policy. ``ollama`` retains the Task 8 confinement/source proof; its quota
+# decision belongs to the campaign pre-round registry. ``synthetic`` is the
+# hermetic hidden-suite provider (no network or real model backend).
+SUPPORTED_PROVIDERS = frozenset({"ollama", "openai-codex", "synthetic"})
+
+# Providers that require the exact staged usage-source and credential-store
+# confinement proof. This is not a quota-decision table: quota is never run
+# inside ``authorize_launch``.
+PROVIDER_GUARD_REQUIRED = frozenset({"ollama"})
+CANONICAL_OLLAMA_SETTINGS_URL = "https://ollama.com/settings"
 
 # The existing secure wrapper — invoked, never reimplemented (§18).
 SECURE_WRAPPER = "scripts/pi2-secure-exec.py"
+PI2_BACKEND_ADAPTER = ".factory/loop/pi2_backend.py"
 
 # Hard bounds: the wrapper itself caps the prompt at 4 MiB; the composition
 # layer enforces a smaller bound so the assembled prompt can never approach
@@ -223,28 +228,50 @@ OUTPUT_DIGEST_CAP = 1024 * 1024
 
 # Default bounds (§9: "run under a hard runtime limit").  The control plane
 # binds these per invocation; the defaults are conservative and documented.
-DEFAULT_RUNTIME_LIMIT = 3600.0
-DEFAULT_INACTIVITY_LIMIT = 600.0
+DEFAULT_RUNTIME_LIMIT = 7200.0
+# Pi emits no supervisor-visible bytes while its tool loop is active. A full
+# serial project/factory verification turn can therefore be externally silent
+# for close to an hour even though every inner command is independently
+# bounded. Keep a finite inactivity bound below the two-hour hard role limit;
+# the six-hour campaign deadline remains the stronger whole-campaign bound.
+DEFAULT_INACTIVITY_LIMIT = 7000.0
 
 # Termination sequence: TERM, INT, and HUP are each delivered to the *full
 # process group* before the bounded grace expires and KILL escalates (§9).
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
-# TOCTOU-free verify-to-exec (F2): the exact committed wrapper/backend bytes
-# are staged into a private mode-0700 directory as mode-0500 single-link
-# files (owner read+execute, no write) and the child executes only those
-# staged paths — never a working-tree pathname that could be swapped after
-# verification.  An *external* trusted executable is not staged (its bytes
+# TOCTOU-free verify-to-interpreter (F2): exact committed wrapper/backend
+# bytes are staged in a private mode-0700 directory as non-executable mode-0400
+# single-link data. Approved immutable interpreters read those paths; no
+# caller-owned staged pathname crosses execve. An *external* trusted executable
+# is not staged (its bytes
 # are not committed): its fully resolved path (including the containing
 # directories of every symlink target) is revalidated immediately at exec.
 EXEC_STAGING_PREFIX = "factory-loop-exec-"
 STAGED_WRAPPER_NAME = "pi2-secure-exec.py"
 STAGED_BACKEND_NAME = "backend"
-STAGED_FILE_MODE = 0o500
+STAGED_GUARD_EXTENSION_NAME = "pi-factory-guard-extension.mjs"
+STAGED_CREDENTIAL_GUARD_NAME = "credential-guard.py"
+STAGED_GIT_SHIM_NAME = "git"
+STAGED_USAGE_GUARD_NAME = "usage.py"
+STAGED_USAGE_FETCH_NAME = "usage_fetch.py"
+CREDENTIAL_GUARD = "scripts/credential-guard.py"
+PI_GIT_SHIM = "scripts/pi-cli-shims/git"
+USAGE_GUARD_SOURCES = (".factory/loop/usage.py", ".factory/loop/usage_fetch.py")
+# Staged scripts/modules are readable data, never direct execve targets. They
+# run only as arguments to an approved immutable interpreter inside the
+# seccomp broker boundary.
+STAGED_FILE_MODE = 0o400
 STAGED_DIR_MODE = 0o700
 DEFAULT_KILL_GRACE = 1.0
 REAP_TIMEOUT = 2.0
 GROUP_GONE_TIMEOUT = 2.0
+# Trusted one-byte protocol emitted only by the staged ptrace broker.  Its
+# target closes the write descriptor before untrusted execution, so model
+# output can neither spoof the verdict nor hold this lifecycle channel open.
+_CONFINEMENT_STATUS_CLEAN = b"C"
+_CONFINEMENT_STATUS_ESCAPED = b"E"
+_CONFINEMENT_STATUS_FAILED = b"F"
 # Bounded /proc read-back window for the per-launch invariants (session id
 # appears at fork, environ at exec).
 INVARIANT_READBACK_WINDOW = 1.0
@@ -266,12 +293,30 @@ RESULT_SCHEMA_FILE = "factory-launch-result-v1.schema.json"
 INVOCATION_ENV_PREFIX = "FACTORY_LOOP_LAUNCH_"
 
 # The environment key the trusted pre-spawn authority uses to forward the
-# exact committed credential-guard digest to the model-side Pi extension
-# (Task 11 review).  The extension hashes the *worktree* guard and fails
-# closed on a missing or mismatched digest — it has no Git access inside
-# the model Landlock, so the exact-commit binding is transported through
-# this sanitized launch-env channel instead.
-PI_RALPH_GUARD_DIGEST_ENV = "PI_RALPH_GUARD_DIGEST"
+# exact committed credential-guard digest to the model-side Pi extension.
+# The extension and guard are staged from exact committed bytes; the extension
+# re-hashes that staged sibling and compares this transported digest before
+# any guard invocation (it has no Git access inside the model Landlock).
+PI_FACTORY_GUARD_DIGEST_ENV = "PI_FACTORY_GUARD_DIGEST"
+PI_FACTORY_GUARD_PYTHON_ENV = "PI_FACTORY_GUARD_PYTHON"
+# The Pi2 adapter publishes only descriptor identity metadata, never
+# credential bytes, for the exact-commit extension to consume synchronously
+# at the common ``tool_call`` boundary. Names deliberately avoid credential-
+# shaped words so the generic child-environment rejection remains useful.
+PI_FACTORY_TOOL_FD_ENV = "PI_FACTORY_TOOL_FD"
+PI_FACTORY_TOOL_FD_DEV_ENV = "PI_FACTORY_TOOL_FD_DEV"
+PI_FACTORY_TOOL_FD_INO_ENV = "PI_FACTORY_TOOL_FD_INO"
+
+# The committed model-side Pi extension (Task 11 review): the generic
+# factory guard extension loaded by the model backend through ``--extension``
+# in the exact child argv.  It enforces the model-side Git command boundary
+# (routing direct commit verbs through ``scripts/pi-cli-shims/git`` and
+# blocking bypass/unguarded verbs), the credential/path tool-input guard,
+# the exact-commit credential-guard digest binding, bounded tool-result
+# redaction, and overflow-log process cleanup.  The extension is a committed
+# workspace blob verified against the bound commit (F5) and is readable by
+# the confined model through the workspace ``scripts/`` read allowlist.
+PI_FACTORY_GUARD_EXTENSION = "scripts/pi-factory-guard-extension.mjs"
 
 # Explicit environment allowlist for model children.  The child environment
 # is *constructed* from these benign keys only (when present in the parent)
@@ -284,7 +329,7 @@ ENV_ALLOWLIST = (
     "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
     "TERM", "TZ", "SHELL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME", "XDG_DATA_HOME", "NO_COLOR", "CLICOLOR",
-    "CLICOLOR_FORCE",
+    "CLICOLOR_FORCE", "TMPDIR", "NIX_PATH", "NIX_REMOTE",
 )
 
 # Model backend flags that must *never* appear in the constructed argv: they
@@ -399,6 +444,9 @@ class InvocationBinding:
     task_excerpt_digest: Optional[str] = None
     audit_objective_digest: str = ""
     findings_digest: str = ""
+    # Exact transient result channel bound into the canonical confinement
+    # specification. Empty for roles/attempts with no structured handoff.
+    result_write_path: str = ""
     runtime_limit: float = DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = DEFAULT_INACTIVITY_LIMIT
 
@@ -414,7 +462,7 @@ def verify_invocation(binding: InvocationBinding) -> None:
         raise InvocationError(
             f"provider must be one of {sorted(SUPPORTED_PROVIDERS)!r}, got "
             f"{binding.provider!r}; an unknown provider fails closed and can "
-            "never bypass the fixed provider policy (Task 32)"
+            "never bypass the fixed provider policy"
         )
     for name, value in (
         ("model", binding.model),
@@ -453,6 +501,48 @@ def verify_invocation(binding: InvocationBinding) -> None:
         raise InvocationError(
             "`findings_digest` is allowed only for the planner role"
         )
+    if binding.result_write_path:
+        if binding.role not in ("tester", "auditor"):
+            raise InvocationError(
+                "`result_write_path` is allowed only for tester/auditor roles"
+            )
+        result_path = Path(binding.result_write_path)
+        if not result_path.is_absolute():
+            raise InvocationError("`result_write_path` must be absolute")
+        if any(
+            part in ("", ".", "..") or any(ord(char) < 0x20 for char in part)
+            for part in result_path.parts
+        ):
+            raise InvocationError("`result_write_path` is not a canonical safe path")
+        try:
+            relative_result = result_path.relative_to(
+                Path(binding.workspace).absolute()
+            )
+        except ValueError as exc:
+            raise InvocationError(
+                "`result_write_path` must remain inside the canonical workspace"
+            ) from exc
+        campaign_channel = (
+            len(relative_result.parts) >= 4
+            and relative_result.parts[0] == ".factory-state"
+            and relative_result.parts[1] == "campaigns"
+            and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",
+                relative_result.parts[2],
+            ) is not None
+        )
+        legacy_channel = (
+            len(relative_result.parts) >= 2
+            and relative_result.parts[0] == ".factory-state"
+            and relative_result.parts[1] != "campaigns"
+        )
+        if not (campaign_channel or legacy_channel):
+            raise InvocationError(
+                "`result_write_path` must be the exact control-plane-owned "
+                "handoff path under a dedicated "
+                ".factory-state/campaigns/<id>/ namespace (or the isolated "
+                "legacy fixture namespace)"
+            )
     if binding.role == "auditor" and not binding.audit_objective_digest:
         raise InvocationError("the auditor role requires an audit-objective digest")
     if binding.role != "auditor" and binding.audit_objective_digest:
@@ -760,6 +850,25 @@ def compose_prompt(
             + b")"
         )
         sections.append(audit_objective)
+    if binding.role in ("tester", "auditor") and binding.result_write_path:
+        # The structured handoff is explicit role context, never a general
+        # environment variable. Landlock grants write access to this one
+        # pre-created file only; prose/stdout remains non-authoritative.
+        result_path = str(Path(binding.result_write_path).absolute())
+        sections.extend([
+            b"",
+            b"## Structured phase-result channel (mandatory)",
+            b"Write the final machine result to this exact UTF-8 path: "
+            + result_path.encode("utf-8"),
+            b"Do not choose, rename, or reopen any alternate result path.",
+            b"The file must contain exactly one JSON object matching "
+            b"factory-phase-result/v1: required keys `schema` and `outcome`; "
+            b"`schema` must be `factory-phase-result/v1`; `outcome` must be "
+            b"`pass`, `findings`, or `blocked`; optional `findings` and "
+            b"`blocked_on` are arrays of non-empty strings; no other keys.",
+            b"Writing prose only, printing JSON only, or leaving this exact "
+            b"pre-created file empty is an infrastructure failure.",
+        ])
     if binding.role == "planner" and findings is not None:
         if not binding.findings_digest:
             raise InvocationError(
@@ -791,58 +900,47 @@ def compose_prompt(
 
 
 # --------------------------------------------------------------------------
-# Prompt-file publication (the wrapper's secure /tmp contract)
+# Prompt transport
 # --------------------------------------------------------------------------
 
-def _prompt_directory() -> Path:
-    """Fresh mode-0700 directory beneath /tmp for one prompt file.
+def _sealed_prompt_memfd(prompt: bytes) -> int:
+    """Create the production prompt channel as an immutable anonymous memfd.
 
-    The secure wrapper requires the prompt file to resolve beneath ``/tmp``
-    (``scripts/pi2-secure-exec.py``), so the directory is always created
-    there regardless of ``TMPDIR``.
-    """
-    try:
-        return Path(tempfile.mkdtemp(prefix="factory-loop-launch-", dir="/tmp"))
-    except OSError as exc:
-        raise LaunchError(f"cannot create the prompt directory under /tmp: {exc}") from exc
-
-
-def write_prompt_file(directory: Path, prompt: bytes) -> Path:
-    """Publish ``prompt`` as a mode-0600 single-link regular file in ``directory``.
-
-    The file is created with ``O_EXCL`` and no-follow semantics so a raced
-    pathname is never reused, and satisfies the wrapper's ownership/link
-    count/mode/size checks.
+    The descriptor is populated from the composed bytes, rewound, and sealed
+    against write/grow/shrink/further-seal changes before it is carried by the
+    launch authority.  No prompt pathname exists at any point.
     """
     if len(prompt) > PROMPT_MAX_BYTES:
-        raise InvocationError(
-            f"prompt exceeds the {PROMPT_MAX_BYTES}-byte bound"
-        )
-    path = directory / "prompt.md"
-    flags = (
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
+        raise InvocationError(f"prompt exceeds the {PROMPT_MAX_BYTES}-byte bound")
+    flags = getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0)
+    required = (
+        getattr(fcntl, "F_SEAL_SEAL", 0)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0)
+        | getattr(fcntl, "F_SEAL_GROW", 0)
+        | getattr(fcntl, "F_SEAL_WRITE", 0)
     )
+    if not hasattr(os, "memfd_create") or required == 0:
+        raise LaunchError("sealed memfd prompt transport is unavailable")
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = os.memfd_create("factory-prompt", flags)
+        view = memoryview(prompt)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short prompt memfd write")
+            view = view[written:]
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, required)
+        actual = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        if actual & required != required:
+            raise OSError("mandatory prompt seals were not applied")
+        return descriptor
     except OSError as exc:
-        raise LaunchError(f"cannot create the prompt file {path}: {exc}") from exc
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(prompt)
-            stream.flush()
-    except OSError as exc:
-        raise LaunchError(f"cannot write the prompt file {path}: {exc}") from exc
-    try:
-        info = path.stat()
-    except OSError as exc:
-        raise LaunchError(f"cannot stat the prompt file {path}: {exc}") from exc
-    if stat.S_ISLNK(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-        raise LaunchError(f"the prompt file {path} has unsafe ownership/link state")
-    if info.st_mode & 0o022:
-        raise LaunchError(f"the prompt file {path} is group/other-writable")
-    return path
+        try:
+            os.close(descriptor)
+        except (OSError, UnboundLocalError):
+            pass
+        raise LaunchError(f"cannot create the sealed prompt memfd: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -853,6 +951,8 @@ def child_environment(
     binding: InvocationBinding,
     *,
     guard_digest: Optional[str] = None,
+    staged_path: Optional[Path] = None,
+    approved_path_dirs: Sequence[str] = (),
 ) -> Dict[str, str]:
     """The exact child environment: allowlist plus the invocation fields.
 
@@ -867,16 +967,83 @@ def child_environment(
 
     ``guard_digest`` (when given) is the SHA-256 of the exact committed
     credential guard the pre-spawn authority verified: it is forwarded to
-    the model-side Pi extension as ``PI_RALPH_GUARD_DIGEST`` so the
-    extension can bind its worktree guard to the exact committed bytes
+    the model-side Pi extension as ``PI_FACTORY_GUARD_DIGEST`` so the
+    extension can bind its staged guard sibling to the exact committed bytes
     without any Git access (Task 11 review).  A 64-hex digest is required
     when the key is carried at all.
     """
     verify_invocation(binding)
     environment: Dict[str, str] = {}
     for key in ENV_ALLOWLIST:
+        if key == "PATH":
+            continue
         if key in os.environ:
             environment[key] = os.environ[key]
+    if staged_path is not None:
+        staged = Path(staged_path).absolute()
+        if not staged.is_dir() or (staged / STAGED_GIT_SHIM_NAME).is_symlink():
+            raise InvocationError(
+                "the sealed staged command PATH is missing its Git shim"
+            )
+        # Preserve only immutable system/store tool directories from the
+        # operator PATH. The launch-owned staging directory is first but is
+        # read-only/non-executable under Landlock. Recognized Git commands run
+        # its exact-commit shim as data through immutable Bash; obfuscated
+        # unqualified Git can execute neither that staged path nor real Git.
+        trusted_dirs: List[str] = []
+        for candidate in os.environ.get("PATH", "").split(os.pathsep):
+            if not candidate or not os.path.isabs(candidate):
+                continue
+            resolved = os.path.realpath(candidate)
+            if resolved in trusted_dirs or not os.path.isdir(resolved):
+                continue
+            try:
+                # A representative executable is not required; the same
+                # immutable-chain authority validates the directory itself.
+                import stat as _stat
+                current = Path(resolved)
+                boundary = Path("/nix/store") if resolved.startswith("/nix/store/") else Path(resolved).anchor
+                while True:
+                    info = current.lstat()
+                    sticky = _stat.S_ISDIR(info.st_mode) and bool(info.st_mode & _stat.S_ISVTX)
+                    if info.st_uid == os.getuid() and not sticky:
+                        raise OSError("caller-owned PATH directory")
+                    if info.st_mode & 0o022 and not sticky:
+                        raise OSError("writable PATH directory")
+                    if current == boundary or current == current.parent:
+                        break
+                    current = current.parent
+            except OSError:
+                continue
+            trusted_dirs.append(resolved)
+        for candidate in approved_path_dirs:
+            resolved = os.path.realpath(candidate)
+            if (
+                resolved != candidate or not resolved.startswith("/nix/store/")
+                or not os.path.isdir(resolved) or resolved in trusted_dirs
+            ):
+                continue
+            # These directories come only from exact executable-file rules in
+            # the already validated confinement specification. PATH visibility
+            # does not grant execution: Landlock and the inode broker still
+            # authorize only each named file, never this directory broadly.
+            trusted_dirs.append(resolved)
+        environment["PATH"] = os.pathsep.join([str(staged), *trusted_dirs])
+    else:
+        # Non-production spawn fixtures have no staged shim but still need the
+        # immutable Nix-shell tool directories.  Preserve only direct store or
+        # fixed FHS directories; caller-owned/profile-relative components are
+        # never copied.
+        safe = []
+        for candidate in os.environ.get("PATH", "").split(os.pathsep):
+            resolved = os.path.realpath(candidate) if candidate else ""
+            if not resolved or resolved in safe or not os.path.isdir(resolved):
+                continue
+            if resolved.startswith("/nix/store/") or resolved in (
+                "/run/current-system/sw/bin", "/usr/bin", "/bin"
+            ):
+                safe.append(resolved)
+        environment["PATH"] = os.pathsep.join(safe or ["/usr/bin", "/bin"])
     if guard_digest is not None:
         if (
             not isinstance(guard_digest, str)
@@ -886,7 +1053,8 @@ def child_environment(
                 "the forwarded credential-guard digest must be a 64-hex "
                 "SHA-256 of the exact committed guard blob"
             )
-        environment[PI_RALPH_GUARD_DIGEST_ENV] = guard_digest
+        environment[PI_FACTORY_GUARD_DIGEST_ENV] = guard_digest
+        environment[PI_FACTORY_GUARD_PYTHON_ENV] = require_trusted_interpreter()
     prefix = INVOCATION_ENV_PREFIX
     environment[prefix + "ROLE"] = binding.role
     environment[prefix + "MODEL"] = binding.model
@@ -945,41 +1113,74 @@ def verify_child_env(environment: Mapping[str, str]) -> None:
 
 def child_argv(
     binding: InvocationBinding,
-    prompt_path: Path,
+    prompt_descriptor: int,
     session_dir: Path,
     *,
     secure_wrapper: Optional[Path] = None,
+    guard_extension: Optional[Path] = None,
+    prompt_digest: Optional[str] = None,
+    auth_fd: int = -1,
 ) -> List[str]:
     """Build the exact one-shot argv for the secure wrapper.
 
-    ``argv = [python, wrapper, --prompt-file, <prompt>, --, backend,
-    --provider, P, --model, M, --print, --no-session, --session-dir, <dir>,
-    --no-skills, --no-themes, --no-context-files, --tools, T]``.
+    ``argv = [python, wrapper, --prompt-fd, <fd>, --prompt-sha256, <digest>, --, backend,
+    --extension, <guard-extension>, --provider, P, --model, M, --print,
+    --no-session, --session-dir, <dir>, --no-skills, --no-themes,
+    --no-context-files, --tools, T]``.
 
     Every flag is structural (the one-shot/no-resume/no-session contract of
     §9/§20) or derived from the binding; no session-resume or conversation
     flag can appear (``FORBIDDEN_BACKEND_FLAGS`` is re-checked here as
     defense in depth), and no prompt content or credential material is ever
-    put in argv.
+    put in argv.  The model-side Pi guard extension (Task 11 review) is
+    always loaded through ``--extension`` with the private staged path the
+    launch authority supplies, so the model process always runs the exact
+    committed git-boundary / credential-guard / redaction extension — never
+    a mutable workspace, caller-supplied, or PATH-resolved extension.
     """
     verify_invocation(binding)
     # Absolute trusted interpreter: the wrapper is executed with the
     # control-plane interpreter, whose resolution is bounded to the trusted
     # set and never follows an attacker-controlled path.
-    require_trusted_interpreter()
+    trusted_interpreter = require_trusted_interpreter()
     wrapper = Path(secure_wrapper or secure_wrapper_path(binding.workspace))
     if not wrapper.is_absolute() or not wrapper.is_file():
         raise InvocationError(
             f"the secure wrapper must be an absolute existing file: {wrapper}"
         )
     tools = ",".join(binding.allowed_tools)
+    extension = Path(
+        guard_extension
+        or (Path(binding.workspace).absolute() / PI_FACTORY_GUARD_EXTENSION)
+    )
+    if not extension.is_absolute() or not extension.is_file():
+        raise InvocationError(
+            f"the model-side Pi guard extension is missing at {extension}; "
+            "the model process must always run the committed staged guard "
+            "extension (Task 11)"
+        )
+    if type(prompt_descriptor) is not int or prompt_descriptor < 0:
+        raise InvocationError("the inherited prompt descriptor must be nonnegative")
+    if prompt_digest is None or not SHA256_RE.fullmatch(prompt_digest):
+        raise InvocationError("the prompt memfd digest must be 64-hex SHA-256")
     argv = [
-        sys.executable,
+        trusted_interpreter,
         str(wrapper),
-        "--prompt-file",
-        str(prompt_path),
+        "--prompt-fd",
+        str(prompt_descriptor),
+        "--prompt-sha256",
+        prompt_digest,
+    ]
+    backend = Path(binding.backend).absolute()
+    staged_backend = secure_wrapper is not None and backend.parent == wrapper.parent
+    backend_argv = (
+        [trusted_interpreter, str(backend)]
+        if staged_backend else [str(backend)]
+    )
+    argv.extend([
         "--",
-        str(binding.backend),
+        *backend_argv,
+        "--extension", str(extension),
         "--provider", binding.provider,
         "--model", binding.model,
         "--print",
@@ -989,7 +1190,16 @@ def child_argv(
         "--no-themes",
         "--no-context-files",
         "--tools", tools,
-    ]
+    ])
+    if auth_fd >= 0:
+        # B1 security review: the openai-codex credential descriptor number
+        # travels only in the backend adapter's transient argv (never an env
+        # var the model could read, never a pathname).  The adapter consumes
+        # it before exec'ing the model CLI, so the number is absent from the
+        # model process argv/environment.
+        if type(auth_fd) is not int:
+            raise InvocationError("the auth descriptor must be an integer")
+        argv.extend(["--auth-fd", str(auth_fd)])
     for flag in FORBIDDEN_BACKEND_FLAGS:
         if flag in argv:
             raise InvocationError(
@@ -1038,14 +1248,11 @@ def _remove_private_directories(directories: Iterable[Optional[Path]]) -> None:
 def _authority_private_directories(authority: "LaunchAuthority") -> List[Optional[Path]]:
     """The exact per-launch private directories a minted authority carries.
 
-    ``exec_dir`` (staging), the prompt file's parent directory, the session
-    directory, and the sanitized home — the same four paths the
-    confinement specification's ``private_launch_rules`` bind and the
-    supervisor's cleanup removes.
+    ``exec_dir`` (staging), the session directory, and the sanitized home —
+    the exact path-backed resources the confinement rules bind and cleanup
+    removes. The prompt is an anonymous sealed descriptor, never a directory.
     """
     directories: List[Optional[Path]] = [authority._exec_dir]
-    if authority._prompt_path is not None:
-        directories.append(Path(authority._prompt_path).parent)
     directories.append(authority._session_dir)
     directories.append(authority._sanitized_home)
     return directories
@@ -1083,8 +1290,8 @@ def verify_child_invariants(
     raises :class:`SupervisionError` (fail closed).  When the child already
     exited before the read-back window the invariants cannot be observed
     and ``("unverifiable-crashed",)`` is returned — the *structural* child
-    boundary (``close_fds``, ``pass_fds=()``, built environment, new
-    session) is still asserted by the parent, so the security property does
+    boundary (``close_fds`` plus only pre-exec Landlock rule anchors, built
+    environment, new session) is still asserted by the parent, so the security property does
     not depend on the read-back timing.
 
     The read-back is a bounded settle loop that **pins the child's
@@ -1400,14 +1607,59 @@ def _pid_group_has_live_members(pgid: int) -> bool:
     return False
 
 
+def _dispose_launch_authority(authority: object) -> None:
+    """Close resources still owned by a genuine unconsumed authority."""
+    if not isinstance(authority, LaunchAuthority) or authority._mint is not _MINT_SECRET:
+        return
+    for descriptor in authority._confinement_rule_fds:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    authority._confinement_rule_fds = ()
+    if authority._prompt_fd >= 0:
+        try:
+            os.close(authority._prompt_fd)
+        except OSError:
+            pass
+        authority._prompt_fd = -1
+    if authority._auth_fd >= 0:
+        try:
+            os.close(authority._auth_fd)
+        except OSError:
+            pass
+        authority._auth_fd = -1
+    _remove_private_directories(_authority_private_directories(authority))
+
+
+def _outer_launch_cleanup(method):
+    """Wrap the entire authority-consumption path in cleanup immediately.
+
+    This outer ``try/finally`` exists before :meth:`run` can transfer a single
+    Landlock or prompt descriptor.  It therefore covers prompt composition,
+    digest checks, redactor preflight, signal/broker setup, and spawn — not
+    only the post-spawn body.  Cleanup is idempotent, so the narrower lifecycle
+    finally inside ``run`` remains defense in depth.
+    """
+    @functools.wraps(method)
+    def guarded(self, *args, **kwargs):
+        authority = args[0] if args else kwargs.get("authority")
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._restore_signal_handlers()
+            self._cleanup()
+            _dispose_launch_authority(authority)
+    return guarded
+
+
 class LaunchSupervision:
     """Descendant-scoped supervision of one fresh model process (F6/F7).
 
-    Owns the F6 descendant-scoped handle scan (a single bounded snapshot of
-    the role's own live descendants, re-enumerated through
-    ``live_scope``), the subreaper lifecycle (F7), the TERM/INT/HUP→KILL
-    bounded termination sequence, the crash-before-snapshot/PID-reuse
-    guards, and the structured bounded result.
+    Owns the outer F6 identity snapshot, the TERM/INT/HUP→KILL lifecycle for
+    the exact dedicated broker PID, crash-before-snapshot/PID-reuse guards,
+    and the structured bounded result.  The fresh confinement broker owns the
+    command-only subreaper namespace and all descendant cleanup (F7).
     """
 
     def __init__(
@@ -1415,7 +1667,6 @@ class LaunchSupervision:
         binding: InvocationBinding,
         *,
         root: Optional[Path] = None,
-        prompt_path: Optional[Path] = None,
         session_dir: Optional[Path] = None,
         kill_grace: float = DEFAULT_KILL_GRACE,
     ) -> None:
@@ -1423,12 +1674,14 @@ class LaunchSupervision:
         self.binding = binding
         self.root = Path(root or binding.workspace).absolute()
         self.kill_grace = kill_grace
-        self.prompt_path = Path(prompt_path) if prompt_path else None
+        self.prompt_fd: Optional[int] = None
         self.session_dir = Path(session_dir) if session_dir else None
         self._child: Optional[subprocess.Popen[bytes]] = None
         self._captured: frozenset = frozenset()
         self._capture_error: Optional[str] = None
-        self._pre_existing_children: set = set()
+        # Descendant ownership is intentionally absent here.  The fresh
+        # confinement/exec broker owns the command-only subreaper namespace;
+        # this outer coordinator waits and signals only that exact broker PID.
         self._elapsed: float = 0.0
         # F4: the leader's /proc starttime, pinned at spawn and re-verified
         # before *every* group signal, so a reused PID is never signaled.
@@ -1443,8 +1696,12 @@ class LaunchSupervision:
         # trusted executables (revalidated immediately before exec), and the
         # private mode-0700 staging directory (removed at cleanup).
         self._staged_wrapper: Optional[Path] = None
+        self._guard_extension: Optional[Path] = None
+        self._prompt_digest: Optional[str] = None
+        self._auth_fd: int = -1
         self._staged_digests: Dict[str, str] = {}
         self._external_paths: Tuple[str, ...] = ()
+        self._external_runtime_bindings: Tuple[_ExternalRuntimeBinding, ...] = ()
         self._exec_dir: Optional[Path] = None
         # Task 8 confinement binding carried by the verified authority (the
         # exact specification, the real proof, the sanitized home, and the
@@ -1453,57 +1710,24 @@ class LaunchSupervision:
         self._confinement_proof: Optional[object] = None
         self._sanitized_home: Optional[Path] = None
         self._confined_launcher: Optional[Path] = None
+        self._confinement_rule_fds: Tuple[int, ...] = ()
+        self._confinement_status_fd: Optional[int] = None
+        self._usage_guard_digests: Optional[Tuple[str, str]] = None
         # Task 11: the verified credential-guard redactor, built by :meth:`run`
         # before the child is spawned so no launch can capture child output
         # without a verified redaction authority (fail closed).  ``_guard_digest``
         # is the SHA-256 of the exact committed guard bytes, forwarded to the
         # model-side Pi extension through the sanitized launch env
-        # (``PI_RALPH_GUARD_DIGEST``) so the extension binds its worktree guard
-        # to the same exact-commit authority without any Git access.
+        # (``PI_FACTORY_GUARD_DIGEST``) so the extension binds its staged guard
+        # sibling to the same exact-commit authority without any Git access.
         self._redactor: Optional["output_redaction.Redactor"] = None
         self._guard_digest: Optional[str] = None
 
-    # -- subreaper lifecycle (F7) --------------------------------------------
-
-    def install_subreaper(self) -> None:
-        """Install this process as a child subreaper (``PR_SET_CHILD_SUBREAPER``).
-
-        With the flag set, every orphaned descendant of the model process is
-        reparented to this process, so an escaped double-fork/``setsid``
-        descendant can never orphan to PID 1: it is reaped here when it
-        dies and detected (by its reparented identity) when it survives.
-        Installing is idempotent; the flag cannot be unset.
-        """
-        try:
-            libc = ctypes.CDLL(None, use_errno=True)
-        except OSError as exc:
-            raise SupervisionError(
-                f"cannot load libc for PR_SET_CHILD_SUBREAPER: {exc}"
-            ) from exc
-        result = libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER == 36
-        if result != 0:
-            error = ctypes.get_errno()
-            raise SupervisionError(
-                f"cannot install the child subreaper (prctl errno {error}); "
-                "escaped descendants could orphan and be lost"
-            )
-
-    def _snapshot_pre_existing_children(self) -> set:
-        """Snapshot of processes already parented to this process (for scoping)."""
-        me = os.getpid()
-        found: set = set()
-        for pid in _iter_pids():
-            if pid == me:
-                continue
-            fields = _proc_stat_fields(pid)
-            if fields is None or len(fields) < 2:
-                continue
-            try:
-                if int(fields[1]) == me:
-                    found.add(pid)
-            except ValueError:
-                continue
-        return found
+    # -- dedicated broker lifecycle (F7) -------------------------------------
+    # The staged confine launcher installs PR_SET_CHILD_SUBREAPER in its own
+    # fresh process before forking the untrusted target.  Installing it in this
+    # long-lived coordinator would mix unrelated child lineages and is
+    # deliberately forbidden by construction.
 
     # -- F3 scoped signal handling ----------------------------------------------
 
@@ -1593,9 +1817,9 @@ class LaunchSupervision:
         The captured scope pins every PID to its starttime and parent PID
         (:class:`CapturedProcess`), so PID reuse can never widen the set.
         When the leader already exited before the snapshot could be taken
-        (crash-before-snapshot window) the scope is empty: a dead leader
-        cannot fork further and any descendant it left is reparented to
-        this subreaper and accounted by :meth:`_live_reparented_children`.
+        (crash-before-snapshot window) the scope is empty: the dedicated
+        broker cannot fork further after death, and PTRACE_O_EXITKILL plus its
+        private lifecycle channel make descendant cleanup fail closed.
         """
         if self._child is None:
             raise SupervisionError("no child process to snapshot")
@@ -1641,10 +1865,11 @@ class LaunchSupervision:
     def spawn(self) -> subprocess.Popen[bytes]:
         """Spawn the fresh one-shot model process behind the wrapper.
 
-        The child starts a new process session/group and inherits nothing:
-        ``close_fds=True``, no ``pass_fds``, and a built allowlist
-        environment, so the lock descriptor and lock metadata never reach a
-        leaf.  ``cwd`` is the canonical workspace.
+        The child starts a new process session/group with ``close_fds=True``
+        and inherits only the descriptor-anchored Landlock rule set through
+        ``pass_fds``.  The confine launcher consumes and closes those anchors
+        before exec, so the model leaf inherits no control-plane descriptor or
+        lock metadata.  ``cwd`` is the canonical workspace.
 
         **Signal-safe spawn window.**  TERM, INT, and HUP are blocked on the
         launch thread with ``pthread_sigmask`` from before the child is
@@ -1660,10 +1885,15 @@ class LaunchSupervision:
         """
         if self._child is not None:
             raise SupervisionError("a child was already spawned")
-        if self.prompt_path is None:
-            raise SupervisionError("no prompt file was published")
+        if self.prompt_fd is None:
+            raise SupervisionError("no sealed prompt memfd was inherited")
         if self.session_dir is None:
             raise SupervisionError("no session directory was prepared")
+        if self._prompt_digest is None or not SHA256_RE.fullmatch(self._prompt_digest):
+            raise SupervisionError(
+                "no exact launch-authority prompt digest is bound for the "
+                "wrapper's sealed snapshot"
+            )
         if threading.current_thread() is not threading.main_thread():
             raise SupervisionError(
                 "a fresh-process launch is refused off the main thread: "
@@ -1680,21 +1910,35 @@ class LaunchSupervision:
         for staged_path, digest in self._staged_digests.items():
             if _file_sha256(Path(staged_path)) != digest:
                 raise SupervisionError(
-                    f"staged executable {staged_path} changed since "
-                    "verification; refusing to execute swapped bytes (F2)"
+                    f"staged script/module {staged_path} changed since "
+                    "verification; refusing interpreter launch (F2)"
                 )
-        for external in self._external_paths:
-            try:
-                require_trusted_executable(external)
-            except GitBoundaryError as exc:
-                raise SupervisionError(
-                    f"external trusted executable {external} changed or is "
-                    f"no longer immutable before exec: {exc} (F2)"
-                ) from exc
-        env = child_environment(self.binding, guard_digest=self._guard_digest)
+        try:
+            _revalidate_external_runtimes(self._external_runtime_bindings)
+        except InvocationError as exc:
+            raise SupervisionError(
+                "an external Pi/runtime path changed in digest, device, inode, "
+                f"or immutable identity immediately before exec: {exc} (F2)"
+            ) from exc
+        approved_path_dirs = sorted({
+            str(Path(str(rule["path"])).parent)
+            for rule in (self._confinement_spec or {}).get("rules", [])
+            if isinstance(rule, dict)
+            and "execute" in rule.get("access", [])
+            and str(rule.get("path", "")).startswith("/nix/store/")
+        })
+        env = child_environment(
+            self.binding,
+            guard_digest=self._guard_digest,
+            staged_path=self._exec_dir,
+            approved_path_dirs=approved_path_dirs,
+        )
         argv = child_argv(
-            self.binding, self.prompt_path, self.session_dir,
+            self.binding, self.prompt_fd, self.session_dir,
             secure_wrapper=self._staged_wrapper,
+            guard_extension=self._guard_extension,
+            prompt_digest=self._prompt_digest,
+            auth_fd=self._auth_fd,
         )
         # Task 8 confined launch: when the verified authority carries the
         # exact confinement specification and a real proof, the model child is
@@ -1705,7 +1949,11 @@ class LaunchSupervision:
         # model is ever started without a proof that matches what will be
         # enforced (fail closed).
         if self._confinement_spec is not None:
-            if self._confined_launcher is None or self._confinement_proof is None:
+            if (
+                self._confined_launcher is None
+                or self._confinement_proof is None
+                or not self._confinement_rule_fds
+            ):
                 raise SupervisionError(
                     "the verified authority carries a confinement "
                     "specification without the staged confine launcher or "
@@ -1713,11 +1961,15 @@ class LaunchSupervision:
                     "(fail closed)"
                 )
             try:
+                real_confinement_authority.validate_rule_anchors(
+                    self._confinement_spec, self._confinement_rule_fds
+                )
                 real_confinement_authority.validate_proof(
                     self._confinement_proof,
                     self.binding,
                     confinement_spec=self._confinement_spec,
                     _strict_channels=False,
+                    _executing_guard_digests=self._usage_guard_digests,
                 )
             except real_confinement_authority.ConfinementError as exc:
                 raise SupervisionError(
@@ -1726,37 +1978,100 @@ class LaunchSupervision:
                     f"be started (fail closed): {exc}"
                 ) from exc
             spec_path = self._publish_confinement_spec()
-            argv = [
-                sys.executable,
-                str(self._confined_launcher),
-                "--spec-file",
-                str(spec_path),
-                "--",
-                *argv,
-            ]
         if not hasattr(signal, "pthread_sigmask"):
             raise SupervisionError(
                 "pthread_sigmask is unavailable; TERM/INT/HUP cannot be "
                 "blocked across the spawn window, so an unrecorded child "
                 "could be left running (fail closed)"
             )
+        supervision_write: Optional[int] = None
+        if self._confinement_spec is not None:
+            pipe_flags = getattr(os, "O_CLOEXEC", 0)
+            try:
+                status_read, supervision_write = os.pipe2(pipe_flags)
+            except (AttributeError, OSError) as exc:
+                raise SupervisionError(
+                    f"cannot create the confined lifecycle pipe: {exc}; "
+                    "descendant escape reporting must fail closed"
+                ) from exc
+            self._confinement_status_fd = status_read
+            argv = [
+                sys.executable,
+                str(self._confined_launcher),
+                "--spec-file",
+                str(spec_path),
+                "--rule-fds",
+                ",".join(str(fd) for fd in self._confinement_rule_fds),
+                *(
+                    ["--target-only-fds", str(self._auth_fd)]
+                    if self._auth_fd >= 0 else []
+                ),
+                "--supervision-fd",
+                str(supervision_write),
+                "--",
+                *argv,
+            ]
         oldmask = signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATION_SIGNALS)
         try:
             try:
+                extra_fds: Tuple[int, ...] = (
+                    (supervision_write,) if supervision_write is not None else ()
+                )
+                auth_pass: Tuple[int, ...] = (
+                    (self._auth_fd,) if self._auth_fd >= 0 else ()
+                )
                 process = subprocess.Popen(
                     argv,
                     cwd=str(self.binding.workspace),
                     env=env,
                     start_new_session=True,
                     close_fds=True,
-                    pass_fds=(),
+                    pass_fds=(
+                        *self._confinement_rule_fds, self.prompt_fd,
+                        *auth_pass, *extra_fds,
+                    ),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     preexec_fn=_child_reset_spawn_mask,
                 )
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                if self._confinement_status_fd is not None:
+                    try:
+                        os.close(self._confinement_status_fd)
+                    except OSError:
+                        pass
+                    self._confinement_status_fd = None
                 raise LaunchError(f"cannot spawn the model process: {exc}") from exc
+            finally:
+                if supervision_write is not None:
+                    try:
+                        os.close(supervision_write)
+                    except OSError:
+                        pass
             self._child = process
+            # The child now owns its inherited anchor copies.  Close every
+            # parent descriptor immediately; the launcher closes the child
+            # copies after Landlock consumes them and before model exec.
+            for descriptor in self._confinement_rule_fds:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            self._confinement_rule_fds = ()
+            try:
+                os.close(self.prompt_fd)
+            except OSError:
+                pass
+            self.prompt_fd = None
+            # Authority has transferred to the child. The parent must not keep
+            # a second readable copy for the entire model lifetime: close and
+            # reset it immediately after successful Popen, before monitoring.
+            if self._auth_fd >= 0:
+                try:
+                    os.close(self._auth_fd)
+                except OSError:
+                    pass
+                self._auth_fd = -1
             # F4: pin the leader's starttime at spawn; every later group
             # signal re-verifies it so a reused PID is never signaled or
             # reaped.  The identity is recorded *before* the mask is
@@ -1791,6 +2106,15 @@ class LaunchSupervision:
             except OSError:
                 continue
         open_fds = set(streams)
+        # ``select.select`` is capped by FD_SETSIZE even when the process
+        # soft limit is much higher.  Exact per-inode confinement can retain
+        # enough descriptor anchors that the two output pipes are numbered
+        # above that cap.  Use the platform's scalable selector (epoll on the
+        # supported Linux hosts), so monitor correctness is independent of
+        # how many exact rule anchors precede the pipes.
+        selector = selectors.DefaultSelector()
+        for descriptor in open_fds:
+            selector.register(descriptor, selectors.EVENT_READ)
         last_activity = time.monotonic()
         reason: Optional[str] = None
         try:
@@ -1814,14 +2138,17 @@ class LaunchSupervision:
                     time.sleep(0.05)
                     continue
                 try:
-                    readable, _, _ = select.select(list(open_fds), [], [], 0.2)
+                    events = selector.select(0.2)
                 except InterruptedError:
-                    # A caught TERM/INT/HUP woke the select: re-check the
+                    # A caught TERM/INT/HUP woke the selector: re-check the
                     # pending-signal flag and the deadline immediately.
                     continue
-                except (OSError, ValueError):
-                    break
-                for descriptor in readable:
+                except (OSError, ValueError) as exc:
+                    raise SupervisionError(
+                        "model output selector failed before process exit"
+                    ) from exc
+                for key, _mask in events:
+                    descriptor = key.fd
                     try:
                         chunk = os.read(descriptor, 65536)
                     except (BlockingIOError, InterruptedError):
@@ -1830,6 +2157,10 @@ class LaunchSupervision:
                         chunk = b""
                     if not chunk:
                         open_fds.discard(descriptor)
+                        try:
+                            selector.unregister(descriptor)
+                        except (KeyError, OSError, ValueError):
+                            pass
                         try:
                             files[descriptor].close()
                         except OSError:
@@ -1840,6 +2171,7 @@ class LaunchSupervision:
                 if self._leader_exited(child) and not open_fds:
                     break
         finally:
+            selector.close()
             for descriptor in tuple(open_fds):
                 try:
                     files[descriptor].close()
@@ -1923,123 +2255,124 @@ class LaunchSupervision:
                 ) from exc
         return tuple(delivered)
 
-    # -- subreaper reaping and escape detection (F7) ------------------------------
+    # -- broker-proven escape cleanup (F7) -----------------------------------
+    # The outer process has no child-adoption ownership surface.  The helper
+    # below remains the identity-safe pidfd primitive used by focused failure
+    # tests and by any already-proven identity cleanup; it never discovers or
+    # classifies a PID.  Discovery, termination, and reaping happen inside the
+    # dedicated ptrace/subreaper broker.
 
-    def _owned_post_spawn_children(self) -> List[int]:
-        """PIDs parented to this subreaper that are *not* pre-existing children.
+    @staticmethod
+    def _kill_pinned_identity(pid: int, starttime: int) -> bool:
+        """SIGKILL one exact process through a revalidated pidfd.
 
-        The orphan/reap scope is the launch snapshot only (F6/F7): a child
-        that existed before the attempt — a previous lifecycle child or an
-        unrelated process spawned by the control plane — is explicitly
-        excluded, so its exit status belongs to its owner and is never
-        claimed here.
+        A ``/proc`` check followed by ``os.kill(pid, ...)`` has a PID-reuse
+        window.  ``pidfd_open`` first pins the kernel process object; the
+        starttime is then re-read and must still match before the signal is
+        sent through that pidfd.  If Python/kernel support for identity-safe
+        signaling is unavailable while the identity is live, cleanup fails
+        closed rather than falling back to a numeric signal.
         """
-        me = os.getpid()
-        owned: List[int] = []
-        for pid in _iter_pids():
-            if pid == me or pid in self._pre_existing_children:
-                continue
-            fields = _proc_stat_fields(pid)
-            if fields is None or len(fields) < 2:
-                continue
-            try:
-                if int(fields[1]) == me:
-                    owned.append(pid)
-            except ValueError:
-                continue
-        return owned
-
-    def _reap_orphans(self, leader: int) -> List[int]:
-        """Reap every re-parented (orphaned) descendant as the subreaper.
-
-        The reap is scoped to the launch snapshot (F6/F7): only children
-        spawned after the snapshot — the leader's reparented orphans — are
-        claimed, each by its own PID (never a blanket ``waitpid(-1)`` that
-        could reap a pre-existing child of the control plane).  The leader
-        is reaped separately by the caller.  An escaped orphan that died
-        during or after termination is therefore always reaped here, never
-        left as a zombie.
-        """
-        reaped: List[int] = []
-        while True:
-            claimed = False
-            for pid in self._owned_post_spawn_children():
-                if pid == leader:
-                    continue
-                try:
-                    got, _ = os.waitpid(pid, os.WNOHANG)
-                except (ChildProcessError, InterruptedError):
-                    continue
-                if got:
-                    reaped.append(got)
-                    claimed = True
-            if not claimed:
-                break
-        return reaped
-
-    def _live_reparented_children(self, leader: int) -> List[int]:
-        """Live non-zombie processes parented to this subreaper (escaped orphans).
-
-        A descendant that escaped the group (``setsid``/double-fork) and
-        whose parent chain died is reparented here; if it is still alive it
-        is an escaped descendant whose exact identity this supervisor owns,
-        and recovery must fail closed.
-        """
-        me = os.getpid()
-        found: List[int] = []
-        for pid in _iter_pids():
-            if pid == me or pid == leader:
-                continue
-            fields = _proc_stat_fields(pid)
-            if fields is None or len(fields) < 3 or fields[0] == "Z":
-                continue
-            try:
-                if int(fields[1]) == me:
-                    found.append(pid)
-            except ValueError:
-                continue
-        return found
-
-    def _detect_escaped(self, leader: int) -> Tuple[List[int], str]:
-        """Combine the Task-5 captured-scope detection with reparented survivors."""
-        escaped, reason = detect_escaped_descendants(
-            self.binding.workspace,
-            model_pid=leader,
-            captured=self._captured,
-            trusted_pids=tuple(self._pre_existing_children),
-        )
-        current = set(escaped)
-        reparented = [
-            pid for pid in self._live_reparented_children(leader)
-            if pid not in self._pre_existing_children
-        ]
-        current.update(reparented)
-        notes = []
-        if reason:
-            notes.append(reason)
-        if reparented:
-            notes.append(
-                f"pid {reparented} was reparented to the subreaper and survives"
+        if not _is_live_with_identity(pid, starttime):
+            return False
+        pidfd_open = getattr(os, "pidfd_open", None)
+        pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+        if not callable(pidfd_open) or not callable(pidfd_send_signal):
+            raise SupervisionError(
+                "identity-safe pidfd signaling is unavailable for live "
+                f"escaped descendant {pid}; refusing numeric os.kill"
             )
-        return sorted(current), "; ".join(notes)
+        try:
+            descriptor = pidfd_open(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            raise SupervisionError(
+                f"cannot pidfd-pin escaped descendant {pid}: {exc}"
+            ) from exc
+        try:
+            # The PID could have been recycled before pidfd_open.  The pidfd
+            # now pins whichever object was opened; authorize signaling only
+            # after /proc proves it is still the snapshotted identity.
+            if not _is_live_with_identity(pid, starttime):
+                return False
+            try:
+                pidfd_send_signal(descriptor, signal.SIGKILL, None, 0)
+            except ProcessLookupError:
+                return False
+            except OSError as exc:
+                raise SupervisionError(
+                    f"cannot pidfd-SIGKILL escaped descendant {pid}: {exc}"
+                ) from exc
+            return True
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
-    def _finalize(self, leader: int) -> None:
-        """Post-run reaping and fail-closed escaped-descendant detection."""
-        # Reap every dead reparented orphan first (F7): an escaped orphan that
-        # died during/after termination is always reaped, never a zombie.
-        self._reap_orphans(leader)
-        escaped, reason = self._detect_escaped(leader)
-        if escaped:
+    def _consume_confinement_status(self, *, allow_missing: bool) -> None:
+        """Consume the broker-only descendant lifecycle report exactly once.
+
+        The broker process has been reaped before this method runs, and the
+        target closed its copy before untrusted execution, so the read cannot
+        be held open by an escaped descendant.  A clean byte accepts the
+        tracer lifecycle; an escape byte means the broker already bounded-
+        killed and reaped a descendant. It fails natural completion closed,
+        while a supervisor-requested termination accepts that cleanup. A
+        malformed/failure report, or a missing report on natural completion,
+        is a supervision boundary failure.
+        """
+        descriptor = self._confinement_status_fd
+        self._confinement_status_fd = None
+        if descriptor is None:
+            if self._confinement_spec is not None and not allow_missing:
+                raise SupervisionError(
+                    "the confined executable broker produced no lifecycle channel"
+                )
+            return
+        try:
+            try:
+                report = os.read(descriptor, 2)
+            except OSError as exc:
+                raise SupervisionError(
+                    f"cannot read the confined lifecycle report: {exc}"
+                ) from exc
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if report == _CONFINEMENT_STATUS_CLEAN:
+            return
+        if report == _CONFINEMENT_STATUS_ESCAPED:
+            if allow_missing:
+                # The outer supervisor deliberately terminated the attempt;
+                # descendants still attached when the target receives that
+                # sequence are part of bounded cleanup, not a natural-exit
+                # escape.  The broker has already killed and reaped them.
+                return
             raise EscapedDescendantError(
-                f"escaped model descendants survive; recovery is blocked: "
-                f"{reason}"
+                "the atomic executable broker bounded-terminated and reaped "
+                "an escaped model descendant; recovery is blocked"
             )
-        # A reparented orphan that died while escape detection ran is reaped
-        # here so nothing is ever left as a zombie of the control plane.
-        self._reap_orphans(leader)
+        if report == b"" and allow_missing:
+            # The outer supervisor SIGKILLed the broker as part of its own
+            # bounded timeout sequence.  PTRACE_O_EXITKILL is the kernel
+            # fallback for every attached target/descendant in this path.
+            return
+        if report == _CONFINEMENT_STATUS_FAILED:
+            raise SupervisionError(
+                "the confined executable broker reported a lifecycle failure"
+            )
+        raise SupervisionError(
+            f"the confined executable broker returned malformed lifecycle "
+            f"status {report!r}"
+        )
 
     # -- the run -----------------------------------------------------------------
 
+    @_outer_launch_cleanup
     def run(
         self,
         authority: Optional["LaunchAuthority"] = None,
@@ -2072,6 +2405,24 @@ class LaunchSupervision:
             # no private or credential material survives the rejected launch
             # (Task 8 review, finding 6).
             if isinstance(authority, LaunchAuthority):
+                for descriptor in authority._confinement_rule_fds:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                authority._confinement_rule_fds = ()
+                if authority._prompt_fd >= 0:
+                    try:
+                        os.close(authority._prompt_fd)
+                    except OSError:
+                        pass
+                    authority._prompt_fd = -1
+                if authority._auth_fd >= 0:
+                    try:
+                        os.close(authority._auth_fd)
+                    except OSError:
+                        pass
+                    authority._auth_fd = -1
                 _remove_private_directories(
                     _authority_private_directories(authority)
                 )
@@ -2120,25 +2471,44 @@ class LaunchSupervision:
             )
         self.binding = binding
         self._staged_wrapper = Path(authority._wrapper)
+        self._guard_extension = Path(authority._guard_extension)
+        self._guard_digest = authority._guard_digest
         self._staged_digests = dict(authority._staged_digests)
         self._external_paths = tuple(authority._external_paths)
+        self._external_runtime_bindings = tuple(authority._external_runtime_bindings)
         self._exec_dir = Path(authority._exec_dir)
         self._confinement_spec = dict(authority._confinement_spec) \
             if authority._confinement_spec else None
         self._confinement_proof = authority._confinement_proof
         self._sanitized_home = authority._sanitized_home
         self._confined_launcher = authority._confined_launcher
-        # Task 8: the mint already created the prompt file and the session
-        # directory and carried their exact paths; ``run`` uses exactly those
-        # paths — the same paths the confinement specification's
-        # ``private_launch_rules`` bind — never re-deriving or re-creating
-        # them (fail closed if the authority carries none).
-        if authority._prompt_path is None or authority._session_dir is None:
+        if not authority._confinement_rule_fds:
             raise SupervisionError(
-                "the verified authority carries no per-launch prompt/session "
-                "paths; no model can be started (fail closed)"
+                "the verified authority carries no descriptor-anchored "
+                "confinement rules or was already consumed"
             )
-        self.prompt_path = Path(authority._prompt_path)
+        self._confinement_rule_fds = tuple(authority._confinement_rule_fds)
+        authority._confinement_rule_fds = ()
+        if type(authority._prompt_fd) is not int or authority._prompt_fd < 0:
+            raise SupervisionError(
+                "the verified authority carries no sealed prompt memfd or was already consumed"
+            )
+        self.prompt_fd = authority._prompt_fd
+        authority._prompt_fd = -1
+        if type(authority._auth_fd) is not int or authority._auth_fd < -1:
+            raise SupervisionError(
+                "the verified authority carries an invalid auth descriptor"
+            )
+        self._auth_fd = authority._auth_fd
+        authority._auth_fd = -1
+        self._usage_guard_digests = authority._usage_guard_digests
+        # The session path is proof-bound; the prompt is the already-consumed
+        # anonymous sealed descriptor and is never represented by a pathname.
+        if authority._session_dir is None:
+            raise SupervisionError(
+                "the verified authority carries no per-launch session path; "
+                "no model can be started (fail closed)"
+            )
         self.session_dir = Path(authority._session_dir)
         prompt = compose_prompt(
             binding,
@@ -2148,11 +2518,13 @@ class LaunchSupervision:
             plan=blobs["plan"],
             audit_objective=blobs.get("audit_objective"),
             task_excerpt=blobs.get("task_excerpt"),
+            findings=blobs.get("findings"),
         )
-        if _file_sha256(self.prompt_path) != hashlib.sha256(prompt).hexdigest():
+        self._prompt_digest = hashlib.sha256(prompt).hexdigest()
+        if _prompt_memfd_sha256(self.prompt_fd) != self._prompt_digest:
             raise SupervisionError(
-                "the authority's prompt file does not match the composed "
-                "prompt bytes; refusing a substituted prompt file (F5)"
+                "the authority's sealed prompt memfd does not match the "
+                "composed prompt bytes; refusing a substituted prompt (F5)"
             )
         # Task 11: every child/tool output channel is redacted through the
         # exact committed credential guard.  The redactor is verified and
@@ -2163,7 +2535,11 @@ class LaunchSupervision:
             self._redactor = output_redaction.redactor_for(
                 self.binding.workspace, self.binding.bound_commit
             )
-            self._guard_digest = self._redactor.digest
+            if self._redactor.digest != self._guard_digest:
+                raise output_redaction.OutputRedactionError(
+                    "the staged model guard digest differs from the exact "
+                    "committed control-plane redactor digest"
+                )
         except output_redaction.OutputRedactionError as exc:
             raise SupervisionError(
                 "child output redaction is unavailable because the "
@@ -2171,9 +2547,7 @@ class LaunchSupervision:
                 "start with an unredacted output channel (Task 11)"
             ) from exc
         try:
-            self.install_subreaper()
             self.install_signal_handlers()
-            self._pre_existing_children = self._snapshot_pre_existing_children()
             child = self.spawn()
             started = time.monotonic()
             try:
@@ -2212,7 +2586,18 @@ class LaunchSupervision:
                 returncode = child.returncode
                 if returncode is not None and returncode < 0:
                     signal_name = signal.Signals(-returncode).name
-                self._finalize(child.pid)
+                self._consume_confinement_status(
+                    allow_missing=(
+                        reason is not None
+                        or (returncode is not None and returncode < 0)
+                    )
+                )
+                if binding.provider.lower() == "openai-codex" and outcome == "completed":
+                    if self._sanitized_home is None:
+                        raise SupervisionError(
+                            "openai-codex launch has no private home for credential refresh"
+                        )
+                    _persist_private_pi2_auth(Path(self._sanitized_home))
                 elapsed = time.monotonic() - started
                 result = LaunchResult(
                     role=binding.role,
@@ -2247,12 +2632,12 @@ class LaunchSupervision:
         """F1: bounded terminate-and-reap for the post-spawn error paths.
 
         Runs when an exception/:class:`KeyboardInterrupt` escapes the
-        post-spawn body: the group is bounded-terminated (TERM → INT → HUP →
-        KILL), the leader is reaped, and the post-snapshot orphans are
-        reaped, so no path leaves a child running.  Escaped-descendant
-        detection still runs; a surviving escape is re-raised (chained to
-        the original error) so recovery fails closed.  Cleanup failures are
-        best-effort and never mask the original failure.
+        post-spawn body: the exact broker group is bounded-terminated (TERM →
+        INT → HUP → KILL), the broker is reaped, and its private lifecycle
+        report is consumed.  The dedicated broker either kills/reaps every
+        ptrace-pinned descendant itself or PTRACE_O_EXITKILL does so if the
+        outer supervisor must KILL the broker.  No outer direct-child scan or
+        baseline inference participates in cleanup.
         """
         child = self._child
         if child is None:
@@ -2274,12 +2659,11 @@ class LaunchSupervision:
         except BaseException:
             pass
         try:
-            self._reap_orphans(child.pid)
-        except BaseException:
-            pass
-        try:
-            self._finalize(child.pid)
-        except EscapedDescendantError:
+            self._consume_confinement_status(allow_missing=True)
+        except (EscapedDescendantError, SupervisionError):
+            # The dedicated broker lifecycle is authoritative.  A malformed
+            # failure report supersedes the triggering error rather than
+            # pretending cleanup completed.
             raise
         except BaseException:
             pass
@@ -2361,13 +2745,35 @@ class LaunchSupervision:
                 pass
 
     def _cleanup(self) -> None:
-        """Best-effort removal of the private prompt/session/staging/home dirs."""
+        """Close all inherited anchors/memfds and remove private directories."""
         self._close_streams()
+        for descriptor in self._confinement_rule_fds:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self._confinement_rule_fds = ()
+        if self._confinement_status_fd is not None:
+            try:
+                os.close(self._confinement_status_fd)
+            except OSError:
+                pass
+            self._confinement_status_fd = None
+        if self.prompt_fd is not None:
+            try:
+                os.close(self.prompt_fd)
+            except OSError:
+                pass
+            self.prompt_fd = None
+        if self._auth_fd >= 0:
+            try:
+                os.close(self._auth_fd)
+            except OSError:
+                pass
+            self._auth_fd = -1
         directories: List[Optional[Path]] = [
             self.session_dir, self._exec_dir, self._sanitized_home,
         ]
-        if self.prompt_path is not None:
-            directories.append(self.prompt_path.parent)
         _remove_private_directories(directories)
 
 
@@ -2460,6 +2866,9 @@ def _add_common_binding(parser: argparse.ArgumentParser) -> None:
         help="(optional, planner only) claimed findings-payload digest; "
         "verified against the re-derived payload bytes, never authoritative",
     )
+    # Quota policy is deliberately absent from this per-model interface.
+    # The campaign's exact-commit ordered pre-round registry owns it.
+
 
 def _read_blob_anchored(path_text: str, label: str, maximum: int) -> bytes:
     """Fd-anchored, no-follow, size-bounded read of one authoritative blob (F5).
@@ -2669,9 +3078,10 @@ def verify_bound_executable(
 # :class:`LaunchAuthority` token that only :func:`authorize_launch` can mint.
 # The mint re-derives every authoritative byte from the committed Git blobs
 # at the bound commit (F5), verifies the wrapper/backend against the F2
-# boundary, stages the exact committed wrapper/backend bytes into a private
-# mode-0700 directory as mode-0500 files (or revalidates an external trusted
-# executable's fully resolved path), and binds the token to the verified
+# boundary, stages exact committed wrapper/backend bytes into a private
+# mode-0700 directory as non-executable mode-0400 interpreter inputs (or
+# revalidates an external trusted executable's fully resolved path), and binds
+# the token to the verified
 # bytes.  A caller can therefore never construct a token from operator
 # claims — the mint is the only path that can produce one, and the CLI is
 # the sole ordinary production entry because only it re-derives the
@@ -2688,11 +3098,11 @@ class LaunchAuthority:
     authoritative byte has been verified against the committed Git blobs at
     the bound commit (F5) and the wrapper/backend have passed the F2
     boundary (committed bytes staged into a private mode-0700 directory as
-    mode-0500 files, or a revalidated immutable external executable).
-    ``binding`` is the *verified* binding (its backend already replaced by
-    the staged executable path), ``blobs`` maps each prompt component to its
-    exact verified bytes, ``wrapper`` is the exact wrapper path that will be
-    executed (staged or the original workspace path), ``staged_digests``
+    non-executable mode-0400 interpreter inputs, or a revalidated immutable
+    external executable). ``binding`` is the *verified* binding (its backend
+    already replaced by the staged script path), ``blobs`` maps each prompt
+    component to its exact verified bytes, ``wrapper`` is the exact staged
+    wrapper passed to the immutable interpreter, ``staged_digests``
     pins the staged files' SHA-256 digests for the exec-time re-check, and
     ``external_paths`` names the external executables that are revalidated
     immediately before exec.
@@ -2706,15 +3116,21 @@ class LaunchAuthority:
         "_binding",
         "_blobs",
         "_wrapper",
+        "_guard_extension",
+        "_guard_digest",
         "_staged_digests",
         "_external_paths",
+        "_external_runtime_bindings",
         "_exec_dir",
-        "_prompt_path",
+        "_prompt_fd",
+        "_auth_fd",
         "_session_dir",
         "_confinement_spec",
         "_confinement_proof",
         "_sanitized_home",
         "_confined_launcher",
+        "_confinement_rule_fds",
+        "_usage_guard_digests",
         "_mint",
     )
 
@@ -2724,15 +3140,21 @@ class LaunchAuthority:
         blobs: Mapping[str, bytes],
         *,
         wrapper: Path,
+        guard_extension: Path,
+        guard_digest: str,
         staged_digests: Mapping[str, str],
         external_paths: Sequence[str],
+        external_runtime_bindings: Sequence["_ExternalRuntimeBinding"],
         exec_dir: Path,
-        prompt_path: Path,
+        prompt_fd: int,
+        auth_fd: int = -1,
         session_dir: Path,
         confinement_spec: Optional[Mapping[str, object]] = None,
         confinement_proof: Optional[object] = None,
         sanitized_home: Optional[Path] = None,
         confined_launcher: Optional[Path] = None,
+        confinement_rule_fds: Sequence[int] = (),
+        usage_guard_digests: Optional[Sequence[str]] = None,
         _mint: object,
     ) -> None:
         if _mint is not _MINT_SECRET:
@@ -2744,28 +3166,70 @@ class LaunchAuthority:
         self._binding = binding
         self._blobs = dict(blobs)
         self._wrapper = Path(wrapper)
+        self._guard_extension = Path(guard_extension)
+        if not SHA256_RE.fullmatch(guard_digest):
+            raise LaunchError("the staged credential-guard digest is invalid")
+        self._guard_digest = guard_digest
         self._staged_digests = dict(staged_digests)
         self._external_paths = tuple(external_paths)
+        self._external_runtime_bindings = tuple(external_runtime_bindings)
+        if tuple(item.path for item in self._external_runtime_bindings) != self._external_paths:
+            raise LaunchError("external runtime path and identity bindings differ")
         self._exec_dir = Path(exec_dir)
-        # Task 8: the exact per-launch private paths (the staging directory,
-        # the prompt file, and the session directory) created by the mint are
-        # carried here, so ``run`` applies and cleans up exactly the paths the
-        # confinement specification's ``private_launch_rules`` bind.
-        self._prompt_path = Path(prompt_path)
+        # The composed prompt is carried only by this sealed anonymous memfd;
+        # it has no pathname and is inherited by the wrapper exactly once.
+        if type(prompt_fd) is not int or prompt_fd < 0:
+            raise LaunchError("the launch authority prompt memfd is invalid")
+        self._prompt_fd = prompt_fd
+        if type(auth_fd) is not int or auth_fd < -1:
+            raise LaunchError("the launch authority auth descriptor is invalid")
+        self._auth_fd = auth_fd
         self._session_dir = Path(session_dir)
         # Task 8 confinement binding: the exact ``factory-confinement/v1``
         # specification the confined child applies, the real (never synthetic)
         # confinement proof minted against it, the fresh sanitized home the
         # proof/spec bind, and the staged confine-launcher executable.  A
-        # token minted without real confinement carries ``None`` for every
-        # field (the hermetic synthetic-proof seam).
+        # descriptor anchors carried to the child.  No token can be minted
+        # without this real confinement authority.
         self._confinement_spec = (
             dict(confinement_spec) if confinement_spec is not None else None
         )
         self._confinement_proof = confinement_proof
         self._sanitized_home = Path(sanitized_home) if sanitized_home else None
         self._confined_launcher = Path(confined_launcher) if confined_launcher else None
+        self._confinement_rule_fds = tuple(int(fd) for fd in confinement_rule_fds)
+        self._usage_guard_digests = (
+            tuple(usage_guard_digests) if usage_guard_digests is not None else None
+        )
         self._mint = _mint
+
+
+def _prompt_memfd_sha256(descriptor: int) -> str:
+    """Revalidate a sealed prompt descriptor and hash it without a pathname."""
+    required = (
+        getattr(fcntl, "F_SEAL_SEAL", 0)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0)
+        | getattr(fcntl, "F_SEAL_GROW", 0)
+        | getattr(fcntl, "F_SEAL_WRITE", 0)
+    )
+    try:
+        info = os.fstat(descriptor)
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+    except OSError as exc:
+        raise LaunchError(f"cannot inspect the sealed prompt memfd: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_size > PROMPT_MAX_BYTES:
+        raise LaunchError("the sealed prompt memfd is not a bounded regular file")
+    if required == 0 or seals & required != required:
+        raise LaunchError("the prompt memfd lacks mandatory immutable seals")
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < info.st_size:
+        chunk = os.pread(descriptor, min(BLOB_READ_CHUNK, info.st_size - offset), offset)
+        if not chunk:
+            raise LaunchError("the sealed prompt memfd was truncated")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
 
 
 def _file_sha256(path: Path) -> str:
@@ -2788,13 +3252,13 @@ def _file_sha256(path: Path) -> str:
 
 
 def _stage_bytes(directory: Path, name: str, data: bytes) -> Path:
-    """Publish the exact committed bytes as a private mode-0500 single-link file.
+    """Publish exact committed bytes as a private mode-0400 single-link file.
 
-    The file is created with ``O_EXCL``/``O_NOFOLLOW`` (a raced pathname is
-    never reused), then chmod'ed to mode 0500 (owner read+execute, no
-    write), so the executed bytes are the verified committed bytes and a
-    later swap of any working-tree pathname cannot change what executes.
-    The file's SHA-256 is re-checked immediately before exec.
+    The file is created with ``O_EXCL``/``O_NOFOLLOW`` and is never executable.
+    Staged Python/shell modules cross the kernel boundary only as readable
+    arguments to an approved immutable interpreter, so a copied ELF or a
+    caller-owned pathname can never become a broker-authorized exec target.
+    The file's SHA-256 is re-checked immediately before interpreter launch.
     """
     path = directory / name
     flags = (
@@ -2805,7 +3269,7 @@ def _stage_bytes(directory: Path, name: str, data: bytes) -> Path:
     try:
         descriptor = os.open(str(path), flags, 0o700)
     except OSError as exc:
-        raise LaunchError(f"cannot create the staged executable {path}: {exc}") from exc
+        raise LaunchError(f"cannot create the staged interpreter input {path}: {exc}") from exc
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
@@ -2816,128 +3280,647 @@ def _stage_bytes(directory: Path, name: str, data: bytes) -> Path:
             os.unlink(path)
         except OSError:
             pass
-        raise LaunchError(f"cannot finalize the staged executable {path}: {exc}") from exc
+        raise LaunchError(f"cannot finalize the staged interpreter input {path}: {exc}") from exc
     info = path.stat()
     if stat.S_ISLNK(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-        raise LaunchError(f"the staged executable {path} has unsafe ownership/link state")
+        raise LaunchError(f"the staged interpreter input {path} has unsafe ownership/link state")
     if info.st_mode & 0o222:
-        raise LaunchError(f"the staged executable {path} is writable")
+        raise LaunchError(f"the staged interpreter input {path} is writable")
     return path
 
 
 def _exec_staging_dir() -> Path:
-    """Fresh private mode-0700 directory for one attempt's staged executables."""
+    """Fresh private mode-0700 directory for staged interpreter inputs."""
     try:
         directory = Path(tempfile.mkdtemp(prefix=EXEC_STAGING_PREFIX, dir="/tmp"))
     except OSError as exc:
         raise LaunchError(
-            f"cannot create the executable staging directory: {exc}"
+            f"cannot create the private staging directory: {exc}"
         ) from exc
     os.chmod(directory, STAGED_DIR_MODE)
     return directory
 
 
+_NIX_LITERAL_RE = re.compile(rb"/nix/store/[A-Za-z0-9._+/@=-]+")
+
+
+@dataclass(frozen=True)
+class _ExternalRuntimeBinding:
+    """Exact immutable external runtime identity retained to exec."""
+
+    path: str
+    sha256: str
+    device: int
+    inode: int
+    executable: bool
+
+
+def _bind_external_runtime(path: str, *, executable: bool) -> _ExternalRuntimeBinding:
+    """Bind canonical path, immutable chain, bytes, device, and inode."""
+    canonical = os.path.realpath(path)
+    if not canonical or canonical != path:
+        raise InvocationError(
+            f"external runtime path is not canonical: {path!r} -> {canonical!r}"
+        )
+    try:
+        if executable:
+            require_trusted_executable(canonical)
+        else:
+            require_trusted_regular_file(canonical)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(canonical, flags)
+        try:
+            before = os.fstat(descriptor)
+            digest = hashlib.sha256()
+            offset = 0
+            while True:
+                chunk = os.pread(descriptor, 65536, offset)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                offset += len(chunk)
+            after = os.fstat(descriptor)
+            named = os.lstat(canonical)
+        finally:
+            os.close(descriptor)
+    except (OSError, GitBoundaryError) as exc:
+        raise InvocationError(
+            f"cannot bind immutable external runtime {canonical}: {exc}"
+        ) from exc
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise InvocationError(
+            f"immutable external runtime changed while binding: {canonical}"
+        )
+    if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
+        raise InvocationError(
+            f"immutable external runtime pathname changed while binding: {canonical}"
+        )
+    return _ExternalRuntimeBinding(
+        canonical, digest.hexdigest(), before.st_dev, before.st_ino, executable
+    )
+
+
+def _revalidate_external_runtime(binding: _ExternalRuntimeBinding) -> None:
+    """Re-derive a retained external identity immediately at a trust edge."""
+    current = _bind_external_runtime(binding.path, executable=binding.executable)
+    if current != binding:
+        raise InvocationError(
+            f"immutable external runtime identity changed: {binding.path}"
+        )
+
+
+def _revalidate_external_runtimes(
+    bindings: Sequence[_ExternalRuntimeBinding],
+) -> None:
+    for binding in bindings:
+        _revalidate_external_runtime(binding)
+
+
+def _resolve_pi2_runtime(wrapper: str) -> Tuple[_ExternalRuntimeBinding, _ExternalRuntimeBinding]:
+    """Resolve immutable Node/CLI files named by the exact Pi2 wrapper chain."""
+    wrapper = os.path.realpath(wrapper)
+    if Path(wrapper).name != "pi2":
+        raise InvocationError("openai-codex requires the trusted pi2 executable")
+    pending = [wrapper]
+    seen: set[str] = set()
+    cli_candidates: set[str] = set()
+    while pending:
+        path = pending.pop(0)
+        if path in seen:
+            continue
+        if len(seen) >= 64:
+            raise InvocationError("pi2 immutable wrapper chain exceeds its bound")
+        try:
+            require_trusted_executable(path)
+            data = Path(path).read_bytes()
+        except (OSError, GitBoundaryError) as exc:
+            raise InvocationError(f"cannot bind the immutable pi2 runtime: {exc}") from exc
+        seen.add(path)
+        if len(data) > (1 << 20) or b"\x00" in data[:4096]:
+            continue
+        for raw in _NIX_LITERAL_RE.findall(data):
+            candidate = raw.decode("utf-8", "strict").rstrip("),;:")
+            if candidate.endswith("/dist/cli.js") and os.path.isfile(candidate):
+                cli_candidates.add(candidate)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                resolved = os.path.realpath(candidate)
+                try:
+                    first = Path(resolved).read_bytes()[:2]
+                except OSError:
+                    continue
+                if first == b"#!" and resolved not in seen and resolved not in pending:
+                    pending.append(resolved)
+    node_link = Path.home() / ".pi" / "agent2" / "bin" / "node"
+    node = os.path.realpath(str(node_link))
+    if len(cli_candidates) != 1:
+        raise InvocationError(
+            f"pi2 wrapper chain must identify exactly one Pi CLI, found {len(cli_candidates)}"
+        )
+    # CLI data is as security-sensitive as Node: the adapter invokes this exact
+    # module directly, so bind its canonical immutable chain and byte/inode
+    # identity even though it has no execute bit.
+    cli = os.path.realpath(next(iter(cli_candidates)))
+    if not cli.startswith("/nix/store/"):
+        raise InvocationError("the Pi CLI module is not canonical Nix-store data")
+    node_binding = _bind_external_runtime(node, executable=True)
+    cli_binding = _bind_external_runtime(cli, executable=False)
+    return node_binding, cli_binding
+
+
+def _prepare_private_pi2_home(sanitized_home: Path) -> int:
+    """Prepare the private Pi2 agent directory and return the sealed auth fd.
+
+    The operator's ``auth.json`` credential is **never** written to any
+    model/tool-readable path before confinement (B1 security review). Only the
+    non-secret catalog and empty settings are initially materialised; the
+    credential bytes travel in one anonymous writable memfd. After Landlock,
+    the exact adapter creates Pi's private mode-0600 auth file. The guard
+    extension identity-checks and detaches that file around each tool, closes
+    every descriptor alias, then restores it from extension-owned memory for
+    the next authenticated turn. Landlock also denies ``/proc``.
+    """
+    source = Path.home() / ".pi" / "agent2"
+    target = sanitized_home / ".pi" / "agent2"
+    target.mkdir(mode=0o700, parents=True, exist_ok=False)
+    for name, maximum in (("models.json", 4 << 20),):
+        src = source / name
+        info = os.lstat(src)
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or info.st_mode & 0o077
+            or info.st_size > maximum
+        ):
+            raise InvocationError(f"operator Pi2 {name} has unsafe ownership or mode")
+        source_fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        dest = target / name
+        dest_fd = os.open(
+            dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+        )
+        try:
+            while True:
+                chunk = os.read(source_fd, 65536)
+                if not chunk:
+                    break
+                os.write(dest_fd, chunk)
+            os.fsync(dest_fd)
+        finally:
+            os.close(source_fd)
+            os.close(dest_fd)
+    settings = target / "settings.json"
+    fd = os.open(settings, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, b"{}\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # The credential crosses the pre-confinement boundary only in an anonymous
+    # writable memfd. The exact adapter/extension own its post-confinement
+    # detach/restore cycle; tool subprocesses do not inherit it and Landlock
+    # denies /proc.
+    auth_source = source / "auth.json"
+    info = os.lstat(auth_source)
+    if (
+        not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+        or info.st_nlink != 1 or info.st_mode & 0o077
+        or info.st_size > (1 << 20)
+    ):
+        raise InvocationError(
+            f"operator Pi2 auth.json has unsafe ownership or mode"
+        )
+    if not hasattr(os, "memfd_create"):
+        raise InvocationError(
+            "openai-codex requires memfd credential transport, which is "
+            "unavailable on this host (fail closed)"
+        )
+    auth_fd = -1
+    try:
+        auth_fd = os.memfd_create("factory-pi2-auth", 0)
+        source_fd = os.open(
+            auth_source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            while True:
+                chunk = os.read(source_fd, 65536)
+                if not chunk:
+                    break
+                os.write(auth_fd, chunk)
+        finally:
+            os.close(source_fd)
+        os.lseek(auth_fd, 0, os.SEEK_SET)
+        after = os.fstat(auth_fd)
+        if not stat.S_ISREG(after.st_mode) or after.st_size != info.st_size:
+            raise InvocationError(
+                "operator Pi2 auth.json memfd transport failed verification"
+            )
+        return auth_fd
+    except BaseException:
+        if auth_fd >= 0:
+            try:
+                os.close(auth_fd)
+            except OSError:
+                pass
+        raise
+
+
+def _persist_private_pi2_auth(
+    sanitized_home: Path, *, operator_home: Optional[Path] = None
+) -> bool:
+    """Atomically persist a Pi2 OAuth refresh from one trusted role process.
+
+    Fresh roles must not reuse model context, but rotating OAuth refresh tokens
+    are provider state rather than model memory. Pi writes a refreshed token to
+    the launch-private ``auth.json``; after the child is fully reaped, this
+    trusted parent validates that file and atomically replaces the operator's
+    existing mode-0600 store. No model/tool path can select either endpoint.
+    """
+    source = Path(sanitized_home) / ".pi" / "agent2" / "auth.json"
+    target_dir = (operator_home or Path.home()) / ".pi" / "agent2"
+    target = target_dir / "auth.json"
+    try:
+        source_info = os.lstat(source)
+        target_dir_info = os.lstat(target_dir)
+        target_info = os.lstat(target)
+    except OSError as exc:
+        raise SupervisionError(f"Pi2 credential refresh path is unavailable: {exc}") from exc
+    uid = os.getuid()
+    if (
+        not stat.S_ISREG(source_info.st_mode) or stat.S_ISLNK(source_info.st_mode)
+        or source_info.st_uid != uid or source_info.st_nlink != 1
+        or stat.S_IMODE(source_info.st_mode) != 0o600
+        or source_info.st_size <= 0 or source_info.st_size > (1 << 20)
+        or not stat.S_ISDIR(target_dir_info.st_mode)
+        or stat.S_ISLNK(target_dir_info.st_mode) or target_dir_info.st_uid != uid
+        or target_dir_info.st_mode & 0o022
+        or not stat.S_ISREG(target_info.st_mode) or stat.S_ISLNK(target_info.st_mode)
+        or target_info.st_uid != uid or target_info.st_nlink != 1
+        or stat.S_IMODE(target_info.st_mode) != 0o600
+        or target_info.st_size <= 0 or target_info.st_size > (1 << 20)
+    ):
+        raise SupervisionError("Pi2 credential refresh path has unsafe identity or mode")
+    def read_bound_auth(path: Path, expected: os.stat_result, label: str) -> bytearray:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or opened.st_uid != uid or stat.S_IMODE(opened.st_mode) != 0o600
+            ):
+                raise SupervisionError(f"Pi2 {label} auth identity changed before refresh")
+            payload = bytearray()
+            while len(payload) <= (1 << 20):
+                chunk = os.read(
+                    descriptor, min(65536, (1 << 20) + 1 - len(payload))
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if not payload or len(payload) > (1 << 20):
+                raise SupervisionError(
+                    f"Pi2 {label} auth bytes are empty or oversized"
+                )
+            return payload
+        finally:
+            os.close(descriptor)
+
+    data = read_bound_auth(source, source_info, "private")
+    try:
+        original_data = read_bound_auth(target, target_info, "operator")
+    except BaseException:
+        data[:] = b"\x00" * len(data)
+        raise
+    try:
+        try:
+            parsed = json.loads(data)
+            original = json.loads(original_data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SupervisionError("Pi2 auth refresh is malformed JSON") from exc
+        codex = parsed.get("openai-codex") if isinstance(parsed, dict) else None
+        original_codex = (
+            original.get("openai-codex") if isinstance(original, dict) else None
+        )
+        if (
+            not isinstance(codex, dict)
+            or not isinstance(original_codex, dict)
+            or codex.get("type") != "oauth"
+            or original_codex.get("type") != "oauth"
+        ):
+            raise SupervisionError(
+                "Pi2 auth refresh lacks the original openai-codex OAuth binding"
+            )
+        access = codex.get("access")
+        refresh = codex.get("refresh")
+        account = codex.get("accountId")
+        expires = codex.get("expires")
+        original_refresh = original_codex.get("refresh")
+        original_account = original_codex.get("accountId")
+        original_access = original_codex.get("access")
+        original_expires = original_codex.get("expires")
+        if (
+            not isinstance(access, str) or not (16 <= len(access) <= 16_384)
+            or not isinstance(refresh, str) or not (16 <= len(refresh) <= 16_384)
+            or not isinstance(original_refresh, str)
+            or not (16 <= len(original_refresh) <= 16_384)
+            or not isinstance(account, str) or not account or len(account) > 1024
+            or account != original_account
+            or isinstance(expires, bool) or not isinstance(expires, (int, float))
+            or not math.isfinite(float(expires))
+            or float(expires) <= time.time() * 1000.0 + 300_000.0
+        ):
+            raise SupervisionError(
+                "Pi2 auth refresh has invalid access/refresh/account/expiry binding"
+            )
+        # The provider may rotate its refresh token, but an arbitrary new
+        # refresh string is not accepted by shape alone. It must form one
+        # coherent transition from the exact operator credential: same account
+        # and unrelated providers, a new access token, and a strictly later
+        # finite expiry. An unchanged refresh remains a legitimate access-token
+        # refresh and is accepted.
+        if refresh != original_refresh and (
+            access == original_access
+            or isinstance(original_expires, bool)
+            or not isinstance(original_expires, (int, float))
+            or not math.isfinite(float(original_expires))
+            or float(expires) <= float(original_expires)
+        ):
+            raise SupervisionError(
+                "Pi2 rotating refresh token is not bound to a coherent provider transition"
+            )
+        if set(parsed) != set(original) or any(
+            parsed[key] != original[key]
+            for key in original
+            if key != "openai-codex"
+        ):
+            raise SupervisionError(
+                "Pi2 auth refresh changed an unrelated operator credential binding"
+            )
+    except BaseException:
+        data[:] = b"\x00" * len(data)
+        raise
+    finally:
+        original_data[:] = b"\x00" * len(original_data)
+    directory_fd = os.open(
+        target_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    temp_path = None
+    temp_fd = -1
+    try:
+        anchored = os.fstat(directory_fd)
+        if (anchored.st_dev, anchored.st_ino) != (
+            target_dir_info.st_dev, target_dir_info.st_ino
+        ):
+            raise SupervisionError("Pi2 operator auth directory identity changed")
+        temp_fd, temp_name = tempfile.mkstemp(prefix=".auth-refresh-", dir=target_dir)
+        temp_path = Path(temp_name)
+        os.fchmod(temp_fd, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(temp_fd, view)
+            if written <= 0:
+                raise OSError("short Pi2 auth refresh write")
+            view = view[written:]
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        before_replace = os.lstat(target)
+        if (before_replace.st_dev, before_replace.st_ino) != (
+            target_info.st_dev, target_info.st_ino
+        ):
+            raise SupervisionError("Pi2 operator auth identity changed before replace")
+        os.replace(temp_path, target)
+        temp_path = None
+        os.fsync(directory_fd)
+        return True
+    except OSError as exc:
+        raise SupervisionError(f"cannot persist Pi2 credential refresh: {exc}") from exc
+    finally:
+        data[:] = b"\x00" * len(data)
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        os.close(directory_fd)
+
+
 def _stage_launch_executables(
     binding: "InvocationBinding",
-) -> Tuple[Path, Path, Dict[str, str], List[str], Path]:
-    """F2/TOCTOU: stage the exact committed wrapper/backend bytes or revalidate external.
+) -> Tuple[
+    Path, Path, Path, str, Dict[str, str], List[str],
+    List[_ExternalRuntimeBinding], Path, bool,
+]:
+    """Stage every committed byte that will execute in the model process.
 
-    Returns ``(wrapper, backend, staged_digests, external_paths, exec_dir)``:
-
-    * ``wrapper`` — the exact wrapper path that will be executed (always the
-      committed workspace ``scripts/pi2-secure-exec.py`` staged into the
-      private directory; the wrapper is never external);
-    * ``backend`` — the staged committed backend, or a fully revalidated
-      external trusted executable (its resolved path, including the
-      containing directories of every symlink target, is validated by the
-      immutable-chain authority);
-    * ``staged_digests`` — ``{path: sha256}`` for every staged file, so the
-      exec-time re-check can fail closed if a staged byte was swapped;
-    * ``external_paths`` — external executables revalidated immediately
-      before exec (closing the verify-to-exec window for paths whose bytes
-      cannot be staged);
-    * ``exec_dir`` — the private mode-0700 staging directory (removed by the
-      supervisor's cleanup after the attempt).
+    The wrapper, Pi guard extension, credential guard, Git shim, and an
+    in-workspace backend are copied from exact bound-commit blobs into one
+    private mode-0700 directory.  ``--extension`` points only at the staged
+    extension, whose relative guard/shim paths therefore resolve to the same
+    digest-bound staging directory.  Every staged digest is rechecked at the
+    immediate exec boundary.
     """
     workspace = Path(binding.workspace).absolute()
     bound_commit = binding.bound_commit
     staged_digests: Dict[str, str] = {}
     external_paths: List[str] = []
+    external_runtime_bindings: List[_ExternalRuntimeBinding] = []
     exec_dir = _exec_staging_dir()
 
-    def stage_wrapper() -> Path:
-        path = _stage_bytes(exec_dir, STAGED_WRAPPER_NAME, wrapper_bytes)
-        staged_digests[str(path)] = hashlib.sha256(wrapper_bytes).hexdigest()
-        return path
-
-    # The secure wrapper is always the committed workspace blob (F2): read
-    # and verify the working-tree file against the committed blob through
-    # the fd-anchored no-follow boundary, then stage its exact bytes.
-    wrapper_source = secure_wrapper_path(workspace)
-    wrapper_bytes = _read_committed_blob(
-        str(wrapper_source), workspace, bound_commit,
-        "secure wrapper", PROMPT_INPUT_MAX,
-    )
-
-    # The model backend is either an in-workspace committed blob (staged
-    # from its exact committed bytes) or an external trusted executable
-    # (revalidated through the immutable-chain authority, including the
-    # containing directories of every symlink target).  A mutable symlink
-    # (whose resolved target or containing directory the caller can change)
-    # fails closed here: the resolved path must be a trusted immutable
-    # executable or a committed in-workspace regular file.
-    backend_path = Path(binding.backend).absolute()
-    backend_is_symlink = os.path.islink(str(backend_path))
-    if backend_is_symlink:
-        resolved = os.path.realpath(str(backend_path))
-        try:
-            Path(resolved).relative_to(workspace)
-        except ValueError:
-            # A workspace symlink whose resolved target is outside the
-            # workspace is external: the full resolved path — including the
-            # target's containing directories — must be a trusted immutable
-            # executable.
-            try:
-                require_trusted_executable(resolved)
-            except GitBoundaryError as exc:
-                raise InvocationError(
-                    f"model backend {backend_path} is a symlink whose resolved "
-                    f"target {resolved} is not a trusted immutable executable: "
-                    f"{exc} (F2)"
-                ) from exc
-            external_paths.append(resolved)
-            return (stage_wrapper(), Path(resolved), staged_digests,
-                    external_paths, exec_dir)
-        # A workspace symlink resolving back into the workspace: the staged
-        # bytes are the committed blob of the *resolved* regular file.
-        backend_bytes = _read_committed_blob(
-            resolved, workspace, bound_commit, "model backend", PROMPT_INPUT_MAX
+    def stage_committed(relpath: str, name: str, label: str,
+                        maximum: int = PROMPT_INPUT_MAX) -> Tuple[Path, bytes]:
+        source = workspace / relpath
+        data = _read_committed_blob(
+            str(source), workspace, bound_commit, label, maximum
         )
-    else:
-        try:
-            backend_path.relative_to(workspace)
-        except ValueError:
-            # External trusted backend: revalidate the fully resolved path
-            # now (immediately before exec the same check runs again).
+        path = _stage_bytes(exec_dir, name, data)
+        staged_digests[str(path)] = hashlib.sha256(data).hexdigest()
+        return path, data
+
+    try:
+        wrapper, _ = stage_committed(
+            SECURE_WRAPPER, STAGED_WRAPPER_NAME, "secure wrapper"
+        )
+        extension, _ = stage_committed(
+            PI_FACTORY_GUARD_EXTENSION,
+            STAGED_GUARD_EXTENSION_NAME,
+            "model-side Pi guard extension",
+        )
+        _guard_path, guard_bytes = stage_committed(
+            CREDENTIAL_GUARD,
+            STAGED_CREDENTIAL_GUARD_NAME,
+            "model-side credential guard",
+            output_redaction.MAX_GUARD_SOURCE_BYTES,
+        )
+        stage_committed(
+            PI_GIT_SHIM, STAGED_GIT_SHIM_NAME, "model-side Git shim"
+        )
+        guard_digest = hashlib.sha256(guard_bytes).hexdigest()
+
+        def bind_external_backend(resolved: str) -> Path:
+            resolved = os.path.realpath(resolved)
+            wrapper_binding = _bind_external_runtime(resolved, executable=True)
+            external_paths.append(wrapper_binding.path)
+            external_runtime_bindings.append(wrapper_binding)
+            if binding.provider.lower() != "openai-codex":
+                return Path(resolved)
+            node_binding, cli_binding = _resolve_pi2_runtime(resolved)
+            adapter_source = _read_committed_blob(
+                str(workspace / PI2_BACKEND_ADAPTER), workspace, bound_commit,
+                "Pi2 factory adapter", PROMPT_INPUT_MAX,
+            )
+            if (
+                adapter_source.count(b"@@FACTORY_PI2_NODE@@") != 1
+                or adapter_source.count(b"@@FACTORY_PI2_CLI@@") != 1
+            ):
+                raise InvocationError("the committed Pi2 adapter markers are ambiguous")
+            adapter_source = adapter_source.replace(
+                b"@@FACTORY_PI2_NODE@@", node_binding.path.encode("utf-8")
+            ).replace(b"@@FACTORY_PI2_CLI@@", cli_binding.path.encode("utf-8"))
+            staged = _stage_bytes(exec_dir, STAGED_BACKEND_NAME, adapter_source)
+            staged_digests[str(staged)] = hashlib.sha256(adapter_source).hexdigest()
+            for runtime in (node_binding, cli_binding):
+                external_paths.append(runtime.path)
+                external_runtime_bindings.append(runtime)
+            return staged
+
+        backend_path = Path(binding.backend).absolute()
+        backend_is_symlink = os.path.islink(str(backend_path))
+        if backend_is_symlink:
             resolved = os.path.realpath(str(backend_path))
             try:
-                require_trusted_executable(resolved)
-            except GitBoundaryError as exc:
-                raise InvocationError(
-                    f"model backend {backend_path} is neither a committed "
-                    f"workspace blob nor an external trusted executable: "
-                    f"{exc} (F2)"
-                ) from exc
-            external_paths.append(resolved)
-            return (stage_wrapper(), Path(resolved), staged_digests,
-                    external_paths, exec_dir)
-        backend_bytes = _read_committed_blob(
-            str(backend_path), workspace, bound_commit,
-            "model backend", PROMPT_INPUT_MAX,
+                Path(resolved).relative_to(workspace)
+            except ValueError:
+                try:
+                    require_trusted_executable(resolved)
+                except GitBoundaryError as exc:
+                    raise InvocationError(
+                        f"model backend {backend_path} is a symlink whose resolved "
+                        f"target {resolved} is not a trusted immutable executable: "
+                        f"{exc} (F2)"
+                    ) from exc
+                trusted_backend = bind_external_backend(resolved)
+                return (wrapper, trusted_backend, extension, guard_digest,
+                        staged_digests, external_paths, external_runtime_bindings,
+                        exec_dir, binding.provider.lower() == "openai-codex")
+            backend_bytes = _read_committed_blob(
+                resolved, workspace, bound_commit,
+                "model backend", PROMPT_INPUT_MAX,
+            )
+        else:
+            try:
+                backend_path.relative_to(workspace)
+            except ValueError:
+                resolved = os.path.realpath(str(backend_path))
+                try:
+                    require_trusted_executable(resolved)
+                except GitBoundaryError as exc:
+                    raise InvocationError(
+                        f"model backend {backend_path} is neither a committed "
+                        f"workspace blob nor an external trusted executable: "
+                        f"{exc} (F2)"
+                    ) from exc
+                trusted_backend = bind_external_backend(resolved)
+                return (wrapper, trusted_backend, extension, guard_digest,
+                        staged_digests, external_paths, external_runtime_bindings,
+                        exec_dir, binding.provider.lower() == "openai-codex")
+            backend_bytes = _read_committed_blob(
+                str(backend_path), workspace, bound_commit,
+                "model backend", PROMPT_INPUT_MAX,
+            )
+        first_line = backend_bytes.splitlines()[0] if backend_bytes else b""
+        if backend_bytes.startswith(b"\x7fELF"):
+            raise InvocationError(
+                "a copied workspace ELF can never become a staged executable; "
+                "use a trusted immutable external backend"
+            )
+        if not first_line.startswith(b"#!") or b"python" not in first_line.lower():
+            raise InvocationError(
+                "a staged workspace backend must be a Python script consumed "
+                "by the trusted immutable interpreter"
+            )
+        staged_backend = _stage_bytes(
+            exec_dir, STAGED_BACKEND_NAME, backend_bytes
         )
-    staged_backend = _stage_bytes(exec_dir, STAGED_BACKEND_NAME, backend_bytes)
-    staged_digests[str(staged_backend)] = hashlib.sha256(backend_bytes).hexdigest()
-    return (stage_wrapper(), staged_backend, staged_digests, external_paths, exec_dir)
+        staged_digests[str(staged_backend)] = hashlib.sha256(
+            backend_bytes
+        ).hexdigest()
+        return (wrapper, staged_backend, extension, guard_digest,
+                staged_digests, external_paths, external_runtime_bindings,
+                exec_dir, False)
+    except BaseException:
+        shutil.rmtree(exec_dir, ignore_errors=True)
+        raise
+
+
+class UsageConfigError(Exception):
+    """Inert confinement-adapter configuration error (no quota API)."""
+
+
+class _UsageConfinementAdapter:
+    """Only the non-credential path contract needed to mint a proof."""
+
+    DEFAULT_SETTINGS_URL = CANONICAL_OLLAMA_SETTINGS_URL
+
+    @staticmethod
+    def _default_env_file() -> str:
+        override = os.environ.get("OLLAMA_USAGE_ENV_FILE")
+        if override:
+            return override
+        base = Path(os.environ["XDG_CONFIG_HOME"]) if os.environ.get(
+            "XDG_CONFIG_HOME"
+        ) else Path.home() / ".config"
+        return str(base / "unattended-ralph" / "ollama-usage-env")
+
+    @staticmethod
+    def assert_store_outside_workspace(path_text: str, workspace: object) -> None:
+        try:
+            store = Path(path_text).resolve()
+            root = Path(str(workspace)).resolve()
+        except OSError as exc:
+            raise UsageConfigError("cannot resolve the operator usage store") from exc
+        if store == root or store.is_relative_to(root):
+            raise UsageConfigError("operator usage store is inside the model workspace")
+
+
+def _stage_committed_usage_guard(
+    binding: "InvocationBinding", exec_dir: Path,
+    staged_digests: Dict[str, str],
+) -> Tuple[object, Tuple[str, str]]:
+    """Stage and import the exact bound-commit usage guard blob pair.
+
+    ``usage.py`` derives its fetch-child path from ``__file__``; assigning
+    the staged path therefore makes every fetch execute the staged committed
+    ``usage_fetch.py`` sibling rather than a mutable worktree pathname.
+    """
+    names = (STAGED_USAGE_GUARD_NAME, STAGED_USAGE_FETCH_NAME)
+    staged: List[Path] = []
+    source_blobs: List[bytes] = []
+    for relpath, name in zip(USAGE_GUARD_SOURCES, names):
+        data = _read_committed_blob(
+            str(Path(binding.workspace).absolute() / relpath),
+            Path(binding.workspace).absolute(),
+            binding.bound_commit,
+            f"usage guard source {relpath}",
+            real_confinement_authority._MAX_GUARD_SOURCE_BYTES,
+        )
+        path = _stage_bytes(exec_dir, name, data)
+        staged_digests[str(path)] = hashlib.sha256(data).hexdigest()
+        staged.append(path)
+        source_blobs.append(data)
+    if b'DEFAULT_SETTINGS_URL = "https://ollama.com/settings"' not in source_blobs[0].splitlines():
+        raise InvocationError(
+            "the committed usage guard does not carry the canonical Ollama settings endpoint"
+        )
+    # Never import or execute the staged quota implementation in the launch
+    # coordinator. The inert adapter carries only confinement path semantics;
+    # no cookie/quota callable can become reachable through globals,
+    # sys.modules, an authority token, or supervision state.
+    adapter = _UsageConfinementAdapter()
+    return adapter, tuple(
+        hashlib.sha256(data).hexdigest() for data in source_blobs
+    )  # type: ignore[return-value]
 
 
 def _backend_is_external(binding: "InvocationBinding") -> bool:
@@ -2964,154 +3947,42 @@ def _backend_is_external(binding: "InvocationBinding") -> bool:
     return False
 
 
-def _reject_production_loopback(
-    settings_url: Optional[str], *, allow_loopback: bool
-) -> None:
-    """The ordinary production launch rejects ``http://`` loopback settings URLs.
+def _canonical_ollama_settings_url(guard: object) -> str:
+    """Return the one production endpoint, or fail before credential access.
 
-    Task 7 review, obligation 14 residual: loopback ``http://`` usage
-    settings transport is a diagnostics/private-test seam only.  It must
-    never be reachable from the ordinary production launch CLI/API, so this
-    boundary is enforced in the launch authority *before* the guard runs.
-
-    When ``allow_loopback`` (the private diagnostics seam) is false, an
-    ``http://`` settings URL naming ``127.0.0.1`` or ``localhost`` fails
-    closed here.  The guard's own HTTPS/loopback rule
-    (``usage._validate_settings_url``) is retained for the direct
-    diagnostics path and as defense-in-depth; it does not weaken this
-    launch-authority boundary.  A malformed URL and a non-loopback
-    ``http://`` URL fall through to the guard, which rejects them with the
-    documented fatal class.
+    The launch API has no URL argument.  Both this control-plane constant and
+    the exact-commit usage module must name the byte-exact canonical endpoint,
+    whose parsed authority is HTTPS, ``ollama.com``, effective port 443, and
+    path ``/settings`` with no userinfo/query/fragment.  This check runs before
+    any cookie/store descriptor is opened.
     """
-    if settings_url is None or allow_loopback:
-        return
+    value = getattr(guard, "DEFAULT_SETTINGS_URL", None)
+    if value != CANONICAL_OLLAMA_SETTINGS_URL:
+        raise InvocationError(
+            "the committed usage guard does not carry the canonical Ollama settings endpoint"
+        )
     try:
-        parsed = urllib.parse.urlsplit(settings_url)
-    except ValueError:
-        # Malformed: the guard rejects it; do not duplicate the diagnostic.
-        return
-    scheme = (parsed.scheme or "").lower()
-    host = (parsed.hostname or "").lower()
-    if scheme == "http" and host in ("127.0.0.1", "localhost"):
-        raise InvocationError(
-            f"the ordinary production launch rejects the http:// loopback "
-            f"settings URL {settings_url!r}: loopback http usage transport "
-            "is a diagnostics/test-only seam reachable only through a "
-            "private authority that is absent from the CLI and requires a "
-            "synthetic confinement proof"
-        )
-
-
-def _gate_ollama_launch(
-    binding: "InvocationBinding",
-    *,
-    _confinement_proof: Optional[object] = None,
-    cookie_file: Optional[str] = None,
-    cookie_stdin: bool = False,
-    settings_url: Optional[str] = None,
-    poll_interval: Optional[int] = None,
-    max_wait: Optional[int] = None,
-    max_polls: Optional[int] = None,
-    _usage_guard_html_file: Optional[str] = None,
-    _usage_guard_allow_loopback: bool = False,
-) -> None:
-    """The Task 7 production gate for guard-gated providers.
-
-    An ``ollama``-provider invocation reaches the §10 guard only after the
-    Task 8 confinement proof authority proves ``.factory/`` and the
-    operator credential store(s) are inaccessible/read-only to model tools
-    and the guard source is exact-commit bound.  Until that authority is
-    available the gate fails closed.  The hermetic hidden suite passes a
-    *private synthetic* proof through ``_confinement_proof`` (validated
-    against the exact invocation and the exact executing guard source); a
-    forged, foreign, or tampered proof fails closed.
-
-    ``_usage_guard_allow_loopback`` is the **private diagnostics/test seam**
-    for loopback ``http://`` usage settings transport (Task 7 review,
-    obligations 9 and 14): it is absent from the CLI and, because it enables
-    a transport the ordinary production launch must reject, it additionally
-    requires a synthetic confinement proof (``_confinement_proof``).  A
-    caller that sets it without a proof fails closed; the ordinary
-    production launch (proof absent and the seam off) always rejects an
-    ``http://`` ``127.0.0.1``/``localhost`` settings URL.
-
-    After the confinement gate, the §10 decision table runs inside the
-    mint.  The operator store is never scoped into the model workspace: the
-    guard resolves its canonical operator-owned store itself and the
-    launch authority passes no workspace-scoped ``env_file`` (Task 7
-    review, obligation 1).
-    """
-    # The private loopback diagnostics seam requires a synthetic confinement
-    # proof: without a validated proof no launch may enable http:// loopback
-    # usage transport (forged/private flag without proof fails closed).
-    if _usage_guard_allow_loopback and _confinement_proof is None:
-        raise InvocationError(
-            "the private loopback diagnostics seam requires a synthetic "
-            "confinement proof; without a validated proof no launch may "
-            "enable http:// loopback usage transport"
-        )
-    # Production launch never inherits an ambient/store URL.  A caller must
-    # provide an explicit trusted URL; otherwise the fixed HTTPS endpoint is
-    # used.  This keeps the direct guard's legacy diagnostics configurability
-    # outside the production launch authority.
-    effective_settings_url = settings_url or usage_guard.DEFAULT_SETTINGS_URL
-    _reject_production_loopback(
-        effective_settings_url, allow_loopback=_usage_guard_allow_loopback
-    )
-    if _confinement_proof is None:
-        try:
-            _confinement_proof = confinement_authority.prove_confinement(binding)
-        except confinement_authority.ConfinementUnavailable as exc:
-            raise InvocationError(
-                "ollama-provider launch fails closed: the Task 8 "
-                f"confinement proof authority is not yet available ({exc})"
-            ) from exc
-    if isinstance(
-        _confinement_proof, real_confinement_authority.ConfinementProof
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise InvocationError("the canonical Ollama settings endpoint is malformed") from exc
+    effective_port = 443 if port is None else port
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "ollama.com"
+        or effective_port != 443
+        or parsed.path != "/settings"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc not in ("ollama.com", "ollama.com:443")
     ):
-        # A *real* Task 8 proof (minted by ``prove_confinement`` when the
-        # exact confinement specification is supplied) is validated against
-        # the exact invocation, the executing guard-source bytes, and the
-        # effective credential channels this invocation consumes.
-        try:
-            real_confinement_authority.validate_proof(
-                _confinement_proof,
-                binding,
-                cookie_file=cookie_file,
-                cookie_stdin=cookie_stdin,
-            )
-        except real_confinement_authority.ConfinementError as exc:
-            raise InvocationError(
-                "ollama-provider launch fails closed: the real confinement "
-                f"proof does not bind this invocation ({exc})"
-            ) from exc
-    else:
-        try:
-            confinement_authority.validate_proof(_confinement_proof, binding)
-        except confinement_authority.ConfinementError as exc:
-            raise InvocationError(
-                "ollama-provider launch fails closed: the confinement proof does "
-                f"not bind this invocation ({exc})"
-            ) from exc
-    try:
-        usage_guard.require_quota(
-            cookie_file=cookie_file,
-            cookie_stdin=cookie_stdin,
-            settings_url=effective_settings_url,
-            poll_interval=poll_interval,
-            max_wait=max_wait,
-            max_polls=max_polls,
-            html_file=_usage_guard_html_file,
-        )
-    except usage_guard.WaitInterrupted:
-        # A TERM/INT/HUP during the initial check, the wait, or the final
-        # check already terminated and reaped the fetch child; propagate so
-        # the CLI exits 128+signum (Task 7 review, obligation 12).
-        raise
-    except usage_guard.UsageGuardError as exc:
         raise InvocationError(
-            f"ollama usage guard blocked the invocation: {exc}"
-        ) from exc
+            "the production Ollama settings endpoint must be exactly HTTPS "
+            "ollama.com:443 /settings without userinfo, query, or fragment"
+        )
+    return CANONICAL_OLLAMA_SETTINGS_URL
 
 
 def authorize_launch(
@@ -3124,50 +3995,27 @@ def authorize_launch(
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
     findings: Optional[bytes] = None,
-    _confinement_proof: Optional[object] = None,
-    _confinement_spec: Optional[Mapping[str, object]] = None,
-    _sanitized_home: Optional[Path] = None,
 ) -> LaunchAuthority:
     """Mint the unforgeable verified-committed authority token (F2/F5).
 
     Every authoritative byte is verified against the committed Git blobs at
-    the bound commit: the wrapper and backend pass the F2 boundary (the
-    exact committed bytes are staged into a private mode-0700 directory as
-    mode-0500 files, or an external trusted executable's fully resolved path
-    is revalidated) and each prompt blob's digest must equal the binding's
+    the bound commit: the wrapper and backend pass the F2 boundary (exact
+    committed bytes become non-executable mode-0400 interpreter inputs in a
+    private mode-0700 directory, or an external trusted executable's fully
+    resolved path is revalidated) and each prompt blob's digest must equal the binding's
     digest — a substituted, paraphrased, foreign, or operator-claimed byte
     set fails closed.  The returned :class:`LaunchAuthority` is the only
     value :meth:`LaunchSupervision.run` accepts; it cannot be constructed
     from operator claims.
 
-    **Mandatory real confinement (Task 8 review, finding 5).**  Real model
-    workspace confinement is mandatory for *every* provider and *every*
-    public authorize API, CLI or programmatic: the mint creates the
-    per-launch private staging/prompt/session paths **first**, augments the
-    caller's ``factory-confinement/v1`` specification with the exact
-    ``private_launch_rules`` for those paths, and **then** mints the real
-    confinement proof against the augmented specification — proving the
-    Landlock primitive is applicable and binding the exact specification
-    digest, the exact executing guard-source bytes, and every effective
-    credential channel this invocation consumes.  The only exception is the
-    explicit *private* synthetic-proof seam (``_confinement_proof``),
-    reachable only by the hidden ``.factory/`` suite; a launch carrying
-    neither the real specification nor that seam fails closed for any
-    provider or entry.
-
-    ``_confinement_spec`` is the base ``factory-confinement/v1``
-    specification (Task 8) the caller builds for the binding (the per-role
-    allowlists plus the sanitized home).  The mint augments it with the
-    exact per-launch private rules (staging/prompt/session paths) before the
-    real proof is minted, so the proof's digest binds exactly what the
-    confined child will apply, and the authority carries those exact paths
-    so :meth:`LaunchSupervision.run` uses — and cleans up — exactly the
-    paths the proof binds.  ``_sanitized_home`` is the fresh private
-    mode-0700 home the specification binds; the supervisor removes it after
-    the attempt.  A caller that supplies a confinement specification but no
-    proof fails closed; the hermetic hidden suite's synthetic proof seam
-    (``_confinement_proof``) never produces real confinement and is never
-    evidence of it.
+    **Mandatory real confinement.**  Every invocation, including the
+    hermetic synthetic model provider, uses an internally constructed
+    canonical ``factory-confinement/v1`` specification and an internally
+    minted real Landlock proof.  The installed/programmatic surface accepts
+    no caller proof, confinement specification, saved-HTML transport, or
+    loopback opt-in.  Every allowlist rule binds dev/inode/type/owner/link
+    count and is retained as an inherited descriptor, so the confined child
+    never reopens a validated rule by pathname.
 
     **Cleanup on authorization failure (Task 8 review, finding 6).**  Any
     failure to authorize or confine the launch removes and cleans every
@@ -3175,91 +4023,15 @@ def authorize_launch(
     the prompt directory, the session directory, and the sanitized home —
     so no private or credential material survives a failed authorization.
 
-    ``_usage_guard_html_file`` is a **private test seam only** (Task 7
-    review, obligation 4): saved-page parsing is diagnostics/test-only and
-    must never appear on the production surface, so the *public* signature
-    and the CLI expose no ``html-file`` option.  Only the hidden
-    ``.factory/`` suite reaches this seam.
-
-    ``_usage_guard_allow_loopback`` is the **private diagnostics/test seam**
-    for loopback ``http://`` usage settings transport (Task 7 review,
-    obligations 9 and 14).  The ordinary production launch CLI/API has no
-    such option and always rejects an ``http://`` ``127.0.0.1``/``localhost``
-    settings URL; this underscore-private authority — absent from the CLI —
-    is the only way the hermetic hidden suite can exercise the loopback
-    transport, and it additionally requires a synthetic confinement proof
-    (``_confinement_proof``): setting it without a proof fails closed, and
-    a forged/foreign/tampered proof is never accepted.
-
-    **Ollama production gate (Task 7 review, obligation 2).**  An
-    ``ollama``-provider invocation does not reach the model until the Task
-    8 confinement authority *proves* that ``.factory/`` and the operator
-    credential store(s) are inaccessible/read-only to model tools and the
-    guard source is exact-commit bound.  The hermetic hidden suite mints a
-    *private synthetic* proof (``confinement._mint_synthetic_proof``) and
-    passes it through the private ``_confinement_proof`` seam; a forged,
-    foreign, or tampered proof fails closed, and a synthetic proof is never
-    evidence of real confinement.  The production mint (``_confinement_spec``
-    supplied) proves real confinement before the guard runs.
-
-    **Ollama usage guard (QUOTA-01, QUOTA-02; §10).**  For a guard-gated
-    provider the §10 decision table runs *inside* the mint (after the real
-    confinement proof binds the augmented specification): ``--check`` exit 0
-    proceeds; exit 1 or 3 runs ``--wait`` and then one final ``--check``
-    that must exit 0; any fatal or nonzero ``--wait`` outcome raises
-    :class:`InvocationError` so the campaign terminates without invoking the
-    model.  The guard's cookie never appears in a child argv or child
-    environment (private stdin channel, built child environment, bounded
-    mode-0600/no-follow owned stores outside the model workspace,
-    zeroization, redacted output), and the ``--usage-guard-*`` options are
-    the operator diagnostics/driver knobs (cookie store/stdin, settings
-    URL) — a caller can never bypass the guard for a guard-gated provider.
-    ``html-file`` is *not* part of the production surface: saved-page
-    parsing is diagnostics/test-only, reachable only through the hidden
-    ``.factory/`` suite (Task 7 review, obligation 4).  A TERM/INT/HUP
-    during the guard propagates :class:`usage_guard.WaitInterrupted` so the
-    CLI exits ``128 + signum`` after reaping the credential-holding fetch
-    child.
+    **Ollama confinement, not quota policy.**  An ``ollama`` provider still
+    receives the same exact-commit staged usage-source and Task 8 proof that
+    keeps operator credential stores inaccessible to model tools.  The
+    decision table itself is absent from this mint and from its public API:
+    the campaign's ordered pre-round registry owns that policy once per
+    round.  No ``--usage-guard-*`` launch option exists, and authorization
+    neither opens a cookie store nor invokes ``require_quota``.
     """
     verify_invocation(binding)
-    # ---- Task 8 mandatory confinement contract (every provider, every
-    # public entry; review finding 5) ----
-    # Real model workspace confinement (the exact factory-confinement/v1
-    # specification) is mandatory for every provider and every public
-    # authorize API, CLI or programmatic.  The only exception is the
-    # explicit *private* synthetic-proof test seam (``_confinement_proof``),
-    # reachable only by the hidden ``.factory/`` suite; a launch carrying
-    # neither the real specification nor that seam fails closed for any
-    # provider or entry.
-    if _confinement_spec is None and _confinement_proof is None:
-        raise InvocationError(
-            "every launch must carry a confinement proof for the real model "
-            "workspace confinement (the exact factory-confinement/v1 "
-            "specification) or the explicit private synthetic-proof test seam; "
-            "an unconfined launch is never "
-            "permitted for any provider or entry (Task 8)"
-        )
-    if _confinement_spec is not None and _sanitized_home is None:
-        raise InvocationError(
-            "a real confined launch requires the fresh sanitized home "
-            "the specification binds"
-        )
-    # ---- Task 11 external backend configuration authority ----
-    # Configuration for an external (non-workspace) model backend or trusted
-    # external executable is confined and transported under the same
-    # mandatory real-confinement and credential/source boundary as the
-    # Ollama provider: the private synthetic-proof seam proves nothing real,
-    # so no external backend config is accepted while Task 8 real
-    # confinement is unproven.  The immutable-chain authority (F2) is
-    # additionally enforced on the resolved path inside
-    # ``_stage_launch_executables`` before any external bytes can run.
-    if _confinement_spec is None and _backend_is_external(binding):
-        raise InvocationError(
-            "an external (non-workspace) model backend is not accepted while "
-            "Task 8 real confinement is unproven: the private synthetic seam "
-            "never proves confinement, so no external backend config is "
-            "confined or transported under this authority (Task 11)"
-        )
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
     _verify_input_digest("specification", spec, binding.specification_digest)
@@ -3312,27 +4084,82 @@ def authorize_launch(
     # the confined child will use; the real proof is minted only against
     # that augmented specification, and the authority carries the exact
     # paths so ``run`` applies and cleans up exactly what the proof binds.
-    wrapper, backend, staged_digests, external_paths, exec_dir = (
-        _stage_launch_executables(binding)
-    )
+    (
+        wrapper,
+        backend,
+        guard_extension,
+        guard_digest,
+        staged_digests,
+        external_paths,
+        external_runtime_bindings,
+        exec_dir,
+        pi2_verified,
+    ) = _stage_launch_executables(binding)
     private_dirs: List[Path] = [exec_dir]
+    prompt_fd = -1
+    auth_fd = -1
+    rule_fd_list: List[int] = []
+    rule_fds: Tuple[int, ...] = ()
     try:
-        # Task 8: stage the committed confine launcher into the same private
-        # staging directory (F2), so the model child always runs through the
-        # exact committed launcher blob when real confinement is bound.
-        confined_launcher: Optional[Path] = None
-        if _confinement_spec is not None:
-            launcher_source = Path(binding.workspace).absolute() / CONFINE_LAUNCHER
-            launcher_bytes = _read_committed_blob(
-                str(launcher_source), Path(binding.workspace).absolute(),
-                binding.bound_commit, "confine launcher", MAX_CONFINEMENT_SPEC_BYTES,
+        # Production constructs every confinement input itself.  Callers can
+        # neither inject a proof/spec/home nor opt into a synthetic transport.
+        sanitized_home = real_confinement_authority.sanitized_home_directory()
+        private_dirs.append(sanitized_home)
+        if binding.provider.lower() == "openai-codex":
+            # B2 security review: the openai-codex credential is provisioned
+            # only after the exact immutable external pi2 wrapper identity is
+            # verified.  A workspace backend (or any other backend) with the
+            # openai-codex provider fails closed and never receives the
+            # credential.
+            if not pi2_verified:
+                raise InvocationError(
+                    "openai-codex requires the exact immutable external pi2 "
+                    "wrapper as the model backend; a workspace or other "
+                    "backend fails closed before any credential is "
+                    "provisioned (B2)"
+                )
+            # The initial discovery is not enough: immediately before opening
+            # operator auth bytes, revalidate the canonical pi2 wrapper, Node,
+            # and CLI digest/dev/inode bindings as one complete identity.
+            _revalidate_external_runtimes(external_runtime_bindings)
+            auth_fd = _prepare_private_pi2_home(sanitized_home)
+        try:
+            base_spec = real_confinement_authority.confinement_spec(
+                binding,
+                sanitized_home=sanitized_home,
+                extra_write=(
+                    [binding.result_write_path]
+                    if binding.result_write_path else []
+                ),
+                _rule_descriptors=rule_fd_list,
             )
-            confined_launcher = _stage_bytes(
-                exec_dir, STAGED_CONFINE_LAUNCHER_NAME, launcher_bytes
-            )
-            staged_digests[str(confined_launcher)] = hashlib.sha256(
-                launcher_bytes
-            ).hexdigest()
+        except real_confinement_authority.ConfinementError as exc:
+            raise InvocationError(
+                f"cannot construct the canonical confinement specification: {exc}"
+            ) from exc
+
+        # The exact committed guard and confine-launcher bytes are staged for
+        # every provider.  The synthetic model backend remains hermetic, but
+        # its filesystem proof is the same real Landlock proof as production.
+        committed_usage_guard, usage_guard_digests = _stage_committed_usage_guard(
+            binding, exec_dir, staged_digests
+        )
+        if binding.provider.lower() in PROVIDER_GUARD_REQUIRED:
+            # Validate the *exact bound-commit module that will execute*, not
+            # merely the already-imported worktree module, before proof/channel
+            # construction can inspect any cookie/store descriptor.
+            _canonical_ollama_settings_url(committed_usage_guard)
+        launcher_source = Path(binding.workspace).absolute() / CONFINE_LAUNCHER
+        launcher_bytes = _read_committed_blob(
+            str(launcher_source), Path(binding.workspace).absolute(),
+            binding.bound_commit, "confine launcher", MAX_CONFINEMENT_SPEC_BYTES,
+        )
+        confined_launcher = _stage_bytes(
+            exec_dir, STAGED_CONFINE_LAUNCHER_NAME, launcher_bytes
+        )
+        staged_digests[str(confined_launcher)] = hashlib.sha256(
+            launcher_bytes
+        ).hexdigest()
         prompt = compose_prompt(
             binding,
             role_prompt=blobs["role_prompt"],
@@ -3343,56 +4170,73 @@ def authorize_launch(
             task_excerpt=blobs.get("task_excerpt"),
             findings=blobs.get("findings"),
         )
-        prompt_dir = _prompt_directory()
-        private_dirs.append(prompt_dir)
-        prompt_path = write_prompt_file(prompt_dir, prompt)
+        prompt_fd = _sealed_prompt_memfd(prompt)
         session_dir = _session_directory()
         private_dirs.append(session_dir)
-        if _sanitized_home is not None:
-            private_dirs.append(Path(_sanitized_home).absolute())
-        # ---- augment the specification with the exact per-launch private
-        # rules, THEN mint the real proof (the proof digest binds the
-        # augmented spec the confined child will apply) ----
-        confinement_spec: Optional[Dict[str, object]] = None
-        real_proof: Optional[object] = None
-        if _confinement_spec is not None:
-            confinement_spec = real_confinement_authority.with_private_launch_paths(
-                dict(_confinement_spec),
-                staging_dir=exec_dir,
-                prompt_path=prompt_path,
-                session_dir=session_dir,
+
+        confinement_spec = real_confinement_authority.with_private_launch_paths(
+            base_spec,
+            staging_dir=exec_dir,
+            session_dir=session_dir,
+            _rule_descriptors=rule_fd_list,
+        )
+        try:
+            # Every descriptor is the one opened by the exact component-wise
+            # validation operation; production never closes and reopens a rule
+            # pathname.  Revalidate those retained anchors before proof mint.
+            rule_fds = tuple(rule_fd_list)
+            real_confinement_authority.validate_rule_anchors(
+                confinement_spec, rule_fds
             )
-            try:
-                real_proof = real_confinement_authority.prove_confinement(
-                    binding, confinement_spec=confinement_spec,
-                )
-                real_confinement_authority.validate_proof(
-                    real_proof, binding, confinement_spec=confinement_spec,
-                )
-            except real_confinement_authority.ConfinementUnavailable as exc:
-                raise InvocationError(
-                    "the production launch fails closed: the real model "
-                    f"workspace confinement is unavailable on this host ({exc})"
-                ) from exc
-            except real_confinement_authority.ConfinementError as exc:
-                raise InvocationError(
-                    "the production launch fails closed: the real confinement "
-                    f"proof cannot bind this invocation ({exc})"
-                ) from exc
+            real_proof = real_confinement_authority.prove_confinement(
+                binding,
+                confinement_spec=confinement_spec,
+                cookie_file=None,
+                cookie_stdin=False,
+                _executing_guard_digests=usage_guard_digests,
+                _usage_guard_module=committed_usage_guard,
+            )
+            real_confinement_authority.validate_proof(
+                real_proof,
+                binding,
+                confinement_spec=confinement_spec,
+                cookie_file=None,
+                cookie_stdin=False,
+                _executing_guard_digests=usage_guard_digests,
+                _usage_guard_module=committed_usage_guard,
+            )
+        except real_confinement_authority.ConfinementUnavailable as exc:
+            raise InvocationError(
+                "the production launch fails closed: the real model "
+                f"workspace confinement is unavailable on this host ({exc})"
+            ) from exc
+        except real_confinement_authority.ConfinementError as exc:
+            raise InvocationError(
+                "the production launch fails closed: the real confinement "
+                f"proof/rule anchor cannot bind this invocation ({exc})"
+            ) from exc
+        # Per-model authorization never executes quota policy.  The ordered
+        # campaign pre-round registry owns that decision once per round.
         verified = replace(binding, backend=backend)
         return LaunchAuthority(
             verified,
             blobs,
             wrapper=wrapper,
+            guard_extension=guard_extension,
+            guard_digest=guard_digest,
             staged_digests=staged_digests,
             external_paths=external_paths,
+            external_runtime_bindings=external_runtime_bindings,
             exec_dir=exec_dir,
-            prompt_path=prompt_path,
+            prompt_fd=prompt_fd,
+            auth_fd=auth_fd,
             session_dir=session_dir,
             confinement_spec=confinement_spec,
             confinement_proof=real_proof,
-            sanitized_home=_sanitized_home,
+            sanitized_home=sanitized_home,
             confined_launcher=confined_launcher,
+            confinement_rule_fds=rule_fds,
+            usage_guard_digests=usage_guard_digests,
             _mint=_MINT_SECRET,
         )
     except BaseException:
@@ -3401,6 +4245,21 @@ def authorize_launch(
         # session directory, and the sanitized home — is removed on any
         # authorization failure, so no private or credential material
         # survives a failed authorization.
+        for descriptor in set(rule_fds or tuple(rule_fd_list)):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if prompt_fd >= 0:
+            try:
+                os.close(prompt_fd)
+            except OSError:
+                pass
+        if auth_fd >= 0:
+            try:
+                os.close(auth_fd)
+            except OSError:
+                pass
         _remove_private_directories(private_dirs)
         raise
 
@@ -3415,7 +4274,7 @@ def require_trusted_interpreter() -> str:
     attacker-controlled or caller-writable interpreter can never execute the
     staged wrapper/backend (F4-style bounded interpreter resolution).
     """
-    executable = sys.executable
+    executable = os.path.realpath(sys.executable)
     if not executable or not executable.startswith("/"):
         raise InvocationError(
             f"the interpreter {executable!r} is not an absolute trusted path; "
@@ -3720,29 +4579,14 @@ def _run_cli(args: argparse.Namespace) -> int:
             inactivity_limit=args.inactivity_limit,
         )
         verify_invocation(binding)
-        # Task 8 production confinement: every ordinary launch is confined.
-        # The control plane creates a fresh private sanitized home and the
-        # exact per-role confinement specification; ``authorize_launch``
-        # mints the real (Landlock) proof against that specification before
-        # the guard runs, and ``LaunchSupervision`` routes the model child
-        # through the committed confine launcher.  A host without the
-        # Landlock primitive fails closed before any model can start.
-        sanitized_home = real_confinement_authority.sanitized_home_directory()
-        try:
-            confinement_spec = real_confinement_authority.confinement_spec(
-                binding, sanitized_home=sanitized_home
-            )
-        except BaseException:
-            try:
-                shutil.rmtree(sanitized_home)
-            except OSError:
-                pass
-            raise
+        # Task 8 production confinement is constructed and minted entirely
+        # inside ``authorize_launch``.  No caller-provided proof/spec/home or
+        # synthetic transport exists on this CLI/programmatic surface.
         # F2/F5: mint the unforgeable verified-committed authority.  The mint
         # verifies the wrapper/backend against the committed blobs (or the
-        # immutable external authority), stages the exact committed bytes into
-        # a private mode-0700 directory as mode-0500 files (or revalidates
-        # the external path), and binds the verified prompt bytes to the
+        # immutable external authority), stages exact committed bytes into a
+        # private mode-0700 directory as non-executable mode-0400 interpreter
+        # inputs (or revalidates the external path), and binds prompt bytes to the
         # token; ``run`` accepts only this token, so the CLI stays the sole
         # ordinary launch entry and the exported API cannot bypass F2/F5.
         authority = authorize_launch(
@@ -3754,8 +4598,6 @@ def _run_cli(args: argparse.Namespace) -> int:
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings,
-            _confinement_spec=confinement_spec,
-            _sanitized_home=sanitized_home,
         )
         supervisor = LaunchSupervision(binding)
         result = supervisor.run(authority)
@@ -3780,18 +4622,6 @@ def _run_cli(args: argparse.Namespace) -> int:
     except SupervisionError as exc:
         print(f"factory-launch: supervision fail-closed: {exc}", file=sys.stderr)
         return EXIT_SUPERVISION
-    except usage_guard.WaitInterrupted as exc:
-        # A TERM/INT/HUP during the §10 guard (initial check, wait, or final
-        # check) already terminated and reaped the credential-holding fetch
-        # child; the machine-readable exit is 128 + signum (Task 7 review,
-        # obligation 12).
-        print(
-            f"factory-launch: ollama usage guard interrupted by "
-            f"{signal.Signals(exc.signum).name} after bounded termination "
-            "and reap",
-            file=sys.stderr,
-        )
-        return 128 + exc.signum
     except GitBoundaryError as exc:
         # Task 11 (Task 9 residual): a pinned Git failure during pre-flight
         # (HEAD resolution, committed-blob reads) is a clean fail-closed CLI

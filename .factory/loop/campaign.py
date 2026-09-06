@@ -7,7 +7,7 @@ building blocks: the deterministic plan parser (``plan_parser.py``), the
 trusted selector (``selector.py``), the ``factory-state/v1`` control-state
 authority (``state.py``), the root-descriptor lock and Git writer boundary
 (``lock.py``/``gitutil.py``), the fresh-context launch/supervision authority
-(``launch.py``), the Ollama usage guard (``usage.py``), and the workspace
+(``launch.py``), pre-round policy hooks (``pre_round.py``), and the workspace
 confinement authority (``workspace_confinement.py``).  It is the only module
 that owns the *campaign loop*; every Git operation, repository-history read,
 staging step, and guarded commit of a campaign is performed here through the
@@ -52,13 +52,13 @@ status, and deterministic gates).  The orchestrator derives every phase
 outcome from the plan state, the Git state, the role's exit status,
 deterministic gate commands, and the §11 transition table.
 
-The ``--role-driver`` CLI option is the explicit deterministic embedded/
-fixture role seam used by the hidden campaign suite: a repository-committed
-executable that acts as a scenario-driven model for synthetic fixture
-repos.  It is never evidence of real model acceptance or real confinement;
-production launches always go through the launch authority
+The ``--role-driver`` CLI option is an explicit test-only deterministic
+fixture seam: it requires a committed scenario (or the dedicated evidence
+smoke lane), uses the synthetic provider, and is never a production fallback
+or evidence of real model acceptance/confinement. Production launches require
+explicit provider/model/backend and always go through the launch authority
 (:func:`launch_role_attempt`), which retains Task 8 real Landlock confinement;
-ordered campaign pre-round hooks own launch-independent policy.
+ordered campaign pre-round hooks own §10 policy.
 """
 
 from __future__ import annotations
@@ -71,7 +71,8 @@ import re
 import shutil
 import stat
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -80,6 +81,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import evidence as evidence_module
     from . import findings as findings_module
     from . import gitutil
+    from . import installer as installer_module
     from . import lock as lock_module
     from . import plan_parser
     from . import pre_round as pre_round_module
@@ -93,6 +95,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import evidence as evidence_module  # type: ignore[no-redef]
     import findings as findings_module  # type: ignore[no-redef]
     import gitutil  # type: ignore[no-redef]
+    import installer as installer_module  # type: ignore[no-redef]
     import lock as lock_module  # type: ignore[no-redef]
     import plan_parser  # type: ignore[no-redef]
     import pre_round as pre_round_module  # type: ignore[no-redef]
@@ -172,13 +175,28 @@ CAMPAIGN_ENV_PREFIX = "FACTORY_LOOP_CAMPAIGN_"
 EVIDENCE_SMOKE_DRIVER_REL = ".factory/smoke/evidence_smoke_driver.py"
 EVIDENCE_SMOKE_ID_PREFIX = "evidence-smoke-"
 EVIDENCE_SMOKE_EVIDENCE_PREFIX = ".factory/artifacts/"
+_CONTROL_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_SOURCE_FIXTURE_SEAMS_AVAILABLE = (
+    (_CONTROL_SOURCE_ROOT / ".git").is_dir()
+    and (_CONTROL_SOURCE_ROOT / ".factory" / "tests").is_dir()
+)
 
 # A torn ``factory-loop.json`` writer leftover (``state`` authority's
 # ``TEMP_ORPHAN_RE`` contract): the evidence-smoke preflight rejects any such
 # recovery orphan before the state recovery can reconcile it.
-EVIDENCE_SMOKE_STATE_ORPHAN_RE = re.compile(
-    r"^\.factory-loop\.json\.[0-9a-f]{32}$"
-)
+CAMPAIGN_STATE_ROOT_REL = ".factory-state"
+CAMPAIGN_STATE_PARENT_NAME = "campaigns"
+CAMPAIGN_STATE_PARENT_REL = f"{CAMPAIGN_STATE_ROOT_REL}/{CAMPAIGN_STATE_PARENT_NAME}"
+CAMPAIGN_PHASE_RESULT_NAME = "factory-phase-result.json"
+CAMPAIGN_AUDIT_RESULT_NAME = "factory-audit-result.json"
+RUNNER_ACQUISITION_NAME = "runner-acquisition.json"
+RUNNER_ACQUISITION_SCHEMA = "factory-runner-acquisition/v1"
+RUNNER_COMMAND = ("./scripts/run-factory-runners.py",)
+RUNNER_CHECKER_COMMAND = ("./scripts/check-factory-runner-evidence.py",)
+RUNNER_TRANSPORT_EXIT = 20
+RUNNER_FINDINGS_EXIT = 21
+RUNNER_INTEGRITY_EXIT = 22
+INSTALL_MANIFEST_MAX = 64 * 1024 * 1024
 
 # The orchestration layer's own commit identity: every campaign commit is
 # provably orchestrator-created (the model never runs Git).
@@ -190,6 +208,12 @@ MAX_RESULT_FILE = 256 * 1024
 STATUS_PORCELAIN_MAX = 4 * 1024 * 1024
 DEFAULT_ROLE_TIMEOUT = 900.0
 DEFAULT_GATE_TIMEOUT = 1800.0
+DEFAULT_RUNNER_TIMEOUT = 7800.0
+MAX_RUNNER_TIMEOUT = 10800.0
+DEFAULT_CAMPAIGN_TIMEOUT = 21600.0
+MAX_CAMPAIGN_TIMEOUT = 86400.0
+INSTALLED_EVIDENCE_OVERRIDE = "FACTORY_INSTALLED_FUNCTIONAL_EVIDENCE_PATH"
+SKIP_OUTPUT_RE = re.compile(r"(?i)(?:^|[^a-z])(?:skip(?:ped)?|not[ -]?run)(?:[^a-z]|$)")
 # Finite bound for every trusted Git call of the orchestrator (Task 9
 # review L4): no trusted Git invocation may wait forever behind the lock.
 GIT_TIMEOUT = 120.0
@@ -205,7 +229,7 @@ GATE_ENV_ALLOWLIST = (
     "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
     "TERM", "TZ", "SHELL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME", "XDG_DATA_HOME", "NO_COLOR", "CLICOLOR",
-    "CLICOLOR_FORCE",
+    "CLICOLOR_FORCE", "NIX_PATH", "NIX_REMOTE",
 )
 
 # Gate output is bounded to this many bytes before redaction (the same
@@ -279,16 +303,18 @@ class RoleOutcome:
 
     ``exit_status`` is the process exit code; ``interrupted`` is true when
     the role ended on a bounded signal/timeout (never the model's choice);
-    ``signal`` names the terminating signal when known.  The orchestrator
-    never interprets role prose as control protocol — only this enum
-    surface, the plan state, the Git state, and deterministic gates decide a
-    phase outcome.
+    ``signal`` names the terminating signal when known. ``diagnostic`` is one
+    bounded redacted process-tail line for operator diagnosis only. The
+    orchestrator never interprets it or any other role prose as control
+    protocol — only this enum surface, the plan state, the Git state, and
+    deterministic gates decide a phase outcome.
     """
 
     role: str
     exit_status: int
     interrupted: bool = False
     signal: Optional[str] = None
+    diagnostic: str = ""
 
 
 @dataclass(frozen=True)
@@ -426,8 +452,10 @@ class CampaignConfig:
     repository-relative canonical plan; ``phase_base_commit`` is the
     campaign's initial bound base (the commit the first planning phase works
     from).  ``planning_attempts`` and ``implementation_attempts`` bound each
-    round/task; the campaign never exceeds them.  ``provider`` is ``ollama``
-    (the §10 usage guard runs inside the launch mint) or ``synthetic``;
+    round/task; the campaign never exceeds them. Production requires explicit
+    provider/model/backend. Production providers are fixed by the launch
+    authority (currently ``ollama`` and ``openai-codex``); ``synthetic`` is
+    explicit and test-only;
     ``role_driver`` is the explicit deterministic embedded/fixture role seam
     (a committed repository-relative executable) or ``None`` for the real
     launch path.
@@ -453,8 +481,8 @@ class CampaignConfig:
     pre_round_implementation_digests: Mapping[str, str]
     pre_round_hook_configuration_digest: str
     pre_round_hook_commit: str
-    provider: str = "synthetic"
-    model: str = "fixture-model"
+    provider: str = ""
+    model: str = ""
     backend: str = ""
     role_driver: Optional[str] = None
     developer_evidence_path: str = ""
@@ -462,10 +490,16 @@ class CampaignConfig:
     acceptance_command: Tuple[str, ...] = ()
     verification_command: Tuple[str, ...] = ()
     capability_command: Tuple[str, ...] = ()
+    runner_command: Tuple[str, ...] = ()
     phase_result_path: str = ""
     audit_result_path: str = ""
+    state_namespace: str = ""
+    accepted_commit: str = ""
+    install_manifest: str = ""
     role_timeout: float = DEFAULT_ROLE_TIMEOUT
     gate_timeout: float = DEFAULT_GATE_TIMEOUT
+    runner_timeout: float = DEFAULT_RUNNER_TIMEOUT
+    campaign_timeout: float = DEFAULT_CAMPAIGN_TIMEOUT
     runtime_limit: float = launch_module.DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = launch_module.DEFAULT_INACTIVITY_LIMIT
 
@@ -563,18 +597,89 @@ class CampaignConfig:
                 raise CampaignConfigError(
                     "role_prompt_digests must map each role to a 64-hex digest"
                 )
+        if not isinstance(self.provider, str) or not self.provider:
+            raise CampaignConfigError("production campaign provider is mandatory")
+        if not isinstance(self.model, str) or not self.model:
+            raise CampaignConfigError("production campaign model is mandatory")
+        if not isinstance(self.backend, str):
+            raise CampaignConfigError("campaign backend must be a string")
         provider = self.provider.lower()
-        if provider not in ("ollama", "synthetic"):
+        if provider not in launch_module.SUPPORTED_PROVIDERS:
             raise CampaignConfigError(
-                "provider must be `ollama` or `synthetic`; an unknown provider "
-                "fails closed and can never bypass the fixed provider policy"
+                "unknown provider; the fixed launch-provider policy fails closed"
             )
-        if provider == "ollama" and self.role_driver is not None:
+        if provider != "synthetic" and self.role_driver is not None:
             raise CampaignConfigError(
                 "the embedded role-driver seam is the explicit fixture surface; "
-                "an `ollama` provider must use the real launch path"
+                "a production provider must use the real launch path"
             )
+        if self.role_driver is None and not self.backend:
+            raise CampaignConfigError(
+                "production campaign backend is mandatory when no test-only role driver is used"
+            )
+        if not self.verification_command:
+            raise CampaignConfigError(
+                "campaign requires an explicit non-empty verification_command "
+                "before any role can launch (fixtures must supply their safe verifier)"
+            )
+        for name in (
+            "verification_command", "acceptance_command", "capability_command",
+            "runner_command",
+        ):
+            command = getattr(self, name)
+            if any(not isinstance(item, str) or not item for item in command):
+                raise CampaignConfigError(
+                    f"{name} must be an argv of non-empty strings"
+                )
+        if self.role_driver is None:
+            if self.runner_command and tuple(self.runner_command) != RUNNER_COMMAND:
+                raise CampaignConfigError(
+                    "when configured, production runner_command must be exactly "
+                    "./scripts/run-factory-runners.py with no arguments or shell"
+                )
+            if not self.acceptance_command:
+                raise CampaignConfigError(
+                    "production campaign requires an explicit non-empty acceptance_command"
+                )
+            for name in ("acceptance_command", "capability_command"):
+                command = getattr(self, name)
+                if command and not command[0].startswith("./"):
+                    raise CampaignConfigError(
+                        f"production {name} must use a canonical repository-relative ./path"
+                    )
+            expected_namespace = (
+                f"{CAMPAIGN_STATE_PARENT_REL}/{self.campaign_id}"
+            )
+            if self.state_namespace != expected_namespace:
+                raise CampaignConfigError(
+                    "production campaign state must use the fresh dedicated "
+                    f"namespace {expected_namespace!r}"
+                )
+            if not SHA40_RE.fullmatch(self.accepted_commit):
+                raise CampaignConfigError(
+                    "production campaign requires an exact accepted_commit binding"
+                )
+            if self.pre_round_hook_commit != self.accepted_commit:
+                raise CampaignConfigError(
+                    "production hook commit must equal the accepted commit"
+                )
+            if not self.install_manifest or not Path(self.install_manifest).is_absolute():
+                raise CampaignConfigError(
+                    "production campaign requires an absolute verified install manifest path"
+                )
         if self.role_driver is not None:
+            if (
+                not _SOURCE_FIXTURE_SEAMS_AVAILABLE
+                and self.role_driver != EVIDENCE_SMOKE_DRIVER_REL
+            ):
+                raise CampaignConfigError(
+                    "the general fixture role-driver seam is unavailable to "
+                    "installed production callers"
+                )
+            if provider != "synthetic":
+                raise CampaignConfigError(
+                    "the test-only role-driver seam requires the synthetic provider"
+                )
             if not self.role_driver or self.role_driver.startswith("/"):
                 raise CampaignConfigError(
                     "the role driver must be a repository-relative committed "
@@ -610,12 +715,29 @@ class CampaignConfig:
                 )
         for name in ("scenario_path", "phase_result_path", "audit_result_path"):
             value = getattr(self, name)
-            if value and (value.startswith("/") or ".." in value.split("/")):
+            if value and not _safe_result_relpath(value):
                 raise CampaignConfigError(
                     f"{name} must be a safe repository-relative path"
                 )
+        for name in ("phase_result_path", "audit_result_path"):
+            value = getattr(self, name)
+            expected_prefix = (
+                self.state_namespace + "/"
+                if self.state_namespace
+                else ".factory-state/"
+            )
+            if not value or not value.startswith(expected_prefix):
+                raise CampaignConfigError(
+                    f"{name} is mandatory and must be an exact path under "
+                    f"{expected_prefix!r}"
+                )
+        if self.phase_result_path == self.audit_result_path:
+            raise CampaignConfigError(
+                "tester and auditor structured result paths must be distinct"
+            )
         for name in (
-            "role_timeout", "gate_timeout", "runtime_limit", "inactivity_limit",
+            "role_timeout", "gate_timeout", "runner_timeout", "campaign_timeout",
+            "runtime_limit", "inactivity_limit",
         ):
             value = getattr(self, name)
             if (
@@ -628,6 +750,14 @@ class CampaignConfig:
                 raise CampaignConfigError(
                     f"`{name}` must be a finite positive number of seconds"
                 )
+        if self.runner_timeout > MAX_RUNNER_TIMEOUT:
+            raise CampaignConfigError(
+                f"runner_timeout must not exceed {MAX_RUNNER_TIMEOUT:g} seconds"
+            )
+        if self.campaign_timeout > MAX_CAMPAIGN_TIMEOUT:
+            raise CampaignConfigError(
+                f"campaign_timeout must not exceed {MAX_CAMPAIGN_TIMEOUT:g} seconds"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -671,8 +801,16 @@ class TrustedGit:
         if result.returncode != 0:
             raise CampaignGitError("cannot resolve HEAD of the canonical repository")
         value = result.stdout.strip()
-        if len(value) != 40:
+        if not SHA40_RE.fullmatch(value):
             raise CampaignGitError("resolved HEAD is not a 40-hex commit hash")
+        return value
+
+    def object_id(self, revision: str) -> str:
+        """Resolve one commit-bound object id through the locked Git authority."""
+        result = self._run(["rev-parse", "--verify", revision])
+        value = result.stdout.strip()
+        if result.returncode != 0 or not SHA40_RE.fullmatch(value):
+            raise CampaignGitError(f"cannot resolve exact Git object {revision!r}")
         return value
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
@@ -807,9 +945,9 @@ class TrustedGit:
         """Dirty paths attributable to an untrusted role.
 
         The orchestrator's own runtime namespaces (the mutable control
-        state, digest ledger, and published results under ``.factory-state``
-        and the legacy runtime namespaces) are created by the trusted
-        control plane and are never role work; untracked entries there are
+        state, digest ledger, and published results under ``.factory-state``)
+        are created by the trusted control plane and are never role work;
+        untracked entries there are
         skipped.  Any *tracked* modification under those namespaces can only
         have been made by an untrusted role and still surfaces as a
         violation.
@@ -1046,7 +1184,9 @@ def _unsafe_repo_relative(path: str) -> Tuple[Optional[str], Optional[str]]:
     return (None, None)
 
 
-HARNESS_RUNTIME_PREFIXES = (".factory-state", ".ralph", ".pi", "$tmp")
+HARNESS_RUNTIME_PREFIXES = (
+    ".factory-state", ".ralph", ".pi", "$tmp"
+)
 
 
 def _is_harness_runtime(path: str) -> bool:
@@ -1097,6 +1237,26 @@ def sanitized_gate_environment(
     for key in GATE_ENV_ALLOWLIST:
         if key in parent:
             environment[key] = parent[key]
+    nix_remote = environment.get("NIX_REMOTE")
+    if nix_remote is not None and nix_remote != "daemon":
+        raise CampaignError("deterministic gates require NIX_REMOTE=daemon")
+    nix_path = environment.get("NIX_PATH")
+    if nix_path is not None:
+        match = re.fullmatch(r"nixpkgs=(/nix/store/[0-9a-z]{32}-[^:]+)", nix_path)
+        if match is None:
+            raise CampaignError("refusing a non-canonical deterministic gate NIX_PATH")
+        source = match.group(1)
+        try:
+            info = os.stat(source, follow_symlinks=False)
+        except OSError as exc:
+            raise CampaignError("cannot validate deterministic gate NIX_PATH") from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid == os.getuid()
+            or info.st_mode & 0o022
+            or os.path.realpath(source) != source
+        ):
+            raise CampaignError("deterministic gate NIX_PATH is not immutable store data")
     environment = lock_module.stripped_child_env(environment)
     environment = gitutil.sanitize_git_environment(environment)
     for key in environment:
@@ -1199,6 +1359,8 @@ def classify_planning(
     """
     if role.interrupted:
         return "interrupted"
+    if role.exit_status != 0:
+        return "failed"
     if not plan_changed:
         return "failed"
     if not plan_valid:
@@ -1227,7 +1389,7 @@ def classify_implementation(
     rejected completion claim, no usable work, or a scope violation — is
     ``task_failed`` (Task 9 review L3).
     """
-    if role.interrupted:
+    if role.interrupted or role.exit_status < 0:
         return "interrupted"
     if role.exit_status != 0:
         # §13: the harness derives outcomes from the machine-readable exit
@@ -1260,8 +1422,13 @@ def classify_verification(
     gate_exit: int,
     tester_result_valid: bool,
     tester_result_outcome: Optional[str],
+    findings: Sequence[str],
     blocked_refs: Sequence[str],
     capability_available: bool,
+    capability_ran: bool = True,
+    capability_exit: int = 0,
+    gate_skipped: bool = False,
+    capability_skipped: bool = False,
 ) -> str:
     """Pure verification classification (§13.3).
 
@@ -1278,19 +1445,63 @@ def classify_verification(
     verification command fails the campaign closed as
     ``infrastructure_failure``.
     """
-    if role.interrupted:
+    if role.interrupted or role.exit_status != 0:
         return "infrastructure_failure"
     if not scope_ok:
         return "infrastructure_failure"
     if not gate_ran:
         return "infrastructure_failure"
+    # 126/127 and the supervisor's negative timeout/binding statuses mean the
+    # fixed verifier/toolchain did not execute. They are infrastructure, never
+    # product findings, capability blockers, or fake skips. A genuine verifier
+    # exit 1 remains a software/acceptance finding.
+    if gate_exit < 0 or gate_exit in (126, 127):
+        return "infrastructure_failure"
+    if capability_ran and (
+        capability_exit < 0 or capability_exit in (126, 127)
+    ):
+        return "infrastructure_failure"
     if not tester_result_valid:
         return "infrastructure_failure"
+    # A trusted command that reports a skip did run but did not exercise
+    # acceptance. It is a finding only after the tester handoff is valid; a
+    # missing/malformed handoff remains infrastructure and can never reach
+    # findings redaction with a null result object.
+    if gate_skipped:
+        return "findings"
+    if capability_skipped:
+        # A skipped capability probe never supports pass. It is an honest
+        # external blocker only when the tester also supplied exact blocker
+        # references and no higher-precedence finding; every other composition
+        # is a verification finding.
+        if (
+            tester_result_outcome == "blocked" and blocked_refs
+            and not findings and gate_exit == 0
+        ):
+            return "blocked"
+        return "findings"
     if gate_exit != 0:
+        return "findings"
+    if not capability_available or (capability_ran and capability_exit != 0):
+        # An unavailable/failed declared capability can never disappear behind
+        # a tester's optimistic pass. Exact blockers stay blocked only when
+        # the tester supplied their machine-readable references; otherwise the
+        # failed acquisition/check is an honest verification finding.
+        if tester_result_outcome == "blocked" and blocked_refs and not findings:
+            return "blocked"
+        return "findings"
+    # Findings always win over blockers and over the role's claimed outcome.
+    # A contradictory pass is rejected by the conditional schema before this
+    # classifier, while a blocked result carrying findings remains findings.
+    if findings:
         return "findings"
     if tester_result_outcome == "blocked":
         if not blocked_refs:
             return "infrastructure_failure"
+        # A capability probe that executed and returned an ordinary nonzero
+        # status is an honest unavailable external capability. A skipped probe
+        # is never passing evidence but remains an explicit blocker rather than
+        # being confused with command-not-found/permission infrastructure.
         if not capability_available:
             return "blocked"
         return "findings"
@@ -1318,6 +1529,8 @@ def classify_audit(
     """
     if role.interrupted:
         return "interrupted"
+    if role.exit_status != 0:
+        return "infrastructure_failure"
     if not scope_ok:
         return "infrastructure_failure"
     if not result_valid:
@@ -1391,6 +1604,11 @@ def _schema_check(instance: object, schema: object, path: str) -> None:
             f"phase-result violation at {path or '(root)'}: value {instance!r} "
             f"is not one of {schema['enum']!r}"
         )
+    if "const" in schema and instance != schema["const"]:
+        raise CampaignResultError(
+            f"phase-result violation at {path or '(root)'}: value {instance!r} "
+            f"does not equal {schema['const']!r}"
+        )
     if isinstance(instance, str):
         if "minLength" in schema and len(instance) < schema["minLength"]:
             raise CampaignResultError(
@@ -1423,10 +1641,30 @@ def _schema_check(instance: object, schema: object, path: str) -> None:
                         f"property {key!r}"
                     )
     if isinstance(instance, list):
+        if "minItems" in schema and len(instance) < schema["minItems"]:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: array below the minimum"
+            )
+        if "maxItems" in schema and len(instance) > schema["maxItems"]:
+            raise CampaignResultError(
+                f"phase-result violation at {path or '(root)'}: array above the maximum"
+            )
         items = schema.get("items")
         if items is not None:
             for index, item in enumerate(instance):
                 _schema_check(item, items, f"{path}[{index}]")
+    for subschema in schema.get("allOf", []):
+        _schema_check(instance, subschema, path)
+    conditional = schema.get("if")
+    if conditional is not None:
+        try:
+            _schema_check(instance, conditional, path)
+            matched = True
+        except CampaignResultError:
+            matched = False
+        branch = schema.get("then") if matched else schema.get("else")
+        if branch is not None:
+            _schema_check(instance, branch, path)
 
 
 _RESULT_SCHEMA: Optional[Dict[str, object]] = None
@@ -1652,9 +1890,6 @@ def launch_role_attempt(
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
     findings_payload: Optional[bytes] = None,
-    _confinement_proof: Optional[object] = None,
-    _confinement_spec: Optional[Mapping[str, object]] = None,
-    _sanitized_home: Optional[Path] = None,
 ) -> RoleOutcome:
     """Run one fresh role attempt through the committed launch authority.
 
@@ -1682,10 +1917,9 @@ def launch_role_attempt(
     role as a digest-bound input (never to the developer, tester, or
     auditor, and never read by the deterministic selector).
 
-    ``_confinement_proof``/``_confinement_spec``/``_sanitized_home`` are the
-    private seams of the hidden suite (mirroring ``launch.py``); the
-    production path builds the real confinement specification and sanitized
-    home exactly like the launch CLI when no seam is supplied.
+    Confinement is not caller-configurable: ``authorize_launch`` internally
+    creates the private home, canonical descriptor-anchored specification,
+    and real proof for every role/provider.
     """
     root = Path(config.root).absolute()
     if config.backend:
@@ -1694,6 +1928,19 @@ def launch_role_attempt(
         raise CampaignConfigError(
             "a real launch requires the committed model backend (`backend`)"
         )
+    result_write_path = ""
+    if role == "tester":
+        if not config.phase_result_path:
+            raise CampaignConfigError(
+                "tester launch requires the exact structured phase-result path"
+            )
+        result_write_path = str((root / config.phase_result_path).absolute())
+    elif role == "auditor":
+        if not config.audit_result_path:
+            raise CampaignConfigError(
+                "auditor launch requires the exact structured audit-result path"
+            )
+        result_write_path = str((root / config.audit_result_path).absolute())
     plan_blob = _blob_at(root, config.plan_path)
     try:
         if role not in config.role_prompt_digests:
@@ -1724,6 +1971,7 @@ def launch_role_attempt(
             plan_digest=plan_sha256(plan_blob),
             policy_digest=plan_sha256(_blob_at(root, "AGENTS.md")),
             specification_digest=config.specification_digest,
+            allowed_tools=launch_module.DEFAULT_ALLOWED_TOOLS[role],
             task_id=task_id,
             task_excerpt_digest=(
                 plan_sha256(task_excerpt) if task_excerpt is not None else None
@@ -1736,46 +1984,11 @@ def launch_role_attempt(
                 if findings_payload is not None
                 else ""
             ),
+            result_write_path=result_write_path,
             runtime_limit=config.runtime_limit,
             inactivity_limit=config.inactivity_limit,
         )
         launch_module.verify_invocation(binding)
-        if _confinement_proof is None and _confinement_spec is None:
-            # Production path: mirror the Task 6 launch CLI — build the fresh
-            # private sanitized home and the exact per-role confinement
-            # specification, then mint the real (Landlock) proof inside
-            # ``authorize_launch``.  The private seam stays exclusive to the
-            # hidden suite and is never evidence of real confinement.
-            sanitized_home = confinement_authority.sanitized_home_directory()
-            try:
-                # Task 10 review (REQ 4): the confined tester/auditor
-                # receives exact write access to exactly its configured
-                # phase/audit result file through the confinement
-                # specification — never the ``.factory-state/`` breadth — so
-                # the untrusted role can rewrite its transient structured
-                # result while every sibling (the state file, the digest
-                # ledger, receipts, other result names) stays denied.  The
-                # file is pre-created by the trusted orchestrator before the
-                # launch (``_prepare_phase_result_file``) because Landlock
-                # cannot grant the creation of a not-yet-existing file
-                # through an exact-file rule.
-                result_write = []
-                if role == "tester" and config.phase_result_path:
-                    result_write = [
-                        str(Path(root) / config.phase_result_path)
-                    ]
-                elif role == "auditor" and config.audit_result_path:
-                    result_write = [
-                        str(Path(root) / config.audit_result_path)
-                    ]
-                _confinement_spec = confinement_authority.confinement_spec(
-                    binding, sanitized_home=sanitized_home,
-                    extra_write=result_write,
-                )
-            except BaseException:
-                shutil.rmtree(sanitized_home, ignore_errors=True)
-                raise
-            _sanitized_home = sanitized_home
         authority = launch_module.authorize_launch(
             binding,
             role_prompt=_blob_at(root, f".factory/prompts/{role}.md"),
@@ -1785,9 +1998,6 @@ def launch_role_attempt(
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings_payload,
-            _confinement_proof=_confinement_proof,
-            _confinement_spec=_confinement_spec,
-            _sanitized_home=_sanitized_home,
         )
     except launch_module.InvocationError as exc:
         # Task 9 review B2: every refused launch — unbound or missing bytes,
@@ -1805,11 +2015,24 @@ def launch_role_attempt(
         raise CampaignPhaseError(
             f"supervision fail-closed for {role}: {exc}"
         ) from exc
-    if result.outcome == "terminated":
+    stderr = getattr(getattr(result, "stderr", None), "tail", "") or ""
+    stdout = getattr(getattr(result, "stdout", None), "tail", "") or ""
+    reason = getattr(result, "reason", "") or ""
+    # Stream tails have already crossed LaunchSupervision's exact-commit
+    # redaction boundary. Preserve only one bounded single-line diagnostic so
+    # an infrastructure exit is actionable without treating model prose as
+    # control protocol or publishing raw process output.
+    diagnostic = " ".join((reason or stderr or stdout).split())[:512]
+    if result.outcome == "terminated" or (
+        result.returncode is not None and result.returncode < 0
+    ):
         return RoleOutcome(
-            role, result.returncode, interrupted=True, signal=result.signal
+            role, result.returncode, interrupted=True, signal=result.signal,
+            diagnostic=diagnostic,
         )
-    return RoleOutcome(role, result.returncode or 0, interrupted=False)
+    return RoleOutcome(
+        role, result.returncode or 0, interrupted=False, diagnostic=diagnostic
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1854,6 +2077,7 @@ class Campaign:
         self._role_runner = role_runner
         self._planning_attempts_used = 0
         self._rounds_completed = 0
+        self._deadline: Optional[float] = None
         # Task 11: the verified credential-guard redactor for deterministic
         # gate output, built lazily on the first gate run (fail closed when
         # the exact committed guard cannot be verified).
@@ -1863,6 +2087,12 @@ class Campaign:
         # every gate execution re-validates it and fails closed on any
         # pathname/content/committed-tree substitution.
         self._held_verifier: Optional[evidence_module.HeldVerifier] = None
+        # Production capability acceptance and coordinator-owned runner
+        # acquisition are independently exact-commit bound; neither falls
+        # back to the verification descriptor or a workspace-resolved command.
+        self._held_capability: Optional[evidence_module.HeldVerifier] = None
+        self._held_runner: Optional[evidence_module.HeldVerifier] = None
+        self._held_runner_checker: Optional[evidence_module.HeldVerifier] = None
         # Task 22 (B1): the role driver is bound to its exact committed
         # blob/identity/inode descriptor *before* planning and every role
         # execution re-validates it, then executes the pinned interpreter
@@ -1963,22 +2193,72 @@ class Campaign:
                     f"the role driver {config.role_driver!r} cannot be bound "
                     f"before the campaign start: {exc}"
                 ) from exc
-        if config.acceptance_command:
-            command = tuple(config.acceptance_command)
+        if config.verification_command:
+            command = tuple(config.verification_command)
+            try:
+                binding = evidence_module.bind_verifier(
+                    self._root, command,
+                    commit=self._git.head(), git=self._git,
+                )
+                self._held_verifier = evidence_module.HeldVerifier(
+                    self._root, binding
+                )
+            except evidence_module.VerifierBindingError as exc:
+                raise CampaignBindingError(
+                    "the explicit verification command cannot be bound to "
+                    f"the exact pre-planning commit: {exc}"
+                ) from exc
+        for label, command_value, attribute in (
+            ("capability", config.capability_command, "_held_capability"),
+            ("acceptance", config.acceptance_command, "_held_acceptance"),
+            ("runner acquisition", config.runner_command, "_held_runner"),
+            (
+                "runner evidence checker",
+                RUNNER_CHECKER_COMMAND if config.runner_command else (),
+                "_held_runner_checker",
+            ),
+        ):
+            command = tuple(command_value)
             if command and command[0].startswith("./"):
                 try:
                     binding = evidence_module.bind_verifier(
                         self._root, command,
                         commit=self._git.head(), git=self._git,
                     )
-                    self._held_acceptance = evidence_module.HeldVerifier(
-                        self._root, binding
+                    setattr(
+                        self, attribute,
+                        evidence_module.HeldVerifier(self._root, binding),
                     )
                 except evidence_module.VerifierBindingError as exc:
                     raise CampaignConfigError(
-                        f"the acceptance gate cannot be bound before the "
-                        f"plan start: {exc}"
+                        f"the {label} gate cannot be bound before the plan "
+                        f"start: {exc}"
                     ) from exc
+
+    def _remaining_time(self, label: str) -> float:
+        """Return the finite remaining campaign wall-clock budget."""
+        if self._deadline is None:
+            return self._config.campaign_timeout
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise CampaignPhaseError(
+                f"campaign wall-clock deadline expired before {label}"
+            )
+        return remaining
+
+    def _gate_environment(self) -> Dict[str, str]:
+        environment = {
+            **sanitized_gate_environment(),
+            "FACTORY_VERIFIER_ROOT": str(self._root),
+        }
+        if self._config.state_namespace:
+            evidence_rel = (
+                f"{self._config.state_namespace}/installed-functional-evidence.env"
+            )
+            environment[INSTALLED_EVIDENCE_OVERRIDE] = str(
+                (self._root / evidence_rel).absolute()
+            )
+        return environment
 
     def _spawn_held_script(
         self, held: evidence_module.HeldVerifier, tail: Sequence[str],
@@ -2011,8 +2291,13 @@ class Campaign:
 
     # -- control-state recovery (Git + plan + state) -----------------------------
 
+    def _state_directory(self) -> Path:
+        if self._config.state_namespace:
+            return self._root / self._config.state_namespace
+        return self._root / ".factory-state"
+
     def _state_file_exists(self) -> bool:
-        return (self._root / ".factory-state" / state_module.STATE_FILE_NAME).exists()
+        return (self._state_directory() / state_module.STATE_FILE_NAME).exists()
 
     def _load_or_init_state(self):
         """Load or initialize the control state; return ``(state, recovered)``.
@@ -2430,8 +2715,17 @@ class Campaign:
                 task_id=task_id, attempt=attempt,
                 findings_payload=findings_payload,
             )
-        return launch_role_attempt(
+        remaining = self._remaining_time(f"{role} launch")
+        runtime_budget = min(float(self._config.runtime_limit), remaining)
+        bounded = replace(
             self._config,
+            runtime_limit=runtime_budget,
+            inactivity_limit=min(
+                float(self._config.inactivity_limit), runtime_budget
+            ),
+        )
+        return launch_role_attempt(
+            bounded,
             role=role,
             head=head,
             task_id=task_id,
@@ -2733,20 +3027,37 @@ class Campaign:
         gate child); its exit status is the gate.  Any captured failure
         output is bounded and redacted through the exact committed
         credential guard before it can enter a result, log, receipt, or
-        repository state.  The default gate verifies that every
-        ``- Verification:`` line of the **exact newly validated plan** (the
-        worktree plan the orchestrator is about to commit, or the freshly
-        committed plan at HEAD in the recovery/resume paths) that names a
-        repository-relative path exists in the worktree — a deterministic,
-        machine-checkable completion check.  The gate never reads the stale
-        plan of the pre-commit head (Task 9 review M1).
+        repository state. Production reserves that command for final product
+        acceptance and uses the exact verification command as the coherent
+        per-task contract. Fixtures without an acceptance command also run
+        their mandatory verifier, then supplement it by checking every
+        single-token ``- Verification:`` repository path in the **exact newly
+        validated plan**. Shell command prose (including whitespace) belongs
+        to the trusted verifier and is never interpreted as a pathname. The
+        gate never reads the stale pre-commit plan (Task 9 review M1).
 
-        Task 9 review L2: a verification reference must be a safe
+        Task 9 review L2: a token interpreted as a path must be a safe
         repository-relative path — an absolute path, an empty/dot-segment
         path, a ``..`` traversal, or any other path that would resolve
         outside the repository fails closed instead of being probed.
         """
         config = self._config
+        if config.role_driver is None:
+            # Production reserves --acceptance-command for the final product
+            # acceptance boundary.  A selected task is accepted by the same
+            # exact-commit deterministic verifier contract that will inspect
+            # the completed work in the verification phase; planner command
+            # prose is never reinterpreted as a pathname.
+            ran, exit_code, detail, skipped = self._run_gate(
+                config.verification_command, "task acceptance"
+            )
+            if not ran:
+                return False, detail or "task acceptance verifier did not run"
+            if exit_code != 0:
+                return False, detail or "task acceptance verifier failed"
+            if skipped:
+                return False, "task acceptance verifier reported a skip"
+            return True, "task acceptance verifier passed with no skips"
         if config.acceptance_command:
             command = tuple(config.acceptance_command)
             spawn_argv = list(command)
@@ -2779,8 +3090,11 @@ class Campaign:
                     spawn_argv,
                     executable=spawn_executable,
                     pass_fds=spawn_pass_fds or (),
-                    env=sanitized_gate_environment(),
-                    timeout=config.gate_timeout,
+                    env=self._gate_environment(),
+                    timeout=min(
+                        config.gate_timeout,
+                        self._remaining_time("fixture acceptance gate"),
+                    ),
                 )
             except lock_module.RootLockTimeoutError:
                 return False, "acceptance gate timed out"
@@ -2789,6 +3103,15 @@ class Campaign:
             return False, self._redact_gate_detail(
                 result.stdout, result.stderr
             ) or "acceptance gate failed"
+        # Fixture/default contracts still run their mandatory deterministic
+        # verifier. Repository-path references are a supplementary fixture
+        # assertion below; shell command prose is not reinterpreted as a path.
+        if self._lock is not None:
+            ran, exit_code, detail, skipped = self._run_gate(
+                config.verification_command, "task acceptance"
+            )
+            if not ran or exit_code != 0 or skipped:
+                return False, detail or "task acceptance verifier failed or skipped"
         task = next((t for t in plan.tasks if t.number == task_id), None)
         if task is None:
             return False, f"task {task_id} is absent from the validated plan"
@@ -2801,10 +3124,9 @@ class Campaign:
                 # An empty line contributes no reference and is skipped.
                 continue
             if any(ch in token for ch in " \t"):
-                # Task 9 review LOW: a verification reference containing
-                # whitespace cannot name one unambiguous repository-relative
-                # path — reject it as unsafe instead of silently skipping it.
-                unsafe.append(token)
+                # Planner Verification fields are command prose by contract.
+                # The trusted verifier above owns command execution; never
+                # misclassify valid shell argv/prose as a repository pathname.
                 continue
             unsafe_path, reason = _unsafe_repo_relative(token)
             if unsafe_path:
@@ -2822,10 +3144,253 @@ class Campaign:
             return False, f"missing verification references: {', '.join(missing)}"
         return True, "all verification references exist"
 
-    def _run_gate(self, command: Sequence[str], label: str) -> Tuple[bool, int, str]:
-        if not command:
+    def _runner_bindings(self) -> Tuple[str, str, str]:
+        """Re-prove the clean exact Git/environment identity for acquisition."""
+        if self._git.role_dirty_paths():
+            raise CampaignBindingError(
+                "runner acquisition requires a clean tracked/untracked product tree"
+            )
+        head = self._git.head()
+        tree = self._git.object_id(f"{head}^{{tree}}")
+        environment_blob = self._git.object_id(
+            f"{head}:.factory/environment.toml"
+        )
+        return head, tree, environment_blob
+
+    def _read_runner_acquisition(self) -> Optional[Dict[str, object]]:
+        state_directory = self._state_directory()
+        if not state_directory.exists() and not state_directory.is_symlink():
+            return None
+        try:
+            value = state_module.read_json(
+                self._root, RUNNER_ACQUISITION_NAME,
+                maximum=MAX_RESULT_FILE, missing_ok=True,
+            )
+        except state_module.StateIOError as exc:
+            raise CampaignBindingError(
+                f"runner acquisition metadata is unsafe or partial: {exc}"
+            ) from exc
+        if value is None:
+            return None
+        expected = {
+            "schema", "attempt", "status", "head", "tree",
+            "environment_blob", "command_sha256", "command",
+            "aggregate_sha256", "checker_exit", "runner_exit",
+            "diagnostic",
+        }
+        command_sha = plan_sha256(
+            json.dumps(list(RUNNER_COMMAND), separators=(",", ":")).encode()
+        )
+        if (
+            not isinstance(value, dict) or set(value) != expected
+            or value.get("schema") != RUNNER_ACQUISITION_SCHEMA
+            or type(value.get("attempt")) is not int or value["attempt"] < 1
+            or value.get("status") not in {
+                "acquiring", "complete", "transport_failure",
+                "findings", "integrity_failure",
+            }
+            or value.get("command") != list(RUNNER_COMMAND)
+            or value.get("command_sha256") != command_sha
+            or not all(
+                SHA40_RE.fullmatch(str(value.get(name, "")))
+                for name in ("head", "tree", "environment_blob")
+            )
+            or not isinstance(value.get("aggregate_sha256"), str)
+            or value.get("aggregate_sha256")
+            and not SHA256_RE.fullmatch(str(value["aggregate_sha256"]))
+            or type(value.get("checker_exit")) is not int
+            or type(value.get("runner_exit")) is not int
+            or not isinstance(value.get("diagnostic"), str)
+            or (
+                value.get("status") == "complete"
+                and (
+                    not SHA256_RE.fullmatch(str(value.get("aggregate_sha256", "")))
+                    or value.get("checker_exit") != 0
+                    or value.get("runner_exit") != 0
+                )
+            )
+        ):
+            raise CampaignBindingError(
+                "runner acquisition metadata schema/binding is invalid"
+            )
+        return value
+
+    def _write_runner_acquisition(
+        self, *, attempt: int, status: str, head: str, tree: str,
+        environment_blob: str, aggregate_sha256: str = "",
+        checker_exit: int = -1, runner_exit: int = -1,
+        diagnostic: str = "",
+    ) -> None:
+        command_sha = plan_sha256(
+            json.dumps(list(RUNNER_COMMAND), separators=(",", ":")).encode()
+        )
+        state_module.atomic_write_json(self._root, RUNNER_ACQUISITION_NAME, {
+            "schema": RUNNER_ACQUISITION_SCHEMA,
+            "attempt": attempt,
+            "status": status,
+            "head": head,
+            "tree": tree,
+            "environment_blob": environment_blob,
+            "command_sha256": command_sha,
+            "command": list(RUNNER_COMMAND),
+            "aggregate_sha256": aggregate_sha256,
+            "checker_exit": checker_exit,
+            "runner_exit": runner_exit,
+            # Fixed coordinator classifications only: child output, hostnames,
+            # transport bytes, environment values, and credentials never enter
+            # durable acquisition state or campaign findings.
+            "diagnostic": diagnostic,
+        })
+
+    def _spawn_runner_authority(
+        self, held: evidence_module.HeldVerifier, tail: Sequence[str],
+        timeout: float,
+    ):
+        try:
+            argv, executable, pass_fds = self._spawn_held_script(held, tail)
+        except evidence_module.VerifierBindingError as exc:
+            raise CampaignBindingError(
+                f"runner authority binding failed closed: {exc}"
+            ) from exc
+        return self._lock.spawn_child(
+            argv, executable=executable, pass_fds=pass_fds,
+            env=self._gate_environment(),
+            timeout=min(timeout, self._remaining_time("runner evidence acquisition")),
+            stdout_limit=GATE_DETAIL_MAX, stderr_limit=GATE_DETAIL_MAX,
+        )
+
+    def _check_runner_aggregate(self, head: str) -> Tuple[int, str]:
+        """Run the strong signed aggregate checker and return its exact digest."""
+        if self._held_runner_checker is None:
+            return -1, ""
+        try:
+            result = self._spawn_runner_authority(
+                self._held_runner_checker,
+                ("--expected-commit", head, "--print-digest"),
+                min(self._config.gate_timeout, self._config.runner_timeout),
+            )
+        except (lock_module.RootLockTimeoutError, CampaignBindingError):
+            return -1, ""
+        digest = (result.stdout or "").strip()
+        if result.returncode != 0 or not SHA256_RE.fullmatch(digest):
+            return result.returncode, ""
+        return 0, digest
+
+    def _ensure_runner_evidence(self) -> Tuple[bool, int, str]:
+        """Acquire fresh signed runner evidence under the trusted campaign lock.
+
+        Reuse is permitted only for this campaign's unambiguous completed
+        acquisition at the unchanged clean HEAD/tree/environment and only
+        after the strong checker revalidates the exact aggregate. Any changed
+        HEAD, interrupted/acquiring marker, transport failure, or stale
+        aggregate causes a new bounded acquisition; current-head tampering
+        after a completed acquisition is an integrity failure, never silently
+        overwritten.
+        """
+        if not self._config.runner_command:
             return False, 0, ""
-        held = self._held_verifier
+        if (
+            tuple(self._config.runner_command) != RUNNER_COMMAND
+            or self._held_runner is None
+            or self._held_runner_checker is None
+        ):
+            return False, -1, "runner acquisition authority is not exactly bound"
+        try:
+            head, tree, environment_blob = self._runner_bindings()
+            prior = self._read_runner_acquisition()
+        except (CampaignBindingError, CampaignGitError):
+            return False, -1, "runner acquisition prerequisite failed integrity validation"
+        same = bool(prior) and all(
+            prior.get(name) == value for name, value in (
+                ("head", head), ("tree", tree),
+                ("environment_blob", environment_blob),
+            )
+        )
+        if same and prior.get("status") == "complete":
+            checker_exit, digest = self._check_runner_aggregate(head)
+            if checker_exit == 0 and digest == prior.get("aggregate_sha256"):
+                return True, 0, "runner evidence reused after exact validation"
+            self._write_runner_acquisition(
+                attempt=int(prior["attempt"]), status="integrity_failure",
+                head=head, tree=tree, environment_blob=environment_blob,
+                checker_exit=checker_exit, runner_exit=RUNNER_INTEGRITY_EXIT,
+                diagnostic="completed runner aggregate failed integrity validation",
+            )
+            return True, -1, "completed runner aggregate failed integrity validation"
+        attempt = int(prior["attempt"]) + 1 if prior else 1
+        self._write_runner_acquisition(
+            attempt=attempt, status="acquiring", head=head, tree=tree,
+            environment_blob=environment_blob,
+            diagnostic="runner acquisition started",
+        )
+        # The metadata publication is not authority by itself. Revalidate the
+        # command inode/bytes and clean Git bindings again in the final
+        # pre-exec window, while retaining the sole campaign/root lock.
+        try:
+            binding_unchanged = (
+                self._runner_bindings() == (head, tree, environment_blob)
+            )
+        except (CampaignBindingError, CampaignGitError):
+            binding_unchanged = False
+        if not binding_unchanged:
+            self._write_runner_acquisition(
+                attempt=attempt, status="integrity_failure", head=head,
+                tree=tree, environment_blob=environment_blob,
+                diagnostic="Git binding changed before runner invocation",
+            )
+            return False, -1, "Git binding changed before runner invocation"
+        try:
+            result = self._spawn_runner_authority(
+                self._held_runner, (), self._config.runner_timeout,
+            )
+            runner_exit = result.returncode
+        except lock_module.RootLockTimeoutError:
+            runner_exit = RUNNER_TRANSPORT_EXIT
+        except CampaignBindingError:
+            runner_exit = RUNNER_INTEGRITY_EXIT
+        checker_exit, digest = self._check_runner_aggregate(head)
+        if runner_exit == 0 and checker_exit == 0:
+            self._write_runner_acquisition(
+                attempt=attempt, status="complete", head=head, tree=tree,
+                environment_blob=environment_blob, aggregate_sha256=digest,
+                checker_exit=0, runner_exit=0,
+                diagnostic="runner acquisition and strong validation passed",
+            )
+            return True, 0, "runner evidence acquired and strongly validated"
+        if runner_exit in (RUNNER_TRANSPORT_EXIT, RUNNER_FINDINGS_EXIT):
+            status = (
+                "transport_failure" if runner_exit == RUNNER_TRANSPORT_EXIT
+                else "findings"
+            )
+            diagnostic = (
+                "runner transport unavailable"
+                if status == "transport_failure"
+                else "declared runner verification did not pass"
+            )
+            self._write_runner_acquisition(
+                attempt=attempt, status=status, head=head, tree=tree,
+                environment_blob=environment_blob, checker_exit=checker_exit,
+                runner_exit=runner_exit, diagnostic=diagnostic,
+            )
+            return True, runner_exit, diagnostic
+        self._write_runner_acquisition(
+            attempt=attempt, status="integrity_failure", head=head, tree=tree,
+            environment_blob=environment_blob, checker_exit=checker_exit,
+            runner_exit=runner_exit,
+            diagnostic="runner protocol or aggregate integrity failure",
+        )
+        return True, -1, "runner protocol or aggregate integrity failure"
+
+    def _run_gate(
+        self, command: Sequence[str], label: str
+    ) -> Tuple[bool, int, str, bool]:
+        if not command:
+            return False, 0, "", False
+        held = {
+            "capability": self._held_capability,
+            "final capability": self._held_capability,
+            "final acceptance": self._held_acceptance,
+        }.get(label, self._held_verifier)
         spawn_argv = list(command)
         spawn_executable = None
         spawn_pass_fds: Tuple[int, ...] = ()
@@ -2873,27 +3438,25 @@ class Campaign:
                 # verifier was never executed, so the campaign classifies
                 # the verification as infrastructure_failure (an untrusted
                 # verifier can never yield pass/findings evidence).
-                return False, -1, f"{label} verifier binding failed closed: {exc}"
+                return False, -1, f"{label} verifier binding failed closed: {exc}", False
         try:
             result = self._lock.spawn_child(
                 spawn_argv,
                 executable=spawn_executable,
                 pass_fds=spawn_pass_fds,
-                env={
-                    **sanitized_gate_environment(),
-                    # Task 16 F1: pin the canonical repository root into the
-                    # verifier child so a repo-relative shell gate can resolve
-                    # its own root without ``$0`` (the kernel shebang dispatch
-                    # replaces the script argument with the descriptor path).
-                    "FACTORY_VERIFIER_ROOT": str(self._root),
-                },
-                timeout=self._config.gate_timeout,
+                env=self._gate_environment(),
+                timeout=min(
+                    self._config.gate_timeout,
+                    self._remaining_time(f"{label} gate"),
+                ),
             )
         except lock_module.RootLockTimeoutError:
-            return True, -1, f"{label} gate timed out"
+            return True, -1, f"{label} gate timed out", False
+        combined = (result.stdout or "") + (result.stderr or "")
+        skipped = bool(SKIP_OUTPUT_RE.search(combined))
         return True, result.returncode, self._redact_gate_detail(
             result.stdout, result.stderr
-        )
+        ), skipped
 
     def _exact_commit_redactor(self) -> object:
         """The verified exact-commit credential-guard redactor (fail closed).
@@ -3128,7 +3691,10 @@ class Campaign:
                 try:
                     self._lock.validate_live_branch(
                         self._config.branch,
-                        timeout=gitutil.GIT_TIMEOUT,
+                        timeout=min(
+                            gitutil.GIT_TIMEOUT,
+                            self._remaining_time("pre-round branch guard"),
+                        ),
                     )
                 except lock_module.RootLockError as exc:
                     raise pre_round_module.PreRoundError(
@@ -3255,10 +3821,17 @@ class Campaign:
             state_module.write_state(self._root, state2)
             self._planning_attempts_used = 0
             return _Step(self._record(state, attempt, "planned", ""), state=state2)
+        # A planner retry is a fresh attempt against the committed canonical
+        # plan, never against another attempt's partial/invalid worktree bytes.
+        # Planner output is regenerable ledger state (not product work), so
+        # every non-planned outcome restores it before retry or terminal exit.
+        if plan_changed:
+            self._restore_plan_worktree()
         detail = reason or (
             f"planner exit={role.exit_status}"
             + (" (interrupted)" if role.interrupted else "")
             + (f" scope={violation}" if violation else "")
+            + (f" diagnostic={role.diagnostic}" if role.diagnostic else "")
         )
         if outcome == "interrupted":
             if attempt < self._config.planning_attempts:
@@ -3463,7 +4036,10 @@ class Campaign:
             )
         return self._implementation_outcome(
             state, attempt, outcome,
-            reason or f"developer exit={role.exit_status}",
+            reason or (
+                f"developer exit={role.exit_status}"
+                + (f" diagnostic={role.diagnostic}" if role.diagnostic else "")
+            ),
             dirty_work=bool(self._preservable_dirty_paths()),
         )
 
@@ -3479,10 +4055,20 @@ class Campaign:
         budget_exhausted = attempt >= self._config.implementation_attempts
         if outcome == "interrupted":
             if budget_exhausted:
-                state2 = state_module.advance(state, "interrupted")
+                if dirty_work or self._preservable_dirty_paths():
+                    state2 = state_module.advance(state, "interrupted")
+                    state_module.write_state(self._root, state2)
+                    return _Step(
+                        self._record(state, attempt, "interrupted", detail), state=state2
+                    )
+                # A bounded model timeout with no uncommitted work is a clean
+                # exhausted attempt, not an operator interruption. Preserve
+                # campaign liveness by recording task failure and proceeding
+                # to independent verification/audit at the coherent HEAD.
+                state2 = state_module.advance(state, "task_failed")
                 state_module.write_state(self._root, state2)
                 return _Step(
-                    self._record(state, attempt, "interrupted", detail), state=state2
+                    self._record(state, attempt, "task_failed", detail), state=state2
                 )
             state2 = state_module.record_retry(state, "interrupted")
             state_module.write_state(self._root, state2)
@@ -3521,68 +4107,95 @@ class Campaign:
 
     def _step_verification(self, state: state_module.FactoryState) -> _Step:
         head = self._git.head()
-        # Task 12 §19: the deterministic verifier entrypoint is opened and
-        # bound to its committed blob, secure identity, and inode BEFORE the
-        # untrusted tester phase; the retained descriptor pins the bound
-        # inode so a later pathname or content substitution fails closed at
-        # execution time.  A verifier that cannot be bound is an untrusted
-        # verifier and fails the campaign closed as infrastructure_failure
-        # without running any untrusted phase.
-        if self._held_verifier is not None:
-            self._held_verifier.close()
-            self._held_verifier = None
-        if self._config.verification_command:
+        # The verifier was opened and exact-commit bound during campaign
+        # acquisition, before the planner or any other role could launch.
+        # Every execution below revalidates that retained descriptor against
+        # the current descendant commit; planner/developer commits may not
+        # change the verifier bytes or pathname.
+        if self._held_verifier is None:
+            raise CampaignBindingError(
+                "the explicit verification command is not held at the "
+                "pre-planning exact-commit boundary"
+            )
+        # A successful tester process can still omit its mandatory handoff.
+        # Retry that one infrastructure-only case once in a fresh role process
+        # before running the expensive trusted gates. Scope violations and
+        # nonzero/interrupted roles do not retry; absent or malformed JSON gets
+        # one fresh serialization attempt. Each attempt has its own state-digest tag and exact empty
+        # pre-created channel; no prior prose/session is carried forward.
+        attempt = 1
+        while True:
+            tag = self._begin_untrusted(state, attempt)
+            self._prepare_phase_result_file(
+                self._config.phase_result_path, "verification"
+            )
+            role = self._run_role("tester", state, head, attempt=attempt)
+            dirty = self._git.role_dirty_paths()
+            allow_paths = (
+                [self._config.phase_result_path]
+                if self._config.phase_result_path else []
+            )
+            violation = scope_violation(
+                dirty, phase="verification",
+                plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+                allow_paths=allow_paths,
+            )
+            result_error: Optional[CampaignResultError] = None
             try:
-                self._held_verifier = evidence_module.HeldVerifier(
-                    self._root,
-                    evidence_module.bind_verifier(
-                        self._root, self._config.verification_command,
-                        commit=head, git=self._git,
-                    ),
+                result = read_phase_result(
+                    self._root, self._config.phase_result_path, "verification"
                 )
-            except evidence_module.VerifierBindingError as exc:
-                state2 = state_module.advance(state, "infrastructure_failure")
-                state_module.write_state(self._root, state2)
-                return _Step(
-                    self._record(
-                        state, 1, "infrastructure_failure",
-                        f"verifier binding failed closed before the untrusted "
-                        f"phase: {exc}",
-                    ),
-                    state=state2,
-                )
-        tag = self._begin_untrusted(state, 1)
-        self._prepare_phase_result_file(
-            self._config.phase_result_path, "verification"
-        )
-        role = self._run_role("tester", state, head, attempt=1)
-        dirty = self._git.role_dirty_paths()
-        allow_paths = [self._config.phase_result_path] if self._config.phase_result_path else []
-        violation = scope_violation(
-            dirty, phase="verification",
-            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
-            allow_paths=allow_paths,
-        )
-        gate_ran, gate_exit, gate_detail = self._run_gate(
+            except CampaignResultError as exc:
+                # The secure reader already removed the malformed channel.
+                # One fresh retry may replace model serialization corruption;
+                # a second malformed result remains a fail-closed campaign
+                # error and is never interpreted or preserved as evidence.
+                result = None
+                result_error = exc
+            self._end_untrusted(tag)
+            if result_error is not None and attempt >= 2:
+                raise result_error
+            if (
+                result is not None or attempt >= 2 or violation is not None
+                or role.interrupted or role.exit_status != 0
+            ):
+                break
+            attempt += 1
+        gate_ran, gate_exit, gate_detail, verification_skipped = self._run_gate(
             self._config.verification_command, "verification"
         )
-        result = read_phase_result(
-            self._root, self._config.phase_result_path, "verification"
-        )
+        if verification_skipped and gate_exit == 0:
+            gate_exit = 1
+            gate_detail = gate_detail or "verification gate reported a skip"
         result_data = result[0] if result is not None else None
         result_digest = result[1] if result is not None else ""
         result_bytes = result[2] if result is not None else b""
         result_valid = bool(result_data is not None)
         result_outcome = result_data.get("outcome") if result_data else None
+        findings = list(result_data.get("findings", [])) if result_data else []
         blocked_refs = (
             list(result_data.get("blocked_on", [])) if result_data else []
         )
-        capability_ran, capability_exit, _ = self._run_gate(
-            self._config.capability_command, "capability"
+        acquisition_ran, acquisition_exit, acquisition_detail = (
+            self._ensure_runner_evidence()
         )
-        capability_available = True
-        if capability_ran:
-            capability_available = capability_exit == 0
+        if self._config.capability_command:
+            capability_ran, capability_exit, capability_detail, capability_skipped = self._run_gate(
+                self._config.capability_command, "capability"
+            )
+        else:
+            capability_ran, capability_exit = True, 0
+            capability_detail, capability_skipped = "no capabilities required", False
+        if acquisition_exit != 0:
+            capability_ran = acquisition_ran
+            capability_exit = acquisition_exit
+            capability_detail = acquisition_detail
+        capability_available = (
+            self._config.role_driver is not None
+            and not self._config.capability_command
+        ) or (capability_ran and capability_exit == 0)
+        if capability_skipped:
+            capability_available = False
         outcome = classify_verification(
             role=role,
             scope_ok=violation is None,
@@ -3590,10 +4203,28 @@ class Campaign:
             gate_exit=gate_exit,
             tester_result_valid=result_valid,
             tester_result_outcome=result_outcome,
+            findings=findings,
             blocked_refs=blocked_refs,
             capability_available=capability_available,
+            capability_ran=capability_ran,
+            capability_exit=capability_exit,
+            gate_skipped=verification_skipped,
+            capability_skipped=capability_skipped,
         )
-        self._end_untrusted(tag)
+        if (
+            outcome == "findings" and result_data is not None
+            and result_data.get("outcome") == "pass" and not findings
+        ):
+            # Deterministic verifier/acquisition failures override an
+            # optimistic tester pass. Mint one fixed, non-child-derived
+            # finding so the preserved structured handoff remains schema-
+            # coherent and cannot leak transport diagnostics.
+            result_data = dict(result_data)
+            result_data["outcome"] = "findings"
+            result_data["findings"] = [
+                "trusted verification or runner capability evidence did not pass"
+            ]
+            findings = list(result_data["findings"])
         if outcome in ("findings", "blocked"):
             # Task 10 §16: verification findings/blocked become next-round
             # planner input through an orchestrator-minted receipt that binds
@@ -3631,36 +4262,115 @@ class Campaign:
             # phase-result bytes the orchestrator consumed (or the honest
             # zero marker when no result file was produced).
             record_result_digest = result_digest or ("0" * 64)
-        detail = violation or gate_detail or ""
+        detail = (
+            violation
+            or (role.diagnostic if role.exit_status != 0 else "")
+            or gate_detail
+            or ""
+        )
         state2 = state_module.advance(state, outcome)
         state_module.write_state(self._root, state2)
         return _Step(
-            self._record(state, 1, outcome, detail,
+            self._record(state, attempt, outcome, detail,
                          result_digest=record_result_digest),
             state=state2,
         )
 
     def _step_audit(self, state: state_module.FactoryState) -> _Step:
-        tag = self._begin_untrusted(state, 1)
         head = self._git.head()
-        self._prepare_phase_result_file(
-            self._config.audit_result_path, "audit"
-        )
-        role = self._run_role("auditor", state, head, attempt=1)
-        dirty = self._git.role_dirty_paths()
-        allow_paths = [self._config.audit_result_path] if self._config.audit_result_path else []
-        violation = scope_violation(
-            dirty, phase="audit",
-            plan_path=self._config.plan_path, spec_path=self._config.spec_path,
-            allow_paths=allow_paths,
-        )
-        result = read_phase_result(
-            self._root, self._config.audit_result_path, "audit"
-        )
+        # One fresh retry absorbs a transient/malformed/missing auditor process
+        # without weakening the read-only scope. A dirty audit never retries;
+        # the second failure remains the terminal fail-closed audit outcome.
+        attempt = 1
+        while True:
+            tag = self._begin_untrusted(state, attempt)
+            self._prepare_phase_result_file(
+                self._config.audit_result_path, "audit"
+            )
+            role = self._run_role("auditor", state, head, attempt=attempt)
+            dirty = self._git.role_dirty_paths()
+            allow_paths = (
+                [self._config.audit_result_path]
+                if self._config.audit_result_path else []
+            )
+            violation = scope_violation(
+                dirty, phase="audit",
+                plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+                allow_paths=allow_paths,
+            )
+            result_error: Optional[CampaignResultError] = None
+            try:
+                result = read_phase_result(
+                    self._root, self._config.audit_result_path, "audit"
+                )
+            except CampaignResultError as exc:
+                result = None
+                result_error = exc
+            self._end_untrusted(tag)
+            trusted_handoff = (
+                result is not None and role.exit_status == 0
+                and not role.interrupted and violation is None
+            )
+            if trusted_handoff or attempt >= 2 or violation is not None:
+                if result_error is not None and attempt >= 2:
+                    raise result_error
+                break
+            attempt += 1
         result_data = result[0] if result is not None else None
         result_digest = result[1] if result is not None else ""
         result_bytes = result[2] if result is not None else b""
         result_valid = bool(result_data is not None)
+        final_gate_detail = ""
+        if (
+            result_valid
+            and role.exit_status == 0
+            and violation is None
+            and result_data.get("outcome") == "pass"
+            and state.current_round == self._config.rounds_requested
+            and self._config.role_driver is None
+        ):
+            # Auditor JSON is never sufficient for campaign success.  At the
+            # only transition that could yield success, execute both exact-
+            # commit-bound production commands and reject nonzero, unrun, or
+            # skip-marked output.  Deterministic failures become findings;
+            # unavailable facts/capabilities therefore cannot be elevated.
+            acquisition_ran, acquisition_exit, acquisition_detail = (
+                self._ensure_runner_evidence()
+            )
+            if self._config.capability_command:
+                cap_ran, cap_exit, cap_detail, cap_skipped = self._run_gate(
+                    self._config.capability_command, "final capability"
+                )
+            else:
+                cap_ran, cap_exit = True, 0
+                cap_detail, cap_skipped = "no capabilities required", False
+            if acquisition_exit != 0:
+                cap_ran = acquisition_ran
+                cap_exit = acquisition_exit
+                cap_detail = acquisition_detail
+            acc_ran, acc_exit, acc_detail, acc_skipped = self._run_gate(
+                self._config.acceptance_command, "final acceptance"
+            )
+            failures: List[str] = []
+            if not cap_ran or cap_exit != 0 or cap_skipped:
+                failures.append("final capability/evidence command did not pass without skips")
+            if not acc_ran or acc_exit != 0 or acc_skipped:
+                failures.append("final project acceptance command did not pass without skips")
+            if failures:
+                result_data = dict(result_data)
+                result_data["outcome"] = "findings"
+                result_data["findings"] = [
+                    *list(result_data.get("findings", [])), *failures
+                ]
+                final_gate_detail = "; ".join(failures)
+            if acquisition_exit < 0:
+                # A command/checker binding or signed-protocol integrity
+                # failure is control-plane infrastructure, not an ordinary
+                # capability finding. Preserve the structured terminal class.
+                role = replace(
+                    role, exit_status=-1,
+                    diagnostic="runner evidence integrity failure",
+                )
         outcome = classify_audit(
             role=role,
             scope_ok=violation is None,
@@ -3669,7 +4379,6 @@ class Campaign:
             findings=list(result_data.get("findings", [])) if result_data else [],
             blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
         )
-        self._end_untrusted(tag)
         if outcome in ("findings", "blocked"):
             # Task 10 §16: audit findings/blocked become next-round planner
             # input through an orchestrator-minted receipt; a non-final
@@ -3713,7 +4422,7 @@ class Campaign:
             state2 = state_module.advance(state, outcome)
             state_module.write_state(self._root, state2)
             return _Step(
-                self._record(state, 1, outcome, violation or "audit untrusted"),
+                self._record(state, attempt, outcome, violation or "audit untrusted"),
                 state=state2, terminal=outcome,
             )
         state2 = state_module.advance(state, outcome)
@@ -3725,8 +4434,11 @@ class Campaign:
             # The final round completed: its audit ended the campaign, so the
             # completed-round counter reaches the current round.
             self._rounds_completed = state2.current_round
+        audit_detail = (
+            role.diagnostic if role.exit_status != 0 else final_gate_detail
+        )
         return _Step(
-            self._record(state, 1, outcome, "",
+            self._record(state, attempt, outcome, audit_detail,
                          result_digest=record_result_digest),
             state=state2,
         )
@@ -3734,6 +4446,29 @@ class Campaign:
     # -- campaign loop ---------------------------------------------------------
 
     def run(self) -> CampaignResult:
+        """Run inside this campaign's sole lifecycle/evidence namespace."""
+        self._deadline = time.monotonic() + self._config.campaign_timeout
+        if self._config.role_driver is None:
+            # Programmatic callers cannot bypass the CLI preflight.  Re-prove
+            # clean HEAD, accepted commit, installed bytes/manifest, explicit
+            # verifier, provider, and the already-reserved private namespace
+            # immediately before acquisition and any role launch.
+            _production_preflight(
+                self._root, self._config,
+                self._config.verification_command,
+                acceptance_command=self._config.acceptance_command,
+                capability_command=self._config.capability_command,
+                runner_command=self._config.runner_command,
+                reserve_namespace=False,
+            )
+        if self._config.state_namespace:
+            with state_module.campaign_state_directory(self._state_directory()):
+                return self._run_in_state_namespace()
+        # Direct in-process fixture authorities retain their isolated legacy
+        # ``.factory-state`` path; production can never reach this branch.
+        return self._run_in_state_namespace()
+
+    def _run_in_state_namespace(self) -> CampaignResult:
         self._acquire()
         try:
             state, recovered = self._load_or_init_state()
@@ -3802,6 +4537,15 @@ class Campaign:
             if self._held_driver is not None:
                 self._held_driver.close()
                 self._held_driver = None
+            if self._held_capability is not None:
+                self._held_capability.close()
+                self._held_capability = None
+            if self._held_runner is not None:
+                self._held_runner.close()
+                self._held_runner = None
+            if self._held_runner_checker is not None:
+                self._held_runner_checker.close()
+                self._held_runner_checker = None
             if self._held_acceptance is not None:
                 self._held_acceptance.close()
                 self._held_acceptance = None
@@ -3841,6 +4585,12 @@ def derive_campaign_config(
     audit_result_path: str,
     role_timeout: float,
     gate_timeout: float,
+    runner_command: Sequence[str] = (),
+    runner_timeout: float = DEFAULT_RUNNER_TIMEOUT,
+    campaign_timeout: float = DEFAULT_CAMPAIGN_TIMEOUT,
+    state_namespace: str = "",
+    accepted_commit: str = "",
+    install_manifest: str = "",
 ) -> CampaignConfig:
     """Derive every binding from the committed state at the current HEAD.
 
@@ -3905,10 +4655,16 @@ def derive_campaign_config(
         acceptance_command=tuple(acceptance_command),
         verification_command=tuple(verification_command),
         capability_command=tuple(capability_command),
+        runner_command=tuple(runner_command),
         phase_result_path=phase_result_path,
         audit_result_path=audit_result_path,
+        state_namespace=state_namespace,
+        accepted_commit=accepted_commit,
+        install_manifest=install_manifest,
         role_timeout=role_timeout,
         gate_timeout=gate_timeout,
+        runner_timeout=runner_timeout,
+        campaign_timeout=campaign_timeout,
     )
 
 
@@ -3928,7 +4684,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="factory-campaign",
         description=(
             "Trusted finite campaign orchestrator with exact-commit ordered "
-            "pre-round hooks before every planner (FACTORY-LOOP-SPEC §11-§15). "
+            "pre-round hooks before every planner (FACTORY-LOOP-SPEC §10-§15). "
             "No Ollama quota hook is configured or executed. Never invoked by "
             "a model role."
         ),
@@ -3950,9 +4706,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_run.add_argument("--plan-path", default=".factory/artifacts/implementation-plan.md")
     p_run.add_argument("--planning-attempts", type=int, default=3)
     p_run.add_argument("--implementation-attempts", type=int, default=3)
-    p_run.add_argument("--provider", default="synthetic")
-    p_run.add_argument("--model", default="fixture-model")
-    p_run.add_argument("--backend", default="")
+    p_run.add_argument("--provider", default=None)
+    p_run.add_argument("--model", default=None)
+    p_run.add_argument("--backend", default=None)
+    p_run.add_argument(
+        "--accepted-commit", default="", metavar="SHA40",
+        help="exact accepted clean commit the production campaign must bind",
+    )
+    p_run.add_argument(
+        "--install-manifest", default="", metavar="ABSOLUTE_FILE",
+        help=(
+            "absolute production install manifest; the executing installed "
+            "control plane must verify byte-exactly at --accepted-commit"
+        ),
+    )
     p_run.add_argument("--role-driver", default=None, metavar="RELPATH")
     p_run.add_argument(
         "--developer-evidence-path",
@@ -3982,20 +4749,145 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     p_run.add_argument("--scenario", default=None, metavar="RELPATH")
-    p_run.add_argument("--phase-result", default=None, metavar="RELPATH")
-    p_run.add_argument("--audit-result", default=None, metavar="RELPATH")
+    p_run.add_argument(
+        "--phase-result", default=None, metavar="RELPATH",
+    )
+    p_run.add_argument(
+        "--audit-result", default=None, metavar="RELPATH",
+    )
     p_run.add_argument("--acceptance-command", action="append", default=[])
     p_run.add_argument("--verification-command", action="append", default=[])
     p_run.add_argument("--capability-command", action="append", default=[])
+    p_run.add_argument(
+        "--runner-command", action="append", default=[],
+        help=(
+            "exact coordinator-owned runner acquisition argv; production "
+            "requires ./scripts/run-factory-runners.py with no shell/arguments"
+        ),
+    )
+    p_run.add_argument(
+        "--preflight-only", action="store_true", help=argparse.SUPPRESS,
+    )
     p_run.add_argument("--role-timeout", type=float, default=DEFAULT_ROLE_TIMEOUT)
     p_run.add_argument("--gate-timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
+    p_run.add_argument(
+        "--runner-timeout", type=float, default=DEFAULT_RUNNER_TIMEOUT,
+        help=f"bounded runner acquisition timeout (maximum {MAX_RUNNER_TIMEOUT:g}s)",
+    )
+    p_run.add_argument(
+        "--campaign-timeout", type=float, default=None, metavar="SECONDS",
+        help=(
+            "required bounded production wall-clock deadline (maximum "
+            f"{MAX_CAMPAIGN_TIMEOUT:g}s), including quota waits"
+        ),
+    )
 
     args = parser.parse_args(argv)
     root = Path(args.root)
     if args.command == "run":
         try:
+            verification_command = _flatten(args.verification_command)
+            acceptance_command = _flatten(args.acceptance_command)
+            capability_command = _flatten(args.capability_command)
+            runner_command = _flatten(args.runner_command)
+            if not args.role_driver:
+                missing_commands = [
+                    option for option, command in (
+                        ("--verification-command", verification_command),
+                        ("--acceptance-command", acceptance_command),
+                    ) if not command
+                ]
+                if missing_commands:
+                    raise CampaignConfigError(
+                        "production campaign requires explicit non-empty "
+                        + ", ".join(missing_commands)
+                        + "; preflight stops before every role"
+                    )
+                if args.campaign_timeout is None:
+                    raise CampaignConfigError(
+                        "production campaign requires --campaign-timeout so "
+                        "quota waits and the full campaign are wall-clock bounded"
+                    )
+                if (
+                    args.runner_timeout <= 0
+                    or args.runner_timeout > MAX_RUNNER_TIMEOUT
+                    or args.runner_timeout != args.runner_timeout
+                    or args.runner_timeout == float("inf")
+                ):
+                    raise CampaignConfigError(
+                        f"--runner-timeout must be finite, positive, and at "
+                        f"most {MAX_RUNNER_TIMEOUT:g} seconds"
+                    )
+                if (
+                    args.campaign_timeout <= 0
+                    or args.campaign_timeout > MAX_CAMPAIGN_TIMEOUT
+                    or args.campaign_timeout != args.campaign_timeout
+                    or args.campaign_timeout == float("inf")
+                ):
+                    raise CampaignConfigError(
+                        f"--campaign-timeout must be finite, positive, and at "
+                        f"most {MAX_CAMPAIGN_TIMEOUT:g} seconds"
+                    )
+            state_namespace = ""
+            if args.role_driver:
+                # The embedded driver is a test-only fixture lane.  It is
+                # never a production fallback and must be made unmistakable
+                # by either the dedicated evidence-smoke mode or a committed
+                # scenario file.  Production installed callers get no
+                # synthetic defaults from this branch.
+                if not args.evidence_smoke and not args.scenario:
+                    raise CampaignConfigError(
+                        "--role-driver is test-only and requires --scenario "
+                        "or the dedicated --evidence-smoke lane"
+                    )
+                args.provider = args.provider or "synthetic"
+                args.model = args.model or "fixture-model"
+                args.backend = args.backend or ""
+            else:
+                missing = [
+                    name for name, value in (
+                        ("--provider", args.provider),
+                        ("--model", args.model),
+                        ("--backend", args.backend),
+                    ) if not value
+                ]
+                if missing:
+                    raise CampaignConfigError(
+                        "production campaign launch requires explicit "
+                        + ", ".join(missing)
+                    )
             if args.evidence_smoke:
                 _evidence_smoke_preflight(root, args)
+            elif not args.role_driver:
+                state_namespace = _production_preflight(
+                    root, args, verification_command,
+                    acceptance_command=acceptance_command,
+                    capability_command=capability_command,
+                    runner_command=runner_command,
+                )
+            if args.preflight_only:
+                if args.role_driver or not state_namespace:
+                    raise CampaignConfigError(
+                        "--preflight-only is available only to production installed-copy tests"
+                    )
+                print(json.dumps({
+                    "schema": "factory-production-preflight/v1",
+                    "campaign_id": args.campaign_id,
+                    "accepted_commit": args.accepted_commit,
+                    "installed_root": str(_CONTROL_SOURCE_ROOT),
+                    "state_namespace": state_namespace,
+                }, sort_keys=True, separators=(",", ":")))
+                return EXIT_SUCCESS
+            phase_result = args.phase_result or (
+                f"{state_namespace}/{CAMPAIGN_PHASE_RESULT_NAME}"
+                if state_namespace
+                else ".factory-state/factory-phase-result.json"
+            )
+            audit_result = args.audit_result or (
+                f"{state_namespace}/{CAMPAIGN_AUDIT_RESULT_NAME}"
+                if state_namespace
+                else ".factory-state/factory-audit-result.json"
+            )
             config = derive_campaign_config(
                 root,
                 campaign_id=args.campaign_id,
@@ -4010,13 +4902,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 role_driver=args.role_driver,
                 developer_evidence_path=args.developer_evidence_path,
                 scenario_path=args.scenario or "",
-                acceptance_command=_flatten(args.acceptance_command),
-                verification_command=_flatten(args.verification_command),
-                capability_command=_flatten(args.capability_command),
-                phase_result_path=args.phase_result or "",
-                audit_result_path=args.audit_result or "",
+                acceptance_command=acceptance_command,
+                verification_command=verification_command,
+                capability_command=capability_command,
+                runner_command=runner_command,
+                phase_result_path=phase_result,
+                audit_result_path=audit_result,
                 role_timeout=args.role_timeout,
                 gate_timeout=args.gate_timeout,
+                runner_timeout=args.runner_timeout,
+                campaign_timeout=(
+                    args.campaign_timeout
+                    if args.campaign_timeout is not None
+                    else DEFAULT_CAMPAIGN_TIMEOUT
+                ),
+                state_namespace=state_namespace,
+                accepted_commit=args.accepted_commit,
+                install_manifest=args.install_manifest,
             )
         except (CampaignError, gitutil.GitBoundaryError) as exc:
             print(f"factory-campaign: {exc}", file=sys.stderr)
@@ -4030,6 +4932,290 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
         return TERMINAL_EXIT_CODES[result.terminal_phase]
     raise AssertionError("argparse accepted an unknown campaign command")
+
+
+def _secure_install_manifest(path_text: str) -> Dict[str, object]:
+    """Read one external production install manifest without following links."""
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise CampaignConfigError("--install-manifest must be an absolute path")
+    try:
+        raw, info = evidence_module.secure_read_bytes(
+            path, maximum=INSTALL_MANIFEST_MAX, what="production install manifest"
+        )
+    except evidence_module.VerifierBindingError as exc:
+        raise CampaignConfigError(str(exc)) from exc
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise CampaignConfigError(
+            "production install manifest must be a current-user-owned mode-0600 file"
+        )
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise CampaignConfigError(
+            f"production install manifest is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise CampaignConfigError("production install manifest must be an object")
+    return data
+
+
+def _private_directory_error(info: os.stat_result, label: str) -> Optional[str]:
+    """Return the exact private-directory contract violation, if any."""
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return f"{label} must be a real directory (never a symlink)"
+    if info.st_uid != os.getuid():
+        return f"{label} must be owned by the invoking user"
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        return f"{label} must have mode 0700"
+    return None
+
+
+def _open_exact_private_directory(
+    parent_fd: int, name: str, label: str, flags: int,
+) -> int:
+    """lstat and open one exact component without listing its parent."""
+    try:
+        info = os.lstat(name, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CampaignConfigError(f"cannot validate exact {label}: {exc}") from exc
+    error = _private_directory_error(info, label)
+    if error:
+        raise CampaignConfigError(error)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CampaignConfigError(f"cannot open exact {label}: {exc}") from exc
+    opened = os.fstat(descriptor)
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        os.close(descriptor)
+        raise CampaignConfigError(f"{label} changed while opening")
+    error = _private_directory_error(opened, label)
+    if error:
+        os.close(descriptor)
+        raise CampaignConfigError(error)
+    return descriptor
+
+
+def _campaign_namespace_descriptors(
+    root: Path, campaign_id: str, *, create: bool,
+) -> Tuple[int, int, int, int]:
+    """Open the exact state/campaign hierarchy, optionally creating the leaf.
+
+    This authority never lists or reads ``.factory-state`` content.  It
+    lstat's only the exact state root and fixed ``campaigns`` component, then
+    creates only a missing fixed parent and one fresh safe campaign child via
+    ``mkdirat``.  Existing foreign entries are never opened, renamed, removed,
+    overwritten, or metadata-mutated.
+    """
+    if not SAFE_CAMPAIGN_ID_RE.fullmatch(campaign_id):
+        raise CampaignConfigError("campaign id is unsafe for state namespace")
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    root_fd = state_fd = parent_fd = leaf_fd = -1
+    try:
+        try:
+            root_fd = os.open(Path(root).absolute(), flags)
+        except OSError as exc:
+            raise CampaignConfigError(
+                f"cannot open canonical campaign repository root: {exc}"
+            ) from exc
+        state_fd = _open_exact_private_directory(
+            root_fd, CAMPAIGN_STATE_ROOT_REL, CAMPAIGN_STATE_ROOT_REL, flags
+        )
+        try:
+            parent_info = os.lstat(CAMPAIGN_STATE_PARENT_NAME, dir_fd=state_fd)
+        except FileNotFoundError:
+            if not create:
+                raise CampaignConfigError(
+                    "prepared production campaign namespace parent is unavailable"
+                )
+            try:
+                os.mkdir(CAMPAIGN_STATE_PARENT_NAME, 0o700, dir_fd=state_fd)
+                os.fsync(state_fd)
+            except FileExistsError as exc:
+                raise CampaignConfigError(
+                    "campaign namespace parent collision while creating exact "
+                    f"{CAMPAIGN_STATE_PARENT_REL!r}"
+                ) from exc
+            except OSError as exc:
+                raise CampaignConfigError(
+                    f"cannot create exact {CAMPAIGN_STATE_PARENT_REL}: {exc}"
+                ) from exc
+        except OSError as exc:
+            raise CampaignConfigError(
+                f"cannot validate exact {CAMPAIGN_STATE_PARENT_REL}: {exc}"
+            ) from exc
+        parent_fd = _open_exact_private_directory(
+            state_fd, CAMPAIGN_STATE_PARENT_NAME, CAMPAIGN_STATE_PARENT_REL, flags
+        )
+        if create:
+            try:
+                os.mkdir(campaign_id, 0o700, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except FileExistsError as exc:
+                raise CampaignConfigError(
+                    f"campaign state namespace collision for {campaign_id!r}; "
+                    "choose a new unique campaign id (existing bytes were untouched)"
+                ) from exc
+            except OSError as exc:
+                raise CampaignConfigError(
+                    f"cannot create fresh campaign state namespace {campaign_id!r}: {exc}"
+                ) from exc
+        leaf_fd = _open_exact_private_directory(
+            parent_fd, campaign_id,
+            f"campaign state namespace {CAMPAIGN_STATE_PARENT_REL}/{campaign_id}",
+            flags,
+        )
+        return root_fd, state_fd, parent_fd, leaf_fd
+    except Exception:
+        for descriptor in (leaf_fd, parent_fd, state_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+        raise
+
+
+def _reserve_campaign_namespace(root: Path, campaign_id: str) -> str:
+    """Atomically reserve one private per-campaign namespace, no collision."""
+    descriptors = _campaign_namespace_descriptors(root, campaign_id, create=True)
+    for descriptor in reversed(descriptors):
+        os.close(descriptor)
+    return f"{CAMPAIGN_STATE_PARENT_REL}/{campaign_id}"
+
+
+def _validate_reserved_campaign_namespace(root: Path, campaign_id: str) -> str:
+    """Revalidate only the exact prepared hierarchy, without enumeration."""
+    descriptors = _campaign_namespace_descriptors(root, campaign_id, create=False)
+    for descriptor in reversed(descriptors):
+        os.close(descriptor)
+    return f"{CAMPAIGN_STATE_PARENT_REL}/{campaign_id}"
+
+
+def _production_preflight(
+    root: Path,
+    args: object,
+    verification_command: Sequence[str],
+    *,
+    acceptance_command: Sequence[str] = (),
+    capability_command: Sequence[str] = (),
+    runner_command: Sequence[str] = (),
+    reserve_namespace: bool = True,
+) -> str:
+    """Validate a normal production campaign before any role launch.
+
+    Production is accepted only from the exact installed bytes certified by
+    a production manifest for the clean repository HEAD.  This closes the
+    planner contamination window: a pre-existing diff, stale install, source
+    invocation, wrong branch, missing explicit verifier, or reused campaign
+    namespace fails before :class:`Campaign` acquires or starts a role.
+    """
+    root = Path(root).absolute()
+    for label, command, required in (
+        ("verification", verification_command, True),
+        ("capability", capability_command, False),
+        ("acceptance", acceptance_command, True),
+        ("runner acquisition", runner_command, False),
+    ):
+        if not command:
+            if required:
+                raise CampaignConfigError(
+                    f"production campaign requires an explicit non-empty {label} command"
+                )
+            continue
+        if not command[0].startswith("./"):
+            raise CampaignConfigError(
+                f"production {label} command must use a canonical repository-relative ./path"
+            )
+    if runner_command and tuple(runner_command) != RUNNER_COMMAND:
+        raise CampaignConfigError(
+            "when configured, production runner acquisition must be exactly "
+            "./scripts/run-factory-runners.py with no shell or arguments"
+        )
+    provider = str(getattr(args, "provider", "")).lower()
+    if provider not in launch_module.SUPPORTED_PROVIDERS or provider == "synthetic":
+        raise CampaignConfigError(
+            "normal production campaigns require a fixed real-model provider; "
+            "synthetic is confined to explicit fixture/role-driver lanes"
+        )
+    accepted = getattr(args, "accepted_commit", "")
+    if not isinstance(accepted, str) or not SHA40_RE.fullmatch(accepted):
+        raise CampaignConfigError(
+            "production campaign requires --accepted-commit with a strict 40-hex commit"
+        )
+    head = _live_head(root)
+    if head != accepted:
+        raise CampaignConfigError(
+            f"HEAD {head} does not equal accepted production commit {accepted}"
+        )
+    branch = gitutil.git_run(
+        ["-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        timeout=GIT_TIMEOUT,
+    )
+    required_branch = getattr(args, "branch", "")
+    if branch.returncode != 0 or branch.stdout.strip() != required_branch:
+        raise CampaignConfigError(
+            f"production branch {branch.stdout.strip()!r} does not equal "
+            f"required branch {required_branch!r}"
+        )
+    status = gitutil.git_run(
+        ["-C", str(root), "status", "--porcelain", "-z", "--untracked-files=all"],
+        timeout=GIT_TIMEOUT,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise CampaignConfigError(
+            "production campaign requires a clean Git tree before planning; "
+            "the planner may never absorb pre-existing changes"
+        )
+    manifest_path = getattr(args, "install_manifest", "")
+    manifest = _secure_install_manifest(manifest_path)
+    if (
+        manifest.get("schema") != installer_module.INSTALL_MANIFEST_SCHEMA
+        or manifest.get("installation_mode") != "production"
+        or manifest.get("acceptance_eligible") is not True
+        or manifest.get("commit") != accepted
+        or Path(str(manifest.get("root", ""))).absolute() != root
+        or Path(str(manifest.get("prefix", ""))).absolute() != _CONTROL_SOURCE_ROOT
+    ):
+        raise CampaignConfigError(
+            "production install manifest does not bind this executing installed "
+            "control plane, repository, and accepted commit"
+        )
+    try:
+        commands = [verification_command, acceptance_command]
+        if capability_command:
+            commands.append(capability_command)
+        if runner_command:
+            commands.extend((runner_command, RUNNER_CHECKER_COMMAND))
+        for command in commands:
+            held = evidence_module.HeldVerifier(
+                root,
+                evidence_module.bind_verifier(
+                    root, tuple(command), commit=head
+                ),
+            )
+            held.close()
+        errors = installer_module.verify_staged(root, _CONTROL_SOURCE_ROOT, manifest)
+    except (installer_module.InstallerError,
+            evidence_module.VerifierBindingError) as exc:
+        raise CampaignConfigError(
+            f"exact-commit installed control-plane/verifier verification failed: {exc}"
+        ) from exc
+    if errors:
+        raise CampaignConfigError(
+            "exact-commit installed control-plane verification failed: "
+            + "; ".join(errors[:8])
+        )
+    campaign_id = getattr(args, "campaign_id", "")
+    if reserve_namespace:
+        return _reserve_campaign_namespace(root, campaign_id)
+    expected = f"{CAMPAIGN_STATE_PARENT_REL}/{campaign_id}"
+    if getattr(args, "state_namespace", expected) != expected:
+        raise CampaignConfigError(
+            f"production campaign state namespace must be {expected!r}"
+        )
+    return _validate_reserved_campaign_namespace(root, campaign_id)
 
 
 def _evidence_smoke_preflight(root: Path, args) -> None:
@@ -4116,19 +5302,8 @@ def _evidence_smoke_preflight(root: Path, args) -> None:
             "the worktree is not clean; the evidence-smoke round requires a "
             "clean tree at the exact bound commit"
         )
-    # Task 22 preflight: reject any existing recovery orphan, result
-    # collision, or lifecycle ledger collision *before* the campaign state
-    # authority can run its crash-window recovery — a leftover or foreign
-    # lifecycle artifact must never be reconciled, overwritten, or appended
-    # to by the smoke round.
-    state_dir = root / ".factory-state"
-    if state_dir.is_dir():
-        for path in sorted(state_dir.iterdir()):
-            if EVIDENCE_SMOKE_STATE_ORPHAN_RE.fullmatch(path.name):
-                raise CampaignConfigError(
-                    "an existing recovery-orphan state file must be resolved "
-                    f"by the operator before the evidence round: {path}"
-                )
+    # The smoke lane checks only its explicit outputs.  It never enumerates
+    # or attempts recovery from unrelated runtime-state content.
     for rel, label in (
         (args.phase_result, "phase result"),
         (args.audit_result, "audit result"),

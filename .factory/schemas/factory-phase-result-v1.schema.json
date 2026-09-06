@@ -23,5 +23,19 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "pass" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "findings": { "maxItems": 0 },
+          "blocked_on": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
 }

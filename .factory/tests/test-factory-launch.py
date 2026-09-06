@@ -37,13 +37,12 @@ synthetic backends:
   leader receives the supervisor's TERM; a TERM/INT/HUP-ignoring leader and
   a pipe-holding descendant in the group are killed after the bounded grace,
   the group is verified gone, and the leader is reaped;
-* **descendant scope / subreaper / reparent / PID reuse / crash-before-
-  snapshot (F6/F7)**: the capture is reuse-safe (a reused PID fails the
-  starttime identity check), a crash before the snapshot leaves an empty
-  scope and preserves dirty work, a double-forked orphan that dies is always
-  reaped by the subreaper, and a double-forked/``setsid`` survivor that
-  escapes bounded termination fails closed with
-  :class:`EscapedDescendantError`;
+* **dedicated broker / descendant scope / PID reuse (F6/F7)**: the capture
+  is reuse-safe, a crash before snapshot preserves dirty work, and the fresh
+  childless ptrace/subreaper broker reaps double-forked orphans and
+  bounded-SIGKILLs surviving ``setsid`` escapes. A pre-existing coordinator
+  child that forks and exits during launch keeps both its unrelated worker
+  and wait status;
 * **bounded output/timeouts (§9)**: per-stream digests and bounded tails,
   runtime and inactivity limits terminate the run, and results are bounded
   and carry no credentials (no argv/environment ever appears in a result).
@@ -52,6 +51,8 @@ synthetic backends:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -72,7 +73,6 @@ ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 
 sys.path.insert(0, str(LOOP))
-import confinement  # noqa: E402
 import gitutil  # noqa: E402
 import launch  # noqa: E402
 import lock as lock_module  # noqa: E402
@@ -101,7 +101,7 @@ from launch import (  # noqa: E402
     child_environment,
     compose_prompt,
     derive_task_excerpt,
-    PI_RALPH_GUARD_DIGEST_ENV,
+    PI_FACTORY_GUARD_DIGEST_ENV,
     secure_wrapper_path,
     task_excerpt_bytes,
     task_excerpt_digest,
@@ -361,6 +361,23 @@ class _Base(unittest.TestCase):
             ROOT / "scripts" / "credential-guard.py",
             scripts / "credential-guard.py",
         )
+        # Task 11: the model-side Pi guard extension is a fixture blob too —
+        # the launch authority verifies the working-tree extension equals the
+        # committed blob at the bound commit and always loads it through
+        # ``--extension`` in the child argv.
+        shutil.copy2(
+            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            scripts / "pi-factory-guard-extension.mjs",
+        )
+        (scripts / "pi-cli-shims").mkdir()
+        shutil.copy2(
+            ROOT / "scripts" / "pi-cli-shims" / "git",
+            scripts / "pi-cli-shims" / "git",
+        )
+        loop = self.workspace / ".factory" / "loop"
+        loop.mkdir(parents=True)
+        for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
+            shutil.copy2(ROOT / ".factory" / "loop" / module, loop / module)
         self.backend = self.workspace / "backend.py"
         self.backend.write_text(BACKEND_SOURCE, encoding="utf-8")
         os.chmod(self.backend, 0o700)
@@ -403,14 +420,11 @@ class _Base(unittest.TestCase):
     ) -> launch.LaunchAuthority:
         """Mint the verified-committed authority from the actual bytes.
 
-        The launch-test suite exercises the Task 6/7 supervision and guard
-        machinery (not Task 8 confinement), so every mint here carries the
-        explicit *private synthetic-proof test seam* (Task 8 review, finding
-        5: confinement is mandatory for every public authorize API unless the
-        hidden suite passes that seam).  A synthetic proof is never evidence
-        of real confinement; real confinement is proven only by the Task 8
-        suite's production mint.
+        Hermetic synthetic model backends still receive the production real
+        Landlock proof; the installed authority has no synthetic-proof seam.
         """
+        if binding.role == "developer" and task_excerpt is None:
+            task_excerpt = task_excerpt_bytes(plan, binding.task_id)
         return launch.authorize_launch(
             binding,
             role_prompt=role_prompt,
@@ -419,7 +433,6 @@ class _Base(unittest.TestCase):
             plan=plan,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
-            _confinement_proof=confinement._mint_synthetic_proof(binding),
         )
 
     def read_json(self, name: str) -> object:
@@ -467,7 +480,7 @@ class _Base(unittest.TestCase):
 
     def make_binding(
         self,
-        role: str = "planner",
+        role: str | None = None,
         *,
         task_id: int | None = None,
         task_excerpt_digest: str | None = None,
@@ -488,6 +501,14 @@ class _Base(unittest.TestCase):
         agents_bytes = agents if agents is not None else self.policy.read_bytes()
         spec_bytes = spec if spec is not None else self.spec.read_bytes()
         plan_bytes = plan if plan is not None else self.plan.read_bytes()
+        if role is None:
+            # Runtime scenarios create behavior.json before binding and need a
+            # genuine product-writable developer role for their marker files.
+            # Pure argv/prompt tests retain the planner default.
+            role = "developer" if (self.workspace / "behavior.json").exists() else "planner"
+        if role == "developer" and task_id is None:
+            task_id = 1
+            task_excerpt_digest = sha256(task_excerpt_bytes(plan_bytes, task_id))
         binding = InvocationBinding(
             role=role,
             model="synthetic-model",
@@ -656,6 +677,20 @@ class ComposePromptTests(_Base):
         self.assertIn(objective, prompt)
         self.assertNotIn(b"## Selected task excerpt", prompt)
 
+    def test_tester_result_channel_is_exact_prompt_context_not_environment(self) -> None:
+        result_path = self.workspace / ".factory-state" / "phase-result.json"
+        binding, role, agents, spec, plan = self.make_binding(role="tester")
+        binding = dataclasses.replace(binding, result_write_path=str(result_path))
+        prompt = compose_prompt(
+            binding, role_prompt=role, agents=agents, spec=spec, plan=plan
+        )
+        self.assertIn(b"## Structured phase-result channel (mandatory)", prompt)
+        self.assertIn(str(result_path).encode(), prompt)
+        self.assertIn(b"factory-phase-result/v1", prompt)
+        env = child_environment(binding)
+        self.assertFalse(any("RESULT" in key for key in env))
+        self.assertNotIn(str(result_path), env.values())
+
     def test_planner_prompt_has_no_task_or_audit(self) -> None:
         binding, role, agents, spec, plan = self.make_binding(role="planner")
         prompt = compose_prompt(
@@ -792,6 +827,26 @@ class InvocationBindingTests(_Base):
                     verify_invocation(InvocationBinding(**kwargs))
         self.assertTrue(verify_invocation(valid) is None)
 
+    def test_campaign_result_handoff_is_confined_to_nested_state_namespace(self) -> None:
+        binding = self.make_binding(role="tester")[0]
+        valid = dataclasses.replace(
+            binding,
+            result_write_path=str(
+                self.workspace / ".factory-state/campaigns/safe-id/phase-result.json"
+            ),
+        )
+        self.assertTrue(verify_invocation(valid) is None)
+        for relpath in (
+            ".factory-state/campaigns/bad id/phase-result.json",
+            ".factory-state/campaigns",
+        ):
+            with self.subTest(relpath=relpath):
+                malformed = dataclasses.replace(
+                    binding, result_write_path=str(self.workspace / relpath)
+                )
+                with self.assertRaises(InvocationError):
+                    verify_invocation(malformed)
+
     def test_missing_backend_or_workspace_fails(self) -> None:
         missing = self.tmp / "nope.py"
         binding = InvocationBinding(
@@ -857,15 +912,15 @@ class ArgvEnvironmentTests(_Base):
     def test_child_environment_forwards_guard_digest(self) -> None:
         # Task 11 review: the trusted pre-spawn authority forwards the exact
         # committed credential-guard digest through the sanitized launch env
-        # so the model-side Pi extension can bind its worktree guard without
-        # any Git access.  A malformed digest fails closed.
+        # so the model-side Pi guard extension can bind its worktree guard
+        # without any Git access.  A malformed digest fails closed.
         binding, _, _, _, _ = self.make_binding()
         digest = hashlib.sha256(b"exact-committed-guard-bytes").hexdigest()
         env = child_environment(binding, guard_digest=digest)
-        self.assertEqual(env[PI_RALPH_GUARD_DIGEST_ENV], digest)
+        self.assertEqual(env[PI_FACTORY_GUARD_DIGEST_ENV], digest)
         # The digest key itself carries no credential shape and survives the
         # defense-in-depth strips.
-        self.assertEqual(env[PI_RALPH_GUARD_DIGEST_ENV], digest)
+        self.assertEqual(env[PI_FACTORY_GUARD_DIGEST_ENV], digest)
         for bad in ("not-hex", "0" * 63, "0" * 65, 123):
             with self.subTest(bad=bad):
                 with self.assertRaises(InvocationError):
@@ -874,7 +929,7 @@ class ArgvEnvironmentTests(_Base):
                     )
         # Without a digest the key is absent entirely.
         self.assertNotIn(
-            PI_RALPH_GUARD_DIGEST_ENV, child_environment(binding)
+            PI_FACTORY_GUARD_DIGEST_ENV, child_environment(binding)
         )
 
     def test_verify_child_env_rejects_credential_and_lock_keys(self) -> None:
@@ -892,12 +947,15 @@ class ArgvEnvironmentTests(_Base):
 
     def test_child_argv_is_structural_and_secret_free(self) -> None:
         binding, _, _, _, _ = self.make_binding()
-        argv = child_argv(binding, Path("/tmp/prompt.md"), Path("/tmp/session"))
-        self.assertEqual(argv[0], sys.executable)
+        argv = child_argv(
+            binding, 9, Path("/tmp/session"), prompt_digest=sha256(b"prompt")
+        )
+        self.assertEqual(argv[0], os.path.realpath(sys.executable))
         self.assertEqual(
             argv[1], str(self.workspace / "scripts" / WRAPPER_BASENAME)
         )
-        self.assertIn("--prompt-file", argv)
+        self.assertIn("--prompt-fd", argv)
+        self.assertNotIn("--prompt-file", argv)
         self.assertIn("--", argv)
         self.assertIn("--print", argv)
         self.assertIn("--no-session", argv)
@@ -905,6 +963,13 @@ class ArgvEnvironmentTests(_Base):
         self.assertIn("--no-themes", argv)
         self.assertIn("--no-context-files", argv)
         self.assertIn("--tools", argv)
+        # Task 11: the model-side Pi guard extension is always loaded through
+        # ``--extension`` with the absolute committed workspace path.
+        self.assertIn("--extension", argv)
+        self.assertEqual(
+            argv[argv.index("--extension") + 1],
+            str(self.workspace / "scripts" / "pi-factory-guard-extension.mjs"),
+        )
         self.assertNotIn(SYNTHETIC_SECRET, json.dumps(argv))
         for flag in launch.FORBIDDEN_BACKEND_FLAGS:
             self.assertNotIn(flag, argv)
@@ -914,9 +979,10 @@ class ArgvEnvironmentTests(_Base):
         with self.assertRaises(InvocationError):
             child_argv(
                 binding,
-                self.tmp / "prompt.md",
+                9,
                 self.tmp / "session",
                 secure_wrapper=self.tmp / "missing-wrapper.py",
+                prompt_digest=sha256(b"prompt"),
             )
 
     def test_secure_wrapper_path_requires_committed_wrapper(self) -> None:
@@ -927,32 +993,27 @@ class ArgvEnvironmentTests(_Base):
 
 
 # --------------------------------------------------------------------------
-# Prompt-file publication (the wrapper's secure /tmp contract)
+# Anonymous sealed prompt transport
 # --------------------------------------------------------------------------
 
-class PromptFileTests(_Base):
-    def test_write_prompt_file_is_private_single_link(self) -> None:
-        directory = launch._prompt_directory()
+class PromptMemfdTests(_Base):
+    def test_prompt_memfd_has_exact_bytes_and_mandatory_seals(self) -> None:
+        descriptor = launch._sealed_prompt_memfd(b"prompt bytes")
         try:
-            path = launch.write_prompt_file(directory, b"prompt bytes")
-            info = path.stat()
-            self.assertEqual(info.st_uid, os.getuid())
-            self.assertEqual(info.st_nlink, 1)
-            self.assertEqual(info.st_mode & 0o777, 0o600)
-            self.assertEqual(path.read_bytes(), b"prompt bytes")
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(os.pread(descriptor, 64, 0), b"prompt bytes")
+            self.assertEqual(
+                launch._prompt_memfd_sha256(descriptor), sha256(b"prompt bytes")
+            )
+            with self.assertRaises(OSError):
+                os.pwrite(descriptor, b"tamper", 0)
+            with self.assertRaises(OSError):
+                os.ftruncate(descriptor, 0)
         finally:
-            shutil.rmtree(directory, ignore_errors=True)
+            os.close(descriptor)
 
-    def test_write_prompt_file_rejects_oversize(self) -> None:
-        directory = launch._prompt_directory()
-        try:
-            with self.assertRaises(InvocationError):
-                launch.write_prompt_file(
-                    directory, b"x" * (PROMPT_MAX_BYTES + 1)
-                )
-        finally:
-            shutil.rmtree(directory, ignore_errors=True)
+    def test_prompt_memfd_rejects_oversize(self) -> None:
+        with self.assertRaises(InvocationError):
+            launch._sealed_prompt_memfd(b"x" * (PROMPT_MAX_BYTES + 1))
 
 
 # --------------------------------------------------------------------------
@@ -999,6 +1060,17 @@ class SupervisedFreshProcessTests(_Base):
             "GIT_DIR",
         ):
             self.assertNotIn(forbidden, env)
+        path_parts = env["PATH"].split(os.pathsep)
+        self.assertTrue(
+            Path(path_parts[0]).name.startswith(launch.EXEC_STAGING_PREFIX),
+            "the exact staged Git shim directory must lead the sealed child PATH",
+        )
+        self.assertTrue(
+            all(part.startswith("/nix/store/") or part in (
+                "/run/current-system/sw/bin", "/usr/bin", "/bin",
+            ) for part in path_parts[1:]),
+            path_parts,
+        )
         serialized = json.dumps(result.to_dict())
         self.assertNotIn(SYNTHETIC_SECRET, serialized)
         # The structured result carries no argv and no environment at all.
@@ -1021,11 +1093,15 @@ class SupervisedFreshProcessTests(_Base):
         self.assertNotIn(SYNTHETIC_SECRET, json.dumps(argv))
 
     def test_prompt_bytes_reach_leaf_exactly(self) -> None:
+        self.set_behavior("record")
         binding, role, agents, spec, plan = self.make_binding()
+        excerpt = task_excerpt_bytes(plan, binding.task_id)
         expected = compose_prompt(
-            binding, role_prompt=role, agents=agents, spec=spec, plan=plan
+            binding, role_prompt=role, agents=agents, spec=spec, plan=plan,
+            task_excerpt=excerpt,
         )
-        self._run_record()
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        supervisor.run(self.authorize(binding, role, agents, spec, plan))
         self.assertEqual(
             self.read_text("prompt.digest"), sha256(expected)
         )
@@ -1214,6 +1290,43 @@ class SupervisionTerminationTests(_Base):
         self.assertNotIn("environ", result.to_dict())
         self.assertEqual(result.outcome, "completed")
 
+    def test_output_monitor_accepts_pipes_above_fd_setsize(self) -> None:
+        """Exact rule-anchor FDs must not make natural completion fail.
+
+        The project-shell closure can retain more than 1024 per-inode/path
+        anchors before Popen creates stdout/stderr. ``select.select`` rejects
+        those high pipe descriptors even when RLIMIT_NOFILE permits them; the
+        production monitor must use a scalable Linux selector instead.
+        """
+        held: list[int] = []
+        try:
+            while not held or held[-1] < 1100:
+                held.append(os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC))
+        except OSError as exc:
+            for descriptor in held:
+                os.close(descriptor)
+            self.skipTest(f"host cannot allocate a descriptor above 1100: {exc}")
+        try:
+            self.set_behavior("record")
+            binding, role, agents, spec, plan = self.make_binding()
+            supervisor = LaunchSupervision(binding, kill_grace=0.3)
+            real_spawn = supervisor.spawn
+            pipe_fds: list[int] = []
+
+            def record_spawn():
+                child = real_spawn()
+                pipe_fds.extend((child.stdout.fileno(), child.stderr.fileno()))
+                return child
+
+            with unittest.mock.patch.object(supervisor, "spawn", record_spawn):
+                result = supervisor.run(self.authorize(binding, role, agents, spec, plan))
+            self.assertTrue(all(descriptor > 1023 for descriptor in pipe_fds))
+            self.assertEqual(result.outcome, "completed")
+            self.assertEqual(result.returncode, 0)
+        finally:
+            for descriptor in held:
+                os.close(descriptor)
+
     def test_exception_in_invariants_still_bounded_terminates(self) -> None:
         """F1: an invariant failure after spawn kills and reaps the live child."""
         self.set_behavior("sleep")
@@ -1348,11 +1461,9 @@ class SupervisionTerminationTests(_Base):
             runtime_limit=60.0, inactivity_limit=60.0
         )
         supervisor = LaunchSupervision(binding, kill_grace=0.3)
-        supervisor.prompt_path = launch.write_prompt_file(
-            launch._prompt_directory(), b"prompt"
-        )
+        supervisor.prompt_fd = launch._sealed_prompt_memfd(b"prompt")
+        supervisor._prompt_digest = sha256(b"prompt")
         supervisor.session_dir = launch._session_directory()
-        supervisor.install_subreaper()
         child = supervisor.spawn()
         starttime = supervisor._leader_starttime
         self.assertIsNotNone(starttime)
@@ -1382,7 +1493,6 @@ class SupervisionTerminationTests(_Base):
             self._wait_gone(holder)
             self.assertIsNotNone(child.returncode)
         finally:
-            supervisor._reap_orphans(child.pid)
             supervisor._cleanup()
 
     def test_killpg_gated_on_reused_pid_identity(self) -> None:
@@ -1392,11 +1502,9 @@ class SupervisionTerminationTests(_Base):
             runtime_limit=60.0, inactivity_limit=60.0
         )
         supervisor = LaunchSupervision(binding, kill_grace=0.3)
-        supervisor.prompt_path = launch.write_prompt_file(
-            launch._prompt_directory(), b"prompt"
-        )
+        supervisor.prompt_fd = launch._sealed_prompt_memfd(b"prompt")
+        supervisor._prompt_digest = sha256(b"prompt")
         supervisor.session_dir = launch._session_directory()
-        supervisor.install_subreaper()
         child = supervisor.spawn()
         killpg_calls: list = []
         try:
@@ -1423,11 +1531,9 @@ class SupervisionTerminationTests(_Base):
             runtime_limit=60.0, inactivity_limit=60.0
         )
         supervisor = LaunchSupervision(binding, kill_grace=0.05)
-        supervisor.prompt_path = launch.write_prompt_file(
-            launch._prompt_directory(), b"prompt"
-        )
+        supervisor.prompt_fd = launch._sealed_prompt_memfd(b"prompt")
+        supervisor._prompt_digest = sha256(b"prompt")
         supervisor.session_dir = launch._session_directory()
-        supervisor.install_subreaper()
         child = supervisor.spawn()
         try:
             identity = iter([True, True, True, False])
@@ -1613,29 +1719,131 @@ class DescendantScopeTests(_Base):
             "the orphaned double-fork descendant must be reaped, not a zombie",
         )
 
-    def test_surviving_escaped_descendant_fails_closed(self) -> None:
+    def test_surviving_escaped_descendant_is_killed_reaped_then_fails(self) -> None:
         self.set_behavior("double-fork-live")
         binding, role, agents, spec, plan = self.make_binding()
         supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        marker = self.marker_dir / "orphan.pid"
+        pid: int | None = None
         try:
-            with self.assertRaises(EscapedDescendantError):
+            with self.assertRaises(EscapedDescendantError) as caught:
                 supervisor.run(self.authorize(binding, role, agents, spec, plan))
+            self.assertIn("reaped", str(caught.exception))
+            self.assertTrue(marker.is_file(), "the escaped helper never started")
+            pid = int(marker.read_text(encoding="utf-8"))
+            self._wait_gone_time(pid)
+            self.assertFalse(
+                os.path.exists(f"/proc/{pid}"),
+                "finalization returned before the owned escape was reaped",
+            )
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
         finally:
-            # Recover the escaped survivor for operator inspection.
-            marker = self.marker_dir / "orphan.pid"
-            if marker.exists():
+            # Failure-path hygiene only: a regressed implementation must not
+            # leave the test's deliberately escaped process behind.
+            if pid is None and marker.is_file():
                 pid = int(marker.read_text(encoding="utf-8"))
+            if pid is not None:
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                # The survivor is a child of this subreaper; reap it so the
-                # harness never leaves a zombie behind.
                 try:
                     os.waitpid(pid, 0)
                 except ChildProcessError:
                     pass
-                self._wait_gone_time(pid)
+
+    def test_preexisting_child_fork_exit_does_not_widen_broker_ownership(self) -> None:
+        """An unrelated mid-attempt fork keeps its worker and exit status.
+
+        The pre-existing coordinator child forks only after the confined
+        command is live, then exits 37.  Its worker is not in the fresh
+        executable broker's ancestry, so launch must neither signal it nor
+        consume the parent's wait status.
+        """
+        trigger = self.marker_dir / "pid"
+        worker_pidfile = self.marker_dir / "unrelated-worker.pid"
+        worker_status = self.marker_dir / "unrelated-worker.status"
+        helper = self.tmp / "unrelated-forker.py"
+        helper.write_text(
+            "import os, pathlib, sys, time\n"
+            "trigger, pidfile, status = map(pathlib.Path, sys.argv[1:])\n"
+            "deadline = time.monotonic() + 20\n"
+            "while not trigger.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "if not trigger.exists(): os._exit(91)\n"
+            "worker = os.fork()\n"
+            "if worker:\n"
+            "    pidfile.write_text(str(worker), encoding='ascii')\n"
+            "    os._exit(37)\n"
+            "os.setsid()\n"
+            "time.sleep(0.15)\n"
+            "status.write_text('untouched', encoding='ascii')\n"
+            "time.sleep(120)\n",
+            encoding="utf-8",
+        )
+        preexisting = subprocess.Popen([
+            sys.executable, str(helper), str(trigger), str(worker_pidfile),
+            str(worker_status),
+        ])
+        worker_pid: int | None = None
+        try:
+            self.set_behavior("trap-term")
+            binding, role, agents, spec, plan = self.make_binding(
+                runtime_limit=30.0, inactivity_limit=0.8
+            )
+            supervisor = LaunchSupervision(binding, kill_grace=0.3)
+            result = supervisor.run(
+                self.authorize(binding, role, agents, spec, plan)
+            )
+            self.assertEqual(result.outcome, "terminated")
+            self.assertEqual(preexisting.wait(timeout=5), 37)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not worker_status.is_file():
+                time.sleep(0.02)
+            self.assertTrue(worker_pidfile.is_file(), "unrelated worker never forked")
+            worker_pid = int(worker_pidfile.read_text(encoding="ascii"))
+            self.assertEqual(worker_status.read_text(encoding="ascii"), "untouched")
+            os.kill(worker_pid, 0)
+            self.assertFalse(hasattr(supervisor, "_pre_existing_children"))
+            self.assertFalse(hasattr(supervisor, "_owned_descendant_identities"))
+        finally:
+            if worker_pid is None and worker_pidfile.is_file():
+                worker_pid = int(worker_pidfile.read_text(encoding="ascii"))
+            if worker_pid is not None:
+                try:
+                    os.kill(worker_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if preexisting.poll() is None:
+                preexisting.kill()
+                preexisting.wait(timeout=5)
+
+    def test_live_escape_fails_closed_without_pidfd_signaling(self) -> None:
+        """Numeric ``os.kill`` is never a fallback for an owned escape."""
+        with unittest.mock.patch.object(
+            launch, "_is_live_with_identity", return_value=True
+        ), unittest.mock.patch.object(os, "pidfd_open", None):
+            with self.assertRaisesRegex(
+                launch.SupervisionError, "pidfd signaling is unavailable"
+            ):
+                LaunchSupervision._kill_pinned_identity(424242, 101)
+
+    def test_pidfd_identity_is_revalidated_after_open(self) -> None:
+        """A PID recycled before pidfd_open is never signaled through its pidfd."""
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        send = unittest.mock.Mock()
+        with unittest.mock.patch.object(
+            launch, "_is_live_with_identity", side_effect=[True, False]
+        ), unittest.mock.patch.object(
+            os, "pidfd_open", return_value=descriptor
+        ), unittest.mock.patch.object(
+            signal, "pidfd_send_signal", send, create=True
+        ):
+            self.assertFalse(
+                LaunchSupervision._kill_pinned_identity(424243, 102)
+            )
+        send.assert_not_called()
 
     def test_live_scope_excludes_pid_reuse(self) -> None:
         """A reused PID with a different start time is never a live descendant."""
@@ -1678,18 +1886,25 @@ class DescendantScopeTests(_Base):
                 child.wait(timeout=10)
 
     def test_capture_scope_bounds_fail_closed(self) -> None:
-        with self.assertRaises(RootLockUnsafeError):
-            capture_descendants(os.getpid(), maximum=1)
+        child = os.fork()
+        if child == 0:
+            time.sleep(120)
+            os._exit(0)
+        try:
+            with self.assertRaises(RootLockUnsafeError):
+                capture_descendants(os.getpid(), maximum=1)
+        finally:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(child, 0)
+            except ChildProcessError:
+                pass
 
     def test_preexisting_child_exit_status_is_not_reaped(self) -> None:
-        """F6/F7: a child that existed before the attempt keeps its exit status.
-
-        The subreaper's orphan/reap scope is the launch snapshot only: a
-        pre-existing child of the control plane that exits while the attempt
-        runs stays a zombie of its owner and is never claimed by
-        ``_reap_orphans`` (``waitpid`` on it must succeed here, not raise
-        ``ChildProcessError``).
-        """
+        """F6/F7: the outer coordinator waits only for its broker child."""
         sleeper = self.workspace / "preexisting.py"
         marker = self.workspace / "preexisting.pid"
         sleeper.write_text(
@@ -1774,16 +1989,28 @@ class CliTests(_Base):
             ROOT / "scripts" / "credential-guard.py",
             repo / "scripts" / "credential-guard.py",
         )
+        # Task 11: commit the exact model-side Pi guard extension into every
+        # fixture repo (the launch always loads it through ``--extension``).
+        shutil.copy2(
+            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            repo / "scripts" / "pi-factory-guard-extension.mjs",
+        )
+        (repo / "scripts" / "pi-cli-shims").mkdir()
+        shutil.copy2(
+            ROOT / "scripts" / "pi-cli-shims" / "git",
+            repo / "scripts" / "pi-cli-shims" / "git",
+        )
         # Task 8 confined launch: the fixture repo commits the exact
         # confine-launcher blob (F2/F5) so the production CLI can stage it
         # from the bound commit, plus the committed confinement schema doc
         # the specification is documented against.
         loop_dir = repo / ".factory" / "loop"
         loop_dir.mkdir(parents=True)
-        shutil.copy2(
-            ROOT / ".factory" / "loop" / "confine_launcher.py",
-            loop_dir / "confine_launcher.py",
-        )
+        for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
+            shutil.copy2(
+                ROOT / ".factory" / "loop" / module,
+                loop_dir / module,
+            )
         schemas_dir = repo / ".factory" / "schemas"
         schemas_dir.mkdir(parents=True)
         shutil.copy2(
@@ -2133,6 +2360,19 @@ class AuthorityTokenTests(_Base):
         self.assertIn("forged", str(cm.exception))
         self.assertIsNone(supervisor._child)
 
+    def test_authorize_has_no_caller_proof_transport(self) -> None:
+        """Installed callers cannot supply any confinement proof object."""
+        binding, role, agents, spec, plan = self.make_binding()
+        with self.assertRaises(TypeError):
+            launch.authorize_launch(
+                binding,
+                role_prompt=role,
+                agents=agents,
+                spec=spec,
+                plan=plan,
+                _confinement_proof=object(),
+            )
+
     def test_token_not_serializable_or_smuggled(self) -> None:
         """The token cannot be serialized and carries no smuggled attribute dict."""
         binding, role, agents, spec, plan = self.make_binding()
@@ -2145,7 +2385,7 @@ class AuthorityTokenTests(_Base):
         self.assertFalse(hasattr(authority, "binding"))
 
     def test_staging_modes_and_cleanup(self) -> None:
-        """Staged executables are mode-0500 in a mode-0700 dir, then removed."""
+        """Staged scripts are non-executable mode-0400 data, then removed."""
         binding, role, agents, spec, plan = self.make_binding()
         authority = self.authorize(binding, role, agents, spec, plan)
         exec_dir = authority._exec_dir
@@ -2155,7 +2395,7 @@ class AuthorityTokenTests(_Base):
         for path_text, digest in authority._staged_digests.items():
             path = Path(path_text)
             self.assertTrue(path.is_file())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o500)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o400)
             self.assertEqual(path.stat().st_nlink, 1)
             self.assertEqual(launch._file_sha256(path), digest)
         supervisor = LaunchSupervision(binding, kill_grace=0.3)
@@ -2164,6 +2404,21 @@ class AuthorityTokenTests(_Base):
         self.assertFalse(
             exec_dir.exists(), "the private staging directory must be cleaned up"
         )
+
+    def test_workspace_copied_elf_is_never_staged_for_execution(self) -> None:
+        """A committed copied ELF must use the immutable external boundary."""
+        copied_elf = self.workspace / "copied-backend"
+        shutil.copy2(os.path.realpath(sys.executable), copied_elf)
+        copied_elf.chmod(0o700)
+        self._git("add", "copied-backend")
+        self._git("commit", "-qm", "copied ELF negative")
+        new_head = self._git("rev-parse", "HEAD").stdout.strip()
+        binding, role, agents, spec, plan = self.make_binding()
+        binding = dataclasses.replace(
+            binding, backend=copied_elf, bound_commit=new_head
+        )
+        with self.assertRaisesRegex(InvocationError, "copied workspace ELF"):
+            self.authorize(binding, role, agents, spec, plan)
 
     def test_mutate_workspace_after_authorize_staged_bytes_execute(self) -> None:
         """TOCTOU: a post-authorize workspace swap cannot change what executes."""
@@ -2177,6 +2432,12 @@ class AuthorityTokenTests(_Base):
         self.backend.write_text("#!/bin/sh\necho swapped\n", encoding="utf-8")
         wrapper = self.workspace / "scripts" / WRAPPER_BASENAME
         wrapper.write_text("# swapped wrapper\n", encoding="utf-8")
+        (self.workspace / launch.PI_FACTORY_GUARD_EXTENSION).write_text(
+            "throw new Error('swapped extension');\n", encoding="utf-8"
+        )
+        (self.workspace / launch.PI_GIT_SHIM).write_text(
+            "#!/bin/sh\nexit 99\n", encoding="utf-8"
+        )
         result = supervisor.run(authority)
         self.assertEqual(result.outcome, "completed")
         self.assertEqual(result.returncode, 0)
@@ -2186,6 +2447,158 @@ class AuthorityTokenTests(_Base):
             (self.marker_dir / "prompt.digest").exists(),
             "the staged committed backend must have executed, not the swap",
         )
+        argv = self.read_json("argv.json")
+        staged_extension = authority._guard_extension
+        self.assertEqual(
+            argv[argv.index("--extension") + 1], str(staged_extension)
+        )
+        self.assertTrue(staged_extension.is_relative_to(authority._exec_dir))
+        self.assertNotEqual(
+            staged_extension,
+            self.workspace / launch.PI_FACTORY_GUARD_EXTENSION,
+            "the mutable worktree extension must never be executed",
+        )
+
+    def test_prompt_memfd_is_sealed_before_supervision(self) -> None:
+        """No pathname/race window exists and the authority memfd is immutable."""
+        self.set_behavior("record")
+        binding, role, agents, spec, plan = self.make_binding()
+        authority = self.authorize(binding, role, agents, spec, plan)
+        self.assertFalse(hasattr(authority, "_prompt_path"))
+        with self.assertRaises(OSError):
+            os.pwrite(authority._prompt_fd, b"SUBSTITUTED PROMPT\n", 0)
+        with self.assertRaises(OSError):
+            os.ftruncate(authority._prompt_fd, 0)
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        result = supervisor.run(authority)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue((self.marker_dir / "prompt.digest").exists())
+
+    def test_auth_fd_parent_copy_closes_and_resets_immediately_after_spawn(self) -> None:
+        """Authority transfer leaves no parent-readable auth descriptor."""
+        self.assertTrue(hasattr(os, "memfd_create"), "Linux memfd is mandatory")
+        self.set_behavior("trap-term")
+        binding, role, agents, spec, plan = self.make_binding(
+            runtime_limit=5.0, inactivity_limit=0.5
+        )
+        authority = self.authorize(binding, role, agents, spec, plan)
+        auth_fd = os.memfd_create("factory-parent-lifecycle", 0)
+        os.write(auth_fd, b"synthetic-auth")
+        authority._auth_fd = auth_fd
+        identity = os.fstat(auth_fd)
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        real_invariants = launch.verify_child_invariants
+        observed_live = []
+
+        def assert_live_parent_and_broker_closed(pid, workspace, child_binding):
+            # This callback runs immediately after Popen while the confinement
+            # broker/target are live, not after run() cleanup.
+            self.assertEqual(supervisor._auth_fd, -1)
+            with self.assertRaises(OSError) as caught:
+                os.fstat(auth_fd)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+            # Target-side readiness barrier: the backend has exec'd, written
+            # its PID, and is sleeping before any simulated tool call.
+            target_marker = self.marker_dir / "pid"
+            deadline = time.monotonic() + 2.0
+            while not target_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(target_marker.exists(), "target readiness marker missing")
+            target_pid = int(target_marker.read_text(encoding="utf-8"))
+            broker_fields = launch._proc_stat_fields(pid)
+            target_fields = launch._proc_stat_fields(target_pid)
+            self.assertIsNotNone(broker_fields)
+            self.assertIsNotNone(target_fields)
+            self.assertNotEqual(broker_fields[0], "Z")
+            self.assertNotEqual(target_fields[0], "Z")
+
+            auth_identity = (identity.st_dev, identity.st_ino)
+            deadline = time.monotonic() + 2.0
+            while True:
+                broker_identities = set()
+                for name in os.listdir(f"/proc/{pid}/fd"):
+                    try:
+                        info = os.stat(f"/proc/{pid}/fd/{name}")
+                    except OSError:
+                        continue
+                    broker_identities.add((info.st_dev, info.st_ino))
+                if auth_identity not in broker_identities or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            self.assertNotIn(
+                auth_identity, broker_identities,
+                "the long-lived confinement broker retained the auth memfd",
+            )
+            observed_live.append(pid)
+            return real_invariants(pid, workspace, child_binding)
+
+        with unittest.mock.patch.object(
+            launch, "verify_child_invariants", side_effect=assert_live_parent_and_broker_closed
+        ):
+            result = supervisor.run(authority)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertTrue(observed_live)
+        self.assertEqual(authority._auth_fd, -1)
+        self.assertEqual(supervisor._auth_fd, -1)
+
+    def test_spawn_failure_closes_auth_fd_after_authority_transfer(self) -> None:
+        """Popen failure is covered by outer cleanup, including auth."""
+        self.assertTrue(hasattr(os, "memfd_create"), "Linux memfd is mandatory")
+        binding, role, agents, spec, plan = self.make_binding()
+        authority = self.authorize(binding, role, agents, spec, plan)
+        auth_fd = os.memfd_create("factory-parent-failure", 0)
+        authority._auth_fd = auth_fd
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        with unittest.mock.patch.object(
+            launch.subprocess, "Popen", side_effect=OSError(errno.EMFILE, "synthetic")
+        ):
+            with self.assertRaises(launch.LaunchError):
+                supervisor.run(authority)
+        self.assertEqual(authority._auth_fd, -1)
+        self.assertEqual(supervisor._auth_fd, -1)
+        with self.assertRaises(OSError) as caught:
+            os.fstat(auth_fd)
+        self.assertEqual(caught.exception.errno, errno.EBADF)
+
+    def test_prompt_preflight_failure_closes_fds_and_private_dirs(self) -> None:
+        """Outer run cleanup covers composition failure after descriptor transfer."""
+        binding, role, agents, spec, plan = self.make_binding()
+        authority = self.authorize(binding, role, agents, spec, plan)
+        descriptors = [*authority._confinement_rule_fds, authority._prompt_fd]
+        directories = list(launch._authority_private_directories(authority))
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        with unittest.mock.patch.object(
+            launch, "compose_prompt", side_effect=InvocationError("prompt preflight")
+        ), unittest.mock.patch.object(launch.subprocess, "Popen") as popen:
+            with self.assertRaises(InvocationError):
+                supervisor.run(authority)
+        popen.assert_not_called()
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        for directory in directories:
+            self.assertFalse(Path(directory).exists(), directory)
+
+    def test_redactor_preflight_failure_closes_fds_and_private_dirs(self) -> None:
+        """Outer run cleanup covers redactor failure before lifecycle try."""
+        binding, role, agents, spec, plan = self.make_binding()
+        authority = self.authorize(binding, role, agents, spec, plan)
+        descriptors = [*authority._confinement_rule_fds, authority._prompt_fd]
+        directories = list(launch._authority_private_directories(authority))
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        with unittest.mock.patch.object(
+            launch.output_redaction,
+            "redactor_for",
+            side_effect=launch.output_redaction.OutputRedactionError("preflight"),
+        ), unittest.mock.patch.object(launch.subprocess, "Popen") as popen:
+            with self.assertRaises(SupervisionError):
+                supervisor.run(authority)
+        popen.assert_not_called()
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        for directory in directories:
+            self.assertFalse(Path(directory).exists(), directory)
 
     def test_mutable_external_symlink_rejected(self) -> None:
         """A workspace symlink to a mutable external path never qualifies (F2)."""

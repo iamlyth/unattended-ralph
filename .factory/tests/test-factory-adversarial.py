@@ -72,7 +72,6 @@ BRANCH = "fixture-main"
 sys.path.insert(0, str(LOOP))
 
 import campaign as campaign_module  # noqa: E402
-import confinement  # noqa: E402  (Task 7 private synthetic-proof seam)
 import evidence as evidence_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
@@ -115,7 +114,7 @@ _findings_spec.loader.exec_module(FACTORY_FINDINGS)
 FindingsWorkspace = FACTORY_FINDINGS.FindingsWorkspace
 
 GIT = gitutil.GIT_EXECUTABLE
-PY = sys.executable
+PY = os.path.realpath(sys.executable)
 TRUE_EXECUTABLE = FACTORY_CAMPAIGN.TRUE_EXECUTABLE
 FALSE_EXECUTABLE = FACTORY_CAMPAIGN.FALSE_EXECUTABLE
 FixtureWorkspace = FACTORY_CAMPAIGN.FixtureWorkspace
@@ -130,6 +129,9 @@ PLAN_REL = FACTORY_CAMPAIGN.PLAN_REL
 DRIVER_REL = FACTORY_CAMPAIGN.DRIVER_REL
 
 VISIBLE_FIXTURES = ROOT / "tests" / "fixtures"
+# Synthetic secret marker: never a real credential.  Its presence in any
+# migration report proves a foreign ``.ralph`` byte leaked.
+RALPH_SECRET = b"RALPH-FOREIGN-SENTINEL-9f4c1a"
 SYNTH_COOKIE = FACTORY_USAGE.SYNTH_COOKIE
 SYNTH_COOKIE_NAME = FACTORY_USAGE.SYNTH_COOKIE_NAME
 SYNTH_COOKIE_VALUE = FACTORY_USAGE.SYNTH_COOKIE_VALUE
@@ -403,8 +405,16 @@ def prepare_launch_workspace(ws: FixtureWorkspace, *backend_rel: str) -> None:
     (root / "src" / ".factory-test-output").mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "scripts" / "pi2-secure-exec.py",
                  scripts / "pi2-secure-exec.py")
-    shutil.copy2(LOOP / "confine_launcher.py",
-                 root / ".factory" / "loop" / "confine_launcher.py")
+    # Task 11: the model-side Pi guard extension is a committed fixture blob
+    # too — the launch authority verifies the working-tree extension equals
+    # the committed blob and always loads it through ``--extension``.
+    shutil.copy2(ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+                 scripts / "pi-factory-guard-extension.mjs")
+    (scripts / "pi-cli-shims").mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "scripts" / "pi-cli-shims" / "git",
+                 scripts / "pi-cli-shims" / "git")
+    for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
+        shutil.copy2(LOOP / module, root / ".factory" / "loop" / module)
     shutil.copy2(SCHEMAS / "factory-confinement-v1.schema.json",
                  root / ".factory" / "schemas" / "factory-confinement-v1.schema.json")
     for rel in backend_rel:
@@ -522,7 +532,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "the confined role must use a fresh private sanitized home",
         )
         # Only the documented allowlist keys plus the FACTORY_LOOP_LAUNCH_*
-        # invocation fields, the single documented PI_RALPH_GUARD_DIGEST
+        # invocation fields, the single documented PI_FACTORY_GUARD_DIGEST
         # guard-binding field (Task 11: the exact committed credential-guard
         # digest forwarded to the model-side extension), and the
         # confined-launch sanitized HOME/XDG keys (all pointing under the
@@ -535,11 +545,21 @@ class CaseAdversarialSuite(_AdversarialBase):
         for key in env:
             if key.startswith("FACTORY_LOOP_LAUNCH_"):
                 continue
-            if key == launch_module.PI_RALPH_GUARD_DIGEST_ENV:
+            if key == launch_module.PI_FACTORY_GUARD_DIGEST_ENV:
                 self.assertRegex(
                     env[key], r"^[0-9a-f]{64}$",
                     "the forwarded guard digest must be the exact 64-hex "
                     "SHA-256 of the committed guard",
+                )
+                continue
+            if key == launch_module.PI_FACTORY_GUARD_PYTHON_ENV:
+                # The pinned trusted interpreter path (Task 11 review): a
+                # non-credential absolute interpreter the model-side guard
+                # extension uses to run the exact committed guard.
+                self.assertTrue(
+                    env[key].startswith("/nix/store/"),
+                    f"the guard interpreter key {key!r} must be an immutable "
+                    "store path",
                 )
                 continue
             if key in sanitized_home_keys:
@@ -556,7 +576,9 @@ class CaseAdversarialSuite(_AdversarialBase):
         # launch authority forwards (and it is verified 64-hex above).
         pi_keys = [key for key in env if key.startswith("PI_")]
         self.assertEqual(
-            pi_keys, [launch_module.PI_RALPH_GUARD_DIGEST_ENV],
+            sorted(pi_keys),
+            sorted([launch_module.PI_FACTORY_GUARD_DIGEST_ENV,
+                    launch_module.PI_FACTORY_GUARD_PYTHON_ENV]),
             f"a PI_ session/memory key reached the role child: {pi_keys}",
         )
         for forbidden_prefix in ("OLLAMA_", "GIT_", "FACTORY_CAMPAIGN_",
@@ -611,16 +633,18 @@ class CaseAdversarialSuite(_AdversarialBase):
             self.assertIn(flag, probe1["argv"],
                           f"the one-shot flag {flag!r} must be present")
         # The child environment carries no session/memory/credential keys:
-        # the single documented PI_RALPH_GUARD_DIGEST invocation field (the
+        # the single documented PI_FACTORY_GUARD_DIGEST invocation field (the
         # exact 64-hex committed guard digest) is the only PI_ key the launch
         # authority forwards.
         pi_keys = [key for key in probe1["env"] if key.startswith("PI_")]
         self.assertEqual(
-            pi_keys, [launch_module.PI_RALPH_GUARD_DIGEST_ENV],
+            sorted(pi_keys),
+            sorted([launch_module.PI_FACTORY_GUARD_DIGEST_ENV,
+                    launch_module.PI_FACTORY_GUARD_PYTHON_ENV]),
             f"a PI_ session/memory key reached the child: {pi_keys}",
         )
         self.assertRegex(
-            probe1["env"].get(launch_module.PI_RALPH_GUARD_DIGEST_ENV, ""),
+            probe1["env"].get(launch_module.PI_FACTORY_GUARD_DIGEST_ENV, ""),
             r"^[0-9a-f]{64}$",
             "the forwarded guard digest must be the exact committed digest",
         )
@@ -1356,7 +1380,10 @@ class CaseAdversarialSuite(_AdversarialBase):
                         rounds_completed=0)
         dirty = ws.root / "src" / "work-1.md"
         self.assertTrue(dirty.is_file(), "the crash-touched dirty work must survive")
-        self.assertEqual(dirty.read_text(encoding="utf-8"), "dirty fixture work\n")
+        # The fixture's crash behavior appends one crash-attempt marker per
+        # developer attempt; the file must survive byte-identically with the
+        # first attempt's marker (proving the dirty work was preserved).
+        self.assertIn("crash-attempt-1\n", dirty.read_text(encoding="utf-8"))
         # Timeout path through the real launch authority: a sleeping backend
         # with a short runtime limit is bounded-terminated and the work it
         # touched survives.
@@ -1510,9 +1537,8 @@ class CaseAdversarialSuite(_AdversarialBase):
         )
         self.assertEqual(waited.returncode, usage_module.EXIT_ALLOWED, waited.stderr)
         # Per-model authorization must not expose a quota-driver API or call
-        # the retired launch gate.  The committed registry owns the policy and
-        # currently records the Ollama hook as disabled without affecting the
-        # enabled branch hook.
+        # the retired launch gate. The committed pre-round registry contains
+        # only the enabled branch hook; Ollama policy is not implemented yet.
         ws = self.make(SUCCESS_SCENARIO)
         backend = ws.root / "backend-ollama.py"
         backend.write_text("#!/usr/bin/env python3\nprint('ok')\n",
@@ -1531,31 +1557,24 @@ class CaseAdversarialSuite(_AdversarialBase):
                 (ws.root / "docs" / "SPEC.md").read_bytes()),
             allowed_tools=("read", "bash"),
         )
-        proof = confinement._mint_synthetic_proof(binding)
         import inspect
-        parameters = inspect.signature(launch_module.authorize_launch).parameters
-        self.assertFalse(any("usage_guard" in name or "cookie" in name
-                             for name in parameters))
-        with unittest.mock.patch.object(
-            launch_module.usage_guard, "require_quota"
-        ) as quota:
-            authority = launch_module.authorize_launch(
+        self.assertNotIn(
+            "usage_guard_cookie_file",
+            inspect.signature(launch_module.authorize_launch).parameters,
+        )
+        self.assertFalse(hasattr(launch_module, "usage_guard"))
+        authority = launch_module.authorize_launch(
                 binding,
                 role_prompt=(ws.root / ".factory" / "prompts" /
                              "planner.md").read_bytes(),
                 agents=(ws.root / "AGENTS.md").read_bytes(),
                 spec=(ws.root / "docs" / "SPEC.md").read_bytes(),
                 plan=(ws.root / PLAN_REL).read_bytes(),
-                _confinement_proof=proof,
             )
-        quota.assert_not_called()
         self.assertIsInstance(authority, launch_module.LaunchAuthority)
         registry = json.loads((ws.root / ".factory/pre-round-hooks.json").read_text())
-        self.assertEqual(
-            [(item["implementation"], item["enabled"], item["mandatory"])
-             for item in registry["hooks"]],
-            [("branch_guard", True, True)],
-        )
+        enabled = {item["id"]: item["enabled"] for item in registry["hooks"]}
+        self.assertEqual(enabled, {"branch-guard": True})
 
     # -- case 14: credential tool-call blocking and redaction stay active ----
 
@@ -1606,7 +1625,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # real retained validators (``machine-receipt.py`` /
         # ``check-audit-receipts.py`` / ``check-factory-runner-evidence.py``
         # / ``visual-audit-provenance.py`` /
-        # ``check-installed-functional-evidence.sh``) with tamper negatives.
+        # ``check-installed-harness-evidence.sh``) with tamper negatives.
         # The ephemeral ed25519 runner key and every artifact are
         # test-owned fixture state; no fake receipt is ever claimed as
         # passing evidence and no external runner/hardware is used.
@@ -1621,12 +1640,17 @@ class CaseAdversarialSuite(_AdversarialBase):
         for script in (
             "machine-receipt.py", "check-audit-receipts.py",
             "check-factory-runner-evidence.py", "check-factory-environment.py",
-            "visual-audit-provenance.py", "check-installed-functional-evidence.sh",
+            "visual-audit-provenance.py", "check-installed-harness-evidence.sh",
         ):
             shutil.copy2(ROOT / "scripts" / script, root / "scripts" / script)
         # Committed runner declaration (validated by the retained
         # check-factory-environment policy) plus the enabled signer trust
         # bound to an ephemeral test-owned ed25519 key (never committed).
+        # The declaration is a genuine Controller-valid environment: the
+        # retained policy requires the approved project verifier argv
+        # exactly, so the fixture uses the Controller's canonical
+        # ``./scripts/verify-project.sh`` (never a generic boilerplate
+        # verifier name the preserved checker would reject).
         (root / ".factory" / "environment.toml").write_text(
             "schema_version = 1\n"
             "[[runners]]\n"
@@ -1635,7 +1659,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             'ssh_config_alias = "fixture-runner"\n'
             'working_directory = "/srv/dev-runner/workspaces/fixture-project"\n'
             'capabilities = ["project-gate"]\n'
-            'verify_argv = ["./scripts/verify-boilerplate.sh"]\n',
+            'verify_argv = ["./scripts/verify-project.sh"]\n',
             encoding="utf-8")
         (root / ".gitignore").write_text(".factory-state/\n", encoding="utf-8")
         signer_key = self.tmp / "signer-key"
@@ -1706,7 +1730,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                 root, "rev-parse", f"{head}:.factory/environment.toml"
             ).stdout.strip()
             argv_digest = sha256(json.dumps(
-                ["./scripts/verify-boilerplate.sh"],
+                ["./scripts/verify-project.sh"],
                 separators=(",", ":")).encode("utf-8"))
             archive = root / "commit-archive.tar"
             _git(root, "archive", "--format=tar", "--output",
@@ -1837,7 +1861,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "# Audit\n\n## Evidence reviewed\n"
             f"- Executable evidence: `{str(TRUE_EXECUTABLE)}` PASS "
             "[receipt: .factory-state/audit-receipts/adversarial.gate.json]\n"
-            f"- Executable evidence: `./scripts/verify-boilerplate.sh` PASS "
+            f"- Executable evidence: `./scripts/verify-project.sh` PASS "
             f"[manifest: {manifest_ref}]\n"
         )
         audit.write_text(audit_body, encoding="utf-8")
@@ -1958,8 +1982,8 @@ class CaseAdversarialSuite(_AdversarialBase):
                 check=False).returncode, 0,
             "a forged environment binding must fail provenance verification")
 
-        # -- installed receipts: exact-commit generic evidence --------------.
-        # The generic installed-functional gate accepts only the exact-HEAD
+        # -- installed receipts: exact-commit generic evidence -------------.
+        # The generic installed-harness gate accepts only the exact-HEAD
         # dedicated generic namespace backed by a matching installed-harness
         # machine receipt; the foreign root env is never read.  The receipt
         # is minted through the real wrapper (the stub suite exits 0).  The
@@ -2020,7 +2044,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         os.chmod(installed_record, 0o600)
         installed = run(
             ["bash", str(root / "scripts" /
-                          "check-installed-functional-evidence.sh")],
+                          "check-installed-harness-evidence.sh")],
             root=root, check=False,
         )
         self.assertEqual(installed.returncode, 0, installed.stderr[-1000:])
@@ -2039,13 +2063,13 @@ class CaseAdversarialSuite(_AdversarialBase):
         write_installed(skipped=1)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
-                             "check-installed-functional-evidence.sh")],
+                             "check-installed-harness-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "skipped installed evidence must fail closed")
         write_installed(result="FAIL")
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
-                             "check-installed-functional-evidence.sh")],
+                             "check-installed-harness-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "failed installed evidence must fail closed")
         write_installed()
@@ -2057,40 +2081,19 @@ class CaseAdversarialSuite(_AdversarialBase):
         os.chmod(installed_record, 0o600)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
-                             "check-installed-functional-evidence.sh")],
+                             "check-installed-harness-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "installed evidence bound to a non-ancestor commit must fail closed")
         shutil.rmtree(installed_ns)
         self.assertNotEqual(
             run(["bash", str(root / "scripts" /
-                             "check-installed-functional-evidence.sh")],
+                             "check-installed-harness-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "missing installed evidence must fail closed")
 
     # -- case 16: no model completion token can bypass deterministic gates ---
 
     def test_case_16_no_completion_token_bypass(self) -> None:
-        # A completion token in a scratchpad is rejected by the gate (the
-        # token alone is never acceptance).
-        scratch = self.tmp / "scratchpad.md"
-        scratch.write_text("# Handoff\n\nstatus: continuing\n\nLOOP_COMPLETE\n",
-                           encoding="utf-8")
-        rejected = run(
-            ["bash", str(ROOT / "scripts" / "check-scratchpad.sh"), "LOOP_COMPLETE"],
-            env={**os.environ, "FACTORY_SCRATCHPAD_PATH": str(scratch)},
-            check=False,
-        )
-        self.assertNotEqual(rejected.returncode, 0,
-                            "the reserved completion token must be rejected")
-        self.assertIn("reserved completion token", rejected.stderr)
-        # Without the token the same handoff passes the structural check.
-        scratch.write_text("# Handoff\n\nstatus: continuing\n", encoding="utf-8")
-        accepted = run(
-            ["bash", str(ROOT / "scripts" / "check-scratchpad.sh"), "LOOP_COMPLETE"],
-            env={**os.environ, "FACTORY_SCRATCHPAD_PATH": str(scratch)},
-            check=False,
-        )
-        self.assertEqual(accepted.returncode, 0, accepted.stderr[-1000:])
         # The campaign outcome is decided by the harness gates, never by a
         # token in the model output: a driver that prints the completion token
         # on every phase still reaches the deterministic terminal.
@@ -2233,17 +2236,26 @@ class CaseAdversarialSuite(_AdversarialBase):
     # -- case 18: migration preserves authority without Ralph imports --------
 
     def test_case_18_migration_preserves_without_ralph_imports(self) -> None:
-        # A fixture repository with a real committed plan, commits, and dirty
-        # work: migration derives a snapshot that preserves the plan/commit/
-        # dirty work/evidence/blockers and never imports Ralph state.
+        # A fixture repository with a real committed plan, commits, and the
+        # canonical role prompts: the post-migration authority confirms the
+        # Ralph control plane is removed (tracked absence of the forbidden
+        # legacy pathnames, a safe non-executable regular freeze marker, a
+        # current canonical plan/spec/roles binding) and never imports or
+        # reads any Ralph state.
         root = Path(tempfile.mkdtemp(prefix="adversarial-migration.", dir=self.tmp))
         (root / "docs").mkdir()
         (root / ".factory").mkdir()
         (root / ".factory" / "artifacts").mkdir()
+        (root / ".factory" / "prompts").mkdir()
         (root / "src").mkdir()
         (root / "docs" / "SPEC.md").write_text("SPEC\n", encoding="utf-8")
         (root / ".factory" / "ralph-freeze").write_text("# frozen\n",
                                                         encoding="utf-8")
+        for role in ("planner", "developer", "tester", "auditor"):
+            (root / ".factory" / "prompts" / f"{role}.md").write_text(
+                f"# {role} fixture prompt\n", encoding="utf-8")
+        (root / ".gitignore").write_text(".ralph/\n.factory-state/\n",
+                                          encoding="utf-8")
         _git(root, "init", "-q", "-b", BRANCH)
         _git(root, "config", "user.email", "factory@test")
         _git(root, "config", "user.name", "factory")
@@ -2261,74 +2273,97 @@ class CaseAdversarialSuite(_AdversarialBase):
             "lifecycle": "active",
         }, ".factory/artifacts/implementation-plan.md",
         FACTORY_CAMPAIGN.TASK_SPECS)
-        # A blocked facts entry stays an external blocker in the snapshot.
-        blocked = root / ".factory" / "artifacts" / "blocked-facts.json"
-        blocked.write_text(json.dumps({
-            "schema": "ralph-blocked-facts/v1",
-            "facts": [{"id": "BLK-1", "title": "fixture blocker",
-                        "status": "open", "requirements": ["MIG-01"]}],
-        }), encoding="utf-8")
         _git(root, "add", "-A")
         _git(root, "commit", "-qm", "evidence")
         evidence_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
-        # Dirty work survives as an *uncommitted* path record (never
-        # discarded, never read as a task ledger).
-        dirty = root / "src" / "dirty-work.md"
-        dirty.write_text("preserved dirty work\n", encoding="utf-8")
-        derived = run(
-            [PY, str(LOOP / "migration.py"), "--root", str(root), "derive"],
+        # The foreign .ralph/ directory remains on disk (git-ignored) with
+        # synthetic sentinel bytes; the migration must never open, read, or
+        # modify it.
+        ralph = root / ".ralph"
+        (ralph / "agent").mkdir(parents=True)
+        sentinel = ralph / "agent" / "tasks.jsonl"
+        sentinel.write_bytes(b"RLP-" + RALPH_SECRET + b"\n")
+        sentinel_before = (
+            sentinel.read_bytes(),
+            os.lstat(sentinel).st_mode,
+            os.lstat(sentinel).st_mtime_ns,
+        )
+        # The post-migration status confirms the removal is complete: no
+        # forbidden tracked pathname, a safe non-executable regular freeze
+        # marker, and a current canonical plan/spec/roles binding.
+        status = run(
+            [PY, str(LOOP / "migration.py"), "--root", str(root), "status"],
             check=False,
         )
-        self.assertEqual(derived.returncode, 0, derived.stderr[-1000:])
-        payload = json.loads(derived.stdout)
+        self.assertEqual(status.returncode, 0, status.stderr[-1000:])
+        payload = json.loads(status.stdout)
         self.assertEqual(payload.get("schema"), "factory-migration/v1")
-        # The active plan and Git commits are preserved by reference.
+        self.assertEqual(payload["tracked_forbidden"], [])
+        self.assertTrue(payload["freeze_marker"]["safe"])
+        self.assertTrue(payload["freeze_marker"]["tracked"])
+        self.assertFalse(payload["freeze_marker"]["executable"])
+        self.assertTrue(payload["plan"]["tracked"])
+        self.assertTrue(payload["plan"]["parses"])
+        self.assertTrue(payload["plan"]["spec_current"])
+        self.assertEqual(payload["plan"]["spec_path"], "docs/SPEC.md")
         self.assertEqual(payload["head_commit"], evidence_commit)
-        self.assertEqual(payload["base_commit"], head)
-        self.assertEqual(payload["plan_path"],
-                         ".factory/artifacts/implementation-plan.md")
-        # The tracked freeze marker keeps legacy launches frozen through the
-        # retained authority (exit 0 = frozen).
-        frozen = run(
-            [PY, str(LOOP / "migration.py"), "--root", str(root),
-             "freeze", "--guard"],
+        self.assertTrue(all(payload["roles"].values()))
+        self.assertTrue(payload["ralph_presence"]["present"])
+        # The verify command exits 0 on the clean fixture.
+        verify = run(
+            [PY, str(LOOP / "migration.py"), "--root", str(root), "verify"],
             check=False,
         )
-        self.assertEqual(frozen.returncode, 0,
-                         "the tracked marker must freeze legacy launches")
-        # Dirty work survives as a path record (never discarded, never read
-        # as a task ledger).
-        dirty_paths = [entry["path"] for entry in payload["dirty"]]
-        self.assertIn("src/dirty-work.md", dirty_paths)
-        # The structured external blocker is preserved, never elevated to a
-        # verified claim.
-        self.assertTrue(
-            any(b.get("id") == "BLK-1" and b.get("status") == "open"
-                for b in payload["blockers"]),
-            "the external blocker must survive in the snapshot")
-        # The migration authority imports no Ralph runtime surface: the
-        # legacy `.ralph/` namespace is not read, and no Ralph import exists
-        # in the hidden control plane.
-        self.assertEqual(
-            sorted(path.name for path in (LOOP / "migration.py").parent.glob("*.py")),
-            sorted(path.name for path in (LOOP / "migration.py").parent.glob("*.py")),
+        self.assertEqual(verify.returncode, 0, verify.stderr[-1000:])
+        # No foreign .ralph byte reaches any report.
+        for report in (status.stdout, verify.stdout):
+            self.assertNotIn(RALPH_SECRET, report.encode("utf-8"))
+        # The foreign .ralph sentinel's bytes, mode, and mtime are preserved
+        # exactly across the status/verify runs.
+        sentinel_after = (
+            sentinel.read_bytes(),
+            os.lstat(sentinel).st_mode,
+            os.lstat(sentinel).st_mtime_ns,
         )
+        self.assertEqual(sentinel_after, sentinel_before,
+                         "the foreign .ralph sentinel must be preserved exactly")
+        # A planted tracked forbidden pathname (a deprecated launcher) is a
+        # migration regression: the verify fails closed and names the path.
+        planted = root / "scripts" / "ralph-run.sh"
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "plant a deprecated launcher")
+        regressed = run(
+            [PY, str(LOOP / "migration.py"), "--root", str(root), "verify"],
+            check=False,
+        )
+        self.assertEqual(regressed.returncode, 2,
+                         "a planted tracked forbidden path must fail verify")
+        self.assertIn("scripts/ralph-run.sh", regressed.stdout)
+        # The migration authority imports no Ralph runtime surface: no Ralph
+        # import exists in the hidden control plane.
         migration_source = (LOOP / "migration.py").read_text(encoding="utf-8")
-        for token in ("ralph emit", "ralph_event", "RalphMemory", "completion_token"):
+        for token in ("ralph emit", "ralph_event", "RalphMemory",
+                      "completion_token"):
             self.assertNotIn(token, migration_source)
         self.assertNotIn("import ralph", migration_source)
         # The freeze-guard substitution atomicity (Task 16 residual): the
-        # shell launchers route the freeze decision through the retained
-        # authority's fresh no-follow re-stat — a marker substitution between
-        # guard invocations changes the decision with no stale cache, and an
-        # unsafe marker fails closed (exit 2) instead of silently unfreezing.
+        # guard's single no-follow re-stat changes the decision with no
+        # stale cache, and an unsafe marker fails closed (exit 2) instead of
+        # silently unfreezing.
         fixture = Path(tempfile.mkdtemp(prefix="adversarial-freeze.", dir=self.tmp))
         (fixture / ".factory" / "loop").mkdir(parents=True)
-        (fixture / "scripts").mkdir()
-        for module in ("migration", "gitutil", "plan_parser", "state"):
-            shutil.copy2(LOOP / f"{module}.py", fixture / ".factory" / "loop" / f"{module}.py")
-        shutil.copy2(ROOT / "scripts" / "factory_state_io.py",
-                     fixture / "scripts" / "factory_state_io.py")
+        (fixture / ".factory" / "schemas").mkdir(parents=True)
+        for module in ("migration", "gitutil", "plan_parser"):
+            shutil.copy2(LOOP / f"{module}.py",
+                         fixture / ".factory" / "loop" / f"{module}.py")
+        shutil.copy2(ROOT / ".factory" / "requirement-policy.json",
+                     fixture / ".factory" / "requirement-policy.json")
+        shutil.copy2(
+            ROOT / ".factory" / "schemas" / "factory-plan-v1.requirements.json",
+            fixture / ".factory" / "schemas" / "factory-plan-v1.requirements.json",
+        )
         marker = fixture / ".factory" / "ralph-freeze"
         guard = [PY, str(fixture / ".factory" / "loop" / "migration.py"),
                  "--root", str(fixture), "freeze", "--guard"]
@@ -2458,47 +2493,70 @@ class CaseAdversarialSuite(_AdversarialBase):
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 cwd=str(ws.root))
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not marker.is_file():
-            time.sleep(0.05)
-        self.assertTrue(marker.is_file(), "the escape probe must have started")
-        with open(marker, encoding="utf-8") as stream:
-            pids = json.load(stream)
-        out, err = proc.communicate(timeout=60)
-        # The launch supervisor detects the escaped descendant and fails
-        # closed (recovery is blocked while it survives).
-        self.assertEqual(proc.returncode, launch_module.EXIT_SUPERVISION,
-                         f"escaped-descendant fail-closed expected, got "
-                         f"{proc.returncode} (stderr: {err[-1000:]})")
-        self.assertIn("escaped", err)
-        # Cleanup: the test owns the probe processes and must reap them.
-        for pid in (pids["grandchild"], pids["pid"]):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            alive = []
-            for pid in (pids["grandchild"], pids["pid"]):
+        pids: dict[str, int] = {}
+        started = time.monotonic()
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not marker.is_file():
+                time.sleep(0.05)
+            self.assertTrue(marker.is_file(), "the escape probe must have started")
+            with open(marker, encoding="utf-8") as stream:
+                pids = json.load(stream)
+            out, err = proc.communicate(timeout=60)
+            elapsed = time.monotonic() - started
+            # The ptrace broker detects a tracee that outlived its target,
+            # bounded-kills/reaps it, closes its pipe lifecycle, and sends an
+            # unspoofable report to the outer launch supervisor.  Recovery
+            # still fails closed even though no escaped process is leaked.
+            self.assertEqual(proc.returncode, launch_module.EXIT_SUPERVISION,
+                             f"escaped-descendant fail-closed expected, got "
+                             f"{proc.returncode} (stderr: {err[-1000:]})")
+            self.assertIn("escaped", err)
+            self.assertLess(
+                elapsed, 15.0,
+                "escaped-descendant cleanup exceeded its internal bounded "
+                "termination/reap window",
+            )
+            deadline = time.monotonic() + 5
+            alive: list[int] = []
+            while time.monotonic() < deadline:
+                alive = []
+                for pid in (pids["grandchild"], pids["pid"]):
+                    try:
+                        os.kill(pid, 0)
+                        alive.append(pid)
+                    except ProcessLookupError:
+                        pass
+                if not alive:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(
+                alive, [],
+                f"the broker failed to terminate/reap escaped pids {alive}",
+            )
+        finally:
+            # Failure-path hygiene belongs to the test: never leak its outer
+            # Popen streams or any probe process while reporting a regression.
+            if proc.poll() is None:
                 try:
-                    os.kill(pid, 0)
-                    alive.append(pid)
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    pass
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+            for pid in pids.values():
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            if not alive:
-                break
-            time.sleep(0.1)
-        for pid in (pids["grandchild"], pids["pid"]):
-            try:
-                os.kill(pid, 0)
-                self.fail(f"escaped descendant pid {pid} survived the test")
-            except ProcessLookupError:
-                pass
+        self.assertTrue(proc.stdout is None or proc.stdout.closed)
+        self.assertTrue(proc.stderr is None or proc.stderr.closed)
 
     # -- case 21: the task excerpt is byte-bound to the committed plan -------
 
@@ -2617,7 +2675,12 @@ class CaseAdversarialSuite(_AdversarialBase):
         )
         home = wc.sanitized_home_directory()
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        spec = wc.confinement_spec(binding, sanitized_home=home)
+        rule_descriptors: list[int] = []
+        spec = wc.confinement_spec(
+            binding, sanitized_home=home,
+            _rule_descriptors=rule_descriptors,
+        )
+        self.addCleanup(lambda: [os.close(fd) for fd in rule_descriptors])
         wc.validate_confinement_spec(spec, binding)
         spec_path = self.tmp / "confinement-spec.json"
         spec_path.write_text(
@@ -2628,10 +2691,14 @@ class CaseAdversarialSuite(_AdversarialBase):
             argv = [PY, str(workspace / "probe.py"), json.dumps(targets)]
             if confined:
                 argv = [PY, str(LOOP / "confine_launcher.py"),
-                        "--spec-file", str(spec_path), "--", *argv]
+                        "--spec-file", str(spec_path),
+                        "--rule-fds", ",".join(
+                            str(fd) for fd in rule_descriptors),
+                        "--", *argv]
             proc = subprocess.run(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=str(workspace), timeout=60,
+                pass_fds=tuple(rule_descriptors) if confined else (),
             )
             self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-2000:])
             line = next(
@@ -2847,20 +2914,25 @@ class CaseAdversarialSuite(_AdversarialBase):
     # -- case 25: the immutable verifier descriptor rejects pathname swap ----
 
     def test_case_25_immutable_verifier_descriptor(self) -> None:
+        # The retained Python verifier authority (campaign-verifier-binding.py)
+        # binds the configured campaign verifier (verification.campaign_command
+        # from .factory/config.toml) to its committed blob/identity.  The
+        # helper is opened before the verifier step and executed through the
+        # retained descriptor, so a workspace pathname or byte substitution
+        # can never substitute the verifier that runs (EVID-01 §19).
         root = Path(tempfile.mkdtemp(prefix="adversarial-verifier.", dir=self.tmp))
         (root / ".factory").mkdir()
         (root / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts" / "campaign-verifier-binding.py",
                      root / "scripts" / "campaign-verifier-binding.py")
-        verifier = root / "scripts" / "verify-maintenance.sh"
+        verifier = root / "scripts" / "verify-project.sh"
         verifier.write_text(
-            "#!/usr/bin/env bash\necho ORIGINAL-MAINTENANCE-VERIFIER-RAN\n"
+            "#!/usr/bin/env bash\necho ORIGINAL-VERIFIER-RAN\n"
             "exit 0\n", encoding="utf-8")
         verifier.chmod(0o755)
         (root / ".factory" / "config.toml").write_text(
             '[verification]\n'
-            'campaign_command = ["./scripts/verify-maintenance.sh"]\n'
-            'maintenance_command = ["./scripts/verify-maintenance.sh"]\n',
+            'campaign_command = ["./scripts/verify-project.sh"]\n',
             encoding="utf-8")
         (root / ".factory" / "verifier-acceptance.json").write_text(
             json.dumps({"schema": "ralph-verifier-acceptance/v1",
@@ -2879,22 +2951,22 @@ class CaseAdversarialSuite(_AdversarialBase):
                 pass_fds=pass_fds,
             )
 
-        # --mode maintenance binds the maintenance verifier (EVID-01 §19):
-        # the maintenance command is bound to its committed blob/identity.
-        bound = helper_run(str(helper), "--mode", "maintenance")
+        # The campaign verifier binding (EVID-01 §19): the campaign command
+        # is bound to its committed blob/identity through the retained
+        # Python authority.
+        bound = helper_run(str(helper))
         self.assertEqual(bound.returncode, 0, bound.stderr[-1000:])
         binding = json.loads(bound.stdout)
         self.assertEqual(binding["binding"]["schema"], "campaign-verifier-binding/v1")
-        self.assertEqual(binding["binding"]["executable"], "scripts/verify-maintenance.sh")
+        self.assertEqual(binding["binding"]["executable"], "scripts/verify-project.sh")
         self.assertEqual(binding["binding"]["argv"],
-                         ["./scripts/verify-maintenance.sh"])
+                         ["./scripts/verify-project.sh"])
         digest = binding["sha256"]
         # The bound inode executes through the retained descriptor; a
         # pathname substitution of the helper can never run the substitute.
         fd = os.open(helper, os.O_RDONLY)
         try:
             os.set_inheritable(fd, True)
-            original_bytes = helper.read_bytes()
             helper.rename(root / "scripts" / "campaign-verifier-binding.py.orig")
             substitute = root / "scripts" / "campaign-verifier-binding.py"
             substitute.write_text(
@@ -2902,19 +2974,19 @@ class CaseAdversarialSuite(_AdversarialBase):
                 "print('SUBSTITUTE-HELPER-RAN')\n", encoding="utf-8")
             substitute.chmod(0o755)
             repeated = helper_run(
-                f"/proc/self/fd/{fd}", "--mode", "maintenance", pass_fds=(fd,))
+                f"/proc/self/fd/{fd}", pass_fds=(fd,))
             self.assertEqual(repeated.returncode, 0, repeated.stderr[-1000:])
             self.assertNotIn("SUBSTITUTE-HELPER-RAN", repeated.stdout,
                              "the substituted helper must never run")
-            maintenance_digest = json.loads(repeated.stdout)["sha256"]
-            self.assertEqual(maintenance_digest, digest)
-            # The maintenance verifier runs through the retained descriptor
+            verifier_digest = json.loads(repeated.stdout)["sha256"]
+            self.assertEqual(verifier_digest, digest)
+            # The campaign verifier runs through the retained descriptor
             # authority with the exact bound digest.
             executed = helper_run(
-                f"/proc/self/fd/{fd}", "--mode", "maintenance",
+                f"/proc/self/fd/{fd}",
                 "--expected-digest", digest, "--exec", pass_fds=(fd,))
             self.assertEqual(executed.returncode, 0, executed.stderr[-1000:])
-            self.assertIn("ORIGINAL-MAINTENANCE-VERIFIER-RAN", executed.stdout)
+            self.assertIn("ORIGINAL-VERIFIER-RAN", executed.stdout)
             self.assertNotIn("SUBSTITUTE", executed.stdout)
         finally:
             os.close(fd)
@@ -2927,32 +2999,30 @@ class CaseAdversarialSuite(_AdversarialBase):
         verifier.write_text(
             "#!/usr/bin/env bash\necho SUBSTITUTE-VERIFIER-RAN\nexit 7\n",
             encoding="utf-8")
-        rejected = helper_run(str(helper), "--mode", "maintenance",
+        rejected = helper_run(str(helper),
                               "--expected-digest", digest, "--exec")
         self.assertNotEqual(rejected.returncode, 0,
-                            "a substituted maintenance verifier must fail closed")
+                            "a substituted campaign verifier must fail closed")
         self.assertNotIn("SUBSTITUTE-VERIFIER-RAN", rejected.stdout)
-        run(["git", "-C", str(root), "restore", "--", "scripts/verify-maintenance.sh"],
+        run(["git", "-C", str(root), "restore", "--", "scripts/verify-project.sh"],
             check=True)
-        # No missing verifier: a config without maintenance_command fails
+        # No missing verifier: a config without campaign_command fails
         # closed with the exact diagnostic, and a nonexistent configured
         # verifier fails closed too.
         config = root / ".factory" / "config.toml"
-        config.write_text('[verification]\ncampaign_command = ["./scripts/verify-maintenance.sh"]\n',
-                          encoding="utf-8")
-        missing = helper_run(str(helper), "--mode", "maintenance")
+        config.write_text('[verification]\n', encoding="utf-8")
+        missing = helper_run(str(helper))
         self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("verification.maintenance_command must be a non-empty argv array",
+        self.assertIn("verification.campaign_command must be a non-empty argv array",
                       missing.stderr)
         config.write_text(
-            '[verification]\ncampaign_command = ["./scripts/verify-maintenance.sh"]\n'
-            'maintenance_command = ["./scripts/does-not-exist.sh"]\n',
+            '[verification]\ncampaign_command = ["./scripts/does-not-exist.sh"]\n',
             encoding="utf-8")
         run(["git", "-C", str(root), "add", "-A"], check=True)
         run(["git", "-C", str(root), "commit", "-qm", "config update"], check=True)
-        gone = helper_run(str(helper), "--mode", "maintenance")
+        gone = helper_run(str(helper))
         self.assertNotEqual(gone.returncode, 0,
-                            "a nonexistent maintenance verifier must fail closed")
+                            "a nonexistent campaign verifier must fail closed")
         self.assertNotEqual(gone.stderr.strip(), "")
 
     # -- case 26: Git commit-boundary bypass attempts remain rejected ---------
@@ -2979,15 +3049,18 @@ class CaseAdversarialSuite(_AdversarialBase):
             self.assertNotEqual(proc.returncode, 0,
                                 f"the shim must reject {config_flag} hooksPath")
         # The commit boundary refuses to run as root (no candidate can be
-        # proven immutable), and the guard script is installed as the
-        # fail-closed pre-commit boundary by every launcher.
+        # proven immutable), and the retained git shim enforces the
+        # fail-closed pre-commit boundary installation for every
+        # commit-creation path (the deprecated ralph launchers that once
+        # installed it are removed).
         guard_text = (ROOT / "scripts" / "git-commit-guard.sh").read_text(
             encoding="utf-8")
         self.assertIn("pre-commit", guard_text)
-        for launcher in ("ralph-run.sh", "ralph-plan.sh", "ralph-campaign.sh"):
-            text = (ROOT / "scripts" / launcher).read_text(encoding="utf-8")
-            self.assertIn("install-git-commit-guard.sh", text,
-                          f"{launcher} must install the commit boundary")
+        shim_text = (ROOT / "scripts" / "pi-cli-shims" / "git").read_text(
+            encoding="utf-8")
+        self.assertIn("install-git-commit-guard.sh", shim_text,
+                      "the git shim must install the commit boundary")
+        self.assertIn("pre-commit", shim_text)
 
     # -- case 27: no Ralph lifecycle dependency in the new implementation ----
 
@@ -2997,22 +3070,24 @@ class CaseAdversarialSuite(_AdversarialBase):
         # (campaign.py and migration.py are scanned exactly like every other
         # module) — plus every retained production script of the new path.
         # A Ralph lifecycle token is permitted only where the file is the
-        # deprecation forwarder that names the deprecated surface solely to
-        # freeze, detect, remove, or reject it (the explicit allowlist
-        # below); every allowlisted mention must sit in a non-dependence
-        # context (never an import, invocation, environment read, exec, or
-        # attribute access), and the separate mechanical scan below proves
-        # there is no runtime authority dependence at all.  The deprecated
-        # lifecycle tools themselves (ralph-event-boundary.py,
-        # ralph-completion-gate.sh, ralph-campaign-state.py,
-        # ralph-final-state.py, ralph_lock.py, ralph-lock-recover.py,
-        # ralph-supervision*.py, ralph-recover.sh, ralph-verifier-migrate.sh,
-        # ralph-context-summary.py, check-context-summary.py,
-        # repair-scratchpad-handoffs.py, pi-ralph-emit-extension.mjs,
-        # pi-cli-shims/ralph, pi2-ollama.sh) are the deprecated surface
-        # itself, not new implementation, and are excluded only from this
-        # "new implementation" scan — the new path's non-dependence on them
-        # is proven below.
+        # post-migration authority that names the forbidden pathnames solely
+        # to confirm their tracked absence, or a retained gate that rejects
+        # the reserved completion token (the explicit allowlist below); every
+        # allowlisted mention must sit in a non-dependence context (never an
+        # import, invocation, environment read, exec, or attribute access),
+        # and the separate mechanical scan below proves there is no runtime
+        # authority dependence at all.  The deprecated lifecycle surface
+        # itself (ralph-event-boundary.py, ralph-completion-gate.sh,
+        # ralph-campaign-state.py, ralph-final-state.py, ralph_lock.py,
+        # ralph-lock-recover.py, ralph-supervision*.py, ralph-recover.sh,
+        # ralph-verifier-migrate.sh, ralph-context-summary.py,
+        # check-context-summary.py, repair-scratchpad-handoffs.py,
+        # pi-ralph-emit-extension.mjs, pi-cli-shims/ralph, pi2-ollama.sh,
+        # the ralph-* launchers, and their tests) is REMOVED from the
+        # tracked tree — the tracked-absence proof below is the strongest
+        # form of non-dependence.  The generic model-side Pi guard extension
+        # (scripts/pi-factory-guard-extension.mjs) is the required
+        # replacement and carries no lifecycle surface.
         lifecycle_tokens = (
             "ralph emit", "ralph_emit", "completion token",
             "completion_token", "ralphmemory", "ralph_event",
@@ -3021,49 +3096,57 @@ class CaseAdversarialSuite(_AdversarialBase):
             "ralph shim", "ralph runtime task", "ralph task",
             "ralph completion",
         )
-        # Explicit allowlist: the exact lifecycle tokens the deprecation
-        # forwarders legitimately name (and nothing else).  Every allowlisted
-        # occurrence is verified below to be forwarder prose in a
-        # non-dependence context.
+        # Explicit allowlist: the exact lifecycle tokens the post-migration
+        # authority and the retained gates legitimately name (and nothing
+        # else).  Every allowlisted occurrence is verified below to be
+        # non-dependence prose.
         forwarder_allowlist = {
-            # migration.py is the migration/deprecation authority: it names
-            # the deprecated completion-token surface only to declare that it
-            # never participates in the migrated state.
-            "migration.py": ("completion token",),
-            # check-scratchpad.sh is the retained gate that rejects reserved
-            # lifecycle completion tokens in the scratchpad.
-            "check-scratchpad.sh": ("completion token",),
+            # migration.py is the post-migration authority: it names the
+            # forbidden pathnames (the Pi ralph shim and the ralph emit
+            # extension) solely to confirm their tracked absence.
+            "migration.py": ("ralph shim", "ralph emit"),
             # verify-boilerplate.sh asserts the role prompts deny the
             # reserved completion token (the ``emit the completion token``
-            # phrase the prompts require for scratchpad prose).
-            "verify-boilerplate.sh": ("completion token",),
+            # phrase the prompts require for scratchpad prose) and scans the
+            # retained gates for the deprecated ralph emit surface (the
+            # check literals below are non-dependence prose).
+            "verify-boilerplate.sh": ("completion token", "ralph emit",
+                                      "ralph_emit", "ralph_event",
+                                      "ralph shim", "pi-ralph-emit-extension"),
         }
-        # The deprecated lifecycle layer: the frozen launchers (which the
-        # migration authority must name to freeze) and the deeper lifecycle
-        # tools (which no new-path module may reference at all).
-        frozen_launchers = {
-            "ralph-run.sh", "ralph-plan.sh", "ralph-campaign.sh",
-            "ralph-audit.sh", "ralph-maintenance-plan.sh",
-            "ralph-maintenance-run.sh", "ralph-recover.sh",
-        }
-        legacy_lifecycle_tools = {
-            "ralph-completion-gate.sh", "ralph-supervision.sh",
-            "ralph-verifier-migrate.sh",
-            "ralph-campaign-state.py", "ralph-context-summary.py",
-            "ralph-event-boundary.py", "ralph-final-state.py",
-            "ralph-lock-recover.py", "ralph-supervision-migrate.py",
-            "ralph_lock.py", "pi-ralph-emit-extension.mjs", "pi2-ollama.sh",
-            "repair-scratchpad-handoffs.py", "check-context-summary.py",
-        }
+        # The deprecated lifecycle layer is removed from the tracked tree:
+        # the frozen launchers, the deeper lifecycle tools, and the Ralph
+        # tests must never reappear as tracked pathnames (the migration
+        # authority's forbidden-pathname set is the exact authority).
+        forbidden_tracked = set(migration_module.FORBIDDEN_TRACKED_EXACT)
+        forbidden_tracked.update(migration_module.FORBIDDEN_OLD_PROMPTS)
+        for prefix in migration_module.FORBIDDEN_TRACKED_PREFIXES:
+            forbidden_tracked.add(prefix.rstrip("/") + "/**")
+        for glob in migration_module.FORBIDDEN_TRACKED_GLOBS:
+            forbidden_tracked.add(glob)
+        tracked = gitutil.git_run(
+            ["-C", str(ROOT), "ls-files", "-z"], timeout=60
+        )
+        self.assertEqual(tracked.returncode, 0, tracked.stderr)
+        tracked_names = [p for p in tracked.stdout.split("\0") if p]
+        for name in tracked_names:
+            self.assertFalse(
+                migration_module._is_forbidden_tracked(name),
+                f"a forbidden Ralph pathname is tracked: {name!r}",
+            )
+        # The only tracked name that mentions ralph is the freeze marker.
+        ralph_tracked = [n for n in tracked_names if "ralph" in n.lower()]
+        self.assertEqual(
+            ralph_tracked, [migration_module.FREEZE_MARKER_RELPATH],
+            "the only tracked ralph-named path must be the freeze marker",
+        )
         loop_modules = sorted(LOOP.glob("*.py"))
         scanned_scripts: list[Path] = []
         for candidate in sorted((ROOT / "scripts").glob("*")):
-            if (candidate.is_file()
-                    and candidate.name not in frozen_launchers
-                    and candidate.name not in legacy_lifecycle_tools):
+            if candidate.is_file():
                 scanned_scripts.append(candidate)
         for candidate in sorted((ROOT / "scripts" / "pi-cli-shims").glob("*")):
-            if candidate.is_file() and candidate.name != "ralph":
+            if candidate.is_file():
                 scanned_scripts.append(candidate)
         self.assertTrue(scanned_scripts, "the script scan must cover scripts")
         for source in loop_modules + scanned_scripts:
@@ -3108,16 +3191,15 @@ class CaseAdversarialSuite(_AdversarialBase):
                         )
         # No runtime authority dependence (the mechanical proof): the
         # complete control plane never imports a Ralph module, never accesses
-        # a ``ralph.*`` attribute, never executes a ralph binary, never reads
-        # a Ralph lifecycle environment surface, and never references the
-        # deprecated lifecycle tools by exact file name.
+        # a ``ralph.*`` attribute, never executes a ralph binary, and never
+        # reads a Ralph lifecycle environment surface.  The migration
+        # authority's forbidden-pathname constants are inert data (strings
+        # naming what must be absent), never invocations.
         for source in loop_modules:
             text = source.read_text(encoding="utf-8")
             label = source.name
-            for token in ("import ralph", "from ralph", "ralph emit",
-                          "ralph_emit", "ralph_event", "RALPH_BIN",
-                          "command -v ralph", "pi-ralph-emit-extension",
-                          "pi-cli-shims/ralph"):
+            for token in ("import ralph", "from ralph", "ralph_emit",
+                          "ralph_event", "RALPH_BIN", "command -v ralph"):
                 self.assertNotIn(token, text,
                                  f"{label} has a Ralph runtime dependence: "
                                  f"{token!r}")
@@ -3136,19 +3218,9 @@ class CaseAdversarialSuite(_AdversarialBase):
                         and node.value.id == "ralph"):
                     self.fail(f"{label} accesses a Ralph attribute at line "
                               f"{node.lineno}")
-            if source.name == "migration.py":
-                # The migration authority is the single deprecation
-                # forwarder: it may name the frozen launchers it freezes, but
-                # never the deeper lifecycle tools.
-                tools = legacy_lifecycle_tools
-            else:
-                tools = frozen_launchers | legacy_lifecycle_tools
-            for tool in tools:
-                self.assertNotIn(tool, text,
-                                 f"{label} references the deprecated "
-                                 f"lifecycle tool {tool!r}")
-        # The migration authority names the deprecated surface only to freeze
-        # and detect it — it never imports or reads any Ralph runtime surface.
+        # The migration authority names the forbidden pathnames only to
+        # confirm their tracked absence — it never imports, invokes, or
+        # reads any Ralph runtime surface.
         migration_text = (LOOP / "migration.py").read_text(encoding="utf-8")
         for import_token in ("from ralph", "import ralph", "ralph.emit",
                              "ralph.plan", "ralph.audit", "ralph.memory",
@@ -3160,26 +3232,180 @@ class CaseAdversarialSuite(_AdversarialBase):
         driver = (FIXTURES / "campaign_driver.py").read_text(encoding="utf-8")
         self.assertIn("embedded/fixture role seam", driver)
         # The new launch authority invokes the committed secure wrapper
-        # directly — never the deprecated ralph shim or the emit extension.
+        # directly and always loads the committed model-side Pi guard
+        # extension — never the deprecated ralph shim or the retired emit
+        # extension.
         launch_text = (LOOP / "launch.py").read_text(encoding="utf-8")
         for token in ("pi-cli-shims/ralph", "pi-ralph-emit-extension",
                       "ralph emit", "ralph_emit"):
             self.assertNotIn(token, launch_text,
                              f"launch.py must not depend on {token!r}")
         self.assertIn("pi2-secure-exec.py", launch_text)
+        self.assertIn("pi-factory-guard-extension.mjs", launch_text,
+                      "launch.py must always load the committed guard extension")
+        self.assertIn("--extension", launch_text,
+                      "launch.py must pass --extension in the child argv")
         # The retained production gates never invoke the deprecated emit
-        # extension or the ralph emit protocol (an artifact inventory that
-        # merely requires the frozen shim to *exist* is retention, not an
-        # invocation, and is covered by the required-artifacts gate).
-        for script in ("scripts/verify-boilerplate.sh", "scripts/final-gate.sh",
+        # extension, the ralph emit protocol, or the model-side guard
+        # extension.  verify-boilerplate.sh is the checker itself: its only
+        # mentions of these tokens are the check literals, so it is not
+        # scanned here.
+        for script in ("scripts/final-gate.sh",
                        "scripts/campaign-verifier-binding.py",
-                       "scripts/check-installed-functional-evidence.sh",
+                       "scripts/check-installed-harness-evidence.sh",
                        "scripts/visual-audit-provenance.py"):
             text = (ROOT / script).read_text(encoding="utf-8")
             for token in ("pi-ralph-emit-extension", "ralph emit",
-                          "ralph-event"):
+                          "ralph-event", "pi-factory-guard-extension"):
                 self.assertNotIn(token, text,
                                  f"{script} must not depend on {token!r}")
+
+
+
+
+# ---------------------------------------------------------------------------
+# B1/B2 security review: sealed-fd Pi2 credential transport (never a
+# model/tool-readable path) and openai-codex exact-identity fail-closed.
+# ---------------------------------------------------------------------------
+
+class Pi2CredentialIsolationTests(unittest.TestCase):
+    """B1/B2 regressions: the openai-codex credential is never materialised
+    in any model/tool-readable path, tool subprocesses cannot dereference the
+    inherited credential descriptor, the credential guard blocks
+    ``/proc/.../fd`` references, and a workspace backend with the
+    openai-codex provider fails closed before any credential is provisioned.
+    """
+
+    def test_pi2_auth_memfd_unreachable_from_tool_subprocess(self) -> None:
+        """A bash tool subprocess cannot read the auth through the symlink or
+        through /proc/self/fd/N (the descriptor is not inherited and /proc is
+        denied by Landlock)."""
+        if not hasattr(os, "memfd_create"):
+            self.skipTest("memfd_create unavailable")
+        fd = os.memfd_create("factory-pi2-auth-test", 0)
+        self.addCleanup(lambda: os.close(fd) if fd >= 0 else None)
+        os.write(fd, b'{"openai-codex":{"access":"SYNTH-TOKEN"}}\n')
+        os.lseek(fd, 0, os.SEEK_SET)
+        agent = tempfile.mkdtemp(prefix="factory-agent-test-")
+        self.addCleanup(shutil.rmtree, agent, ignore_errors=True)
+        os.symlink(f"/proc/self/fd/{fd}", os.path.join(agent, "auth.json"))
+        # The tool subprocess does not inherit the descriptor (Node/pi spawn
+        # closes non-stdio fds), so both the symlink dereference and the
+        # direct /proc/self/fd/N read fail.
+        # The tool subprocess does not inherit the descriptor (Node/pi spawn
+        # closes non-stdio fds), so the symlink dereference and the direct
+        # /proc/self/fd/N read both fail.  The /proc/<parent>/fd/N read is
+        # denied by Landlock under the factory confinement (covered by the
+        # confinement suite's proc-credential-reads test).
+        probe = (
+            f"cat '{agent}/auth.json' 2>&1; "
+            f"cat /proc/self/fd/{fd} 2>&1"
+        )
+        result = subprocess.run(
+            ["bash", "-c", probe], capture_output=True, text=True, timeout=30
+        )
+        self.assertNotIn("SYNTH-TOKEN", result.stdout + result.stderr)
+
+    def test_credential_guard_blocks_proc_fd_references(self) -> None:
+        """The credential guard blocks /proc/.../fd in commands and paths
+        (defense in depth against in-process dereference of the inherited
+        credential descriptor)."""
+        guard = ROOT / "scripts" / "credential-guard.py"
+        for command in (
+            "cat /proc/self/fd/3",
+            "cat /proc/1234/fd/5",
+            "ln -s /proc/self/fd/3 leak",
+            "cat /proc/self/fd/$(echo 3)",
+            "cat /proc/self/f[d]/3",
+            "cat /proc/self/f[d]/[0-9]",
+            "python3 generated-numeric-fd-scanner.py",
+        ):
+            result = subprocess.run(
+                [PY, str(guard), "check-command-stdin"],
+                input=command, capture_output=True, text=True, timeout=30,
+            )
+            if command == "python3 generated-numeric-fd-scanner.py":
+                # Static text classification cannot inspect code generated by
+                # the model. The exact-Pi regression proves the common
+                # tool_call boundary closes the fd before this script starts.
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('"verdict":"allow"', result.stdout)
+            else:
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('"verdict":"block"', result.stdout,
+                              f"command {command!r} was not blocked")
+        for path in (
+            "/proc/self/fd/3",
+            "/proc/1234/fd/5",
+            "/proc/self/fd/3/",
+        ):
+            result = subprocess.run(
+                [PY, str(guard), "check-path-stdin"],
+                input=path, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('"verdict":"block"', result.stdout,
+                          f"path {path!r} was not blocked")
+
+    def test_openai_codex_workspace_backend_fails_closed(self) -> None:
+        """B2: a workspace backend with the openai-codex provider fails
+        closed before any credential is provisioned (only the exact immutable
+        external pi2 wrapper identity may receive the credential)."""
+        with tempfile.TemporaryDirectory(prefix="factory-b2-") as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "scripts").mkdir()
+            shutil.copy2(
+                ROOT / "scripts" / "pi2-secure-exec.py",
+                workspace / "scripts" / "pi2-secure-exec.py",
+            )
+            shutil.copy2(
+                ROOT / "scripts" / "credential-guard.py",
+                workspace / "scripts" / "credential-guard.py",
+            )
+            shutil.copy2(
+                ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+                workspace / "scripts" / "pi-factory-guard-extension.mjs",
+            )
+            (workspace / "scripts" / "pi-cli-shims").mkdir()
+            shutil.copy2(
+                ROOT / "scripts" / "pi-cli-shims" / "git",
+                workspace / "scripts" / "pi-cli-shims" / "git",
+            )
+            (workspace / "src").mkdir()
+            (workspace / "src" / "main.py").write_text("def main(): pass\n")
+            (workspace / "build-check").mkdir()
+            (workspace / "plan.md").write_text("plan\n")
+            (workspace / "spec.md").write_text("spec\n")
+            (workspace / "role.md").write_text("role\n")
+            (workspace / "AGENTS.md").write_text("agents\n")
+            backend = workspace / "backend.py"
+            backend.write_text("#!/usr/bin/env python3\nprint('ok')\n")
+            os.chmod(backend, 0o700)
+            _git(workspace, "init", "-q")
+            _git(workspace, "config", "user.email", "factory@test")
+            _git(workspace, "config", "user.name", "factory")
+            _git(workspace, "add", "-A")
+            _git(workspace, "commit", "-qm", "fixture")
+            head = _git(workspace, "rev-parse", "HEAD").stdout.strip()
+            binding = launch_module.InvocationBinding(
+                role="developer", model="gpt-5.6-luna",
+                provider="openai-codex", backend=backend,
+                workspace=workspace, bound_commit=head,
+                role_prompt_digest=sha256((workspace / "role.md").read_bytes()),
+                prompt_set_digest=sha256(b"campaign-set"),
+                plan_digest=sha256((workspace / "plan.md").read_bytes()),
+                policy_digest=sha256((workspace / "AGENTS.md").read_bytes()),
+                specification_digest=sha256((workspace / "spec.md").read_bytes()),
+            )
+            with self.assertRaises(launch_module.InvocationError):
+                launch_module.authorize_launch(
+                    binding,
+                    role_prompt=(workspace / "role.md").read_bytes(),
+                    agents=(workspace / "AGENTS.md").read_bytes(),
+                    spec=(workspace / "spec.md").read_bytes(),
+                    plan=(workspace / "plan.md").read_bytes(),
+                )
 
 
 if __name__ == "__main__":
