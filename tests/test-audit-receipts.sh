@@ -23,7 +23,8 @@ setup_repo() {
     mkdir -p "$dir/scripts" "$dir/.factory/loop" "$dir/.factory/artifacts" "$dir/.ralph/agent" \
         "$dir/.factory-state/runner-evidence" "$dir/docs"
     chmod 700 "$dir/.factory-state"
-    cp "$RECORDER" "$CHECKER" "$RUNNER_EVIDENCE" "$ENV_CHECKER" "$dir/scripts/"
+    cp "$RECORDER" "$CHECKER" "$RUNNER_EVIDENCE" "$ENV_CHECKER" \
+       "$PROJECT_ROOT/scripts/factory_runner_artifacts.py" "$dir/scripts/"
     # The receipt wrapper's bounded supervised runner resolves the trusted
     # root-descriptor lock authority from its own tree.
     cp "$PROJECT_ROOT/.factory/loop/lock.py" "$dir/.factory/loop/"
@@ -282,11 +283,11 @@ write_report "$tmp/audit" findings "\`real system probe\` BLOCKED (no real syste
 write_report "$tmp/audit" findings "\`sh -c 'printf \"runtime output\\n\"'\` PASS [receipt: .factory-state/audit-receipts/probe.json]"
 (cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
 
-# A `[manifest:]` reference must be an exact signed record in the runner-
-# evidence aggregate bound to the audit base; an accepted manifest certifies a
-# clean PASS through the strict runner-evidence helper.
+# A correctly signed but retired v1 fixture is not accepted as v3 namespaced
+# evidence and therefore cannot certify a PASS audit.
 write_report "$tmp/audit" pass "\`./verify-project\` PASS [manifest: .factory-state/runner-evidence/fake-runner/$head/manifest.json]"
-(cd "$tmp/audit" && ./scripts/check-audit-receipts.py >/dev/null)
+must_fail "legacy runner manifest is not namespaced v3 evidence" \
+    "cd '$tmp/audit' && ./scripts/check-audit-receipts.py"
 
 # A standalone/minimal manifest is never accepted: it is not an exact signed
 # aggregate record, so the strict runner-evidence validation rejects it.
