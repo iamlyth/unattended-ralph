@@ -1677,4 +1677,11 @@ elevated by prose.
   `scripts/check-docs-sync.sh`; `scripts/check-audit-receipts.py`;
   `scripts/check-campaign-objectives.py`; independent audit evidence
   appended to `.factory/artifacts/campaign-audit.md`.
+- Evidence: Upgrade regression at commit `7dcd9f7` passed the launch (90),
+  campaign (97), confinement (96), usage (109), state (129), lock (46),
+  redaction (69), installed (14), plan-parser (17), and 27-case adversarial
+  suites; `scripts/verify-boilerplate.sh` then passed end-to-end with generic
+  leakage, docs sync, migration, evidence, installed, smoke, credential,
+  process, and residual-cleanliness checks. This is implementation evidence,
+  not final-audit acceptance and does not resolve FACT-020 or the §10 mismatch.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.
