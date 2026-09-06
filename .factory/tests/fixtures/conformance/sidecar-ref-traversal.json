@@ -13,7 +13,7 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "tests/../../escape"
+        ".factory/tests/legacy/../../escape"
       ],
       "fact_refs": [],
       "reason": ""

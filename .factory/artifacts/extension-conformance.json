@@ -1,0 +1,29 @@
+{
+  "schema": "factory-extension-conformance/v1",
+  "requirements": [
+    {
+      "id": "EXT-PREROUND-01",
+      "classification": "partial",
+      "artifacts": [".factory/loop/pre_round.py", ".factory/tests/test-factory-pre-round.py"],
+      "reason": "Implementation and private tests exist; installed acceptance is not enrolled."
+    },
+    {
+      "id": "EXT-READINESS-01",
+      "classification": "partial",
+      "artifacts": [".factory/loop/readiness.py", ".factory/tests/test-factory-readiness.py"],
+      "reason": "Neutral enrollment intentionally blocks; no production authority receipt exists."
+    },
+    {
+      "id": "EXT-STATE-V2-01",
+      "classification": "partial",
+      "artifacts": [".factory/loop/state.py", ".factory/schemas/factory-state-v2.schema.md"],
+      "reason": "This extension is not represented as the exact canonical section 11 state field set."
+    },
+    {
+      "id": "EXT-RUNNER-V4-01",
+      "classification": "blocked",
+      "artifacts": [".factory/schemas/factory-runner-aggregate-v4.schema.json", ".factory/tools/check-factory-runner-evidence.py"],
+      "reason": "External real-system runner provisioning remains unavailable (FACT-020)."
+    }
+  ]
+}

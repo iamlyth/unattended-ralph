@@ -1,7 +1,7 @@
 # Generic boilerplate product-leak allowlist.
 #
 # Keep this list as narrow as possible: every entry is an exact tracked path
-# exempted from the product-term scan in scripts/check-generic-leakage.sh.
+# exempted from the product-term scan in .factory/tools/check-generic-leakage.sh.
 # Prefer neutralizing product content over allowlisting it. An adopting
 # product must instead delete this allowlist when it replaces the boilerplate.
 #

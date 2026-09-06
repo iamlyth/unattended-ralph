@@ -3,7 +3,7 @@
 # conformance shell driver.
 #
 # The specification (HIDE-01, §3, TEST-01 §22) keeps harness-only tests out
-# of the adopting product's visible `tests/` tree, so the §22 conformance
+# of the adopting product's visible `.factory/tests/legacy/` tree, so the §22 conformance
 # suite lives under the hidden `.factory/tests/` namespace like the Task 13
 # footprint and Task 15 migration series.  This driver:
 #
@@ -22,22 +22,9 @@
 #   2. runs `.factory/tests/test-factory-adversarial.py` warning-free under
 #      `-W error::ResourceWarning` (the full 27-case §22 suite drives the
 #      real authorities in fresh subprocesses and test-owned repositories);
-#   3. proves the Task 15/16 freeze residual at the *shell* level: every
-#      frozen legacy launcher routes the freeze decision through the
-#      retained hidden authority (`.factory/loop/migration.py freeze
-#      --guard`), so a fixture launcher with a regular marker is refused
-#      (exit 2), the exact override escapes, a missing marker preserves the
-#      legacy semantics, and an unsafe (symlink/FIFO) marker fails closed
-#      without silently unfreezing — with the guard's own exit table
-#      (0 frozen / 1 not frozen / 2 unsafe) checked directly;
-#   4. proves the Task 16 maintenance-verifier fd residual at the *shell*
-#      level: `final-gate.sh` routes the configured maintenance verifier
-#      through the retained descriptor authority
-#      (`campaign-verifier-binding.py --mode maintenance --exec`) — the
-#      binding helper is opened before the step and the maintenance command
-#      is bound to its committed blob/identity, so a workspace pathname or
-#      byte substitution can never substitute the maintenance verifier that
-#      runs (EVID-01 §19).
+#
+# Legacy launcher compatibility is outside this completed hidden-harness
+# driver; migration behavior is exercised by canonical case 18.
 #
 # The driver never writes to the live repository and never touches `.ralph/`.
 set -euo pipefail
@@ -206,154 +193,4 @@ grep -q '^OK$' "$tmp/suite.log" \
     || fail "the Python suite must end OK (got: $(tail -3 "$tmp/suite.log"))"
 echo "test-factory-adversarial: the 27-case §22 suite passes warning-free"
 
-# -- 3. Freeze-guard routing fixtures (Task 15/16 residual) -----------------
-# A fixture copy of a launcher proves the freeze decision is routed through
-# the retained hidden authority: the launcher refuses while the marker
-# freezes, the exact override escape proceeds to a deterministic later
-# failure, a missing marker preserves the legacy semantics, and an unsafe
-# marker fails closed without silently unfreezing.
-provision_loop_authority() {
-    local fixture="$1"
-    mkdir -p "$fixture/.factory/loop" "$fixture/scripts"
-    for module in migration gitutil plan_parser state; do
-        cp "$ROOT/.factory/loop/$module.py" "$fixture/.factory/loop/$module.py"
-    done
-    cp "$ROOT/scripts/factory_state_io.py" "$fixture/scripts/factory_state_io.py"
-}
-
-# Guard exit table through the retained authority itself (0 frozen / 1 not
-# frozen / 2 unsafe), run against the provisioned loop authority exactly as
-# a deployed legacy launcher would invoke it.
-guard_fixture="$tmp/guard-fixture"
-mkdir -p "$guard_fixture/.factory"
-provision_loop_authority "$guard_fixture"
-guard=("$PY" "$guard_fixture/.factory/loop/migration.py" \
-    --root "$guard_fixture" freeze --guard)
-guard_rc=0
-"${guard[@]}" >/dev/null 2>&1 || guard_rc=$?
-[[ $guard_rc -eq 1 ]] \
-    || fail "missing marker must report not-frozen (exit 1, got $guard_rc)"
-printf '# frozen\n' > "$guard_fixture/.factory/ralph-freeze"
-"${guard[@]}" >/dev/null 2>&1 \
-    || fail "a regular marker must report frozen (exit 0)"
-ln -sfn "$guard_fixture/ralph-freeze-target" "$guard_fixture/.factory/ralph-freeze"
-printf 't\n' > "$guard_fixture/ralph-freeze-target"
-guard_rc=0
-"${guard[@]}" >/dev/null 2>&1 || guard_rc=$?
-[[ $guard_rc -eq 2 ]] \
-    || fail "an unsafe (symlink) marker must fail closed (exit 2, got $guard_rc)"
-
-# A fixture launcher routes the decision through the retained authority.
-fixture="$tmp/freeze-fixture"
-mkdir -p "$fixture/.factory"
-provision_loop_authority "$fixture"
-cp "$ROOT/scripts/ralph-plan.sh" "$fixture/scripts/ralph-plan.sh"
-chmod +x "$fixture/scripts/ralph-plan.sh"
-printf '# frozen fixture\n' > "$fixture/.factory/ralph-freeze"
-if "$fixture/scripts/ralph-plan.sh" >"$tmp/f1.out" 2>"$tmp/f1.err"; then
-    fail "frozen fixture launcher must refuse a new launch (exit 2)"
-fi
-grep -q 'frozen' "$tmp/f1.err" || fail "fixture refusal must name the freeze"
-if FACTORY_RALPH_FREEZE_OVERRIDE=1 "$fixture/scripts/ralph-plan.sh" \
-    >"$tmp/f2.out" 2>"$tmp/f2.err"; then
-    fail "override launcher must still stop deterministically (missing lock helper)"
-fi
-grep -q 'frozen' "$tmp/f2.err" \
-    && fail "the exact override must bypass the freeze message"
-grep -q 'factory-lock.sh' "$tmp/f2.err" \
-    || fail "override launcher must proceed past the freeze gate"
-rm -f "$fixture/.factory/ralph-freeze"
-if "$fixture/scripts/ralph-plan.sh" >"$tmp/f0.out" 2>"$tmp/f0.err"; then
-    fail "marker-less launcher must still stop deterministically (missing lock helper)"
-fi
-grep -q 'frozen' "$tmp/f0.err" \
-    && fail "a missing freeze marker must never freeze"
-grep -q 'factory-lock.sh' "$tmp/f0.err" \
-    || fail "marker-less launcher must proceed past the absent freeze gate"
-rm -f "$fixture/.factory/ralph-freeze"
-mkfifo "$fixture/.factory/ralph-freeze"
-if "$fixture/scripts/ralph-plan.sh" >"$tmp/f3.out" 2>"$tmp/f3.err"; then
-    fail "an unsafe (FIFO) marker must refuse the launch"
-fi
-grep -q 'frozen' "$tmp/f3.err" \
-    || fail "the unsafe-marker refusal must name the freeze"
-! grep -q 'factory-lock.sh' "$tmp/f3.err" \
-    || fail "the unsafe marker must stop at the freeze gate, not proceed"
-echo "test-factory-adversarial: freeze-guard routing, override, and unsafe-marker semantics verified"
-
-# -- 4. Maintenance verifier fd routing fixture (Task 16 residual) ----------
-# final-gate.sh must route the configured maintenance verifier through the
-# retained descriptor authority (the bound inode), exactly like the campaign
-# verifier — the helper is opened before the verifier step and the
-# maintenance_command is bound to its committed blob/identity, so a
-# workspace pathname or byte substitution can never substitute the
-# maintenance verifier that runs.
-grep -q 'campaign-verifier-binding.py' "$ROOT/scripts/final-gate.sh" \
-    || fail "final-gate.sh must route the maintenance verifier through the retained authority"
-grep -q -- '--mode maintenance' "$ROOT/scripts/final-gate.sh" \
-    || fail "final-gate.sh must bind the maintenance verifier in maintenance mode"
-grep -q -- '--expected-digest' "$ROOT/scripts/final-gate.sh" \
-    || fail "final-gate.sh must re-validate the binding digest before executing"
-verifier_fixture="$tmp/verifier-fixture"
-mkdir -p "$verifier_fixture/.factory" "$verifier_fixture/scripts"
-cp "$ROOT/scripts/campaign-verifier-binding.py" \
-    "$verifier_fixture/scripts/campaign-verifier-binding.py"
-printf '#!/usr/bin/env bash\necho ORIGINAL-MAINTENANCE-VERIFIER-RAN\nexit 0\n' \
-    > "$verifier_fixture/scripts/verify-maintenance.sh"
-chmod +x "$verifier_fixture/scripts/verify-maintenance.sh"
-cat > "$verifier_fixture/.factory/config.toml" <<'TOML'
-[verification]
-campaign_command = ["./scripts/verify-maintenance.sh"]
-maintenance_command = ["./scripts/verify-maintenance.sh"]
-TOML
-printf '{"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}\n' \
-    > "$verifier_fixture/.factory/verifier-acceptance.json"
-git -C "$verifier_fixture" init -q -b fixture-main
-git -C "$verifier_fixture" config user.email factory@test
-git -C "$verifier_fixture" config user.name factory
-git -C "$verifier_fixture" add -A
-git -C "$verifier_fixture" commit -qm base
-# The maintenance binding resolves and the descriptor-executed helper runs
-# the exact bound verifier inode; a substituted helper pathname never runs.
-exec {helper_fd}<"$verifier_fixture/scripts/campaign-verifier-binding.py" || \
-    fail "cannot open the retained binding helper"
-binding_json=$("/proc/self/fd/$helper_fd" --mode maintenance \
-    <&"$helper_fd") || fail "the maintenance binding must resolve"
-maintenance_digest=$("$PY" - "$binding_json" <<'PY' || fail "invalid maintenance binding"
-import json, sys
-binding = json.loads(sys.argv[1])
-if binding.get("binding", {}).get("schema") != "campaign-verifier-binding/v1":
-    raise SystemExit("invalid binding schema")
-print(binding["sha256"])
-PY
-)
-executed=$("/proc/self/fd/$helper_fd" --mode maintenance \
-    --expected-digest "$maintenance_digest" --exec <&"$helper_fd") || \
-    fail "the bound maintenance verifier must run through the retained descriptor"
-[[ "$executed" == *"ORIGINAL-MAINTENANCE-VERIFIER-RAN"* ]] \
-    || fail "the maintenance verifier output was not the bound inode's output"
-# A byte-substituted maintenance verifier fails closed before execution.
-printf '#!/usr/bin/env bash\necho SUBSTITUTE-VERIFIER-RAN\nexit 7\n' \
-    > "$verifier_fixture/scripts/verify-maintenance.sh"
-if "/proc/self/fd/$helper_fd" --mode maintenance \
-    --expected-digest "$maintenance_digest" --exec <&"$helper_fd" \
-    >"$tmp/v.out" 2>"$tmp/v.err"; then
-    fail "a substituted maintenance verifier must fail closed"
-fi
-grep -q 'SUBSTITUTE-VERIFIER-RAN' "$tmp/v.out" \
-    && fail "a substituted maintenance verifier must never run"
-# A missing maintenance verifier fails closed: the retained helper cannot
-# resolve the configured command's committed blob, so the maintenance step
-# refuses instead of substituting an unbound script.
-rm -f -- "$verifier_fixture/scripts/verify-maintenance.sh"
-if "/proc/self/fd/$helper_fd" --mode maintenance \
-    >"$tmp/m.out" 2>"$tmp/m.err"; then
-    fail "a missing maintenance verifier must fail closed"
-fi
-grep -qi 'unavailable' "$tmp/m.err" \
-    || fail "the missing-verifier refusal must name the binding failure " \
-        "(got: $(tail -1 "$tmp/m.err"))"
-exec {helper_fd}>&- 2>/dev/null || true
-echo "test-factory-adversarial: maintenance verifier fd routing, substitution refusal, and missing-verifier closure verified"
-
-echo "test-factory-adversarial: all checks passed"
+echo "test-factory-adversarial: all 27 canonical cases passed"

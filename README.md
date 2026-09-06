@@ -9,20 +9,23 @@ control-state file drives the lifecycle; real Landlock confinement jails each
 model process; Git history and commits stay in the trusted orchestrator; and
 campaigns are finite with exact terminal outcomes.
 
-> **Migration status:** Ralph Orchestrator launches are frozen
-> (`.factory/ralph-freeze`). The hidden Python control plane under
-> `.factory/loop/` implements the canonical
-> [Factory Loop Specification](docs/FACTORY-LOOP-SPEC.md) using
-> `factory-plan/v1` and the single `factory-state/v2` control-state file; it
-> does not import Ralph tasks, memories, events, completion tokens,
-> scratchpads, or persisted context summaries. Visible `scripts/ralph-*`
-> commands are frozen deprecated compatibility forwarders and are not
-> required by the loop. The `FACTORY_RALPH_FREEZE_OVERRIDE=1` escape exists
-> only to recover an already in-flight legacy cycle; see
-> [Factory Operations](docs/OPERATIONS.md).
+> **Current path:** The hidden Python control plane under `.factory/loop/`
+> implements the [Factory Loop Specification](docs/FACTORY-LOOP-SPEC.md).
+> Legacy orchestration namespaces and launchers are not part of this checkout
+> or installed surface. `factory-state/v1` describes canonical STATE-01;
+> `factory-state/v2` is the explicitly mapped EXT-STATE-V2-01 readiness and
+> pre-round extension, not the exact §11 field set.
 
 `docs/SPEC.md` remains the adopting-product placeholder and is never planned
 against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
+
+## Documentation index
+
+- [Canonical factory loop specification](docs/FACTORY-LOOP-SPEC.md)
+- [Factory design and contracts](docs/FACTORY.md)
+- [Operations and recovery](docs/OPERATIONS.md)
+- [Generic defect workflow](docs/BUG_WORKFLOW.md)
+- [Adopting-product specification placeholder](docs/SPEC.md)
 
 ## Operating model
 
@@ -49,9 +52,11 @@ against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
   The registry accepts only fixed internal implementations and initially
   contains the mandatory `branch_guard`; it cannot carry commands or argv.
 - Exactly one minimal mutable control-state file
-  `.factory-state/factory-loop.json` (schema `factory-state/v2`, ignored)
-  also carries mandatory round-zero readiness and the exact hook configuration/commit binding, ordered result
-  digest chain, and durable start/completion cursor.
+  `.factory-state/factory-loop.json` (the explicit `factory-state/v2`
+  extension, ignored) carries readiness and pre-round bindings in addition to
+  the canonical state-v1 baseline. Extension requirements and truth are in
+  `.factory/extension-requirements.json` and
+  `.factory/artifacts/extension-conformance.json`.
 - Tests, documentation, machine evidence, and an independent audit are
   completion gates. A campaign always terminates with one of six outcomes:
   `success`, `findings`, `blocked`, `failed`, `infrastructure_failure`,
@@ -68,7 +73,7 @@ against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
   `.factory/environment.toml` declares tools and runners without endpoints or
   credentials; SSH aliases, provisioning, and credentials stay outside the
   repository.
-- The secure Pi wrapper (`scripts/pi2-secure-exec.py`) and a committed model
+- The secure Pi wrapper (`.factory/tools/pi2-secure-exec.py`) and a committed model
   backend. The `ollama` provider additionally requires the retained usage
   guard and a real Landlock confinement proof.
 - A clean configured development branch with at least one commit. No Git
@@ -87,8 +92,8 @@ audit):
   --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
   --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
   --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
-  --verification-command ./scripts/verify-boilerplate.sh \
-  --acceptance-command ./scripts/verify-boilerplate.sh
+  --verification-command ./.factory/tools/verify-boilerplate.sh \
+  --acceptance-command ./.factory/tools/verify-boilerplate.sh
 ```
 
 Production accepts only the authenticated, immutable Pi2 launch contract;
@@ -98,8 +103,11 @@ adapters and binds the accepted commit/tree, configuration, environment,
 specification, plan, contracts, install manifest, and external trust. The
 boilerplate enrolls no production authority, so real-provider production is
 explicitly blocked until an adopting project commits and provisions one.
-Readiness-only terminates as `readiness_complete`, never campaign `success`;
-each real role consumes a fresh campaign-only one-use authorization.
+Readiness-only terminates as `readiness_complete`, never campaign `success`.
+Immediately before every model invocation the trusted parent runs the fixed
+§10 `--check`, conditional bounded `--wait`, and final `--check`; any failure
+launches no model. Each real role consumes a campaign-lock-bound, durable
+one-use authorization.
 
 Inspect the lifecycle:
 
@@ -156,7 +164,7 @@ Provisioning examples and the authenticated bootstrap are documented in
 ## Verify the boilerplate
 
 ```bash
-./scripts/verify-boilerplate.sh
+./.factory/tools/verify-boilerplate.sh
 ```
 
 The verifier checks shell syntax, ShellCheck when available, TOML/JSON

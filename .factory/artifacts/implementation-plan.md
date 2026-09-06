@@ -16,7 +16,7 @@ hidden `.factory/` namespace with runtime state under ignored `.factory-state/`.
 The redesign retains the existing Ollama usage guard, the Git commit boundary,
 the credential tool-call/tool-result enforcement, and the exact-commit
 evidence/runner/visual machinery, hardens the Ollama credential transport, and
-migrates off the Ralph Orchestrator control plane with visible `scripts/ralph-*`
+migrates off the Ralph Orchestrator control plane with visible `.factory/tools/ralph-*`
 entrypoints reduced to deprecated forwarders (or removed) only after parity is
 proven.
 
@@ -27,9 +27,9 @@ Non-goals:
   (`docs/SPEC.md` remains the adopting-product placeholder and is not planned
   against);
 - no adaptive model subroles, no parallel model launches, no Rust toolchain;
-- no new orchestration added to the visible product `scripts/` directory beyond
+- no new orchestration added to the visible product `.factory/tools/` directory beyond
   adaptation of existing configuration readers and deprecation forwarders;
-- this boilerplate cycle does not plan, build, or test the Controller product.
+- this boilerplate cycle does not plan, build, or test the adopting product.
 
 - Smoke evidence round (evidence-smoke): deterministic designated harness seam; no external model, cookies, credentials, runner, or human.
 ## Architecture and constraints
@@ -37,7 +37,7 @@ Non-goals:
 - Control-plane implementation is Python 3.11+ standard library under
   `.factory/loop/` (plan parser, selector, state, locking, launch/supervision,
   phase machine, conformance helpers). POSIX shell is limited to small operator
-  entry points. The existing secure Pi wrapper (`scripts/pi2-secure-exec.py`)
+  entry points. The existing secure Pi wrapper (`.factory/tools/pi2-secure-exec.py`)
   is invoked, never reimplemented.
 - Committed schema `factory-plan/v1` (Markdown + schema files under
   `.factory/schemas/`) is the plan contract; the deterministic parser is part
@@ -50,14 +50,16 @@ Non-goals:
   lifecycle status must be consistent with the task statuses (Task 2,
   Task 18).
 - Exactly one minimal mutable control-state file
-  `.factory-state/factory-loop.json` (schema `factory-state/v1`) carries the
-  lifecycle fields plus Task-32's exact pre-round configuration/commit binding,
-  ordered result digest chain, and durable start/completion cursor; append-only
+  `.factory-state/factory-loop.json` uses the explicitly versioned
+  `factory-state/v2` extension. Canonical STATE-01 remains the state-v1
+  baseline; EXT-STATE-V2-01 maps the additional readiness and pre-round
+  bindings and does not claim they are the exact §11 field set. Append-only
   evidence artifacts are never orchestration state.
 - The exact committed `.factory/pre-round-hooks.json` registry runs once in
   order before each round planner. It accepts fixed internal implementations
   only, initially mandatory `branch_guard`, with no command/argv or model-facing
-  quota/cookie surface.
+  quota/cookie surface. QUOTA-01 remains a separate fixed per-model gate and
+  runs immediately before every invocation, never as a per-round hook.
 - Locking is an exclusive `flock` on the canonical Git top-level directory
   descriptor (`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`); the descriptor and lock
   metadata are never inherited by model processes, and no second writer,
@@ -86,7 +88,7 @@ Non-goals:
 Every normative requirement in `docs/FACTORY-LOOP-SPEC.md` §24 is mapped to
 the bounded tasks below. These classifications are reconciled exactly to the
 machine-readable conformance sidecar (`.factory/artifacts/conformance.json`,
-which `scripts/validate-conformance.py` cross-checks row-by-row): the
+which `.factory/tools/validate-conformance.py` cross-checks row-by-row): the
 retained-and-rebound machinery rows AUTH-01 through VIS-01 are `partial`
 (existing harness authority is preserved and re-bound to the new path;
 Task 20 completes the installed-harness mechanics with fixture-authority
@@ -124,7 +126,7 @@ elevated by prose.
 | PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18, Task 25 |
 | TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16, Task 22, Task 25 |
 | TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 25 |
-| QUOTA-01 | §10 | partial | existing `scripts/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 25 |
+| QUOTA-01 | §10 | partial | existing `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 25 |
 | QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 25 |
 | STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25 |
 | LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 25 |
@@ -170,27 +172,27 @@ elevated by prose.
 - Scope: Point `.factory/config.toml [project].spec` at
   `docs/FACTORY-LOOP-SPEC.md` so plan freshness and planning gates resolve the
   redesign specification (commit `2d6a4fd`, blob `ca2334ab…`); adapt
-  `scripts/check-spec-provided.sh` so it gates on the new canonical spec and
+  `.factory/tools/check-spec-provided.sh` so it gates on the new canonical spec and
   never plans against `docs/SPEC.md` (which remains the adopting product
-  placeholder, untouched and unplanned); adapt `scripts/check-plan-freshness.sh`
-  and `scripts/plan-scope-guard.sh` to the new spec path without adding new
-  orchestration to the visible `scripts/` tree.
-- Acceptance criteria: `scripts/check-plan-freshness.sh` resolves the committed
+  placeholder, untouched and unplanned); adapt `.factory/tools/check-plan-freshness.sh`
+  and `.factory/tools/plan-scope-guard.sh` to the new spec path without adding new
+  orchestration to the visible `.factory/tools/` tree.
+- Acceptance criteria: `.factory/tools/check-plan-freshness.sh` resolves the committed
   plan's spec binding to `docs/FACTORY-LOOP-SPEC.md` at commit `2d6a4fd` and
-  blob `ca2334ab…` and exits 0; `scripts/check-spec-provided.sh` exits 0 while
+  blob `ca2334ab…` and exits 0; `.factory/tools/check-spec-provided.sh` exits 0 while
   the new canonical spec is present; `docs/SPEC.md` is byte-unchanged and not
   planned against.
-- Verification: `scripts/check-plan-freshness.sh` and
-  `scripts/check-spec-provided.sh` run from a clean tree; `git diff HEAD -- docs/SPEC.md` is empty.
+- Verification: `.factory/tools/check-plan-freshness.sh` and
+  `.factory/tools/check-spec-provided.sh` run from a clean tree; `git diff HEAD -- docs/SPEC.md` is empty.
 - Evidence: `.factory/config.toml [project].spec` now binds the redesign
   contract `docs/FACTORY-LOOP-SPEC.md` (commit `2d6a4fd`, blob `ca2334ab…`);
-  `scripts/check-spec-provided.sh` gates on the bound canonical spec and
+  `.factory/tools/check-spec-provided.sh` gates on the bound canonical spec and
   hard-blocks any bound placeholder (missing/unsafe path or
   `SPEC_PENDING_HUMAN_SUPPLY` marker), so the adopting-product placeholder
-  `docs/SPEC.md` is never planned against; `scripts/check-plan-freshness.sh`
+  `docs/SPEC.md` is never planned against; `.factory/tools/check-plan-freshness.sh`
   resolves the committed plan's binding to `docs/FACTORY-LOOP-SPEC.md` at
   commit `2d6a4fd` / blob `ca2334ab…` and exits 0 (committed and planning
-  phases), and `scripts/plan-scope-guard.sh` still confines planning writes;
+  phases), and `.factory/tools/plan-scope-guard.sh` still confines planning writes;
   `git diff HEAD -- docs/SPEC.md` is empty and the placeholder is byte-
   unchanged.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
@@ -207,13 +209,13 @@ elevated by prose.
   interaction inventory. The parser rejects duplicate headings, unknown
   lifecycle states, ambiguous task sections, out-of-order or cyclic
   dependencies, and non-contiguous IDs, and round-trips without semantic loss.
-  `scripts/validate-implementation-plan.py` remains a passing gate for the
+  `.factory/tools/validate-implementation-plan.py` remains a passing gate for the
   owned plan file.
 - Acceptance criteria: the parser and the existing validator agree on the
   canonical committed plan; each documented defect class has an exact
   fixture; output is a deterministic function of the plan bytes.
 - Verification: `.factory/tests/test-factory-plan-parser.py`; run
-  `scripts/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md`.
+  `.factory/tools/validate-implementation-plan.py planning .factory/artifacts/implementation-plan.md`.
 - Evidence: `.factory/loop/plan_parser.py` is a stdlib-only deterministic
   `factory-plan/v1` parser with byte-exact `parse -> serialize -> parse`
   round-trip, deterministic JSON dump, the documented status transition
@@ -221,10 +223,10 @@ elevated by prose.
   committed schema is `.factory/schemas/factory-plan-v1.schema.md` with the
   machine-readable model contract `.factory/schemas/factory-plan-v1.schema.json`.
   The harness-owned suite `.factory/tests/test-factory-plan-parser.py`
-  (12 tests, all passing) proves agreement with `scripts/validate-implementation-plan.py`
+  (12 tests, all passing) proves agreement with `.factory/tools/validate-implementation-plan.py`
   on the committed canonical plan, exact-fixture rejection for every defect
   class (`.factory/tests/fixtures/plan-*.md`), and byte-exact/deterministic
-  round-trip; `scripts/validate-implementation-plan.py planning
+  round-trip; `.factory/tools/validate-implementation-plan.py planning
   .factory/artifacts/implementation-plan.md` still exits 0.
 - Documentation impact: `docs/FACTORY.md`.
 
@@ -265,10 +267,10 @@ elevated by prose.
   corpus `.factory/tests/fixtures/plan-select-*.md` (8 fixtures, all
   round-tripping byte-exactly); the canonical plan deterministically
   selects its first runnable pending task (Task 4 at the evidence commit);
-  `scripts/validate-implementation-plan.py planning` and
-  `scripts/check-plan-freshness.sh` still exit 0. The verification path
+  `.factory/tools/validate-implementation-plan.py planning` and
+  `.factory/tools/check-plan-freshness.sh` still exit 0. The verification path
   stays under the hidden `.factory/` namespace per HIDE-01 (the visible
-  `tests/` tree is product-owned).
+  `.factory/tests/legacy/` tree is product-owned).
 - Documentation impact: `docs/FACTORY.md`.
 
 ## Task 4: Minimal mutable control state
@@ -281,7 +283,7 @@ elevated by prose.
   round counters, phase, spec/plan/prompt-set digests, base commit, selected
   task id, attempt counters, monotonic phase/attempt start markers, and a
   trusted `last_outcome` enum. All writes are atomic, no-follow, and
-  ownership/mode/link-count checked (reuse `scripts/factory_state_io.py`);
+  ownership/mode/link-count checked (reuse `.factory/tools/factory_state_io.py`);
   the §11 transition table is enforced; completed-phase bindings are
   write-once; counters are monotonic; the state digest is recorded before each
   untrusted phase and re-validated after.
@@ -299,7 +301,7 @@ elevated by prose.
   deterministic canonical state digest, and a before/after untrusted-phase
   digest ledger (`.factory-state/state-digest-ledger.jsonl`, evidence only).
   All file I/O reuses the established no-follow authority
-  `scripts/factory_state_io.py` (atomic publication through a mode-0600
+  `.factory/tools/factory_state_io.py` (atomic publication through a mode-0600
   temporary and `linkat`, with ownership/mode/link-count and (dev, inode)
   identity checks), and loading re-validates `repository_identity` against the
   canonical root descriptor and any expected campaign binding, so forged,
@@ -316,9 +318,9 @@ elevated by prose.
   the hidden `.factory/loop/__init__.py` control-plane package. STATE-01
   remains co-owned by pending Task 9 (phase/campaign orchestration) so the §11
   transition machinery is exercised by the trusted control plane, not only by
-  the unit suite; `scripts/validate-implementation-plan.py planning`,
-  `scripts/check-plan-freshness.sh`, `scripts/check-generic-leakage.sh`, and
-  `scripts/check-docs-sync.sh` still exit 0.
+  the unit suite; `.factory/tools/validate-implementation-plan.py planning`,
+  `.factory/tools/check-plan-freshness.sh`, `.factory/tools/check-generic-leakage.sh`, and
+  `.factory/tools/check-docs-sync.sh` still exit 0.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 5: Root-descriptor lock and Git writer boundary
@@ -364,10 +366,10 @@ elevated by prose.
   lock is rejected before exec (F8); every lock failure surfaces through the
   unified fail-closed exception contract (F9); the escaped-descendant case
   blocks recovery; commit-boundary bypass tests stay rejected.
-- Verification: `tests/test-factory-lock.py` extended with inheritance,
+- Verification: `.factory/tests/legacy/test-factory-lock.py` extended with inheritance,
   escape, `/proc` ancestor-walk, inode-binding, `GIT_CONFIG*`/legacy lock-key
   strip, alias-fd, unified-exception, and timeout fixtures;
-  `tests/test-git-commit-guard.sh` still passes.
+  `.factory/tests/legacy/test-git-commit-guard.sh` still passes.
 - Evidence: `.factory/loop/lock.py` implements the root-descriptor lock
   authority with `flock` on the already-open canonical Git top-level
   directory descriptor opened with `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, binds
@@ -406,10 +408,10 @@ elevated by prose.
 - Scope: Reconcile the Task 6 supervisor review (findings F1-F5): implement
   `.factory/loop/launch.py` as a hidden control-plane module exposed only via
   `python -m factory.loop.launch` and, when installed, the external-prefix
-  launcher entry point (no visible bare `scripts/` wrapper); the launch API
+  launcher entry point (no visible bare `.factory/tools/` wrapper); the launch API
   and result types are exported from the hidden `.factory.loop` package
   surface. Every role starts in a new fresh process via the existing secure
-  wrapper (`scripts/pi2-secure-exec.py`) in one-shot mode with disabled
+  wrapper (`.factory/tools/pi2-secure-exec.py`) in one-shot mode with disabled
   session resume and memory injection; the invocation binds exact
   model/provider, static role prompt digest, campaign-bound prompt-set digest,
   optional audit-objective digest, canonical workspace and bound commit,
@@ -491,7 +493,7 @@ elevated by prose.
   trusted set.
 - Verification: `.factory/tests/test-factory-launch.py`;
   `.factory/tests/test-factory-supervision.sh` (hidden-namespace actual test
-  path; no visible `tests/` runner for Task 6) plus added tests covering
+  path; no visible `.factory/tests/legacy/` runner for Task 6) plus added tests covering
   the terminal emergency full-group kill after leader exit, TERM/INT/HUP
   blocking and off-main-thread rejection, finite runtime/inactivity
   enforcement, verify-to-exec TOCTOU (mode-0500 staged bytes / verified
@@ -516,7 +518,7 @@ elevated by prose.
 
 - Status: complete
 - Dependencies: Task 6
-- Scope: Retain the `scripts/ollama-usage-guard.sh` `--check`/`--wait`
+- Scope: Retain the `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait`
   contract and the §10 decision table, wired into the control plane before
   every model invocation. Harden the credential transport: cookies and
   credentials never appear in child argv, child environments, logs, or
@@ -612,13 +614,13 @@ elevated by prose.
 - Verification: the hidden `.factory/tests/test-factory-usage.py` extended
   with redirect/3xx/401/403, loopback-only HTTPS, ambient-scrub, CRLF, zero
   poll, provider/store tamper, and initial/final-check signal fixtures;
-  `tests/test-pi2-ollama-wrapper.sh` extended with the proc probe;
-  `tests/fixtures/usage-ok.html` and `usage-blocked.html` still drive the
+  `.factory/tests/legacy/test-pi2-ollama-wrapper.sh` extended with the proc probe;
+  `.factory/tests/legacy/fixtures/usage-ok.html` and `usage-blocked.html` still drive the
   parse path; the production `python -m factory.loop.launch` help exposes no
   `--usage-guard-html-file`.
 - Evidence: `.factory/tests/test-factory-usage.py` passes 106/106 under a
   90-second outer bound with one honest root-only ownership-tamper skip;
-  `tests/test-pi2-ollama-wrapper.sh` passes the live synthetic curl
+  `.factory/tests/legacy/test-pi2-ollama-wrapper.sh` passes the live synthetic curl
   cmdline/environ probe; launch regressions pass 76/76. The retained shell
   and hidden Python guards preserve the exact `--check`/`--wait` exit table,
   transport cookies only through bounded private stdin/config channels, and
@@ -805,7 +807,7 @@ elevated by prose.
   request through the trusted path. The orchestrator's commit boundary
   preserves the Git commit guard so `--no-verify`, hook-path override,
   `GIT_CONFIG*`, worktrees, and amend/merge/rebase bypasses remain rejected.
-  Task 32 adds exact-commit ordered pre-round hooks: the configuration digest
+  EXT-PREROUND-01 adds exact-commit ordered pre-round hooks: the configuration digest
   binds registry bytes, accepted commit, and the branch implementation closure;
   a write-ahead start/completion cursor gives exactly-once round ordering,
   planner retries never rerun hooks, and ambiguous crash recovery or mandatory
@@ -913,7 +915,7 @@ elevated by prose.
   PATH cannot redirect the model-facing git shim or bare-git selection; HOME/
   XDG/filesystem confinement keeps host credentials out of model reach.
 - Verification: `.factory/tests/test-factory-redaction.py`,
-  `tests/test-credential-extension.sh`, `tests/test-credential-guard.sh`, and
+  `.factory/tests/legacy/test-credential-extension.sh`, `.factory/tests/legacy/test-credential-guard.sh`, and
   the launch/campaign/usage/lock/confinement regressions.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 - Evidence: redaction 67 tests with two honest root-only skips; launch 77/77,
@@ -933,7 +935,7 @@ elevated by prose.
 - Dependencies: Task 5, Task 9
 - Scope: Retain exact-commit signed runner receipts, capability contracts,
   visual provenance, atomic publication, installed and human evidence tiers,
-  and the receipt wrapper (`scripts/machine-receipt.py`). Harden adjacent
+  and the receipt wrapper (`.factory/tools/machine-receipt.py`). Harden adjacent
   stdout/stderr artifacts with owner, mode, link-count, and inode checks, and
   require same-tag coordinator receipt publication to fail closed rather than
   silently replace an existing receipt. The verifier
@@ -947,8 +949,8 @@ elevated by prose.
   authoritative, the immutable verifier binding rejects path substitution,
   and no model assertion can elevate evidence.
 - Verification: `.factory/tests/test-factory-evidence.py`,
-  `tests/test-audit-receipts.sh`, `tests/test-runner-signer.sh`, and
-  `tests/test-campaign-audit.sh`.
+  `.factory/tests/legacy/test-audit-receipts.sh`, `.factory/tests/legacy/test-runner-signer.sh`, and
+  `.factory/tests/legacy/test-campaign-audit.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 - Evidence: hidden evidence 116/116, campaign 66/66, lock 39/39, and the
   visible receipt/signer/campaign-audit/factory-lock gates pass. Tests prove
@@ -977,7 +979,7 @@ elevated by prose.
   harness file placed in a product path fails the gate; build/packaging
   discovery yields no `.factory/` artifacts.
 - Verification: `.factory/tests/test-factory-footprint.sh` and
-  `scripts/check-generic-leakage.sh`.
+  `.factory/tools/check-generic-leakage.sh`.
 - Documentation impact: `docs/FACTORY.md`.
 - Evidence: hidden footprint 97/97 and its shell driver pass warning-clean;
   the live tracked/on-disk/external inventory is clean, product discovery
@@ -1001,14 +1003,14 @@ elevated by prose.
   commit references, and receipt/artifact references. Classifications retain
   fail-closed semantics; only all-verified can produce campaign success;
   `blocked`/`partial`/`not_applicable` keep their blocking behavior.
-- Acceptance criteria: `scripts/validate-conformance.py` passes with the
+- Acceptance criteria: `.factory/tools/validate-conformance.py` passes with the
   populated sidecar; every §24 ID appears in both the sidecar and the policy
   with matching required tiers; no requirement is self-declared.
 - Verification: `.factory/tests/test-factory-conformance.py`,
   `.factory/tests/test-factory-plan-parser.py`,
-  `tests/test-conformance.sh`, `tests/test-blocked-facts.sh`,
-  `scripts/validate-conformance.py`, and
-  `scripts/check-capability-evidence.py`.
+  `.factory/tests/legacy/test-conformance.sh`, `.factory/tests/legacy/test-blocked-facts.sh`,
+  `.factory/tools/validate-conformance.py`, and
+  `.factory/tools/check-capability-evidence.py`.
 - Documentation impact: none (sidecar is machine data).
 - Evidence: hidden conformance 37/37, parser 17/17, selector 32/32,
   visible conformance and blocked-facts suites pass; planning mode validates
@@ -1030,11 +1032,11 @@ elevated by prose.
   model-visible workspace; migrate the active plan and campaign cursor into
   the single minimal state file; do not translate runtime tasks, memories, or
   completion tokens into the new authorities. Existing visible
-  `scripts/ralph-*` entry points become deprecated forwarders only, and the
+  `.factory/tools/ralph-*` entry points become deprecated forwarders only, and the
   completed design must not require them; new orchestration implementation
-  never lands in the visible `scripts/` directory. New-path source and tests
+  never lands in the visible `.factory/tools/` directory. New-path source and tests
   reject any dependency on `ralph emit`, completion tokens, Ralph event
-  streams, runtime task stores, or Ralph memories. Port to the Controller
+  streams, runtime task stores, or Ralph memories. Port to the adopting product
   product occurs only after generic verification, and this task stays
   generic-only. Legacy mutable control-state files (pre-existing lifecycle
   state) must coexist with or migrate into the single `factory-state/v1`
@@ -1044,8 +1046,8 @@ elevated by prose.
   FACTORY-LOOP-SPEC forbids persisted context summaries and any competing
   task authority, the new path must never generate, read, inject, or validate
   `.factory/artifacts/context-summary.md`, nor invoke or depend on
-  `scripts/ralph-context-summary.py` (generator) or
-  `scripts/check-context-summary.py` (verifier), and must strip the
+  `.factory/tools/ralph-context-summary.py` (generator) or
+  `.factory/tools/check-context-summary.py` (verifier), and must strip the
   context-summary wiring out of the new orchestration/launch/commit path
   (the `verify-boilerplate.sh`, `final-gate.sh`, `git-commit-hook.sh`, and
   `ralph-run.sh` invocation/checkpoint lines) so the stale mirror never
@@ -1065,20 +1067,20 @@ elevated by prose.
   Ralph dependency; the new control flow generates, checks, or reads no
   context summary, and the stale
   `.factory/artifacts/context-summary.md` (with its
-  `scripts/ralph-context-summary.py` / `scripts/check-context-summary.py`
-  verifier and `tests/test-context-summary.sh` wiring) is removed/deprecated
+  `.factory/tools/ralph-context-summary.py` / `.factory/tools/check-context-summary.py`
+  verifier and `.factory/tests/legacy/test-context-summary.sh` wiring) is removed/deprecated
   from every new-path control step, so a plan-mirror drift cannot surface as
   an acceptance failure; the legacy workspace `.ollama-usage-env` store is
   migrated/deprecated and no new-path code reads a workspace- or
   repository-scoped Ollama credential store.
 - Verification: `.factory/tests/test-factory-migration.py`,
   `.factory/tests/test-factory-migration.sh`, and the complete
-  `scripts/verify-boilerplate.sh` gate. The suites prove the new path has no
+  `.factory/tools/verify-boilerplate.sh` gate. The suites prove the new path has no
   context-summary dependency, imports no Ralph runtime authority, and reads no
   workspace/repository-scoped `.ollama-usage-env` credential bytes.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`, `README.md`.
 - Evidence: migration 67/67, state 129/129, and every retained hidden factory
-  regression passes; `scripts/verify-boilerplate.sh` exits 0. The migration
+  regression passes; `.factory/tools/verify-boilerplate.sh` exits 0. The migration
   binds plan/HEAD/dirty/evidence/blocker metadata, publishes only the single
   no-replace `factory-state/v1` authority, freezes all six Ralph launchers,
   removes and unwires the persisted context-summary authority, and detects
@@ -1109,12 +1111,12 @@ elevated by prose.
   escape, task-excerpt byte binding, context confinement, mid-phase mutation
   fail closed, synthetic Ollama cookie argv/environ, immutable verifier
   descriptor, Git commit-boundary rejection, no Ralph lifecycle dependency).
-  Rework `scripts/verify-boilerplate.sh` so it runs the new-suite and the
+  Rework `.factory/tools/verify-boilerplate.sh` so it runs the new-suite and the
   generic implementation acceptance; a synthetic five-round campaign completes
   with both success and findings fixtures.
 - Acceptance criteria: every §22 test passes deterministically on clean
   trees; verify-boilerplate.sh fails on any of the adversarial fixtures.
-- Verification: `./scripts/verify-boilerplate.sh`;
+- Verification: `./.factory/tools/verify-boilerplate.sh`;
   `.factory/tests/test-factory-adversarial.sh`.
 - Documentation impact: `docs/FACTORY.md`; Task 17 completes synchronized
   operator and template documentation.
@@ -1122,7 +1124,7 @@ elevated by prose.
   contains the machine-complete 27-case manifest, warning-free adversarial
   suite, five-round success/findings fixtures, atomic freeze guard,
   descriptor-bound maintenance verifier, and deletion revalidation. The hidden
-  adversarial gate and complete `scripts/verify-boilerplate.sh` both exit 0.
+  adversarial gate and complete `.factory/tools/verify-boilerplate.sh` both exit 0.
   Independent specification, security, code-quality, and focused findings-flow
   reviews accepted the checkpoint after case 5 was made non-vacuous, case 15
   exercised every retained receipt family, case 22 became a hard Landlock
@@ -1142,8 +1144,8 @@ elevated by prose.
 - Acceptance criteria: all listed documents reflect the implemented loop and
   pass the doc gates; `AGENTS.md` stays at or under the concise length limit
   and names deterministic commands.
-- Verification: `scripts/check-docs-sync.sh`; the docs gate inside
-  `scripts/verify-boilerplate.sh`.
+- Verification: `.factory/tools/check-docs-sync.sh`; the docs gate inside
+  `.factory/tools/verify-boilerplate.sh`.
 - Documentation impact: README.md, `docs/FACTORY.md`, `docs/OPERATIONS.md`,
   `docs/BUG_WORKFLOW.md`, `AGENTS.md`, help text.
 - Evidence: the documentation gate checks canonical spec/plan/state bindings,
@@ -1203,17 +1205,17 @@ elevated by prose.
   validator; repeated oversized-range probes remain within a fixed memory/time
   ceiling.
 - Verification: `.factory/tests/test-factory-plan-parser.py`;
-  `scripts/validate-implementation-plan.py planning
+  `.factory/tools/validate-implementation-plan.py planning
   .factory/artifacts/implementation-plan.md`; bounded resource probe for range
-  fixtures; `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`.
+  fixtures; `.factory/tools/check-generic-leakage.sh`; `.factory/tools/check-docs-sync.sh`.
 - Evidence: `.factory/tests/test-factory-plan-parser.py` passes 13/13,
   including every named invalid fixture, byte-exact accepted fixtures,
   parser/legacy-validator agreement, deterministic transitions, and 600
   repeated oversized-range parses under enforced 10-second CPU and 32 MiB RSS
   ceilings. The §24 registry SHA-256 is
   `7d9f502995a7af00c0153093bddb38e2cb948fbe717742ba3d2b6fba9539b402`.
-  `scripts/validate-implementation-plan.py planning`,
-  `scripts/check-generic-leakage.sh`, and `scripts/check-docs-sync.sh` exit 0;
+  `.factory/tools/validate-implementation-plan.py planning`,
+  `.factory/tools/check-generic-leakage.sh`, and `.factory/tools/check-docs-sync.sh` exit 0;
   standalone parser round-trip is byte-exact. The planner applied Task 3's
   `blocked -> pending` transition in commit `21eafd7` after this evidence passed.
 - Documentation impact: `docs/FACTORY.md`,
@@ -1265,8 +1267,8 @@ elevated by prose.
   fixtures.
 - Verification: `.factory/tests/test-factory-state.py` extended with the
   independent fixtures; new `.factory/tests/fixtures/state-*` files;
-  `scripts/validate-implementation-plan.py planning`;
-  `scripts/check-plan-freshness.sh`.
+  `.factory/tools/validate-implementation-plan.py planning`;
+  `.factory/tools/check-plan-freshness.sh`.
 - Evidence: every Task 4 review finding is closed with an exact fail-closed
   fixture exercised by the trusted control plane, not only the unit suite.
   S1 `init` is atomic and no-replace (never clobbers existing state or a
@@ -1293,12 +1295,12 @@ elevated by prose.
   control-plane CLI across the committed `state-*.json`/`state-*.jsonl`
   corpus; `.factory/tests/test-factory-plan-parser.py` (13 tests) and
   `.factory/tests/test-factory-selector.py` (32 tests) also pass, and
-  `scripts/validate-implementation-plan.py planning`,
-  `scripts/check-plan-freshness.sh`, `scripts/check-generic-leakage.sh`, and
-  `scripts/check-docs-sync.sh` all exit 0 with no `docs/SPEC.md` change.
+  `.factory/tools/validate-implementation-plan.py planning`,
+  `.factory/tools/check-plan-freshness.sh`, `.factory/tools/check-generic-leakage.sh`, and
+  `.factory/tools/check-docs-sync.sh` all exit 0 with no `docs/SPEC.md` change.
   The independent security review of the hardened authority is acceptable.
   The complete `verify-boilerplate.sh` gate still exits 1 solely from the
-  legacy context-summary authority drift (`scripts/check-context-summary.py`
+  legacy context-summary authority drift (`.factory/tools/check-context-summary.py`
   reports the open-task set drifts from the plan against the stale
   `.factory/artifacts/context-summary.md`); that legacy authority removal is
   assigned to pending Task 15 and is not a Task 19 defect.
@@ -1321,12 +1323,12 @@ elevated by prose.
   from the installed copy include `python -m factory.loop.launch` (help and
   CLI surface plus the external-prefix launcher entry point),
   `factory-campaign`, the parser/selector/state CLIs,
-  `scripts/machine-receipt.py`, and the installed footprint inventory.
+  `.factory/tools/machine-receipt.py`, and the installed footprint inventory.
   Every installed-tier gate is minted as an exact-commit receipt via
-  `scripts/machine-receipt.py`; at this commit the receipts are
+  `.factory/tools/machine-receipt.py`; at this commit the receipts are
   fixture-authority only (minted under the fixture authority's audit
   coordinator, never against the live `.factory-state/`), so
-  `scripts/check-audit-receipts.py` exits 0; the physical installed-file
+  `.factory/tools/check-audit-receipts.py` exits 0; the physical installed-file
   inventory (path, mode, owner, link count) is captured and asserted to
   stay inside the test-owned external/hidden prefixes and the hidden
   `.factory/`/`.factory-state/`/`.pi/` namespaces (HIDE-01). The live
@@ -1338,15 +1340,15 @@ elevated by prose.
   physical installed-file inventory is complete and confined; every
   installed-tier production CLI/gate runs from the installed copy with its
   documented exit status; every installed-tier gate has an exact-commit
-  fixture-authority receipt and `scripts/check-audit-receipts.py` exits 0;
+  fixture-authority receipt and `.factory/tools/check-audit-receipts.py` exits 0;
   no source-tree or private-test run is claimed as installed-tier evidence,
   and no live installed-functional evidence is staged by this task (the
   live `.factory-state/` is never touched).
-- Verification: `scripts/verify-boilerplate.sh`;
-  `scripts/check-audit-receipts.py`;
-  `scripts/check-installed-functional-evidence.sh`;
+- Verification: `.factory/tools/verify-boilerplate.sh`;
+  `.factory/tools/check-audit-receipts.py`;
+  `.factory/tools/check-installed-functional-evidence.sh`;
   `.factory/tests/test-factory-footprint.sh` installed inventory;
-  `scripts/validate-conformance.py planning`; `scripts/check-docs-sync.sh`.
+  `.factory/tools/validate-conformance.py planning`; `.factory/tools/check-docs-sync.sh`.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
 - Evidence: exact commit `6b9c626` completes the installed-harness
   mechanics with fixture-authority receipts only — no live
@@ -1390,22 +1392,22 @@ elevated by prose.
 - Scope: Remediate campaign-audit Finding 4 by covering the round-1
   objective's receipt categories with genuine evidence. `project-verify`
   becomes coverable by a fresh exact-commit receipt of
-  `./scripts/verify-boilerplate.sh` once Tasks 20/22/23 pass; `runner-evidence`
+  `./.factory/tools/verify-boilerplate.sh` once Tasks 20/22/23 pass; `runner-evidence`
   remains coverable only by an exact signed runner manifest accepted by
-  `scripts/check-factory-runner-evidence.py` after the external human
+  `.factory/tools/check-factory-runner-evidence.py` after the external human
   completes Task 24. While any category is uncovered,
-  `scripts/check-campaign-objectives.py` exits 1 and the campaign audit keeps
+  `.factory/tools/check-campaign-objectives.py` exits 1 and the campaign audit keeps
   reporting `findings`; partial or fabricated coverage is never claimed and
   no private/synthetic evidence is elevated to the runner-evidence category.
 - Acceptance criteria: the round-1 objective is either fully covered by
   genuine receipts/manifests (only after Task 24 provisions the runner) or
   explicitly reported uncovered with the audit result `findings`; no PASS is
   pretended while `runner-evidence` is uncovered;
-  `scripts/check-campaign-objectives.py` reflects the true covered/uncovered
+  `.factory/tools/check-campaign-objectives.py` reflects the true covered/uncovered
   state at the audit base.
-- Verification: `scripts/check-campaign-objectives.py --round 1 --base <exact-commit>`;
-  `scripts/check-audit-receipts.py`;
-  `scripts/check-factory-runner-evidence.py --print-capabilities`.
+- Verification: `.factory/tools/check-campaign-objectives.py --round 1 --base <exact-commit>`;
+  `.factory/tools/check-audit-receipts.py`;
+  `.factory/tools/check-factory-runner-evidence.py --print-capabilities`.
 - Documentation impact: `docs/FACTORY.md`,
   `.factory/artifacts/campaign-audit.md`.
 
@@ -1440,12 +1442,12 @@ elevated by prose.
   finite terminal; the smoke seam is deterministic and labeled private
   source methodology (never installed-tier, never GIT-01); no external
   model/cookies/credentials are invoked; state digest verification,
-  `scripts/check-plan-freshness.sh`, and
-  `scripts/check-generic-leakage.sh` pass.
+  `.factory/tools/check-plan-freshness.sh`, and
+  `.factory/tools/check-generic-leakage.sh` pass.
 - Verification: `.factory/tests/test-factory-campaign.py`;
   `.factory/loop/campaign.py run` live at the bound commit;
-  `.factory/loop/state.py show`; `scripts/check-plan-freshness.sh`;
-  `scripts/check-generic-leakage.sh`.
+  `.factory/loop/state.py show`; `.factory/tools/check-plan-freshness.sh`;
+  `.factory/tools/check-generic-leakage.sh`.
 - Documentation impact: `docs/OPERATIONS.md`.
 
 ## Task 23: Generic evidence-scope authority for foreign artifacts
@@ -1465,10 +1467,10 @@ elevated by prose.
   `.factory-state/generic-evidence/`), mints the installed-tier coordinator
   receipts at the audit base under `.factory-state/audit-receipts/`, and
   produces the fresh check-installed acceptance
-  (`scripts/check-installed-functional-evidence.sh` exit 0). It scopes
+  (`.factory/tools/check-installed-functional-evidence.sh` exit 0). It scopes
   every generic checker's and generic read authority to the exact bound
   commit and the dedicated generic evidence namespace:
-  `scripts/check-installed-functional-evidence.sh` and sibling generic
+  `.factory/tools/check-installed-functional-evidence.sh` and sibling generic
   readers ignore foreign artifacts outside that namespace, so a foreign
   artifact causes no error and is never rewritten. Preservation is proven
   by recording the foreign files' byte digests before and after the task
@@ -1490,7 +1492,7 @@ elevated by prose.
   machine receipt under the new allowlisted `installed-harness-smoke`
   receipt-policy category (argv `[./.factory/tests/test-factory-installed.sh]`,
   `.factory/campaign-receipt-policy.json`) through the trusted
-  `scripts/machine-receipt.py` authority, validates the receipt (hardened
+  `.factory/tools/machine-receipt.py` authority, validates the receipt (hardened
   no-follow validation, exact commit, coordinator round/nonce, allowlisted
   argv, byte digest, no skip marker), and only after the receipt is accepted
   publishes the installed-functional evidence record (schema
@@ -1501,7 +1503,7 @@ elevated by prose.
   directories, mode-0600 single-link no-replace artifacts).  The publisher
   is two-stage, exact-commit, clean-tree, one-writer, and
   model/runner/hardware/human-free; a failed or skipped suite leaves no
-  artifacts.  `scripts/check-installed-functional-evidence.sh` is scoped to
+  artifacts.  `.factory/tools/check-installed-functional-evidence.sh` is scoped to
   read ONLY the exact-HEAD dedicated generic namespace by default (or an
   explicit safe-mode `--namespace`), never the foreign root
   `.factory-state/installed-functional-evidence.env`, and accepting the
@@ -1519,14 +1521,14 @@ elevated by prose.
   Final Task-23 blocker remediations (all proven by the hidden suites):
 
   1. **Identity-pinned group termination.** The numeric-killpg reuse race
-     is eliminated in both `scripts/machine-receipt.py` and
+     is eliminated in both `.factory/tools/machine-receipt.py` and
      `.factory/loop/lock.py`: the numeric group id is used only as a
      `/proc` scan key and is never passed to `killpg`, every member is
      signaled per-PID while its starttime identity matches, fork-during-
      termination descendants are captured by repeated scans, and a foreign
      group that reuses a released id is never signaled (deterministic
      PGID/PID-reuse and fork-during-termination tests in
-     `tests/test-factory-lock.py`/`tests/test-audit-receipts.sh`).
+     `.factory/tests/legacy/test-factory-lock.py`/`.factory/tests/legacy/test-audit-receipts.sh`).
   2. **Full post-suite snapshot delta.** After the installed suite the
      `.factory-state` snapshot must be fully unchanged (no additions,
      mutations, or deletions at all) before any coordinator/receipt/
@@ -1582,17 +1584,17 @@ elevated by prose.
   byte-identical after the task (digest snapshot proves untouched); the
   installed suite (Task 20 machinery) runs from the installed copy at the
   bound Task-23 commit and mints the live generic-namespace evidence and
-  coordinator receipts at the audit base so `scripts/check-audit-receipts.py`
+  coordinator receipts at the audit base so `.factory/tools/check-audit-receipts.py`
   exits 0; generic checkers read only the exact-commit dedicated generic
   namespace and ignore the foreign artifact; no generic tooling deletes,
   quarantines, or mutates a foreign artifact;
-  `scripts/check-installed-functional-evidence.sh` exits 0 on the fresh
-  generic evidence and `scripts/check-generic-leakage.sh` passes.
+  `.factory/tools/check-installed-functional-evidence.sh` exits 0 on the fresh
+  generic evidence and `.factory/tools/check-generic-leakage.sh` passes.
 - Verification: byte-digest before/after snapshot of the foreign
   `.factory-state` files (digest, mode, and mtime recorded and re-verified);
-  `scripts/check-installed-functional-evidence.sh`;
-  `scripts/check-audit-receipts.py`;
-  `scripts/check-generic-leakage.sh`; `scripts/check-docs-sync.sh`;
+  `.factory/tools/check-installed-functional-evidence.sh`;
+  `.factory/tools/check-audit-receipts.py`;
+  `.factory/tools/check-generic-leakage.sh`; `.factory/tools/check-docs-sync.sh`;
   `./.factory/tests/test-factory-generic-evidence.sh`.
 - Evidence: at exact commit `1afe31126762a82ff8bfad057011facbccdc02f7`,
   the trusted publisher completed round 1 and published the no-replace
@@ -1617,10 +1619,10 @@ elevated by prose.
   `.factory/environment.toml`, provision the signer trust in
   `.factory/signer-trust.json`, run the runner against the exact audit base,
   and have the signed manifest accepted by
-  `scripts/check-factory-runner-evidence.py`.
+  `.factory/tools/check-factory-runner-evidence.py`.
 - Scope: Remediate campaign-audit Finding 3 (RUNNER-01 real_system evidence
   blocked on an undeclared, unprovisioned external runner). The generic
-  methodology does not assume controller hardware or any product-specific
+  methodology does not assume external hardware or any product-specific
   runner class. While the human
   action is outstanding, the task stays blocked, RUNNER-01 stays `blocked`,
   and FACT-020 stays open; private/synthetic evidence is never elevated to
@@ -1631,12 +1633,12 @@ elevated by prose.
 - Acceptance criteria: without the human action the task remains blocked and
   the conformance row remains `blocked`; after the human action an
   exact-commit signed runner manifest is accepted by
-  `scripts/check-factory-runner-evidence.py` (exit 0, capabilities non-empty)
-  and `scripts/check-capability-evidence.py` passes with a fresh exact-commit
+  `.factory/tools/check-factory-runner-evidence.py` (exit 0, capabilities non-empty)
+  and `.factory/tools/check-capability-evidence.py` passes with a fresh exact-commit
   probe; no fake or simulated runner evidence is ever recorded.
-- Verification: `scripts/check-factory-runner-evidence.py --print-capabilities`;
-  `scripts/run-factory-runners.py`; `scripts/check-capability-evidence.py`;
-  `scripts/check-factory-environment.py .factory/environment.toml`.
+- Verification: `.factory/tools/check-factory-runner-evidence.py --print-capabilities`;
+  `.factory/tools/run-factory-runners.py`; `.factory/tools/check-capability-evidence.py`;
+  `.factory/tools/check-factory-environment.py .factory/environment.toml`.
 - Documentation impact: none beyond the evidence receipts and blocked-facts
   resolution.
 
@@ -1659,15 +1661,15 @@ elevated by prose.
   task; the audit itself never edits product code or the plan. The audit
   report cites `[receipt: …]`/`[manifest: …]` exact references, and any
   BLOCKED evidence forces result `findings`. This audit also covers the
-  post-Task-32 generic runtime upgrade: exact invocation descriptors,
+  versioned generic runtime extensions: exact invocation descriptors,
   authenticated immutable Pi2/Node/CLI identity, FD-backed credential
   handling and tool-boundary revalidation, bounded high-FD supervision,
   single-write phase results, role retries, generic optional capability/runner
   gates, and residual cleanup. It additionally covers the generic mandatory
   round-zero readiness policy/schema, fixed gate adapters, exact accepted and
-  descendant bindings, optional external human authority, `factory-state/v2`
-  migration, readiness-only terminal, and campaign-only one-use role launch
-  authorization. It also audits the generic runner parity port: receipt v3,
+  descendant bindings, detached-signature external human authority,
+  EXT-STATE-V2-01 migration, readiness-only terminal, and campaign-lock-bound
+  FD-secret-backed durable one-use role launch authorization. It also audits the generic runner parity port: receipt v3,
   aggregate v4 and artifact v1 schemas; arbitrary class/capability cardinality;
   campaign/readiness/acquisition namespaces; issuance/current trust and
   revocation; exact commit/tree/archive/environment/contracts/policy/authority
@@ -1680,36 +1682,35 @@ elevated by prose.
   only a harmless stdlib fixture authority and no production enrollment.
   The neutral boilerplate remains deliberately blocked with no enrolled
   production authority and no product hardware assumptions. The canonical
-  specification remains unchanged. Its §10 mandatory per-invocation
-  Ollama check/wait contract conflicts with
-  the newer no-quota-policy launch surface; that mismatch is an explicit
-  acceptance blocker and must not be reclassified as verified without human
-  specification authority.
+  specification remains unchanged. QUOTA-01 is enforced immediately before
+  every real model invocation; readiness and pre-round extensions never
+  replace or weaken that per-invocation contract.
 - Acceptance criteria: audit report records every §24 requirement verified
   or an explicit finding; no acceptance-critical audit finding remains; the
   campaign does not claim success unless the final audit is clean, the
   conformance sidecar shows all verified, and the `complete` mode of
-  `scripts/validate-conformance.py` exits 0.
-- Verification: `scripts/validate-conformance.py`;
-  `scripts/check-docs-sync.sh`; `scripts/check-audit-receipts.py`;
-  `scripts/check-campaign-objectives.py`; independent audit evidence
+  `.factory/tools/validate-conformance.py` exits 0.
+- Verification: `.factory/tools/validate-conformance.py`;
+  `.factory/tools/check-docs-sync.sh`; `.factory/tools/check-audit-receipts.py`;
+  `.factory/tools/check-campaign-objectives.py`; independent audit evidence
   appended to `.factory/artifacts/campaign-audit.md`.
 - Evidence: Upgrade regression at commit `7dcd9f7` passed the launch (90),
   campaign (97), confinement (96), usage (109), state (129), lock (46),
   redaction (69), installed (14), plan-parser (17), and 27-case adversarial
-  suites; `scripts/verify-boilerplate.sh` then passed end-to-end with generic
+  suites; `.factory/tools/verify-boilerplate.sh` then passed end-to-end with generic
   leakage, docs sync, migration, evidence, installed, smoke, credential,
   process, and residual-cleanliness checks. The later generic runner parity
   implementation adds rootless policy/authority/artifact/client/bootstrap/
   installer/signer/archive adversarial fixtures and the complete boilerplate
   gate, but these remain implementation methodology rather than live runner
   evidence. This is implementation evidence, not final-audit acceptance and
-  does not resolve FACT-020 or the canonical §10 quota-policy mismatch.
+  does not resolve FACT-020 or provide current exact-commit acceptance.
   Runner parity verification at `ba6fbdff295fe6347855bc3aba5f76cd327d714f`
-  passed `tests/test-factory-runner.sh`, installed harness, migration,
+  passed `.factory/tests/legacy/test-factory-runner.sh`, installed harness, migration,
   adversarial, readiness, 97-case campaign, generic leakage, documentation,
   capability/conformance, audit-receipt, legacy campaign/recovery, and the full
-  `scripts/verify-boilerplate.sh` gate serially. The fixture authority remains
-  explicitly simulated and no production runner/model/campaign/deployment was
-  invoked or evidenced.
+  then-current gate serially. That record is historical only: the present
+  remediation has not yet produced exact-commit installed acceptance. The
+  fixture authority remains explicitly simulated and no production runner,
+  model, campaign, or deployment is claimed.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.

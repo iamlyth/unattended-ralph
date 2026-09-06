@@ -420,10 +420,10 @@ def apply_confinement(
     if len(set(rule_fds)) != len(rule_fds) or any(fd < 0 for fd in rule_fds):
         raise ConfineLaunchError("the inherited rule descriptor list is invalid")
     abi = _landlock_abi()
-    if abi < 1:
+    if abi < 3:
         raise ConfineLaunchError(
-            "the Landlock LSM is unavailable; the confined launch cannot "
-            "proceed (fail closed)"
+            "Landlock ABI 3 or newer is required so truncate is mediated; "
+            f"host reported ABI {abi} (fail closed)"
         )
     handled = _handled_access_bits(abi)
     descriptor = -1

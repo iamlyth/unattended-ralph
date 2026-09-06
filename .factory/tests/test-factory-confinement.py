@@ -2,7 +2,7 @@
 """Harness-owned adversarial tests for model workspace/tool confinement (Task 8).
 
 This suite lives under the hidden ``.factory/tests/`` namespace (HIDE-01 keeps
-harness-only tests out of the adopting product's visible ``tests/`` tree) and
+harness-only tests out of the adopting product's visible ``.factory/tests/legacy/`` tree) and
 is the deterministic verification for Task 8 (role prompts, prompt-set
 binding, audit-objective registry selection, and real model workspace
 confinement).  Nothing here is simulated: the confinement is applied through
@@ -315,26 +315,26 @@ class _Base(unittest.TestCase):
 
     def _populate_workspace(self) -> None:
         ws = self.workspace
-        (ws / "scripts").mkdir()
-        shutil.copy2(REAL_WRAPPER, ws / "scripts" / WRAPPER_BASENAME)
+        (ws / ".factory" / "tools").mkdir(parents=True)
+        shutil.copy2(REAL_WRAPPER, ws / ".factory" / "tools" / WRAPPER_BASENAME)
         # Task 11: every fixture repo commits the exact credential guard so
         # the launch authority can verify and bind the guard source before
         # any child output channel is redacted.
         shutil.copy2(
-            ROOT / "scripts" / "credential-guard.py",
-            ws / "scripts" / "credential-guard.py",
+            ROOT / ".factory" / "tools" / "credential-guard.py",
+            ws / ".factory" / "tools" / "credential-guard.py",
         )
         # Task 11: every fixture repo commits the exact model-side Pi guard
         # extension so the launch authority can verify and always load it
         # through ``--extension`` in the child argv.
         shutil.copy2(
-            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
-            ws / "scripts" / "pi-factory-guard-extension.mjs",
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
+            ws / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
         )
-        (ws / "scripts" / "pi-cli-shims").mkdir()
+        (ws / ".factory" / "tools" / "pi-cli-shims").mkdir()
         shutil.copy2(
-            ROOT / "scripts" / "pi-cli-shims" / "git",
-            ws / "scripts" / "pi-cli-shims" / "git",
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
+            ws / ".factory" / "tools" / "pi-cli-shims" / "git",
         )
         (ws / "src").mkdir()
         (ws / "src" / "main.py").write_text("def main(): pass\n", encoding="utf-8")
@@ -378,7 +378,7 @@ class _Base(unittest.TestCase):
         os.chmod(store, 0o600)
         # Allowlisted ``.factory/`` inputs (base reads + planner schema reads).
         factory = ws / ".factory"
-        factory.mkdir()
+        factory.mkdir(exist_ok=True)
         (factory / "config.toml").write_text("[x]\n", encoding="utf-8")
         (factory / "environment.toml").write_text("schema_version = 1\n", encoding="utf-8")
         (factory / "artifacts").mkdir()

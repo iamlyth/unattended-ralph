@@ -2,7 +2,7 @@
 """Standalone stdlib Ollama operator utility (Task 7; QUOTA-01, QUOTA-02).
 
 This module is the hardened, standard-library implementation of the retained
-``scripts/ollama-usage-guard.sh`` ``--check``/``--wait`` operator contract.
+``.factory/tools/ollama-usage-guard.sh`` ``--check``/``--wait`` operator contract.
 It is not a campaign pre-round hook and per-model launch never imports or calls
 it. It satisfies QUOTA-02:
 
@@ -632,7 +632,7 @@ def acquire_credentials(
 def classify_html(raw_text: str) -> Tuple[str, str, str, str]:
     """Classify a settings page: ``(kind, session, weekly, extra)``.
 
-    Ported verbatim from the legacy shell guard so ``tests/fixtures/
+    Ported verbatim from the legacy shell guard so ``.factory/tests/legacy/fixtures/
     usage-ok.html``, ``usage-blocked.html``, and ``login.html`` drive exactly
     the same parse path (QUOTA-01).  ``kind`` is ``usage``, ``auth``, or
     ``parse``; for ``usage`` the extra field is the reset hint, for
@@ -858,7 +858,7 @@ def _missing_cookie_reason(credentials: Credentials) -> Optional[str]:
     if not credentials.cookie:
         return (
             "OLLAMA_COOKIE is missing; run source "
-            "scripts/update-ollama-cookies.sh"
+            ".factory/tools/update-ollama-cookies.sh"
         )
     return None
 
@@ -915,7 +915,7 @@ def check_once(
     if kind == "auth":
         print(
             "ollama-guard: authentication expired; refresh cookies with "
-            "source scripts/update-ollama-cookies.sh",
+            "source .factory/tools/update-ollama-cookies.sh",
             file=sys.stderr,
         )
         return EXIT_FATAL, {"kind": "auth", "reason": extra_redacted}
@@ -1104,7 +1104,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="factory-usage",
         description=(
             "Hidden Ollama usage guard (FACTORY-LOOP-SPEC §10; Task 7). "
-            "Retains the scripts/ollama-usage-guard.sh --check/--wait "
+            "Retains the .factory/tools/ollama-usage-guard.sh --check/--wait "
             "contract with hardened credential transport: the cookie never "
             "appears in a child argv, a child environment, a log, or a "
             "result."

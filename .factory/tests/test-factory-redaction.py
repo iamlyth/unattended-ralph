@@ -2,7 +2,7 @@
 """Hidden Task 11 credential/security boundary suite (CRED-01, §18; GIT-01).
 
 This suite lives under the hidden ``.factory/tests/`` namespace (HIDE-01
-keeps harness-only tests out of the adopting product's visible ``tests/``
+keeps harness-only tests out of the adopting product's visible ``.factory/tests/legacy/``
 tree) and is the deterministic verification for Task 11: output-content
 redaction through the exact committed credential guard, the stripped
 deterministic-gate environment, the model-facing Git shim PATH pinning, and
@@ -15,7 +15,7 @@ Coverage:
 
 * **guard-source binding** (Task 7 review obligation 3, co-owned with Task
   8): the executing redaction guard is always the exact committed blob of
-  ``scripts/credential-guard.py`` at the bound commit.  A missing,
+  ``.factory/tools/credential-guard.py`` at the bound commit.  A missing,
   symlinked, oversized, foreign-owned, group/other-writable, tampered
   (byte-divergent), or uncommitted working-tree guard fails closed before
   any output is redacted; a guard that does not compile or lacks the
@@ -38,8 +38,8 @@ Coverage:
   can enter the campaign result, the phase-history detail, or the published
   result file, and gate detail stays bounded;
 * **the actual CLI and the Node extension** (CRED-01, §18): the tracked
-  ``scripts/credential-guard.py`` CLI and the exported
-  ``scripts/pi-factory-guard-extension.mjs`` tool_call/tool_result redaction
+  ``.factory/tools/credential-guard.py`` CLI and the exported
+  ``.factory/tools/pi-factory-guard-extension.mjs`` tool_call/tool_result redaction
   helpers are exercised with synthetic secrets through real subprocesses;
 * **model-viewed Git shim** (GIT-01, Task 11): a caller-controlled PATH
   with a forged ``git`` cannot redirect the shim — the real executable is
@@ -73,7 +73,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 FIXTURES = ROOT / ".factory" / "tests" / "fixtures"
 SCHEMAS = ROOT / ".factory" / "schemas"
-GUARD_RELPATH = "scripts/credential-guard.py"
+GUARD_RELPATH = ".factory/tools/credential-guard.py"
 
 sys.path.insert(0, str(LOOP))
 import campaign as campaign_module  # noqa: E402
@@ -147,7 +147,7 @@ class _FixtureWorkspace:
     """One small committed repository whose HEAD carries the exact guard.
 
     ``commit_guard=True`` (the default) commits the exact
-    ``scripts/credential-guard.py`` blob; ``commit_guard=False`` leaves the
+    ``.factory/tools/credential-guard.py`` blob; ``commit_guard=False`` leaves the
     guard absent from HEAD (the uncommitted/missing-blob fixtures build on
     that).  The working tree starts clean and owned 0755 so the guarded
     no-follow read passes unless a test deliberately tampers with it.
@@ -212,12 +212,12 @@ class GuardSourceBindingTests(unittest.TestCase):
 
     def test_symlinked_guard_fails_closed(self) -> None:
         ws = _FixtureWorkspace(self.tmp)
-        target = ws.root / "scripts" / "credential-guard.py"
-        link = ws.root / "scripts" / "guard-link.py"
+        target = ws.root / ".factory" / "tools" / "credential-guard.py"
+        link = ws.root / ".factory" / "tools" / "guard-link.py"
         link.symlink_to(target.name)
         with self.assertRaises(redaction.OutputRedactionError) as caught:
             redaction._read_worktree_source(
-                ws.root, "scripts/guard-link.py", redaction.MAX_GUARD_SOURCE_BYTES
+                ws.root, ".factory/tools/guard-link.py", redaction.MAX_GUARD_SOURCE_BYTES
             )
         self.assertIn("open", str(caught.exception))
 
@@ -876,7 +876,7 @@ class CampaignGateEndToEndTests(unittest.TestCase):
 
 
 class CredentialGuardCliTests(unittest.TestCase):
-    """The tracked scripts/credential-guard.py CLI, driven as a subprocess."""
+    """The tracked .factory/tools/credential-guard.py CLI, driven as a subprocess."""
 
     GUARD = str(REAL_GUARD)
 
@@ -1169,7 +1169,7 @@ class NodeExtensionRedactionTests(unittest.TestCase):
         )
         fixture = self.tmp / "tool-fd-fixture.mjs"
         fixture.write_text(TOOL_FD_FIXTURE, encoding="utf-8")
-        extension = ROOT / "scripts" / "pi-factory-guard-extension.mjs"
+        extension = ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs"
         guard_digest = hashlib.sha256(REAL_GUARD.read_bytes()).hexdigest()
         for tool_name in sorted({
             tool for tools in launch_module.DEFAULT_ALLOWED_TOOLS.values()
@@ -1241,7 +1241,7 @@ class NodeExtensionRedactionTests(unittest.TestCase):
         node_env[launch_module.PI_FACTORY_GUARD_DIGEST_ENV] = guard_digest
         result = run(
             ["node", "--input-type=module", "-",
-             str(ROOT / "scripts" / "pi-factory-guard-extension.mjs")],
+             str(ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs")],
             input_data=self.fixture.read_bytes(),
             check=False,
             env=node_env,
@@ -1259,7 +1259,7 @@ class NodeExtensionRedactionTests(unittest.TestCase):
 class GitShimTests(unittest.TestCase):
     """A caller-controlled PATH cannot redirect the model-facing git shim."""
 
-    SHIM_SOURCE = ROOT / "scripts" / "pi-cli-shims" / "git"
+    SHIM_SOURCE = ROOT / ".factory" / "tools" / "pi-cli-shims" / "git"
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="factory-git-shim."))
@@ -1369,12 +1369,12 @@ class ExternalBackendTests(unittest.TestCase):
                      scripts / Path(launch_module.SECURE_WRAPPER).name)
         shutil.copy2(REAL_GUARD, scripts / Path(GUARD_RELPATH).name)
         shutil.copy2(
-            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
             scripts / "pi-factory-guard-extension.mjs",
         )
         (scripts / "pi-cli-shims").mkdir()
         shutil.copy2(
-            ROOT / "scripts" / "pi-cli-shims" / "git",
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
             scripts / "pi-cli-shims" / "git",
         )
         loop = self.workspace / ".factory" / "loop"

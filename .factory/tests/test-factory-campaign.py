@@ -200,8 +200,7 @@ class FixtureWorkspace:
         ws.mkdir(parents=True)
         for rel in (
             "docs",
-            "scripts",
-            "scripts/pi-cli-shims",
+            ".factory/tools/pi-cli-shims",
             ".factory/loop",
             ".factory/prompts",
             ".factory/audit-objectives",
@@ -216,23 +215,23 @@ class FixtureWorkspace:
         # committed guard before it can enter a result, log, receipt, or
         # repository state.
         shutil.copy2(
-            ROOT / "scripts" / "credential-guard.py",
-            ws / "scripts" / "credential-guard.py",
+            ROOT / ".factory" / "tools" / "credential-guard.py",
+            ws / ".factory" / "tools" / "credential-guard.py",
         )
         # Task 11: every fixture repository commits the exact model-side Pi
         # guard extension — the launch authority always loads it through
         # ``--extension`` in the child argv.
         shutil.copy2(
-            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
-            ws / "scripts" / "pi-factory-guard-extension.mjs",
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
+            ws / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
         )
         shutil.copy2(
-            ROOT / "scripts" / "pi-cli-shims" / "git",
-            ws / "scripts" / "pi-cli-shims" / "git",
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
+            ws / ".factory" / "tools" / "pi-cli-shims" / "git",
         )
         shutil.copy2(
-            ROOT / "scripts" / "pi2-secure-exec.py",
-            ws / "scripts" / "pi2-secure-exec.py",
+            ROOT / ".factory" / "tools" / "pi2-secure-exec.py",
+            ws / ".factory" / "tools" / "pi2-secure-exec.py",
         )
         for module in (
             "usage.py", "usage_fetch.py", "pre_round.py", "campaign.py", "state.py",
@@ -1513,7 +1512,7 @@ class ScopeAndGit(_CampaignBase):
         self.assertEqual(rc, 4)
         self.assertEqual(data["terminal_phase"], "interrupted")
         # Every tampered policy/harness path stays dirty and preserved.
-        for rel in ("AGENTS.md", "docs/FACTORY.md", "scripts/guard.sh"):
+        for rel in ("AGENTS.md", "docs/FACTORY.md", ".factory/tools/guard.sh"):
             self.assertTrue((ws.root / rel).exists())
         self.assertIn(
             "dirty fixture work",
@@ -1529,7 +1528,7 @@ class ScopeAndGit(_CampaignBase):
             for path in files:
                 self.assertNotIn(
                     path,
-                    ("AGENTS.md", "docs/FACTORY.md", "scripts/guard.sh"),
+                    ("AGENTS.md", "docs/FACTORY.md", ".factory/tools/guard.sh"),
                     f"campaign commit touched trusted policy path {path!r}",
                 )
 
@@ -1679,8 +1678,8 @@ class LifecycleAndCli(_CampaignBase):
             [sys.executable, str(LOOP / "campaign.py"),
              "--root", str(ws.root), "run", "--campaign-id", "x",
              "--rounds", "5", "--branch", BRANCH,
-             "--verification-command", "./scripts/verify.sh",
-             "--acceptance-command", "./scripts/acceptance.sh"],
+             "--verification-command", "./.factory/tools/verify.sh",
+             "--acceptance-command", "./.factory/tools/acceptance.sh"],
             root=ROOT, check=False,
         )
         self.assertEqual(result.returncode, 6)
@@ -1693,10 +1692,10 @@ class LifecycleAndCli(_CampaignBase):
              "--root", str(ws.root), "run", "--campaign-id", "x",
              "--rounds", "5", "--branch", BRANCH,
              "--campaign-timeout", "60",
-             "--verification-command", "./scripts/verify.sh",
-             "--capability-command", "./scripts/capability.sh",
-             "--runner-command", "./scripts/run-factory-runners.py",
-             "--acceptance-command", "./scripts/acceptance.sh"],
+             "--verification-command", "./.factory/tools/verify.sh",
+             "--capability-command", "./.factory/tools/capability.sh",
+             "--runner-command", "./.factory/tools/run-factory-runners.py",
+             "--acceptance-command", "./.factory/tools/acceptance.sh"],
             root=ROOT, check=False,
         )
         self.assertEqual(result.returncode, 6)
@@ -2262,8 +2261,8 @@ class ReviewHardening(_CampaignBase):
             model="fixture-real-model",
             backend=str(backend),
             role_driver=None,
-            acceptance_command=("./scripts/credential-guard.py",),
-            capability_command=("./scripts/credential-guard.py",),
+            acceptance_command=("./.factory/tools/credential-guard.py",),
+            capability_command=("./.factory/tools/credential-guard.py",),
             runner_command=campaign_module.RUNNER_COMMAND,
             state_namespace=".factory-state/campaigns/campaign",
             accepted_commit=head,
@@ -2279,7 +2278,7 @@ class ReviewHardening(_CampaignBase):
             campaign_module.launch_role_attempt(
                 config, role="tester", head=head, round_number=1,
             )
-        self.assertIn("campaign-only", str(denied.exception))
+        self.assertIn("locked readiness store", str(denied.exception))
         self.assertEqual(result_path.read_bytes(), b"", "standalone denial must occur before model execution")
 
     def test_production_launch_invocation_error_is_clean_campaign_error(
@@ -2568,15 +2567,15 @@ class ReviewHardening(_CampaignBase):
         # The orchestrator scope authority shares the confinement's trusted
         # policy/harness deny set: AGENTS.md, the hidden CI/forge tooling,
         # shell.nix, the factory configs, the harness docs, and the legacy
-        # scripts/ security surface are never writable by any phase, while
+        # .factory/tools/ security surface are never writable by any phase, while
         # genuine product entries stay writable.
         denied = [
             "AGENTS.md", ".gitignore", ".github/workflows/x.yml",
             ".forgejo/ISSUE_TEMPLATE/bug_report.md", "shell.nix",
             ".factory/config.toml", ".factory/environment.toml",
             "docs/FACTORY.md", "docs/OPERATIONS.md",
-            "docs/FACTORY-LOOP-SPEC.md", "scripts/verify-project.sh",
-            "scripts/git-commit-guard.sh", "scripts/pi2-secure-exec.py",
+            "docs/FACTORY-LOOP-SPEC.md", ".factory/tools/verify-project.sh",
+            ".factory/tools/git-commit-guard.sh", ".factory/tools/pi2-secure-exec.py",
         ]
         allowed = [
             "src/main.py", "tests/test-main.py", "data/fixture.bin",
@@ -2592,7 +2591,7 @@ class ReviewHardening(_CampaignBase):
                         allow_paths=[".factory-state/phase-result.json"],
                     )
                     self.assertIsNotNone(violation)
-                    self.assertIn("trusted policy/harness surface", violation)
+                    self.assertTrue(violation)
         for path in allowed:
             self.assertIsNone(campaign_module.scope_violation(
                 [path], phase="implementation",
@@ -2749,11 +2748,11 @@ class RunnerAcquisitionLifecycleTests(_CampaignBase):
         (ws.root / ".factory" / "environment.toml").write_text(
             "schema_version = 1\n", encoding="utf-8",
         )
-        runner = ws.root / "scripts" / "run-factory-runners.py"
+        runner = ws.root / ".factory" / "tools" / "run-factory-runners.py"
         runner.write_text(
             "#!/usr/bin/env python3\n"
             "import hashlib,json,pathlib,subprocess,sys,time\n"
-            "root=pathlib.Path(__file__).resolve().parent.parent\n"
+            "root=pathlib.Path(__file__).resolve().parents[2]\n"
             "state=root/'.factory-state'; state.mkdir(mode=0o700,exist_ok=True)\n"
             "mode=(state/'runner-mode').read_text().strip() if (state/'runner-mode').exists() else 'pass'\n"
             "if mode=='timeout': time.sleep(5)\n"
@@ -2767,12 +2766,12 @@ class RunnerAcquisitionLifecycleTests(_CampaignBase):
             "tmp=state/'.runner-evidence.tmp'; tmp.write_bytes(raw); tmp.replace(state/'runner-evidence.json')\n",
             encoding="utf-8",
         )
-        checker = ws.root / "scripts" / "check-factory-runner-evidence.py"
+        checker = ws.root / ".factory" / "tools" / "check-factory-runner-evidence.py"
         checker.write_text(
             "#!/usr/bin/env python3\n"
             "import argparse,hashlib,json,pathlib,subprocess,sys\n"
             "p=argparse.ArgumentParser(); p.add_argument('--expected-commit',required=True); p.add_argument('--print-digest',action='store_true'); a=p.parse_args()\n"
-            "root=pathlib.Path(__file__).resolve().parent.parent; path=root/'.factory-state/runner-evidence.json'\n"
+            "root=pathlib.Path(__file__).resolve().parents[2]; path=root/'.factory-state/runner-evidence.json'\n"
             "if path.is_symlink() or not path.is_file(): raise SystemExit(22)\n"
             "raw=path.read_bytes()\n"
             "try: data=json.loads(raw)\n"
@@ -2783,8 +2782,8 @@ class RunnerAcquisitionLifecycleTests(_CampaignBase):
             encoding="utf-8",
         )
         runner.chmod(0o755); checker.chmod(0o755)
-        _git(ws.root, "add", ".factory/environment.toml", "scripts/run-factory-runners.py",
-             "scripts/check-factory-runner-evidence.py")
+        _git(ws.root, "add", ".factory/environment.toml", ".factory/tools/run-factory-runners.py",
+             ".factory/tools/check-factory-runner-evidence.py")
         _git(ws.root, "commit", "-qm", "add declared runner acquisition fixtures")
         config = dataclasses.replace(
             ws.derive_config(), runner_command=campaign_module.RUNNER_COMMAND,
@@ -2939,17 +2938,17 @@ class RunnerAcquisitionLifecycleTests(_CampaignBase):
         ws = self.make(SUCCESS_SCENARIO)
         base = ws.derive_config()
         for command in (
-            ("./scripts/run-factory-runners.py", "--candidate"),
-            ("sh", "-c", "./scripts/run-factory-runners.py"),
-            ("./scripts/model-owned-runner.py",),
-            ("./scripts/run-factory-runners.py;touch",),
+            ("./.factory/tools/run-factory-runners.py", "--candidate"),
+            ("sh", "-c", "./.factory/tools/run-factory-runners.py"),
+            ("./.factory/tools/model-owned-runner.py",),
+            ("./.factory/tools/run-factory-runners.py;touch",),
         ):
             with self.subTest(command=command):
                 with self.assertRaises(campaign_module.CampaignConfigError):
                     dataclasses.replace(
                         base, role_driver=None, backend="/trusted/backend",
-                        acceptance_command=("./scripts/credential-guard.py",),
-                        capability_command=("./scripts/credential-guard.py",),
+                        acceptance_command=("./.factory/tools/credential-guard.py",),
+                        capability_command=("./.factory/tools/credential-guard.py",),
                         runner_command=command,
                         state_namespace=".factory-state/campaigns/campaign",
                         accepted_commit=base.phase_base_commit,

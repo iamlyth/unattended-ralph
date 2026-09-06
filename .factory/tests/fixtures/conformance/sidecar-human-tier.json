@@ -13,8 +13,8 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "tests/fixtures/runner-manifest.json",
-        "tests/probe.c"
+        ".factory/tests/legacy/fixtures/runner-manifest.json",
+        ".factory/tests/legacy/probe.c"
       ],
       "fact_refs": [],
       "reason": ""

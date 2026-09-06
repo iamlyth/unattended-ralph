@@ -107,7 +107,7 @@
     },
     {
       "case": 13,
-      "title": "Ordered pre-round hooks run once before each planner; Ollama policy is configured and absent from per-model launch",
+      "title": "Canonical Ollama check, conditional bounded wait, and final check run before every model invocation; every failure launches zero models",
       "requirement_ids": [
         "QUOTA-01"
       ],

@@ -40,7 +40,7 @@ otherwise swap an object behind ``git cat-file``).  Every trusted invocation
 re-pins ``GIT_NO_REPLACE_OBJECTS=1`` in its sanitized environment, so object
 resolution can never consult ``refs/replace/*``.  Only the *read-only*
 state/branch calls of the trusted control plane use this module; the
-committed ``scripts/git-commit-guard.sh`` boundary remains the authority for
+committed ``.factory/tools/git-commit-guard.sh`` boundary remains the authority for
 commit creation and is preserved untouched.
 
 Bounded byte capture: :func:`git_bytes_bounded` drives the stdin write and
@@ -820,7 +820,7 @@ def load_sibling(name: str) -> object:
     ``.factory/loop/`` directory, while the package ``__init__.py`` imports
     them as a proper package; loading a sibling by its absolute committed
     path (the same idiom ``state.py`` uses for
-    ``scripts/factory_state_io.py``) works in both contexts.
+    ``.factory/tools/factory_state_io.py``) works in both contexts.
     """
     path = Path(__file__).resolve().parent / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)

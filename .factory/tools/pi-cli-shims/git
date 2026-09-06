@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Fail-closed Git argv boundary for model-invoked commits.
+#
+# The Pi tool-call extension rewrites simple direct `git <commit-verb>`
+# commands to this shim. Commit-creating operations are enforced before
+# delegation: hook-bypass flags (`--no-verify`, commit `-n`) and
+# hooksPath/config redirections are rejected, and the fail-closed pre-commit
+# boundary must be installed for the target repository. Content enforcement
+# itself remains in .factory/tools/git-commit-guard.sh (the pre-commit hook), which
+# fires for every repository commit no matter how git is invoked.
+#
+# The real Git executable is resolved from **fixed absolute candidates only**
+# (Task 11, GIT-01): `/usr/bin/git`, `/bin/git`, the NixOS system profile,
+# and the immutable root-owned Nix store. `PATH` is never consulted, so a
+# caller-controlled PATH cannot redirect `git` behind the model boundary —
+# the same PATH-pinned authority as the trusted control plane's
+# `.factory/loop/gitutil.py` selection.  Every candidate additionally passes
+# the same **immutable-chain validation** as that Python authority: the
+# realpath of the binary and every directory that names it must be owned by a
+# uid that differs from the caller with no group/other write bits (sticky
+# foreign-owned store directories excepted), so a caller-owned or writable
+# candidate — including a symlink that redirects into a caller-writable
+# directory — can never replace the pinned Git. The boundary refuses to run
+# as root: under uid 0 every candidate path component is caller-owned, so no
+# candidate can be proven immutable without weakening the ownership check.
+set -euo pipefail
+
+resolve_pinned_git() {
+    local candidate
+    for candidate in /usr/bin/git /bin/git /run/current-system/sw/bin/git /nix/store/*/bin/git; do
+        # Only the immutable Nix-store path shape is a store candidate.
+        if [[ "$candidate" == /nix/store/* && ! "$candidate" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/bin/git$ ]]; then
+            continue
+        fi
+        validate_pinned_candidate "$candidate" || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+validate_pinned_candidate() {
+    # Mirror the control plane's gitutil._immutable_chain authority (F4): a
+    # candidate is trusted only when the caller (the same uid the model runs
+    # under) can neither replace it nor replace any directory that names it.
+    # Every component of the realpath chain up to the containment boundary
+    # (the store root for /nix/store/... paths, the filesystem root
+    # otherwise) must be owned by a uid that differs from the caller and
+    # carry no group/other write bits, with the single sticky foreign-owned
+    # directory exception (the Nix store is mode 1775 owned by root).  The
+    # binary itself must be a regular executable with the same
+    # ownership/writability properties; a root-owned symlink that redirects
+    # into a caller-writable directory is rejected through the realpath.
+    local candidate=$1 resolved current boundary info uid hex mode parent
+    resolved=$(readlink -f -- "$candidate" 2>/dev/null) || return 1
+    [[ -f "$resolved" && -x "$resolved" ]] || return 1
+    case "$resolved" in
+        /nix/store/*) boundary=/nix/store ;;
+        *) boundary=/ ;;
+    esac
+    current=$resolved
+    while :; do
+        info=$(stat -Lc '%u %f' -- "$current" 2>/dev/null) || return 1
+        uid=${info%% *}
+        hex=${info##* }
+        mode=$((16#${hex:-0}))
+        if [[ "$uid" -eq "$UID" ]]; then
+            # caller-owned component: only a sticky directory may be accepted
+            if [[ ! -d "$current" || $((mode & 0x200)) -eq 0 ]]; then
+                return 1
+            fi
+        fi
+        if ((mode & 0x12)); then
+            # group/other-writable: only a sticky directory may be accepted
+            if [[ ! -d "$current" || $((mode & 0x200)) -eq 0 ]]; then
+                return 1
+            fi
+        fi
+        [[ "$current" == "$boundary" ]] && break
+        parent=${current%/*}
+        [[ "$current" == "$parent" ]] && break
+        current=$parent
+    done
+    return 0
+}
+
+if [[ ${UID:-0} -eq 0 ]]; then
+    echo "git-shim: the pinned Git boundary refuses to run as root; run the trusted control plane as an unprivileged user" >&2
+    exit 2
+fi
+
+REAL_GIT=$(resolve_pinned_git) || {
+    echo "git-shim: cannot resolve the pinned absolute Git executable; refusing to fall back to a PATH-resolved `git`" >&2
+    exit 2
+}
+
+# Locate the git subcommand, skipping option values (-C <dir>, -c <key>=<val>,
+# --config <key>=<val>) so the verb is identified correctly.
+verb=
+previous=
+for argument in "$@"; do
+    case "$previous" in
+        -C|--git-dir|--work-tree|-c|--config|--config-env)
+            previous=
+            continue
+            ;;
+    esac
+    case "$argument" in
+        -C|--git-dir|--work-tree|-c|--config|--config-env)
+            previous=$argument
+            continue
+            ;;
+        -C=*|--git-dir=*|--work-tree=*|-c=*|--config=*|--config-env=*) continue ;;
+        -*) continue ;;
+        *)
+            verb=$argument
+            break
+            ;;
+    esac
+done
+
+COMMIT_VERBS=" commit merge cherry-pick revert am rebase pull "
+if [[ -z "$verb" || "$COMMIT_VERBS" != *" $verb "* ]]; then
+    exec "$REAL_GIT" "$@"
+fi
+
+# Only `git commit` is delegated. Every other commit-creation verb is refused
+# at the model's command boundary: cherry-pick and revert run no Git hooks at
+# all, am/rebase use patch hooks this boundary does not own, and merge is
+# redundant with the harness's checkpoint flow. The fail-closed content policy
+# therefore holds for every commit the model can create.
+if [[ "$verb" != commit ]]; then
+    echo "git-shim: '$verb' can create commits outside the fail-closed boundary; use git commit" >&2
+    exit 1
+fi
+
+# Hook-bypass attempts are rejected before Git runs. --no-verify and commit -n
+# disable every Git hook; -c/--config core.hooksPath and the GIT_CONFIG_* env
+# family redirect or suppress hooks. None of these have a legitimate use in the
+# Ralph harness (the trusted checkpoint flow never bypasses hooks).
+for argument in "$@"; do
+    lower_argument=${argument,,}
+    case "$lower_argument" in
+        --no-verify)
+            echo "git-shim: --no-verify is forbidden: it bypasses the fail-closed commit boundary" >&2
+            exit 1
+            ;;
+        -c=core.hookspath*|--config=core.hookspath*|--config-env=core.hookspath*)
+            echo "git-shim: core.hooksPath redirection is forbidden" >&2
+            exit 1
+            ;;
+    esac
+done
+previous=
+for argument in "$@"; do
+    lower_argument=${argument,,}
+    case "$previous" in
+        -c|--config|--config-env)
+            case "$lower_argument" in
+                core.hookspath|core.hookspath=*)
+                    echo "git-shim: core.hooksPath redirection is forbidden" >&2
+                    exit 1
+                    ;;
+            esac
+            previous=
+            continue
+            ;;
+    esac
+    case "$lower_argument" in
+        -c|--config|--config-env) previous=$lower_argument ;;
+    esac
+done
+if [[ "$verb" == commit ]]; then
+    for argument in "$@"; do
+        if [[ "$argument" == -n ]]; then
+            echo "git-shim: commit -n (--no-verify) is forbidden: it bypasses the fail-closed commit boundary" >&2
+            exit 1
+        fi
+    done
+fi
+if [[ -n ${GIT_CONFIG_PARAMETERS:-} || -n ${GIT_CONFIG_COUNT:-} ]] \
+    || compgen -v | grep -q '^GIT_CONFIG_KEY_' || compgen -v | grep -q '^GIT_CONFIG_VALUE_'; then
+    echo "git-shim: GIT_CONFIG_* hook redirection is forbidden" >&2
+    exit 1
+fi
+
+# Resolve the target repository the same way git would: keep only -C pairs
+# (which select the working tree) and let rev-parse report the git dir.
+prefix=()
+previous=
+for argument in "$@"; do
+    case "$previous" in
+        -C)
+            prefix+=(-C "$argument")
+            previous=
+            continue
+            ;;
+    esac
+    case "$argument" in
+        -C) previous=-C ;;
+        -C=*) prefix+=("$argument") ;;
+    esac
+done
+
+# Fail closed when the target repository has no installed guard or has a
+# core.hooksPath redirect in its own configuration. Without the pre-commit
+# boundary, a delegated commit could reach history unguarded.
+git_dir=$("$REAL_GIT" "${prefix[@]}" rev-parse --absolute-git-dir 2>/dev/null || true)
+if [[ -n "$git_dir" ]]; then
+    hooks_path=$("$REAL_GIT" "${prefix[@]}" config --get core.hooksPath 2>/dev/null || true)
+    if [[ -n "$hooks_path" ]]; then
+        echo "git-shim: repository core.hooksPath redirect is forbidden: $hooks_path" >&2
+        exit 1
+    fi
+    # The fail-closed boundary spans every commit-creation path: pre-commit,
+    # pre-merge-commit (merge) and commit-msg (merge, cherry-pick, revert, am,
+    # rebase). All three must be installed before a commit is delegated.
+    for hook_name in pre-commit pre-merge-commit commit-msg; do
+        if [[ ! -x "$git_dir/hooks/$hook_name" ]]; then
+            echo "git-shim: fail-closed $hook_name boundary is not installed; run ./.factory/tools/install-git-commit-guard.sh" >&2
+            exit 1
+        fi
+    done
+fi
+
+exec "$REAL_GIT" "$@"

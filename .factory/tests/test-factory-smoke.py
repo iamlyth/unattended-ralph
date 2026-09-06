@@ -250,13 +250,13 @@ class SmokeWorkspace:
             "The frozen legacy launcher `ralph-maintenance-run.sh` stays "
             "frozen legacy.\n"
             "Ledger: `.factory/bugs/open.md` and `.factory/bugs/closed.md`.\n"
-            "The adopting-product supplied `scripts/verify-project.sh` is "
+            "The adopting-product supplied `.factory/tools/verify-project.sh` is "
             "the project verifier.\n",
             encoding="utf-8",
         )
         (ws / "AGENTS.md").write_text(
             "AGENTS.md fixture operational policy: run "
-            "scripts/verify-boilerplate.sh and scripts/check-docs-sync.sh; "
+            ".factory/tools/verify-boilerplate.sh and .factory/tools/check-docs-sync.sh; "
             "the adversarial suite is .factory/tests/test-factory-adversarial.sh.\n",
             encoding="utf-8",
         )
@@ -280,17 +280,17 @@ class SmokeWorkspace:
             "check-generic-leakage.sh",
             "check-docs-sync.sh",
         ):
-            shutil.copy2(ROOT / "scripts" / script, ws / "scripts" / script)
+            shutil.copy2(ROOT / ".factory" / "tools" / script, ws / "scripts" / script)
         # The fixture installs the *real* tracked Git commit boundary: the
         # exact `git-commit-guard.sh` and its installer are committed and the
         # six launcher hooks are installed, so every campaign commit (and
         # every fixture commit) runs through the production guard.
         shutil.copy2(
-            ROOT / "scripts" / "git-commit-guard.sh",
+            ROOT / ".factory" / "tools" / "git-commit-guard.sh",
             ws / "scripts" / "git-commit-guard.sh",
         )
         shutil.copy2(
-            ROOT / "scripts" / "install-git-commit-guard.sh",
+            ROOT / ".factory" / "tools" / "install-git-commit-guard.sh",
             ws / "scripts" / "install-git-commit-guard.sh",
         )
         os.chmod(ws / "scripts" / "git-commit-guard.sh", 0o755)
@@ -770,8 +770,8 @@ class EvidenceSmokeAdversarial(_SmokeBase):
             common.DESIGNATED_DRIVER_REL,
             common.GATE_REL,
             ".factory/smoke/evidence_smoke.py",
-            "scripts/git-commit-guard.sh",
-            "scripts/install-git-commit-guard.sh",
+            ".factory/tools/git-commit-guard.sh",
+            ".factory/tools/install-git-commit-guard.sh",
         ):
             entry = _git(ws.root, "ls-files", "-s", "--", rel).stdout.strip()
             self.assertTrue(entry.startswith("100755"), (rel, entry))
@@ -788,7 +788,7 @@ class EvidenceSmokeAdversarial(_SmokeBase):
             self.assertFalse(hook_path.is_symlink(), hook)
         check = run(
             [
-                "bash", str(ws.root / "scripts" / "install-git-commit-guard.sh"),
+                "bash", str(ws.root / ".factory" / "tools" / "install-git-commit-guard.sh"),
                 "--check",
             ],
             cwd=str(ws.root),
@@ -1117,7 +1117,7 @@ class DocsGateSync(_SmokeBase):
     """
 
     def _docs_via_fd(self, root: Path, *, verifier_root: str | None):
-        script = root / "scripts" / "check-docs-sync.sh"
+        script = root / ".factory" / "tools" / "check-docs-sync.sh"
         descriptor = os.open(
             script,
             os.O_RDONLY

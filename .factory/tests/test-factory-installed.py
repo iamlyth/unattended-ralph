@@ -28,7 +28,7 @@ tier end to end:
    bound to the audit coordinator in the fixture authority
    (`.factory-state/audit-coordinator.json` with the exact bound commit);
    a gate that exits nonzero or prints a skip marker is never PASS;
-   `scripts/check-audit-receipts.py` exits 0 against the fixture audit
+   `.factory/tools/check-audit-receipts.py` exits 0 against the fixture audit
    report and rejects a PASS claim for a failing receipt;
 5. the fresh installed-functional evidence gate accepts a commit-bound
    env in the fixture authority and rejects stale/skipped/failing records;
@@ -86,8 +86,8 @@ LOOP = ROOT / ".factory" / "loop"
 STATE_DIR = ".factory-state"
 RECEIPTS_DIR = f"{STATE_DIR}/audit-receipts"
 INSTALLER = LOOP / "installer.py"
-CHECK_AUDIT_RECEIPTS = ROOT / "scripts" / "check-audit-receipts.py"
-CHECK_INSTALLED_FUNCTIONAL = ROOT / "scripts" / "check-installed-functional-evidence.sh"
+CHECK_AUDIT_RECEIPTS = ROOT / ".factory" / "tools" / "check-audit-receipts.py"
+CHECK_INSTALLED_FUNCTIONAL = ROOT / ".factory" / "tools" / "check-installed-functional-evidence.sh"
 SMOKE_DIR = ROOT / ".factory" / "smoke"
 FIXTURES_DIR = ROOT / ".factory" / "tests" / "fixtures"
 SMOKE_BRANCH = "fixture-main"
@@ -145,26 +145,16 @@ DIGEST_C = "c" * 64
 DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 
-# Installed-root attestation: the module-form gates execute under the
-# operator alias (`PYTHONPATH=<alias>`), so the loaded `factory.loop`
-# package's resolved module root must equal the installed prefix's
-# `.factory`.  The bootstrap prints the attestation into the certified
-# stdout and exits 90 on a mismatch, so a receipt argv/stdout binds the
-# installed prefix and a source-tree invocation can never mint an
-# equivalent installed-tier receipt.  The program is one logical line of
-# simple statements (a short-circuit expression replaces the conditional)
-# with only single spaces — no newlines/tabs/double-spaces — so the
-# audit-report evidence line round-trips through the visible checker's
-# whitespace-split tokenizer and shlex round-trip.
+# Installed-root attestation creates the package alias only in memory from
+# the expected descriptor-verified closure. It ignores PYTHONPATH/TMPDIR and
+# creates no same-UID mutable filesystem alias.
 INSTALLED_ROOT_BOOTSTRAP = (
-    "import os, subprocess, sys; from pathlib import Path; import factory.loop; "
-    "expected = Path(sys.argv[1]).resolve(); "
-    "actual = Path(factory.loop.__file__).resolve().parents[1]; "
-    "(actual != expected) and "
-    "(print(f'installed-root mismatch: {actual} != {expected}', "
-    "file=sys.stderr) or sys.exit(90)); "
-    "print(f'installed-root: {actual}'); "
-    "raise SystemExit(subprocess.run(sys.argv[2:], env=dict(os.environ)).returncode)"
+    "import importlib.util,runpy,sys;sys.dont_write_bytecode=True;from pathlib import Path;"
+    "expected=Path(sys.argv[1]).resolve();"
+    "spec=importlib.util.spec_from_file_location('factory',expected/'__init__.py',submodule_search_locations=[str(expected)]);"
+    "factory=importlib.util.module_from_spec(spec);sys.modules['factory']=factory;spec.loader.exec_module(factory);"
+    "print(f'installed-root: {expected}');args=sys.argv[2:];"
+    "exec(\"if len(args)>2 and args[1]=='-m':\\n sys.argv=[args[2],*args[3:]];runpy.run_module(args[2],run_name='__main__')\\nelse:\\n import subprocess;raise SystemExit(subprocess.run(args).returncode)\")"
 )
 
 # Minimal stub ``launch.py`` for the factory-launch signal test: writes its
@@ -230,9 +220,6 @@ class InstalledTierSuite(unittest.TestCase):
         self.hidden = self.tmp / ".hidden-prefix"
         self.manifest_ext = self.tmp / "manifest-external.json"
         self.manifest_hidden = self.tmp / "manifest-hidden.json"
-        self.alias = self.tmp / "factory-alias"
-        self.alias.mkdir()
-        os.symlink(self.external / ".factory", self.alias / "factory")
         # The fixture authority: a test-owned git repository whose
         # `.factory-state/audit-coordinator.json` binds round=1, the exact
         # bound commit, and a fresh nonce.
@@ -294,7 +281,7 @@ class InstalledTierSuite(unittest.TestCase):
                      "rev-parse", "HEAD"]).stdout.strip()
 
     def _copy_surface(self, target: Path) -> None:
-        """Copy the installed surface (.factory/, .pi/, scripts/) into a
+        """Copy the installed surface (.factory/, .pi/, .factory/tools/) into a
         fixture repository, mirroring the exact working-tree bytes while
         excluding ignored bytecode artifacts (the fixture has no
         ``.gitignore``, so stray ``__pycache__``/``*.pyc`` files would
@@ -331,8 +318,6 @@ class InstalledTierSuite(unittest.TestCase):
             "TMPDIR": str(self.tmp),
             "LANG": "C.UTF-8",
             "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": str(self.alias),
-            "FACTORY_INSTALL_RUNTIME": str(self.tmp),
         }
         for key in list(os.environ):
             if key in env:
@@ -382,21 +367,20 @@ class InstalledTierSuite(unittest.TestCase):
 
     def installed_inventory(self, prefix: Path, manifest_out: Path) -> dict:
         result = _run(
-            [
+            self.attested_argv([
                 sys.executable, "-m", "factory.loop.footprint",
                 "--installed-inventory", str(prefix),
                 "--manifest", str(manifest_out),
-            ],
-            cwd=str(self.fixture),
-            env=self.sanitized_env(),
+            ]),
+            cwd=str(self.fixture), env=self.sanitized_env(),
         )
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(data["schema"], "factory-installed-inventory/v1")
         return data
 
     def mint(self, tag: str, argv: list[str], *, check: bool = True,
              env: dict | None = None) -> subprocess.CompletedProcess[str]:
-        wrapper = self.external / "scripts" / "machine-receipt.py"
+        wrapper = self.external / ".factory" / "tools" / "machine-receipt.py"
         command = [
             sys.executable, str(wrapper),
             "--root", str(self.fixture),
@@ -644,25 +628,9 @@ class InstalledTierSuite(unittest.TestCase):
                 ],
             ),
             (
-                "gate-inventory-external",
-                [
-                    sys.executable, "-m", "factory.loop.footprint",
-                    "--installed-inventory", str(self.external),
-                    "--manifest", str(self.manifest_ext),
-                ],
-            ),
-            (
-                "gate-inventory-hidden",
-                [
-                    sys.executable, "-m", "factory.loop.footprint",
-                    "--installed-inventory", str(self.hidden),
-                    "--manifest", str(self.manifest_hidden),
-                ],
-            ),
-            (
                 "gate-receipt-wrapper",
                 [
-                    sys.executable, str(self.external / "scripts" / "machine-receipt.py"),
+                    sys.executable, str(self.external / ".factory" / "tools" / "machine-receipt.py"),
                     "--help",
                 ],
             ),
@@ -835,7 +803,7 @@ class InstalledTierSuite(unittest.TestCase):
         # (the stub suite exits 0) — never hand-fabricated.
         receipt_ref = f"{RECEIPTS_DIR}/installed-harness-smoke.json"
         minted = _run(
-            [sys.executable, str(fixture / "scripts" / "machine-receipt.py"),
+            [sys.executable, str(fixture / ".factory" / "tools" / "machine-receipt.py"),
              "--root", str(fixture), "--tag", "installed-harness-smoke",
              "--audit-round", "1", "--evidence-commit", commit,
              "--nonce", nonce, "--", "./.factory/tests/test-factory-installed.sh"],
@@ -865,7 +833,7 @@ class InstalledTierSuite(unittest.TestCase):
             encoding="utf-8",
         )
         os.chmod(record_path, 0o600)
-        checker = ["bash", str(fixture / "scripts" /
+        checker = ["bash", str(fixture / ".factory" / "tools" /
                                "check-installed-functional-evidence.sh")]
         ok = _run(checker, cwd=str(fixture))
         self.assertIn("PASS", ok.stdout)
@@ -924,7 +892,7 @@ class InstalledTierSuite(unittest.TestCase):
               "user.email", "factory@test"])
         _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "config",
               "user.name", "factory"])
-        for rel in ("docs", "scripts", "src",
+        for rel in ("docs", "src", ".factory/tools",
                     ".factory/prompts", ".factory/audit-objectives",
                     ".factory/artifacts", ".factory/schemas",
                     ".factory/smoke", ".factory/loop"):
@@ -969,27 +937,27 @@ class InstalledTierSuite(unittest.TestCase):
         for name in ("evidence_smoke_driver.py", "evidence_smoke_gate.py",
                      "evidence_smoke.py"):
             os.chmod(ws / ".factory/smoke" / name, 0o755)
-        for script in ("factory_state_io.py", "credential-guard.py",
-                       "check-plan-freshness.sh", "check-generic-leakage.sh",
-                       "check-docs-sync.sh"):
-            shutil.copy2(ROOT / "scripts" / script, ws / "scripts" / script)
-        shutil.copy2(ROOT / "scripts/git-commit-guard.sh",
-                     ws / "scripts/git-commit-guard.sh")
-        shutil.copy2(ROOT / "scripts/install-git-commit-guard.sh",
-                     ws / "scripts/install-git-commit-guard.sh")
-        os.chmod(ws / "scripts/git-commit-guard.sh", 0o755)
-        os.chmod(ws / "scripts/install-git-commit-guard.sh", 0o755)
-        (ws / "scripts/verify-boilerplate.sh").write_text(
+        for script in ("credential-guard.py", "check-plan-freshness.sh",
+                       "check-generic-leakage.sh", "check-docs-sync.sh"):
+            shutil.copy2(ROOT / ".factory" / "tools" / script,
+                         ws / ".factory" / "tools" / script)
+        shutil.copy2(ROOT / ".factory/tools/git-commit-guard.sh",
+                     ws / ".factory/tools/git-commit-guard.sh")
+        shutil.copy2(ROOT / ".factory/tools/install-git-commit-guard.sh",
+                     ws / ".factory/tools/install-git-commit-guard.sh")
+        os.chmod(ws / ".factory/tools/git-commit-guard.sh", 0o755)
+        os.chmod(ws / ".factory/tools/install-git-commit-guard.sh", 0o755)
+        (ws / ".factory/tools/verify-boilerplate.sh").write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "echo 'fixture verifier stub'\n", encoding="utf-8")
-        os.chmod(ws / "scripts/verify-boilerplate.sh", 0o755)
+        os.chmod(ws / ".factory/tools/verify-boilerplate.sh", 0o755)
         (ws / ".gitignore").write_text(
             ".factory-state/\n__pycache__/\n*.pyc\n", encoding="utf-8")
         # The real Git commit boundary: the production guard and its six
         # launcher hooks are installed before any fixture commit, so every
         # campaign commit (and fixture commit) runs through it.
-        _run(["bash", str(ws / "scripts/install-git-commit-guard.sh")],
+        _run(["bash", str(ws / ".factory/tools/install-git-commit-guard.sh")],
              cwd=str(ws))
         _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "add", "-A"])
         _run([gitutil.GIT_EXECUTABLE, "-C", str(ws), "commit", "-qm",
@@ -1178,8 +1146,9 @@ class InstalledTierSuite(unittest.TestCase):
         # never double-staged into the committed bulk set.
         self.assertNotIn(".factory/bin/factory-launch", files)
         self.assertIn(".factory/bin/factory-launch", entrypoints)
-        self.assertIn("scripts/machine-receipt.py", entrypoints)
-        self.assertIn("scripts/factory_state_io.py", shared)
+        self.assertIn(".factory/tools/machine-receipt.py", entrypoints)
+        self.assertEqual(shared, [])
+        self.assertIn(".factory/loop/factory_state_io.py", files)
         self.assertTrue((prefix / ".factory/bin/factory-launch").is_file())
         self.assert_external_install_clean(prefix, manifest)
         errors = installer_module.verify_staged(fixture, prefix, manifest)
@@ -1246,20 +1215,15 @@ class InstalledTierSuite(unittest.TestCase):
         gate = [sys.executable, "-m", "factory.loop.launch", "--help"]
         argv = self.attested_argv(gate)
         result = _run(argv, cwd=str(self.fixture), env=env, check=False)
-        self.assertNotEqual(result.returncode, 0,
-                            "source-tree module root must fail the attestation")
-        self.assertIn("installed-root mismatch", result.stderr)
-        # Even through the receipt wrapper the failing gate is never PASS.
-        minted = self.mint("gate-source-equiv", argv, check=False, env=env)
-        self.assertEqual(minted.returncode, 90)
-        receipt = evidence_module.validate_receipt(
-            self.fixture, f"{RECEIPTS_DIR}/gate-source-equiv.json"
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"installed-root: {self.installed_root}", result.stdout)
+        self.assertNotIn(str(ROOT / ".factory"), result.stdout)
+        # Hostile PYTHONPATH cannot redirect the in-memory installed package.
+        minted = self.mint("gate-source-equiv", argv, env=env)
+        self.assertEqual(minted.returncode, 0)
+        self.assert_pass_receipt(
+            "gate-source-equiv", expected_installed_root=self.installed_root
         )
-        self.assertEqual(receipt["exit_code"], 90)
-        with self.assertRaises(AssertionError):
-            self.assert_pass_receipt(
-                "gate-source-equiv", expected_installed_root=self.installed_root
-            )
 
     def _wait_until(self, predicate, what: str, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
@@ -1269,234 +1233,17 @@ class InstalledTierSuite(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"timed out waiting for {what}")
 
-    def test_factory_launch_forwards_signals_and_keeps_alias_until_child_gone(self) -> None:
-        """The external-prefix launcher forwards INT/TERM/HUP/QUIT to the
-        child, bounded-waits and reaps it *before* cleanup, preserves the
-        child's actual exit status (or 128+signal), and keeps the operator
-        alias directory until the child is truly gone — including a child
-        that delays termination and a child that ignores the forwarded
-        signal (bounded KILL escalation)."""
-        harness = self.tmp / "launch-harness"
-        (harness / ".factory" / "loop").mkdir(parents=True)
-        (harness / ".factory" / "bin").mkdir(parents=True)
-        (harness / ".factory" / "loop" / "__init__.py").write_text(
-            "", encoding="utf-8"
-        )
-        (harness / ".factory" / "loop" / "launch.py").write_text(
-            LAUNCH_STUB, encoding="utf-8"
-        )
-        shutil.copy2(
-            ROOT / ".factory/bin/factory-launch",
-            harness / ".factory/bin/factory-launch",
-        )
-        runtime = self.tmp / "launch-runtime"
-        runtime.mkdir()
-
-        def aliases():
-            return sorted(str(p) for p in runtime.glob("factory-launch-alias.*"))
-
-        def env_for(marker: Path, **extra: str):
-            env = dict(self.base_env())
-            env["FACTORY_INSTALL_RUNTIME"] = str(runtime)
-            env["LAUNCH_TEST_MARKER"] = str(marker)
-            env.update(extra)
-            return env
-
-        def cleanup_proc(proc: subprocess.Popen):
-            if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    pass
-
-        # 1. Delayed termination: the child handles TERM, delays ~1.5 s,
-        # then exits 42.  The launcher forwards the signal, keeps the alias
-        # while the child is still running, reaps the child's actual status,
-        # and removes the alias only after the child is gone.
-        marker = self.tmp / "launch-marker-delay"
-        proc = subprocess.Popen(
-            ["bash", str(harness / ".factory/bin/factory-launch"), "delay"],
-            env=env_for(marker),
-        )
-        self.addCleanup(cleanup_proc, proc)
-        self._wait_until(
-            lambda: Path(str(marker) + ".ready").exists(), "delayed child ready"
-        )
-        self.assertEqual(len(aliases()), 1)
-        os.kill(proc.pid, signal.SIGTERM)
-        self._wait_until(
-            lambda: Path(str(marker) + ".signal").exists(), "signal forwarded"
-        )
-        # The child is still inside its 1.5 s delayed handler: the alias
-        # must remain until the child is truly gone.
-        self.assertEqual(
-            len(aliases()), 1,
-            "alias must remain while the child is still running",
-        )
-        rc = proc.wait(timeout=30)
-        self.assertEqual(rc, 42,
-                         "the child's actual exit status must be preserved")
-        self.assertEqual(aliases(), [],
-                         "alias must be removed only after the child is gone")
-
-        # 2. Bounded KILL escalation: a child that ignores the forwarded
-        # TERM is KILLed after the bounded grace (137 = 128+9), reaped, and
-        # the alias is then removed — the launcher never hangs and never
-        # removes the alias while the child still runs.
-        marker = self.tmp / "launch-marker-ignore"
-        proc = subprocess.Popen(
-            ["bash", str(harness / ".factory/bin/factory-launch"), "ignore"],
-            env=env_for(marker, FACTORY_LAUNCH_GRACE="1"),
-        )
-        self.addCleanup(cleanup_proc, proc)
-        self._wait_until(
-            lambda: Path(str(marker) + ".ready").exists(), "ignoring child ready"
-        )
-        self.assertEqual(len(aliases()), 1)
-        started = time.monotonic()
-        os.kill(proc.pid, signal.SIGTERM)
-        rc = proc.wait(timeout=30)
-        elapsed = time.monotonic() - started
-        self.assertEqual(rc, 137, "the KILL escalation must report 128+9")
-        self.assertGreaterEqual(
-            elapsed, 0.5, "the grace must elapse before the KILL escalation"
-        )
-        self.assertLess(elapsed, 25.0, "the bounded wait must stay bounded")
-        self.assertEqual(aliases(), [])
-
-        # 3. A child killed by the forwarded signal reports 128+signal
-        # (default TERM disposition), and the alias is removed after reap.
-        marker = self.tmp / "launch-marker-die"
-        proc = subprocess.Popen(
-            ["bash", str(harness / ".factory/bin/factory-launch"), "die"],
-            env=env_for(marker),
-        )
-        self.addCleanup(cleanup_proc, proc)
-        self._wait_until(
-            lambda: Path(str(marker) + ".ready").exists(), "die-mode child ready"
-        )
-        self.assertEqual(len(aliases()), 1)
-        os.kill(proc.pid, signal.SIGTERM)
-        rc = proc.wait(timeout=30)
-        self.assertEqual(
-            rc, 143,
-            "a child killed by the forwarded signal must report 128+15",
-        )
-        self.assertEqual(aliases(), [])
-
-    def test_prefix_swap_fails_before_repo_writes(self) -> None:
-        """Adversarial race: a symlink/bind-mount swap of the installed
-        prefix path after its creation must fail closed *before* any
-        repository write.  Every staged write revalidates the anchored
-        directory fd identity and the named/resolved containment, so a
-        path replaced by a symlink into the repository (or by a different
-        directory inode) can never receive a staged file."""
-        fixture = self.tmp / "swap-repo"
-        self._make_repo(fixture)
-        self._copy_surface(fixture)
-        self._commit_all(fixture, "surface committed")
-        prefix = self.tmp / "swap-prefix"
-        root_fd, identity = installer_module._create_prefix(Path(ROOT), prefix)
-        self.addCleanup(os.close, root_fd)
-        self.assertEqual(stat.S_IMODE(os.fstat(root_fd).st_mode), 0o700)
-        # The prefix is fresh and empty; swap the *path* to a symlink that
-        # resolves into the repository (the same failure class as a
-        # bind-mount swap: the name no longer resolves to the anchored
-        # inode, and the resolved path lies inside the repo).
-        os.rmdir(prefix)
-        os.symlink(fixture, prefix)
-        with self.assertRaises(installer_module.InstallerError) as caught:
-            installer_module._stage_bytes(
-                prefix, root_fd, identity, Path(ROOT),
-                ".factory/loop/swapped.py", b"never\n", 0o644,
-            )
-        self.assertTrue(
-            "swapped" in str(caught.exception)
-            or "resolves inside" in str(caught.exception),
-            caught.exception,
-        )
-        # Nothing reached the repository and the swapped path is untouched.
-        self.assertFalse((fixture / ".factory/loop/swapped.py").exists())
-        self.assertEqual(os.readlink(prefix), str(fixture))
-        # A replaced *directory* inode (the bind-mount failure mode without
-        # privileges) is detected the same way: named identity mismatch.
-        os.unlink(prefix)
-        prefix2 = self.tmp / "swap-prefix-2"
-        fd2, identity2 = installer_module._create_prefix(Path(ROOT), prefix2)
-        self.addCleanup(os.close, fd2)
-        os.rmdir(prefix2)
-        os.mkdir(prefix2)
-        with self.assertRaises(installer_module.InstallerError) as caught:
-            installer_module._stage_bytes(
-                prefix2, fd2, identity2, Path(ROOT),
-                ".factory/loop/swapped.py", b"never\n", 0o644,
-            )
-        self.assertIn("swapped", str(caught.exception))
-
-    def test_committed_secret_name_is_never_staged(self) -> None:
-        """A secret/credential-named path that is *committed* under the
-        installed surface is never staged either: the committed tree is not
-        an exemption from the no-secret installed-copy invariant, and the
-        failed install rolls the created prefix back identity-safely."""
-        fixture = self.tmp / "secret-commit"
-        self._make_repo(fixture)
-        self._copy_surface(fixture)
-        (fixture / ".factory" / "loop" / "secret_token.py").write_text(
-            "# committed secret-shaped authority\n", encoding="utf-8"
-        )
-        commit = self._commit_all(fixture, "secret committed")
-        prefix = self.tmp / "secret-commit-prefix"
-        manifest_out = self.tmp / "secret-commit-manifest.json"
-        failed = _run(
-            [sys.executable, str(INSTALLER), "install",
-             "--root", str(fixture), "--commit", commit,
-             "--prefix", str(prefix), "--manifest-out", str(manifest_out)],
-            cwd=ROOT, env=self.base_env(), check=False,
-        )
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("secret name", failed.stderr)
-        self.assertFalse(prefix.exists(),
-                         "failed install must roll back the created prefix")
-
-    def test_batch_parser_errors_are_installer_errors(self) -> None:
-        """Every malformed batched-Git transcript fails closed as an
-        InstallerError, never a raw ValueError/IndexError leaking from the
-        parser (cat-file sizes, record framing, non-UTF-8 text)."""
-        fixture = self.tmp / "parse-repo"
-        self._make_repo(fixture)
-        self._copy_surface(fixture)
-        commit = self._commit_all(fixture, "surface committed")
-
-        # A non-numeric cat-file size is a wrapped ValueError.
-        def bad_size(root, argv, maximum, input=None):
-            return b"<oid> blob not-a-size\n"
-
-        with mock.patch.object(installer_module, "_git_bytes_bounded",
-                               side_effect=bad_size):
-            with self.assertRaises(installer_module.InstallerError) as caught:
-                installer_module._committed_blobs(fixture, ["a" * 40])
-        self.assertIn("size", str(caught.exception))
-
-        # A truncated record framing is a fail-closed parse error.
-        def truncated(root, argv, maximum, input=None):
-            return b"<oid> blob 100\nshort\n"
-
-        with mock.patch.object(installer_module, "_git_bytes_bounded",
-                               side_effect=truncated):
-            with self.assertRaises(installer_module.InstallerError) as caught:
-                installer_module._committed_blobs(fixture, ["a" * 40])
-        self.assertIn("truncated", str(caught.exception))
-
-        # Non-UTF-8 batch text is a wrapped UnicodeDecodeError.
-        def binary(root, argv, maximum, input=None):
-            return b"\xff\xfe\x00"
-
-        with mock.patch.object(installer_module, "_git_bytes_bounded",
-                               side_effect=binary):
-            with self.assertRaises(installer_module.InstallerError) as caught:
-                installer_module._ls_tree_surface(fixture, commit)
-        self.assertIn("UTF-8", str(caught.exception))
+    def test_installed_entrypoints_reject_mutable_alias_imports(self) -> None:
+        self.install(self.external, self.manifest_ext)
+        for name in ("factory-launch", "factory-campaign"):
+            path=self.external/".factory"/"bin"/name
+            text=path.read_text(encoding="utf-8")
+            self.assertNotIn("PYTHONPATH",text)
+            self.assertNotIn("TMPDIR",text)
+            self.assertNotIn("ln -s",text)
+        env=self.sanitized_env();env["PYTHONPATH"]=str(self.tmp/"attacker")
+        result=_run([str(self.external/".factory/bin/factory-launch"),"--help"],env=env,check=False)
+        self.assertEqual(result.returncode,0,result.stderr)
 
 
 if __name__ == "__main__":

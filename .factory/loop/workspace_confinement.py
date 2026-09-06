@@ -244,9 +244,9 @@ TESTER_WRITE_TOP = frozenset({
 # golden/visual-audit authorities) are the factory contracts; the harness
 # documentation (``docs/FACTORY.md``, ``docs/OPERATIONS.md``,
 # ``docs/FACTORY-LOOP-SPEC.md``) documents the control plane; and the legacy
-# visible ``scripts/`` tree is the security/harness surface (guards,
+# visible ``.factory/tools/`` tree is the security/harness surface (guards,
 # receipts, verifier, ralph entrypoints).  Genuine product entries
-# (``src/``, ``tests/``, product data, and product documentation other than
+# (``src/``, ``.factory/tests/legacy/``, product data, and product documentation other than
 # the harness docs) are NOT part of this surface and stay writable by the
 # developer role.
 #
@@ -289,7 +289,7 @@ def is_trusted_policy_path(relpath: str) -> bool:
     path itself or any path under a denied directory) is never writable by
     an untrusted role — neither through the confinement write allowlist nor
     through the campaign scope authority.  A path that equals a denied
-    entry or lies beneath a denied directory (``scripts/...``,
+    entry or lies beneath a denied directory (``.factory/tools/...``,
     ``.github/...``, ``.forgejo/...``) is denied even when it does not
     exist yet.
     """
@@ -723,7 +723,7 @@ def _role_write_paths(role: str, workspace: Path) -> List[Path]:
     component, resolved containment, no forbidden hardlink alias); the
     developer writes genuine product entries and the plan — never the
     trusted policy/harness surface (``AGENTS.md``, hidden CI/forge
-    tooling, factory configs, harness docs, the legacy ``scripts/``
+    tooling, factory configs, harness docs, the legacy ``.factory/tools/``
     security surface) and never ``.git``, whose history/commit authority
     belongs to the trusted orchestrator (Task 8 review, finding 2; Task 9
     review HIGH).
@@ -1705,10 +1705,10 @@ def require_confinement_primitive() -> None:
     never restricted; the child's exit status is the probe result.
     """
     abi = _landlock_abi()
-    if abi < 1:
+    if abi < 3:
         raise ConfinementUnavailable(
-            "the Landlock LSM is unavailable on this host (no landlock "
-            "ruleset syscall); model workspace confinement cannot be applied"
+            "Landlock ABI 3 or newer is required so truncate is mediated; "
+            f"host reported ABI {abi}"
         )
     pid = os.fork()
     if pid == 0:
@@ -1747,15 +1747,20 @@ def _set_no_new_privs() -> None:
 
 
 def _probe_apply_ruleset(handled_bits: int) -> None:
-    """Apply one real rule and restrict this disposable probe child."""
+    """Apply a real rule and prove that an ungranted truncate is denied."""
     import ctypes
     import errno
+    import tempfile
 
     class PathBeneath(ctypes.Structure):
         _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
 
     ruleset = -1
     anchor = -1
+    probe_fd, probe_name = tempfile.mkstemp(prefix="factory-landlock-truncate-")
+    os.write(probe_fd, b"must-not-truncate")
+    os.unlink(probe_name)
+    probe_descriptor_path = f"/proc/self/fd/{probe_fd}"
     try:
         _set_no_new_privs()
         ruleset = _create_ruleset(handled_bits)
@@ -1779,7 +1784,17 @@ def _probe_apply_ruleset(handled_bits: int) -> None:
                 "landlock_restrict_self probe failed: "
                 + errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
             )
+        try:
+            denied = os.open(probe_descriptor_path, os.O_WRONLY | os.O_TRUNC)
+        except PermissionError:
+            denied = -1
+        else:
+            os.close(denied)
+            raise ConfinementUnavailable(
+                "Landlock truncate negative probe unexpectedly succeeded"
+            )
     finally:
+        os.close(probe_fd)
         if anchor >= 0:
             os.close(anchor)
         if ruleset >= 0:

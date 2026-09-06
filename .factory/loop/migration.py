@@ -38,11 +38,11 @@ that must not become new-path authorities:
 ``freeze`` (new Ralph launch freezing): the tracked marker
 ``.factory/ralph-freeze`` freezes new legacy Ralph campaign/planning/
 implementation/audit/maintenance launches.  Deprecated visible
-``scripts/ralph-*`` entry points check the marker and refuse to start a new
+``.factory/tools/ralph-*`` entry points check the marker and refuse to start a new
 Ralph control-plane cycle; the operator-only
 ``FACTORY_RALPH_FREEZE_OVERRIDE=1`` escape exists solely to recover an
 already in-flight legacy cycle during migration.  Recovery itself
-(``scripts/ralph-recover.sh``) is not a new launch and stays usable.
+(``.factory/tools/ralph-recover.sh``) is not a new launch and stays usable.
 
 The shell-level freeze gate is a best-effort presence check with an accepted
 TOCTOU residual (Task 16): a same-uid local writer can delete the marker
@@ -156,12 +156,12 @@ HARNESS_RUNTIME_PREFIXES = (".factory-state", ".ralph", ".pi", "$tmp")
 
 # The frozen legacy launch entry points that may not start a new Ralph cycle.
 FROZEN_LAUNCHERS = (
-    "scripts/ralph-campaign.sh",
-    "scripts/ralph-plan.sh",
-    "scripts/ralph-run.sh",
-    "scripts/ralph-audit.sh",
-    "scripts/ralph-maintenance-plan.sh",
-    "scripts/ralph-maintenance-run.sh",
+    ".factory/tools/ralph-campaign.sh",
+    ".factory/tools/ralph-plan.sh",
+    ".factory/tools/ralph-run.sh",
+    ".factory/tools/ralph-audit.sh",
+    ".factory/tools/ralph-maintenance-plan.sh",
+    ".factory/tools/ralph-maintenance-run.sh",
 )
 
 

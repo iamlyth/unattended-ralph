@@ -337,7 +337,7 @@ def main() -> int:
             copy_template(f"dev-{task_id}.md", plan_rel, root)
             touch(root, f"src/work-{task_id}.md")
             for rel in (
-                "AGENTS.md", "docs/FACTORY.md", "scripts/guard.sh",
+                "AGENTS.md", "docs/FACTORY.md", ".factory/tools/guard.sh",
             ):
                 touch(root, rel)
             return 0

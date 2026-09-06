@@ -1,7 +1,7 @@
 """Hidden ``.factory/`` control-plane package root (FACTORY-LOOP-SPEC).
 
 The fresh-context launcher is exposed only as ``python -m factory.loop.launch``
-(no visible bare ``scripts/`` wrapper): the hidden ``.factory/loop`` package is
+(no visible bare ``.factory/tools/`` wrapper): the hidden ``.factory/loop`` package is
 importable under the public ``factory.loop`` name through the external-prefix
 alias mechanism — the operator or installed launcher places ``factory`` on
 ``PYTHONPATH`` resolving to the canonical ``.factory/`` directory, and the

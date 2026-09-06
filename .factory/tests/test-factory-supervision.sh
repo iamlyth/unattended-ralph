@@ -3,15 +3,15 @@
 #
 # This is the *hidden actual test path* for Task 6 (fresh-context execution,
 # invocation contract, and supervision): the specification (HIDE-01, §3) keeps
-# harness-only tests out of the adopting product's visible `tests/` tree, so
-# there is deliberately no visible `tests/` runner for Task 6.  It drives
+# harness-only tests out of the adopting product's visible `.factory/tests/legacy/` tree, so
+# there is deliberately no visible `.factory/tests/legacy/` runner for Task 6.  It drives
 # `.factory/loop/launch.py` through its only exposed entry points:
 #
 #   * `python -m factory.loop.launch` (the module entrypoint, reachable
 #     through the external-prefix alias: `factory` on `PYTHONPATH` resolving
-#     to the canonical `.factory/` directory — no visible bare `scripts/`
+#     to the canonical `.factory/` directory — no visible bare `.factory/tools/`
 #     wrapper);
-#   * the real `scripts/pi2-secure-exec.py` wrapper (invoked, never
+#   * the real `.factory/tools/pi2-secure-exec.py` wrapper (invoked, never
 #     reimplemented) with a synthetic committed model backend.
 #
 # The suite re-derives every authoritative byte from the committed fixture
@@ -69,7 +69,7 @@ fi
 grep -q 'factory-launch' "$tmp/help.out" \
     || fail "the module entrypoint help does not identify factory-launch"
 if find scripts -maxdepth 1 -name '*launch*' | grep -q .; then
-    fail "a visible scripts/ wrapper exposes the launcher (HIDE-01)"
+    fail "a visible .factory/tools/ wrapper exposes the launcher (HIDE-01)"
 fi
 
 # -- 3. End-to-end launch through the committed fixture repo ------------------
@@ -77,11 +77,11 @@ repo="$tmp/repo"
 mkdir -p "$repo/scripts"
 mkdir -p "$repo/.factory/loop"
 mkdir -p "$repo/.factory/schemas"
-cp scripts/pi2-secure-exec.py "$repo/scripts/"
+cp .factory/tools/pi2-secure-exec.py "$repo/scripts/"
 # Task 11: every fixture repo commits the exact credential guard so the
 # launch authority can verify the guard source before any child output
 # channel is redacted.
-cp scripts/credential-guard.py "$repo/scripts/"
+cp .factory/tools/credential-guard.py "$repo/scripts/"
 cp .factory/loop/confine_launcher.py "$repo/.factory/loop/"
 cp .factory/schemas/factory-confinement-v1.schema.json "$repo/.factory/schemas/"
 cp .factory/tests/fixtures/plan-valid-base.md "$repo/plan.md"

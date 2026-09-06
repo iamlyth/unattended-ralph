@@ -44,7 +44,7 @@ No model, runner, hardware, or human is ever invoked: the publisher is
 deterministic control-plane code with a one-writer lock, and a failed or
 skipped suite leaves no artifacts.  The evidence record binds the receipt
 digest, the exact commit, and the coordinator round/nonce so
-``scripts/check-installed-functional-evidence.sh`` can require a matching
+``.factory/tools/check-installed-functional-evidence.sh`` can require a matching
 installed-harness receipt before accepting the generic evidence.
 
 **Crash recovery/resume (Task 23).** Every canonical write is atomic
@@ -107,8 +107,8 @@ STAGING_SCHEMA = "factory-generic-evidence-staging/v1"
 PRESERVATION_SCHEMA = "factory-generic-preservation/v1"
 COORDINATOR_SCHEMA = "ralph-audit-coordinator/v1"
 POLICY_REL = ".factory/campaign-receipt-policy.json"
-MACHINE_RECEIPT_REL = "scripts/machine-receipt.py"
-CHECKER_REL = "scripts/check-installed-functional-evidence.sh"
+MACHINE_RECEIPT_REL = ".factory/tools/machine-receipt.py"
+CHECKER_REL = ".factory/tools/check-installed-functional-evidence.sh"
 STATE_FILE = ".factory-state/factory-loop.json"
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -144,7 +144,7 @@ ALLOWED_NEW_PREFIXES = (
 RECEIPT_ARTIFACT_NAMES = ("stdout", "stderr", "json")
 
 # The hidden evidence, state, and git authorities are loaded by committed
-# path (the same idiom state.py uses for scripts/factory_state_io.py), so
+# path (the same idiom state.py uses for .factory/tools/factory_state_io.py), so
 # the publisher works both as a package member and as a direct script.
 sys.path.insert(0, str(LOOP_DIR))
 import evidence as evidence_module  # noqa: E402
@@ -296,50 +296,51 @@ def _resolve_bindings(root: Path) -> Tuple[object, str, str]:
 
 
 def _snapshot_state_files(root: Path) -> Dict[str, dict]:
-    """Record every pre-existing ``.factory-state`` file's digest/mode/mtime.
-
-    A regular file is recorded as ``{sha256, mode, mtime_ns}`` (nanosecond
-    precision, so a same-second rewrite is still caught); a symlink is
-    recorded as its link target so a symlink substitution is caught; any
-    other special inode is recorded by mode.  The walk never follows
-    symlinked directories.
-    """
-    base = root / ".factory-state"
-    result: Dict[str, dict] = {}
-    if not base.is_dir():
-        return result
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        dirnames[:] = [
-            name for name in dirnames
-            if not os.path.islink(os.path.join(dirpath, name))
-        ]
-        for name in sorted(filenames):
-            path = Path(dirpath) / name
-            try:
-                info = path.lstat()
-            except OSError:
-                continue
-            rel = str(path.relative_to(base))
-            if stat.S_ISLNK(info.st_mode):
-                try:
-                    result[rel] = {"symlink": os.readlink(path)}
-                except OSError:
+    """Descriptor-relative, authenticated, globally bounded state snapshot."""
+    base = root / ".factory-state"; result: Dict[str, dict] = {}
+    try: base_fd=os.open(base,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    except FileNotFoundError: return result
+    except OSError as exc: raise GenericEvidenceError(f"cannot open state authority: {exc}") from exc
+    counters={"dirs":0,"files":0,"bytes":0}
+    MAX_DIRS,MAX_FILES,MAX_DEPTH,MAX_FILE,MAX_TOTAL=1024,8192,16,8*1024*1024,64*1024*1024
+    try:
+        info=os.fstat(base_fd)
+        if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+            raise GenericEvidenceError("state authority must be owned mode-0700")
+        def walk(fd:int,prefix:str,depth:int)->None:
+            if depth>MAX_DEPTH: raise GenericEvidenceError("state traversal depth exceeds bound")
+            counters["dirs"]+=1
+            if counters["dirs"]>MAX_DIRS: raise GenericEvidenceError("state directory count exceeds bound")
+            for name in sorted(os.listdir(fd)):
+                if name in (".","..") or "/" in name: raise GenericEvidenceError("unsafe state entry")
+                item=os.stat(name,dir_fd=fd,follow_symlinks=False); rel=f"{prefix}/{name}" if prefix else name
+                if stat.S_ISDIR(item.st_mode):
+                    child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                    try: walk(child,rel,depth+1)
+                    finally: os.close(child)
                     continue
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                result[rel] = {
-                    "mode": format(stat.S_IMODE(info.st_mode), "04o")
-                }
-                continue
-            try:
-                raw = path.read_bytes()
-            except OSError:
-                continue
-            result[rel] = {
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "mode": format(stat.S_IMODE(info.st_mode), "04o"),
-                "mtime_ns": int(info.st_mtime_ns),
-            }
+                counters["files"]+=1
+                if counters["files"]>MAX_FILES: raise GenericEvidenceError("state file count exceeds bound")
+                if stat.S_ISLNK(item.st_mode):
+                    result[rel]={"symlink":os.readlink(name,dir_fd=fd)}; continue
+                if not stat.S_ISREG(item.st_mode):
+                    result[rel]={"mode":format(stat.S_IMODE(item.st_mode),"04o")}; continue
+                if item.st_size>MAX_FILE: raise GenericEvidenceError(f"state file exceeds bound: {rel}")
+                leaf=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                try:
+                    opened=os.fstat(leaf)
+                    if (opened.st_dev,opened.st_ino)!=(item.st_dev,item.st_ino): raise GenericEvidenceError("state entry changed while opening")
+                    h=hashlib.sha256(); total=0
+                    while True:
+                        chunk=os.read(leaf,65536)
+                        if not chunk: break
+                        total+=len(chunk); counters["bytes"]+=len(chunk)
+                        if total>MAX_FILE or counters["bytes"]>MAX_TOTAL: raise GenericEvidenceError("state aggregate exceeds bound")
+                        h.update(chunk)
+                    result[rel]={"sha256":h.hexdigest(),"mode":format(stat.S_IMODE(opened.st_mode),"04o"),"mtime_ns":int(opened.st_mtime_ns)}
+                finally: os.close(leaf)
+        walk(base_fd,"",0)
+    finally: os.close(base_fd)
     return result
 
 

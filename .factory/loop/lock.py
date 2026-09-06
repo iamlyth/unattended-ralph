@@ -106,7 +106,7 @@ Guarantees provided here (the trusted control plane wires them at launch):
 
 All Git reads go through the PATH-pinned absolute executable in
 ``gitutil.py`` (GIT-01); an attacker-controlled ``PATH`` cannot substitute a
-different ``git``.  The committed ``scripts/git-commit-guard.sh`` commit
+different ``git``.  The committed ``.factory/tools/git-commit-guard.sh`` commit
 boundary is preserved and never bypassed by this module.
 """
 

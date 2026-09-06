@@ -85,7 +85,7 @@ Task 19 S3), and an active attempt can never precede the phase that owns it
 (``attempt_started_at_monotonic >= phase_started_at_monotonic``, S9).
 
 All file I/O reuses the established dirfd/no-follow authority
-``scripts/factory_state_io.py``: atomic publication through a mode-0600
+``.factory/loop/factory_state_io.py``: atomic publication through a mode-0600
 temporary file and ``linkat``, with ownership/mode/link-count and
 (dev, inode) identity checks on every open/read/update.  Loading additionally
 re-validates the recorded ``repository_identity`` against the canonical root
@@ -368,14 +368,11 @@ class StateDigestError(StateError):
 def _load_factory_state_io() -> object:
     """Load the established dirfd/no-follow state I/O utility.
 
-    ``scripts/factory_state_io.py`` is the committed authority for safe
+    ``.factory/loop/factory_state_io.py`` is the committed authority for safe
     lifecycle-marker I/O (atomic no-follow writes, ownership/mode/link-count
     checks, bounded reads) and is deliberately reused rather than copied.
     """
-    path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "scripts" / "factory_state_io.py"
-    )
+    path = Path(__file__).resolve().parent / "factory_state_io.py"
     spec = importlib.util.spec_from_file_location("factory_state_io", path)
     if spec is None or spec.loader is None:
         raise StateError(f"cannot load established state I/O at {path}")

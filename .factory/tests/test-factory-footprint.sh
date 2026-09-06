@@ -2,7 +2,7 @@
 # test-factory-footprint.sh — hidden-namespace Task 13 footprint suite driver.
 #
 # The specification (HIDE-01, §3) keeps harness-only tests out of the adopting
-# product's visible `tests/` tree, so the Task 13 inventory suite lives under
+# product's visible `.factory/tests/legacy/` tree, so the Task 13 inventory suite lives under
 # the hidden `.factory/tests/` namespace exactly like the Task 6 supervision
 # series.  This driver runs inside a strict shell context manager:
 #

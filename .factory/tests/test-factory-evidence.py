@@ -5,7 +5,7 @@ This test lives under the hidden ``.factory/tests/`` namespace because the
 specification (HIDE-01, §3) keeps harness-only tests out of the adopting
 product's visible test tree.  It verifies the retained exact-commit evidence
 machinery of ``.factory/loop/evidence.py`` and its script counterparts
-(``scripts/machine-receipt.py``, ``scripts/check-audit-receipts.py``):
+(``.factory/tools/machine-receipt.py``, ``.factory/tools/check-audit-receipts.py``):
 
 * **held verifier binding (§19)**: the deterministic verification entrypoint
   is opened no-follow and bound to its committed blob, secure identity, and
@@ -82,12 +82,12 @@ import state as state_module  # noqa: E402
 
 GIT = gitutil.GIT_EXECUTABLE
 TRUE_EXECUTABLE = Path(shutil.which("true"))
-MACHINE_RECEIPT = ROOT / "scripts" / "machine-receipt.py"
-CHECK_AUDIT_RECEIPTS = ROOT / "scripts" / "check-audit-receipts.py"
-CHECK_RUNNER_EVIDENCE = ROOT / "scripts" / "check-factory-runner-evidence.py"
-INITIALIZE_CAMPAIGN_AUDIT = ROOT / "scripts" / "initialize-campaign-audit.py"
-VALIDATE_CAMPAIGN_AUDIT = ROOT / "scripts" / "validate-campaign-audit.py"
-CHECK_ENV = ROOT / "scripts" / "check-factory-environment.py"
+MACHINE_RECEIPT = ROOT / ".factory" / "tools" / "machine-receipt.py"
+CHECK_AUDIT_RECEIPTS = ROOT / ".factory" / "tools" / "check-audit-receipts.py"
+CHECK_RUNNER_EVIDENCE = ROOT / ".factory" / "tools" / "check-factory-runner-evidence.py"
+INITIALIZE_CAMPAIGN_AUDIT = ROOT / ".factory" / "tools" / "initialize-campaign-audit.py"
+VALIDATE_CAMPAIGN_AUDIT = ROOT / ".factory" / "tools" / "validate-campaign-audit.py"
+CHECK_ENV = ROOT / ".factory" / "tools" / "check-factory-environment.py"
 
 SHA1 = evidence_module.SHA1
 SHA256 = evidence_module.SHA256
@@ -132,7 +132,7 @@ def _write(path: Path, data: bytes | str) -> Path:
 
 
 def _load_machine_receipt() -> object:
-    """Load ``scripts/machine-receipt.py`` as an importable module.
+    """Load ``.factory/tools/machine-receipt.py`` as an importable module.
 
     The hidden evidence suite exercises the wrapper's bounded supervision
     in-process (baseline-child and foreign-process isolation), so the real
@@ -140,7 +140,7 @@ def _load_machine_receipt() -> object:
     it — by committed path with a pinned interpreter, never a copy.
     """
     spec = importlib.util.spec_from_file_location(
-        "machine_receipt", ROOT / "scripts" / "machine-receipt.py"
+        "machine_receipt", ROOT / ".factory" / "tools" / "machine-receipt.py"
     )
     if spec is None or spec.loader is None:
         raise AssertionError("cannot load the machine-receipt authority")
@@ -258,7 +258,7 @@ class RepoFixture:
         return path
 
     def write_verifier(
-        self, content: bytes = b"#!/bin/sh\nexit 0\n", rel: str = "scripts/verify.sh"
+        self, content: bytes = b"#!/bin/sh\nexit 0\n", rel: str = ".factory/tools/verify.sh"
     ) -> Path:
         return self.write(rel, content, mode=0o755)
 
@@ -407,13 +407,13 @@ class ManifestFixture:
             'ssh_config_alias = "fake-runner"\n'
             'working_directory = "/srv/dev-runner/workspaces/fake-project"\n'
             'capabilities = ["project-gate"]\n'
-            'verify_argv = ["./scripts/verify-boilerplate.sh"]\n'
+            'verify_argv = ["./.factory/tools/verify-boilerplate.sh"]\n'
         )
 
     def commit(self, message: str = "runner fixture") -> str:
-        shutil.copy2(CHECK_RUNNER_EVIDENCE, self.root / "scripts" /
+        shutil.copy2(CHECK_RUNNER_EVIDENCE, self.root / ".factory" / "tools" /
                      "check-factory-runner-evidence.py")
-        shutil.copy2(CHECK_ENV, self.root / "scripts" / "check-factory-environment.py")
+        shutil.copy2(CHECK_ENV, self.root / ".factory" / "tools" / "check-factory-environment.py")
         _write(self.root / ".factory" / "environment.toml", self.environment)
         _write(self.root / ".factory" / "signer-trust.json",
                json.dumps(self.trust, sort_keys=True, indent=2) + "\n")
@@ -436,7 +436,7 @@ class ManifestFixture:
             self.root, "rev-parse", f"{head}:.factory/environment.toml"
         ).stdout.strip()
         argv_digest = hashlib.sha256(
-            json.dumps(["./scripts/verify-boilerplate.sh"],
+            json.dumps(["./.factory/tools/verify-boilerplate.sh"],
                        separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         subprocess.run(
@@ -531,10 +531,10 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         self.assertEqual(binding.schema, evidence_module.SCHEMA_NAME)
-        self.assertEqual(binding.command, ("./scripts/verify.sh",))
-        self.assertEqual(binding.executable, "./scripts/verify.sh")
+        self.assertEqual(binding.command, ("./.factory/tools/verify.sh",))
+        self.assertEqual(binding.executable, "./.factory/tools/verify.sh")
         self.assertEqual(binding.commit, head)
         self.assertEqual(binding.mode, "0755")
         self.assertFalse(binding.external)
@@ -547,7 +547,7 @@ class VerifierBindingTests(unittest.TestCase):
             self.assertEqual(raw, b"#!/bin/sh\nexit 0\n")
         # The digest is stable across identical commands.
         binding2 = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         self.assertEqual(binding.digest(), binding2.digest())
 
     def test_worktree_content_substitution_before_bind_fails(self) -> None:
@@ -557,21 +557,21 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier(content=b"#!/bin/sh\nexit 7\n")
         with self.assertRaises(evidence_module.VerifierBindingError):
             evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
 
     def test_pathname_substitution_after_bind_fails(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
         # Post-bind (post-untrusted): the pathname is replaced by a different
         # file at the same name — the retained descriptor still pins the old
         # inode, so the path/inode substitution fails closed.
-        verifier = repo.root / "scripts" / "verify.sh"
-        verifier.rename(repo.root / "scripts" / "saved.sh")
+        verifier = repo.root / ".factory" / "tools" / "verify.sh"
+        verifier.rename(repo.root / ".factory" / "tools" / "saved.sh")
         _write(verifier, b"#!/bin/sh\nexit 9\n")
         os.chmod(verifier, 0o755)
         with self.assertRaises(evidence_module.VerifierBindingError):
@@ -582,12 +582,12 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
         # In-place content rewrite (same inode, different bytes) is caught by
         # the retained-descriptor digest check.
-        verifier = repo.root / "scripts" / "verify.sh"
+        verifier = repo.root / ".factory" / "tools" / "verify.sh"
         verifier.write_bytes(b"#!/bin/sh\nexit 9\n")
         with self.assertRaises(evidence_module.VerifierBindingError):
             held.revalidate(git=None, current_commit=head)
@@ -597,7 +597,7 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
         repo.write_verifier(content=b"#!/bin/sh\nexit 5\n")
@@ -611,10 +611,10 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
-        (repo.root / "scripts" / "verify.sh").unlink()
+        (repo.root / ".factory" / "tools" / "verify.sh").unlink()
         with self.assertRaises(evidence_module.VerifierBindingError):
             held.revalidate(git=None, current_commit=head)
 
@@ -622,42 +622,42 @@ class VerifierBindingTests(unittest.TestCase):
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
-        verifier = repo.root / "scripts" / "verify.sh"
+        verifier = repo.root / ".factory" / "tools" / "verify.sh"
         verifier.unlink()
-        _write(repo.root / "scripts" / "saved.sh", b"#!/bin/sh\nexit 0\n")
-        os.chmod(repo.root / "scripts" / "saved.sh", 0o755)
-        verifier.symlink_to(repo.root / "scripts" / "saved.sh")
+        _write(repo.root / ".factory" / "tools" / "saved.sh", b"#!/bin/sh\nexit 0\n")
+        os.chmod(repo.root / ".factory" / "tools" / "saved.sh", 0o755)
+        verifier.symlink_to(repo.root / ".factory" / "tools" / "saved.sh")
         with self.assertRaises(evidence_module.VerifierBindingError):
             evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
 
     def test_hardlinked_verifier_fails_before_bind(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
-        os.link(repo.root / "scripts" / "verify.sh",
-                repo.root / "scripts" / "alias.sh")
+        os.link(repo.root / ".factory" / "tools" / "verify.sh",
+                repo.root / ".factory" / "tools" / "alias.sh")
         with self.assertRaises(evidence_module.VerifierBindingError):
             evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
 
     def test_group_writable_verifier_fails_before_bind(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
-        os.chmod(repo.root / "scripts" / "verify.sh", 0o664)
+        os.chmod(repo.root / ".factory" / "tools" / "verify.sh", 0o664)
         with self.assertRaises(evidence_module.VerifierBindingError):
             evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
 
     def test_non_executable_verifier_fails_before_bind(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
-        os.chmod(repo.root / "scripts" / "verify.sh", 0o644)
+        os.chmod(repo.root / ".factory" / "tools" / "verify.sh", 0o644)
         with self.assertRaises(evidence_module.VerifierBindingError):
             evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
 
     def test_empty_and_malformed_command_fails(self) -> None:
         repo = RepoFixture(self.tmp)
@@ -689,16 +689,16 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         raw = evidence_module.revalidate_verifier(
             repo.root, binding, current_commit=head)
         self.assertEqual(raw, b"#!/bin/sh\nexit 0\n")
 
     def test_canonical_relative_path_magic(self) -> None:
-        valid = "./scripts/verify.sh"
+        valid = "./.factory/tools/verify.sh"
         self.assertEqual(evidence_module._canonical_relative(valid), valid)
         for bad in (
-            "scripts/verify.sh", "verify.sh", "./verify.sh/", "./", "..",
+            ".factory/tools/verify.sh", "verify.sh", "./verify.sh/", "./", "..",
             ".", "./..", "./../verify.sh", "./a/./b", "./a//b",
             "/abs/path", "./has\\slash", "./with\x00nul", "./x/\x7f",
         ):
@@ -708,7 +708,7 @@ class VerifierBindingTests(unittest.TestCase):
     def test_bind_external_without_pinned_chain_fails(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.commit()
-        fake = repo.root / "scripts" / "self-made"
+        fake = repo.root / ".factory" / "tools" / "self-made"
         _write(fake, b"#!/bin/sh\n")
         os.chmod(fake, 0o755)
         # A caller-owned absolute executable is never a pinned trusted
@@ -731,7 +731,7 @@ class VerifierBindingTests(unittest.TestCase):
             b"printf 'two=%s\\n' \"$2\"\n"
         )
         repo.write_verifier(content=content)
-        command = ["./scripts/verify.sh", "alpha", "beta"]
+        command = ["./.factory/tools/verify.sh", "alpha", "beta"]
         head = repo.commit()
         binding = evidence_module.bind_verifier(
             repo.root, command, commit=head)
@@ -744,8 +744,8 @@ class VerifierBindingTests(unittest.TestCase):
         # is swapped to a different inode: the retained descriptor still
         # resolves the bound inode at exec time via /proc/self/fd, so the
         # child executes the old committed bytes and the swap never runs.
-        verifier = repo.root / "scripts" / "verify.sh"
-        verifier.rename(repo.root / "scripts" / "saved.sh")
+        verifier = repo.root / ".factory" / "tools" / "verify.sh"
+        verifier.rename(repo.root / ".factory" / "tools" / "saved.sh")
         _write(verifier, b"#!/bin/sh\nprintf 'swapped-content\\n'\n")
         os.chmod(verifier, 0o755)
         argv, executable, pass_fds = held.spawn(command)
@@ -757,12 +757,12 @@ class VerifierBindingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # F1 (empirical): the old held inode executes (the swap never ran),
         # the kernel's shebang dispatch makes the script's ``$0`` the fd path
-        # ``/proc/self/fd/<fd>`` — never the canonical ``./scripts/verify.sh``
+        # ``/proc/self/fd/<fd>`` — never the canonical ``./.factory/tools/verify.sh``
         # — and every command argument after the script path is preserved.
         self.assertIn("bound-content", result.stdout)
         self.assertNotIn("swapped", result.stdout)
         self.assertIn(f"zero=/proc/self/fd/{held.fd}", result.stdout)
-        self.assertNotIn("zero=./scripts/verify.sh", result.stdout)
+        self.assertNotIn("zero=./.factory/tools/verify.sh", result.stdout)
         self.assertIn("one=alpha", result.stdout)
         self.assertIn("two=beta", result.stdout)
 
@@ -800,15 +800,15 @@ class VerifierBindingTests(unittest.TestCase):
                 digest=hashlib.sha256(plan_raw).hexdigest(),
             ),
         ) as root_lock:
-            command = ["./scripts/verify.sh", "payload-arg"]
+            command = ["./.factory/tools/verify.sh", "payload-arg"]
             binding = evidence_module.bind_verifier(
                 repo.root, command, commit=head)
             held = evidence_module.HeldVerifier(repo.root, binding)
             self.addCleanup(held.close)
             held.revalidate(git=None, current_commit=head)
             # Swap the pathname after the last revalidation (the race window).
-            verifier = repo.root / "scripts" / "verify.sh"
-            verifier.rename(repo.root / "scripts" / "saved.sh")
+            verifier = repo.root / ".factory" / "tools" / "verify.sh"
+            verifier.rename(repo.root / ".factory" / "tools" / "saved.sh")
             _write(verifier, b"#!/bin/sh\nprintf 'swapped-content\\n'\n")
             os.chmod(verifier, 0o755)
             argv, executable, pass_fds = held.spawn(command)
@@ -821,7 +821,7 @@ class VerifierBindingTests(unittest.TestCase):
             self.assertIn("bound-content", result.stdout)
             self.assertNotIn("swapped", result.stdout)
             self.assertIn(f"zero=/proc/self/fd/{held.fd}", result.stdout)
-            self.assertNotIn("zero=./scripts/verify.sh", result.stdout)
+            self.assertNotIn("zero=./.factory/tools/verify.sh", result.stdout)
             self.assertIn("arg=payload-arg", result.stdout)
 
     def test_descriptor_chmod_fails_closed(self) -> None:
@@ -829,7 +829,7 @@ class VerifierBindingTests(unittest.TestCase):
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
         # The retained descriptor is made group-writable after binding: the
@@ -837,24 +837,24 @@ class VerifierBindingTests(unittest.TestCase):
         # any child could execute it.
         os.fchmod(held.fd, 0o664)
         with self.assertRaises(evidence_module.VerifierBindingError):
-            held.spawn(["./scripts/verify.sh"])
+            held.spawn(["./.factory/tools/verify.sh"])
 
     def test_descriptor_hardlink_fails_closed(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
         head = repo.commit()
         binding = evidence_module.bind_verifier(
-            repo.root, ["./scripts/verify.sh"], commit=head)
+            repo.root, ["./.factory/tools/verify.sh"], commit=head)
         held = evidence_module.HeldVerifier(repo.root, binding)
         self.addCleanup(held.close)
         # A second hardlink to the bound inode breaks the single-link
         # invariant: the descriptor identity check fails closed.
-        os.link(repo.root / "scripts" / "verify.sh",
-                repo.root / "scripts" / "alias.sh")
+        os.link(repo.root / ".factory" / "tools" / "verify.sh",
+                repo.root / ".factory" / "tools" / "alias.sh")
         with self.assertRaises(evidence_module.VerifierBindingError):
             held.revalidate(git=None, current_commit=head)
         with self.assertRaises(evidence_module.VerifierBindingError):
-            held.spawn(["./scripts/verify.sh"])
+            held.spawn(["./.factory/tools/verify.sh"])
 
     def test_root_lock_fd_not_inherited_by_verifier_child(self) -> None:
         repo = RepoFixture(self.tmp)
@@ -884,10 +884,10 @@ class VerifierBindingTests(unittest.TestCase):
             ),
         ) as root_lock:
             binding = evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
             with evidence_module.HeldVerifier(repo.root, binding) as held:
                 argv, executable, pass_fds = held.spawn(
-                    ["./scripts/verify.sh"])
+                    ["./.factory/tools/verify.sh"])
                 self.assertEqual(tuple(pass_fds), (held.fd,))
                 self.assertNotIn(root_lock.fd, tuple(pass_fds))
                 result = root_lock.spawn_child(
@@ -957,10 +957,10 @@ class VerifierBindingTests(unittest.TestCase):
             ),
         ) as root_lock:
             binding = evidence_module.bind_verifier(
-                repo.root, ["./scripts/verify.sh"], commit=head)
+                repo.root, ["./.factory/tools/verify.sh"], commit=head)
             with evidence_module.HeldVerifier(repo.root, binding) as held:
                 argv, executable, pass_fds = held.spawn(
-                    ["./scripts/verify.sh"])
+                    ["./.factory/tools/verify.sh"])
                 # The only passed descriptor is the explicit verifier fd;
                 # the root lock descriptor is never passed.
                 self.assertEqual(tuple(pass_fds), (held.fd,))
@@ -1000,16 +1000,16 @@ class ConfigCommandTests(unittest.TestCase):
     def test_config_command_parsed_from_committed_config(self) -> None:
         repo = RepoFixture(self.tmp)
         repo.write_verifier()
-        repo.write_config(["./scripts/verify.sh"])
+        repo.write_config(["./.factory/tools/verify.sh"])
         repo.commit()
         command = evidence_module._config_command(repo.root)
-        self.assertEqual(command, ("./scripts/verify.sh",))
+        self.assertEqual(command, ("./.factory/tools/verify.sh",))
 
     def test_config_command_malformed_fails_closed(self) -> None:
         cases = [
             ("empty", []),
-            ("blank-arg", ["./scripts/verify.sh", ""]),
-            ("nul-arg", ["./scripts/verify\x00.sh"]),
+            ("blank-arg", ["./.factory/tools/verify.sh", ""]),
+            ("nul-arg", ["./.factory/tools/verify\x00.sh"]),
             ("not-a-list", "argv-array"),
             ("number", 42),
             ("none-arg", [None]),
@@ -1023,7 +1023,7 @@ class ConfigCommandTests(unittest.TestCase):
 
     def test_config_command_unsafe_config_file_fails(self) -> None:
         repo = RepoFixture(self.tmp, name="unsafe-config")
-        repo.write_config(["./scripts/verify.sh"])
+        repo.write_config(["./.factory/tools/verify.sh"])
         repo.commit()
         os.chmod(repo.root / ".factory" / "config.toml", 0o664)
         with self.assertRaises(evidence_module.EvidenceError):
@@ -1041,9 +1041,9 @@ class ConfigCommandTests(unittest.TestCase):
         # script) fails closed before any verifier binding.
         repo = RepoFixture(self.tmp, name="mismatch-config")
         repo.write_verifier()
-        repo.write_config(["./scripts/verify.sh"])
+        repo.write_config(["./.factory/tools/verify.sh"])
         repo.commit()
-        repo.write_config(["./scripts/verify.sh", "--evil-flag"])
+        repo.write_config(["./.factory/tools/verify.sh", "--evil-flag"])
         with self.assertRaises(evidence_module.EvidenceError):
             evidence_module._config_command(repo.root)
 
@@ -1608,7 +1608,7 @@ class ManifestValidationTests(unittest.TestCase):
     def test_checker_cli_rejects_without_real_keys(self) -> None:
         root, head, ref = self.build(enabled=False)
         result = run(
-            [sys.executable, str(root / "scripts/check-factory-runner-evidence.py"),
+            [sys.executable, str(root / ".factory/tools/check-factory-runner-evidence.py"),
              "--verify-manifest", ref, "--expected-commit", head],
             root=root, check=False,
         )
@@ -1761,7 +1761,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         root, head, ref = self._build_manifest_fixture(enabled=False)
         base_command = [
             sys.executable,
-            str(root / "scripts/check-factory-runner-evidence.py"),
+            str(root / ".factory/tools/check-factory-runner-evidence.py"),
             "--verify-manifest", ref, "--expected-commit", head,
         ]
         clean = run(base_command, root=root, check=False, env=None)
@@ -1781,7 +1781,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         root, head, ref = self._build_manifest_fixture(enabled=True)
         result = run(
             [sys.executable,
-             str(root / "scripts/check-factory-runner-evidence.py"),
+             str(root / ".factory/tools/check-factory-runner-evidence.py"),
              "--verify-manifest", ref, "--expected-commit", head],
             root=root, check=False, env=self._hostile_env(fake_bin),
         )
@@ -1806,7 +1806,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
                "schema_version = 1\n[[runners]]\nname = \"x\"\n"
                "capabilities = []\nverify_argv = []\n")
         shutil.copy2(INITIALIZE_CAMPAIGN_AUDIT,
-                     root / "scripts" / "initialize-campaign-audit.py")
+                     root / ".factory" / "tools" / "initialize-campaign-audit.py")
         _git(root, "init", "-q", "-b", "develop")
         _git(root, "config", "user.email", "fixture@test")
         _git(root, "config", "user.name", "fixture")
@@ -1815,7 +1815,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         head = _git(root, "rev-parse", "HEAD").stdout.strip()
         result = run(
             [sys.executable,
-             str(root / "scripts/initialize-campaign-audit.py"),
+             str(root / ".factory/tools/initialize-campaign-audit.py"),
              "--round", "1", "--base", head,
              "--runner-evidence-sha256", "0" * 64],
             root=root, check=False, env=self._hostile_env(fake_bin),
@@ -1833,7 +1833,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         nonce_before = data["nonce"]
         reinit = run(
             [sys.executable,
-             str(root / "scripts/initialize-campaign-audit.py"),
+             str(root / ".factory/tools/initialize-campaign-audit.py"),
              "--round", "1", "--base", head,
              "--runner-evidence-sha256", "0" * 64],
             root=root, check=False, env=self._hostile_env(fake_bin),
@@ -1845,7 +1845,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
                          "the exact-matching coordinator must be reused, not re-minted")
         mismatch = run(
             [sys.executable,
-             str(root / "scripts/initialize-campaign-audit.py"),
+             str(root / ".factory/tools/initialize-campaign-audit.py"),
              "--round", "2", "--base", head,
              "--runner-evidence-sha256", "0" * 64],
             root=root, check=False, env=self._hostile_env(fake_bin),
@@ -1866,7 +1866,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
                "[fixture-plan]\n")
         _write(root / ".factory/environment.toml", "schema_version = 1\n")
         shutil.copy2(VALIDATE_CAMPAIGN_AUDIT,
-                     root / "scripts" / "validate-campaign-audit.py")
+                     root / ".factory" / "tools" / "validate-campaign-audit.py")
         _git(root, "init", "-q", "-b", "develop")
         _git(root, "config", "user.email", "fixture@test")
         _git(root, "config", "user.name", "fixture")
@@ -1893,7 +1893,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         )
         _write(root / ".factory/artifacts/campaign-audit.md", report)
         result = run(
-            [sys.executable, str(root / "scripts/validate-campaign-audit.py"),
+            [sys.executable, str(root / ".factory/tools/validate-campaign-audit.py"),
              "metadata"],
             root=root, check=False, env=self._hostile_env(fake_bin),
         )
@@ -1931,7 +1931,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         )
         for script in (VALIDATE_CAMPAIGN_AUDIT, CHECK_RUNNER_EVIDENCE,
                        CHECK_ENV):
-            shutil.copy2(script, root / "scripts" / script.name)
+            shutil.copy2(script, root / ".factory" / "tools" / script.name)
         _git(root, "init", "-q", "-b", "develop")
         _git(root, "config", "user.email", "fixture@test")
         _git(root, "config", "user.name", "fixture")
@@ -1969,7 +1969,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         marker = self.tmp / "fake-invoked"
         root, head = self._complete_audit_fixture()
         command = [
-            sys.executable, str(root / "scripts/validate-campaign-audit.py"),
+            sys.executable, str(root / ".factory/tools/validate-campaign-audit.py"),
             "complete", ".factory/artifacts/campaign-audit.md",
             "--expected-round", "1", "--expected-base", head,
             "--expected-runner-evidence-sha256", "0" * 64,
@@ -1993,7 +1993,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         traceback, no hang): the finite bound converts TimeoutExpired into
         a SystemExit message."""
         root, head = self._complete_audit_fixture()
-        validator_path = root / "scripts/validate-campaign-audit.py"
+        validator_path = root / ".factory/tools/validate-campaign-audit.py"
         spec = importlib.util.spec_from_file_location(
             "factory_validate_campaign_audit", str(validator_path))
         assert spec.loader is not None
@@ -2424,7 +2424,7 @@ class EvidenceCLITests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = RepoFixture(self.tmp)
         self.repo.write_verifier()
-        self.repo.write_config(["./scripts/verify.sh"])
+        self.repo.write_config(["./.factory/tools/verify.sh"])
         self.head = self.repo.commit()
         self.root = self.repo.root
         self.fixture = ReceiptFixture(self.root)
@@ -2454,7 +2454,7 @@ class EvidenceCLITests(unittest.TestCase):
             ["bind", "--root", str(self.root), "--commit", self.head])
         self.assertEqual(rc, 0)
         payload = json.loads(captured)
-        self.assertEqual(payload["binding"]["executable"], "./scripts/verify.sh")
+        self.assertEqual(payload["binding"]["executable"], "./.factory/tools/verify.sh")
         self.assertEqual(payload["binding"]["commit"], self.head)
         self.assertEqual(len(payload["sha256"]), 64)
 
@@ -2485,7 +2485,7 @@ class EvidenceCLITests(unittest.TestCase):
         # LOW5: the committed config is authoritative; an uncommitted worktree
         # substitution of .factory/config.toml fails the CLI closed before any
         # verifier binding or execution.
-        self.repo.write_config(["./scripts/verify.sh", "--substituted"])
+        self.repo.write_config(["./.factory/tools/verify.sh", "--substituted"])
         rc, captured, err = self.captured_main_combined(
             ["bind", "--root", str(self.root), "--commit", self.head])
         self.assertEqual(rc, 1)
@@ -2510,7 +2510,7 @@ class CampaignVerifierIntegrationTests(unittest.TestCase):
 
     def _commit_verifier(self, ws, content: bytes = b"#!/bin/sh\nexit 0\n") -> None:
         # The verifier lives under ``src/`` (product scope), never the
-        # protected ``scripts/`` harness surface, so the fixture planner's
+        # protected ``.factory/tools/`` harness surface, so the fixture planner's
         # dirty-path scope check stays clean.
         verifier = ws.root / "src" / "verify-fixture.sh"
         _write(verifier, content)

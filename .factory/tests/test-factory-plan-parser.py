@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 FIXTURES = ROOT / ".factory" / "tests" / "fixtures"
 CANONICAL_PLAN = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
-VALIDATOR = ROOT / "scripts" / "validate-implementation-plan.py"
+VALIDATOR = ROOT / ".factory" / "tools" / "validate-implementation-plan.py"
 
 sys.path.insert(0, str(LOOP))
 from plan_parser import (  # noqa: E402

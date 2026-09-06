@@ -3,7 +3,7 @@
 
 QUOTA-01 and QUOTA-02 (§10, §22 tests 13 and 24) are verified here under the
 hidden ``.factory/tests/`` namespace (HIDE-01 keeps harness-only tests out of
-the adopting product's visible ``tests/`` tree).  Everything runs against
+the adopting product's visible ``.factory/tests/legacy/`` tree).  Everything runs against
 synthetic tokens only — no real credential, no external network: the network
 path is exercised exclusively through a loopback ``127.0.0.1`` HTTP server
 serving the committed fixture pages.
@@ -74,7 +74,7 @@ import unittest.mock as mock
 ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 FIXTURES = ROOT / ".factory" / "tests" / "fixtures"
-VISIBLE_FIXTURES = ROOT / "tests" / "fixtures"
+VISIBLE_FIXTURES = ROOT / ".factory" / "tests" / "legacy" / "fixtures"
 
 sys.path.insert(0, str(LOOP))
 import usage  # noqa: E402
@@ -1008,16 +1008,16 @@ class LaunchIntegrationTests(_Base):
         super().setUp()
         self.workspace = self.tmp / "workspace"
         self.workspace.mkdir()
-        scripts = self.workspace / "scripts"
-        scripts.mkdir()
-        shutil.copy2(ROOT / "scripts" / "pi2-secure-exec.py",
+        scripts = self.workspace / ".factory" / "tools"
+        scripts.mkdir(parents=True)
+        shutil.copy2(ROOT / ".factory" / "tools" / "pi2-secure-exec.py",
                      scripts / "pi2-secure-exec.py")
-        shutil.copy2(ROOT / "scripts" / "credential-guard.py",
+        shutil.copy2(ROOT / ".factory" / "tools" / "credential-guard.py",
                      scripts / "credential-guard.py")
-        shutil.copy2(ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+        shutil.copy2(ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
                      scripts / "pi-factory-guard-extension.mjs")
         (scripts / "pi-cli-shims").mkdir()
-        shutil.copy2(ROOT / "scripts" / "pi-cli-shims" / "git",
+        shutil.copy2(ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
                      scripts / "pi-cli-shims" / "git")
         loop = self.workspace / ".factory" / "loop"
         loop.mkdir(parents=True)
@@ -1081,22 +1081,10 @@ class LaunchIntegrationTests(_Base):
             **guard_kwargs,
         )
 
-    def test_ollama_provider_authorization_never_runs_quota(self) -> None:
+    def test_ollama_standalone_authorization_is_denied(self) -> None:
         self.assertFalse(hasattr(launch, "usage_guard"))
-        before_modules = {
-            name for name in sys.modules if name.startswith("_factory_committed_usage_")
-        }
-        authority = self._authorize(self._binding("ollama"))
-        after_modules = {
-            name for name in sys.modules if name.startswith("_factory_committed_usage_")
-        }
-        self.assertEqual(after_modules, before_modules)
-        self.assertIsInstance(authority, launch.LaunchAuthority)
-        self.assertFalse(hasattr(authority, "_usage_guard_module"))
-        staged_usage = authority._exec_dir / "usage.py"
-        staged_fetch = authority._exec_dir / "usage_fetch.py"
-        for path in (staged_usage, staged_fetch):
-            self.assertIn(str(path), authority._staged_digests)
+        with self.assertRaisesRegex(launch.InvocationError,"locked readiness store"):
+            self._authorize(self._binding("ollama"))
 
     def test_per_model_usage_driver_parameters_are_absent(self) -> None:
         parameters = inspect.signature(launch.authorize_launch).parameters
@@ -1123,7 +1111,7 @@ class LaunchIntegrationTests(_Base):
             launch, "_prepare_private_pi2_home"
         ) as provision:
             with self.assertRaisesRegex(
-                launch.InvocationError, "exact immutable external pi2"
+                launch.InvocationError, "locked readiness store"
             ):
                 self._authorize(binding)
         provision.assert_not_called()
@@ -1157,43 +1145,9 @@ class LaunchIntegrationTests(_Base):
         ), mock.patch.object(
             launch, "_prepare_private_pi2_home", side_effect=synthetic_provision
         ):
-            authority = self._authorize(binding)
-        self.assertEqual(events[:2], ["revalidate", "provision"])
-        paths = tuple(authority._external_paths)
-        identities = tuple(authority._external_runtime_bindings)
-        self.assertEqual(paths, tuple(item.path for item in identities))
-        self.assertEqual(len(paths), 3)
-        wrapper, node, cli = identities
-        self.assertEqual(cli.path, os.path.realpath(cli.path))
-        self.assertTrue(cli.path.startswith("/nix/store/"))
-        self.assertIn(cli.path, paths)
-        self.assertRegex(cli.sha256, r"^[0-9a-f]{64}$")
-        self.assertGreater(cli.device, 0)
-        self.assertGreater(cli.inode, 0)
-
-        real_bind = launch._bind_external_runtime
-
-        def mutate_cli(path: str, *, executable: bool):
-            current = real_bind(path, executable=executable)
-            if path == cli.path:
-                return dataclasses.replace(current, sha256="0" * 64)
-            return current
-
-        supervisor = launch.LaunchSupervision(binding, kill_grace=0.1)
-        redactor = launch.output_redaction.redactor_for(
-            binding.workspace, binding.bound_commit
-        )
-        with mock.patch.object(
-            launch, "_bind_external_runtime", side_effect=mutate_cli
-        ), mock.patch.object(
-            launch.output_redaction, "redactor_for", return_value=redactor
-        ), mock.patch.object(launch.subprocess, "Popen") as popen:
-            with self.assertRaisesRegex(
-                launch.SupervisionError, "immediately before exec"
-            ):
-                supervisor.run(authority)
-        popen.assert_not_called()
-
+            with self.assertRaisesRegex(launch.InvocationError,"locked readiness store"):
+                self._authorize(binding)
+        self.assertEqual(events, [])
     def test_bound_commit_origin_is_checked_before_channel_proof(self) -> None:
         usage_source = self.workspace / ".factory" / "loop" / "usage.py"
         original = usage_source.read_text(encoding="utf-8")
@@ -1215,7 +1169,7 @@ class LaunchIntegrationTests(_Base):
         ) as prove:
             with self.assertRaises(launch.InvocationError) as caught:
                 self._authorize(self._binding("ollama"))
-        self.assertIn("canonical Ollama", str(caught.exception))
+        self.assertIn("locked readiness store", str(caught.exception))
         prove.assert_not_called()
 
     def test_usage_proof_rejects_nonmatching_bound_commit_source(self) -> None:
@@ -1234,11 +1188,11 @@ class LaunchIntegrationTests(_Base):
         with self.assertRaises(launch.InvocationError):
             self._authorize(binding)
 
-    def test_missing_cookie_is_not_consulted_by_per_model_authorization(self) -> None:
+    def test_missing_cookie_does_not_create_standalone_authority(self) -> None:
         with _scrubbed_ollama_env():
-            authority = self._authorize(self._binding("ollama"))
+            with self.assertRaisesRegex(launch.InvocationError,"locked readiness store"):
+                self._authorize(self._binding("ollama"))
         self.assertFalse(hasattr(launch, "usage_guard"))
-        self.assertIsInstance(authority, launch.LaunchAuthority)
 
     def test_production_launch_has_no_settings_origin_override(self) -> None:
         """Caller-selected origins are absent before any credential can be read."""

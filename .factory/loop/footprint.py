@@ -87,7 +87,7 @@ Python standard library plus the pinned Git boundary, performs no network
 access, never writes to the repository, and is safe to run from any clean
 tree.  The packaging gate is the harness-owned driver
 ``.factory/tests/test-factory-footprint.sh`` (invoked from
-``scripts/verify-boilerplate.sh``); the suite
+``.factory/tools/verify-boilerplate.sh``); the suite
 ``.factory/tests/test-factory-footprint.py`` proves every escape class with
 adversarial fixture repositories.
 """
@@ -754,7 +754,7 @@ def verify_external_install(
     exceptions of ``entrypoints``, an explicit list of trusted operator
     entrypoints that must each be a regular executable file, and ``shared``,
     an explicit list of non-executable shared authorities (for example the
-    committed ``scripts/factory_state_io.py`` the hidden control plane loads
+    committed ``.factory/tools/factory_state_io.py`` the hidden control plane loads
     by its established absolute path) that must each be a regular file.
     Symlinks and special inodes are never allowed anywhere in the installed
     copy.  ``prefix`` must be absolute, a real (never symlinked) directory,
@@ -1101,7 +1101,7 @@ def inventory_installed(
     manifest + shared authorities + operator entrypoints (never a product
     file); and every regular file's sha256 must match the recorded digest
     when ``digests`` is supplied.  Entrypoints must be under a harness
-    namespace or the shared ``scripts/`` surface so an operator entrypoint
+    namespace or the shared ``.factory/tools/`` surface so an operator entrypoint
     can never smuggle a product path into the installed copy.
     """
     prefix = Path(prefix).absolute()

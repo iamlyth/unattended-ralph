@@ -36,7 +36,7 @@ can never cause a possibly side-effecting hook to run twice. It is the only muta
 file; the append-only `.factory-state/state-digest-ledger.jsonl` records
 evidence only and is never orchestration state. All writes are atomic,
 no-follow, mode-0600, and ownership/mode/link-count/(dev, inode) checked via
-`scripts/factory_state_io.py`; loading re-validates the recorded repository
+`.factory/tools/factory_state_io.py`; loading re-validates the recorded repository
 identity against the canonical root descriptor and any expected campaign
 binding, so a forged, moved, symlinked, oversized, wrong-owner, or wrong-mode
 file fails closed. The §11 transition table is enforced edge for edge,
@@ -227,7 +227,7 @@ committed-descriptor authority under a sanitized allowlist environment with
 a scrubbed pinned `PATH`, and the campaign child is supervised as a new
 session with a bounded TERM -> grace -> KILL of the whole process group and
 marker-based survivor detection. State digest verification,
-`scripts/check-plan-freshness.sh`, and `scripts/check-generic-leakage.sh`
+`.factory/tools/check-plan-freshness.sh`, and `.factory/tools/check-generic-leakage.sh`
 pass.
 
 ## Findings flow (Task 10)
@@ -343,13 +343,13 @@ as an unprivileged user. Every trusted Git invocation also
 strips the complete `GIT_CONFIG*` environment family — including
 `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_KEY_*`/
 `GIT_CONFIG_VALUE_*` (F5) — plus the object-store/index/work-tree
-redirectors. The committed `scripts/git-commit-guard.sh` branch boundary is
+redirectors. The committed `.factory/tools/git-commit-guard.sh` branch boundary is
 preserved untouched.
 
 ## Fresh-context execution, invocation contract, and supervision (Task 6)
 
 Every role attempt of the new loop runs in a **fresh process** behind the
-existing secure wrapper (`scripts/pi2-secure-exec.py`, invoked never
+existing secure wrapper (`.factory/tools/pi2-secure-exec.py`, invoked never
 reimplemented) in one-shot mode: a new process session/group, no resumed
 session, no session storage shared with any previous loop identity, no
 automatic memory injection, and only allowlisted prompt inputs. The hidden
@@ -359,7 +359,7 @@ control-plane module is `.factory/loop/launch.py`; the launch API and the
 `python -m factory.loop.launch` (through the external-prefix alias that puts
 `factory` on `PYTHONPATH` resolving to the canonical `.factory/` directory)
 and, when installed, the external-prefix launcher entry point; there is no
-visible bare `scripts/` wrapper. `excerpt` derives the exact committed
+visible bare `.factory/tools/` wrapper. `excerpt` derives the exact committed
 `factory-plan/v1` task-section bytes and their SHA-256 digest; `launch` runs
 one supervised attempt and prints the machine-readable `factory-launch-
 result/v1` JSON (`.factory/schemas/factory-launch-result-v1.schema.json`),
@@ -435,7 +435,7 @@ argv or environment ever appears in a result.
 
 ## Branch policy
 
-The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `scripts/branch-guard.sh` also rejects multiple Git worktrees. The campaign CLI requires the exact `--branch`; there is no trial-branch escape in the new loop.
+The autonomous lifecycle runs only on the configured development branch. `main` is protected by policy and never modified by the factory. `.factory/tools/branch-guard.sh` also rejects multiple Git worktrees. The campaign CLI requires the exact `--branch`; there is no trial-branch escape in the new loop.
 
 ## Multi-round campaign
 
@@ -449,8 +449,8 @@ Campaigns are unattended and headless; there is no TUI.
   --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
   --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
   --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
-  --verification-command ./scripts/verify-boilerplate.sh \
-  --acceptance-command ./scripts/verify-boilerplate.sh
+  --verification-command ./.factory/tools/verify-boilerplate.sh \
+  --acceptance-command ./.factory/tools/verify-boilerplate.sh
 python3 .factory/loop/state.py --root "$PWD" show
 ```
 
@@ -469,7 +469,7 @@ quarantined, revalidated, and removed once; busy or ambiguous migration state
 stops the lifecycle. After interruption, confirm no role process is alive and
 re-run the same `run` command; there is no `--resume`/`--restart` flag.
 
-The legacy `scripts/ralph-campaign.sh` (and its `.factory-state/ralph-campaign.json`
+The legacy `.factory/tools/ralph-campaign.sh` (and its `.factory-state/ralph-campaign.json`
 and `ralph-supervision-migrate.py` machinery) is a frozen deprecated surface
 kept only for history; the new loop never depends on it. The legacy Ralph
 `ralph emit`/completion-token protocol is not reimplemented: completion is
@@ -487,8 +487,8 @@ without endpoints or credentials. Campaign verification runs every declared
 runner and validates exact-commit evidence:
 
 ```bash
-./scripts/run-factory-runners.py
-./scripts/check-factory-runner-evidence.py
+./.factory/tools/run-factory-runners.py
+./.factory/tools/check-factory-runner-evidence.py
 ```
 
 Runner provisioning is external and begins from an independently authenticated
@@ -497,9 +497,9 @@ signs it offline, then invokes the minimal root bootstrap; the checkout itself
 is never privileged authority:
 
 ```bash
-python3 scripts/generate-runner-install-manifest.py --source "$PWD" \
+python3 .factory/tools/generate-runner-install-manifest.py --source "$PWD" \
   --revision HEAD --output "$SECURE_STAGE/source-manifest.json"
-sudo scripts/factory-runner-root-bootstrap install \
+sudo .factory/tools/factory-runner-root-bootstrap install \
   --manifest "$SECURE_STAGE/source-manifest.json" \
   --signature "$SECURE_STAGE/source-manifest.sig" \
   --allowed-signers "$SECURE_STAGE/install-signers" \
@@ -563,7 +563,7 @@ PASS requires recorded exit 0, and any genuine BLOCKED evidence forces a
 `findings` audit result.
 
 **Receipt wrapper supervision (Task 23).** Every coordinator-executed command
-is wrapped by `scripts/machine-receipt.py` and runs under the same bounded
+is wrapped by `.factory/tools/machine-receipt.py` and runs under the same bounded
 supervision contract as the launch authorities (F1/F3/F4/F6/F7): the wrapper
 installs itself as a child subreaper before spawn, snapshots the identity-
 pinned baseline (every pre-existing child's PID + starttime) and the captured
@@ -617,7 +617,7 @@ the production control-plane CLIs executed from that copy. It never claims
 runner, or human.
 
 Run the installed smoke suite exactly like the other hidden suites (it is
-also part of `scripts/verify-boilerplate.sh`):
+also part of `.factory/tools/verify-boilerplate.sh`):
 
 ```bash
 ./.factory/tests/test-factory-installed.sh
@@ -625,9 +625,9 @@ also part of `scripts/verify-boilerplate.sh`):
 
 The trusted installer stages committed harness content (`.factory/` and
 `.pi/` at the bound commit) plus the shared authority
-(`scripts/factory_state_io.py`) and the operator entrypoints (the
+(`.factory/tools/factory_state_io.py`) and the operator entrypoints (the
 `.factory/bin/factory-launch` external-prefix launcher and the
-`scripts/machine-receipt.py` receipt wrapper) into a fresh absolute prefix
+`.factory/tools/machine-receipt.py` receipt wrapper) into a fresh absolute prefix
 outside the repository, preserving executable modes and proving
 blob-exactness through the pinned Git boundary (batched `cat-file` with a
 hard-capped fair single-event-loop capture and `hash-object --no-filters`
@@ -668,7 +668,7 @@ the receipt wrapper, and the installed inventory) runs from the installed
 copy under a sanitized environment and is minted as an exact-commit machine
 receipt bound to the audit coordinator in the fixture authority
 (`.factory-state/audit-coordinator.json` with the exact bound commit), so
-`scripts/check-audit-receipts.py` exits 0 and a gate that exits nonzero or
+`.factory/tools/check-audit-receipts.py` exits 0 and a gate that exits nonzero or
 prints a skip marker is never PASS.  Module-form gates carry an
 installed-root attestation (the receipt argv/stdout binds the resolved
 installed module root; a source-tree invocation resolves a different root
@@ -729,7 +729,7 @@ complete 0700 temp namespace moved onto the canonical name with Linux
 never clobber); the publisher's own `.partial-*` temp namespace left by a
 SIGKILL is validated and resumed, or fails closed.
 
-`scripts/check-installed-functional-evidence.sh` scans every hardened child
+`.factory/tools/check-installed-functional-evidence.sh` scans every hardened child
 of the dedicated generic evidence root by default and accepts the **unique
 valid namespace bound to the exact live audit coordinator base** — the
 strict invariant
@@ -759,7 +759,7 @@ exact binding bytes, and the real installed suite runs end-to-end.
 
 ### Guard contract and schema reference (QUOTA-01, QUOTA-02)
 
-The retained `scripts/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
+The retained `.factory/tools/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
 and §10 decision table are now enforced by the hidden standard-library guard
 ``.factory/loop/usage.py`` (with its fetch child ``.factory/loop/usage_fetch.py``)
 retained for direct operator diagnostics but not configured as a campaign hook
@@ -781,7 +781,7 @@ not group/other-writable, and bounded in size. Cookie buffers are zeroized,
 no temporary files are created, every fetch child is reaped, and only
 redacted status leaves the guard. Signals received while waiting terminate
 the wait and the in-flight fetch child and exit ``128 + signum``. The
-synthetic-secret proc probe is in ``tests/test-pi2-ollama-wrapper.sh``.
+synthetic-secret proc probe is in ``.factory/tests/legacy/test-pi2-ollama-wrapper.sh``.
 
 Loopback usage-settings transport is **diagnostics/test-only** (Task 7
 review, obligations 9 and 14): the ordinary production launch CLI and API
@@ -801,7 +801,7 @@ otherwise ``$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`` (or
 and is never read, sourced, or parsed as a credential authority; the
 operator must migrate it to the external store (the migration reports its
 presence in the flat evidence report ``.factory-state/migration.json``).  This also applies to the
-retained shell guard and ``scripts/update-ollama-cookies.sh``, which warn on
+retained shell guard and ``.factory/tools/update-ollama-cookies.sh``, which warn on
 the legacy store without reading it.
 
 ### Allowed
@@ -821,7 +821,7 @@ Network and server failures are retried in wait mode. Single-check mode returns 
 Missing/expired cookies or an unparseable settings page return status 2 and require operator action:
 
 ```bash
-source scripts/update-ollama-cookies.sh
+source .factory/tools/update-ollama-cookies.sh
 ```
 
 ## Model workspace confinement (Task 8)
@@ -852,7 +852,7 @@ evidence. The machine contract is
 ## Credential and output boundary (Task 11)
 
 Before any model or deterministic gate starts, the trusted control plane binds
-`scripts/credential-guard.py` to its exact committed bytes and compiles its
+`.factory/tools/credential-guard.py` to its exact committed bytes and compiles its
 redaction API. A missing, changed, symlinked, oversized, writable, or invalid
 guard fails closed. The same guard is the sole masking authority for Pi SDK
 `tool_call` input, `tool_result` patches, model stdout/stderr tails, and gate or
@@ -887,7 +887,7 @@ missing marker preserves the legacy not-frozen semantics.
 A documented operator-only override exists solely for bounded legacy recovery;
 it is never part of normal orchestration. Completing **full** legacy recovery
 (resuming an already in-flight legacy cycle through the frozen launcher that
-`scripts/ralph-recover.sh` execs) requires the exact override value — set
+`.factory/tools/ralph-recover.sh` execs) requires the exact override value — set
 `FACTORY_RALPH_FREEZE_OVERRIDE=1` into the recovery environment. The value must
 be exactly `1`; any other value (unset, `0`, `2`, `yes`) leaves the launchers
 frozen. `ralph-recover.sh` itself is not a new launch and runs without the
@@ -928,7 +928,7 @@ grace, KILL, leader reap) on a wedged or over-bound run, leaving no zombie.
 
 ### Accepted shell-level freeze race (Task 16)
 
-The shell freeze gates in the deprecated `scripts/ralph-*` launchers are
+The shell freeze gates in the deprecated `.factory/tools/ralph-*` launchers are
 best-effort presence checks: a same-uid local writer can delete the tracked
 `.factory/ralph-freeze` marker between a shell's `[ -f ]` check and the launch
 it guards, so a shell gate can never be a strong tamper boundary.  The hidden
@@ -973,20 +973,20 @@ file, stale specification binding, changed plan base, rewound counter, or
 invalid state transition fails closed for human/operator inspection. Recovery
 never resets Git and never starts a second writer.
 
-The frozen legacy recovery path (`scripts/ralph-recover.sh`) exists only for
+The frozen legacy recovery path (`.factory/tools/ralph-recover.sh`) exists only for
 an already in-flight legacy cycle; it requires the operator-only
 `FACTORY_RALPH_FREEZE_OVERRIDE=1` escape and is not a new launch.
 
 ## Bug maintenance
 
-GitHub and Forgejo issues are optional manual references; a bug may link either or both with `bug-ledger.py link|unlink`. Never store PATs in the repo or embed credentials/query tokens in URLs. Validate and inspect canonical state with `scripts/bug-ledger.py validate|list|show|fingerprint` and maintain it with `add`, `link`, `unlink`, `set-status`, `close`, and safe interrupted-close `recover`. States are `open`, `triaged`, `planned`, `in_progress`, `blocked`, and `closed`; close requires `in_progress`.
+GitHub and Forgejo issues are optional manual references; a bug may link either or both with `bug-ledger.py link|unlink`. Never store PATs in the repo or embed credentials/query tokens in URLs. Validate and inspect canonical state with `.factory/tools/bug-ledger.py validate|list|show|fingerprint` and maintain it with `add`, `link`, `unlink`, `set-status`, `close`, and safe interrupted-close `recover`. States are `open`, `triaged`, `planned`, `in_progress`, `blocked`, and `closed`; close requires `in_progress`.
 
-The legacy maintenance loops (`scripts/ralph-maintenance-plan.sh` /
-`scripts/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
+The legacy maintenance loops (`.factory/tools/ralph-maintenance-plan.sh` /
+`.factory/tools/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
 fresh loop's complete role set is planner, developer, tester, and auditor, so
 it has no maintenance role. Product defects are triaged by the human and enter
 the canonical plan through a planning revision; `[verification].maintenance_command`
-and `scripts/verify-project.sh` are project-supplied. Full details are in
+and `.factory/tools/verify-project.sh` are project-supplied. Full details are in
 `docs/BUG_WORKFLOW.md`.
 
 ## Specification changes
@@ -1015,4 +1015,4 @@ Every implementation plan ends with **Final documentation and specification audi
 - **`specification changed after planning`**: commit the revised canonical specification and start a new campaign from a clean tree.
 - **`factory-state/v2` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
 - **quota wait appears idle**: the usage guard prints each usage poll; lower the polling interval temporarily for diagnostics.
-- **cookie expired**: refresh the external operator store (`$OLLAMA_USAGE_ENV_FILE`, else `$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`) with `source scripts/update-ollama-cookies.sh`.
+- **cookie expired**: refresh the external operator store (`$OLLAMA_USAGE_ENV_FILE`, else `$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`) with `source .factory/tools/update-ollama-cookies.sh`.

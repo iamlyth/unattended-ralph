@@ -1,7 +1,7 @@
 [project]
 # This boilerplate cycle plans against the committed redesign specification.
 # docs/SPEC.md remains the adopting-product placeholder and is never planned
-# against; the placeholder-marker guard in scripts/check-spec-provided.sh
+# against; the placeholder-marker guard in .factory/tools/check-spec-provided.sh
 # hard-blocks it regardless of this binding.
 spec = "docs/FACTORY-LOOP-SPEC.md"
 plan = ".factory/artifacts/implementation-plan.md"
@@ -38,8 +38,8 @@ operations = "docs/OPERATIONS.md"
 final_task_title = "Final documentation and specification audit"
 
 [verification]
-maintenance_command = ["./scripts/verify-boilerplate.sh"]
-campaign_command = ["./scripts/verify-boilerplate.sh"]
+maintenance_command = ["./.factory/tools/verify-boilerplate.sh"]
+campaign_command = ["./.factory/tools/verify-boilerplate.sh"]
 
 [issues]
 schema = "ralph-bug-ledger/v1"

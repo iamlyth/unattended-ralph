@@ -5,7 +5,7 @@ Every child/tool/gate output channel of the trusted control plane —
 bounded launch captures (``launch._BoundedStream`` tails), deterministic
 gate output and acceptance-command output (``campaign._run_gate`` /
 ``campaign._acceptance_gate``) — is redacted **through the committed
-credential guard** (``scripts/credential-guard.py``) before it can reach
+credential guard** (``.factory/tools/credential-guard.py``) before it can reach
 results, logs, receipts, or repository state.  The guard is the single
 redaction authority: the control plane never reimplements masking (§18:
 "the retained extension contains only required credential enforcement ..."),
@@ -14,7 +14,7 @@ every downstream artifact and a redaction failure fails closed.
 
 Guard-source binding (co-owned with Task 8; Task 7 review obligation 3):
 the executing guard is always the **exact committed blob** of
-``scripts/credential-guard.py`` at the bound commit.  A missing,
+``.factory/tools/credential-guard.py`` at the bound commit.  A missing,
 oversized, symlinked, foreign, or byte-divergent working-tree guard fails
 closed before any output is redacted and before any gate runs — an
 operator-claimed or caller-controlled guard source is never executed.
@@ -61,7 +61,7 @@ __all__ = [
 
 # The committed credential guard every control-plane redaction channel runs
 # through (Task 11: redaction is never reimplemented in the control plane).
-REDACTION_GUARD_RELPATH = "scripts/credential-guard.py"
+REDACTION_GUARD_RELPATH = ".factory/tools/credential-guard.py"
 
 # Fail-closed marker a redacted channel carries when the guard cannot mask it
 # (mirrors the Pi extension's ``[REDACTION FAILED]`` contract).
@@ -74,7 +74,7 @@ MAX_GUARD_SOURCE_BYTES = 4 * 1024 * 1024
 GIT_BLOB_TIMEOUT = 30.0
 
 # Private-key block markers, byte-identical to the guard's own
-# ``_KEY_BEGIN_RE`` / ``_KEY_END_RE`` (``scripts/credential-guard.py``).  The
+# ``_KEY_BEGIN_RE`` / ``_KEY_END_RE`` (``.factory/tools/credential-guard.py``).  The
 # control plane tracks the *streaming block state* of captured output so a
 # private-key block that straddles a capture boundary is still masked by the
 # guard; it never reimplements the masking itself.
@@ -213,7 +213,7 @@ def _read_worktree_source(root: Path, relpath: str, maximum: int) -> bytes:
 
 
 def _committed_guard_bytes(workspace: Path, bound_commit: str) -> bytes:
-    """The exact committed ``scripts/credential-guard.py`` blob at ``bound_commit``."""
+    """The exact committed ``.factory/tools/credential-guard.py`` blob at ``bound_commit``."""
     if (
         not isinstance(bound_commit, str)
         or len(bound_commit) != 40
@@ -236,7 +236,7 @@ def _committed_guard_bytes(workspace: Path, bound_commit: str) -> bytes:
         ) from exc
     if result.returncode != 0:
         raise OutputRedactionError(
-            f"scripts/credential-guard.py is not tracked at the bound commit "
+            f".factory/tools/credential-guard.py is not tracked at the bound commit "
             f"{bound_commit}; the guard must be an exact committed blob"
         )
     data = result.stdout

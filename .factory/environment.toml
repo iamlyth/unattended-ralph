@@ -16,4 +16,4 @@ schema_version = 1
 # ssh_config_alias = "configured-outside-the-repository"
 # working_directory = "/path/on/runner"
 # capabilities = ["example-real-system-capability"]
-# verify_argv = ["./scripts/verify-project.sh"]
+# verify_argv = ["./.factory/tools/verify-project.sh"]

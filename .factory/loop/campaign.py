@@ -57,8 +57,8 @@ fixture seam: it requires a committed scenario (or the dedicated evidence
 smoke lane), uses the synthetic provider, and is never a production fallback
 or evidence of real model acceptance/confinement. Production launches require
 explicit provider/model/backend and always go through the launch authority
-(:func:`launch_role_attempt`), which retains Task 8 real Landlock confinement;
-ordered campaign pre-round hooks own §10 policy.
+(:func:`launch_role_attempt`), which retains Task 8 real Landlock confinement.
+The fixed §10 decision table runs immediately before every model invocation.
 """
 
 from __future__ import annotations
@@ -91,6 +91,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import workspace_confinement as confinement_authority
     from . import redaction as output_redaction
     from . import readiness as readiness_module
+    from . import usage as usage_module
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
     import evidence as evidence_module  # type: ignore[no-redef]
@@ -106,6 +107,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
     import readiness as readiness_module  # type: ignore[no-redef]
+    import usage as usage_module  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -194,8 +196,8 @@ CAMPAIGN_PHASE_RESULT_NAME = "factory-phase-result.json"
 CAMPAIGN_AUDIT_RESULT_NAME = "factory-audit-result.json"
 RUNNER_ACQUISITION_NAME = "runner-acquisition.json"
 RUNNER_ACQUISITION_SCHEMA = "factory-runner-acquisition/v1"
-RUNNER_COMMAND = ("./scripts/run-factory-runners.py",)
-RUNNER_CHECKER_COMMAND = ("./scripts/check-factory-runner-evidence.py",)
+RUNNER_COMMAND = ("./.factory/tools/run-factory-runners.py",)
+RUNNER_CHECKER_COMMAND = ("./.factory/tools/check-factory-runner-evidence.py",)
 RUNNER_TRANSPORT_EXIT = 20
 RUNNER_FINDINGS_EXIT = 21
 RUNNER_INTEGRITY_EXIT = 22
@@ -514,6 +516,7 @@ class CampaignConfig:
     campaign_timeout: float = DEFAULT_CAMPAIGN_TIMEOUT
     runtime_limit: float = launch_module.DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = launch_module.DEFAULT_INACTIVITY_LIMIT
+    readiness_only: bool = False
 
     def __post_init__(self) -> None:
         # Fail closed at construction: an invalid campaign contract can never
@@ -609,14 +612,16 @@ class CampaignConfig:
                 raise CampaignConfigError(
                     "role_prompt_digests must map each role to a 64-hex digest"
                 )
-        if not isinstance(self.provider, str) or not self.provider:
+        if type(self.readiness_only) is not bool:
+            raise CampaignConfigError("readiness_only must be boolean")
+        if (not isinstance(self.provider, str) or not self.provider) and not self.readiness_only:
             raise CampaignConfigError("production campaign provider is mandatory")
-        if not isinstance(self.model, str) or not self.model:
+        if (not isinstance(self.model, str) or not self.model) and not self.readiness_only:
             raise CampaignConfigError("production campaign model is mandatory")
         if not isinstance(self.backend, str):
             raise CampaignConfigError("campaign backend must be a string")
         provider = self.provider.lower()
-        if provider not in launch_module.SUPPORTED_PROVIDERS:
+        if provider and provider not in launch_module.SUPPORTED_PROVIDERS:
             raise CampaignConfigError(
                 "unknown provider; the fixed launch-provider policy fails closed"
             )
@@ -625,11 +630,11 @@ class CampaignConfig:
                 "the embedded role-driver seam is the explicit fixture surface; "
                 "a production provider must use the real launch path"
             )
-        if self.role_driver is None and not self.backend:
+        if self.role_driver is None and not self.backend and not self.readiness_only:
             raise CampaignConfigError(
                 "production campaign backend is mandatory when no test-only role driver is used"
             )
-        if not self.verification_command:
+        if not self.verification_command and not self.readiness_only:
             raise CampaignConfigError(
                 "campaign requires an explicit non-empty verification_command "
                 "before any role can launch (fixtures must supply their safe verifier)"
@@ -647,9 +652,9 @@ class CampaignConfig:
             if self.runner_command and tuple(self.runner_command) != RUNNER_COMMAND:
                 raise CampaignConfigError(
                     "when configured, production runner_command must be exactly "
-                    "./scripts/run-factory-runners.py with no arguments or shell"
+                    "./.factory/tools/run-factory-runners.py with no arguments or shell"
                 )
-            if not self.acceptance_command:
+            if not self.acceptance_command and not self.readiness_only:
                 raise CampaignConfigError(
                     "production campaign requires an explicit non-empty acceptance_command"
                 )
@@ -1148,7 +1153,7 @@ def scope_violation(
         # with the confinement write allowlists
         # (``workspace_confinement.TRUSTED_POLICY_RELPATHS``) — AGENTS.md,
         # the hidden CI/forge tooling, shell.nix, the factory configs, the
-        # harness docs, and the legacy ``scripts/`` security surface.  An
+        # harness docs, and the legacy ``.factory/tools/`` security surface.  An
         # untrusted role must never write *or commit* these paths, so the
         # orchestrator refuses them exactly like the model workspace does.
         if confinement_authority.is_trusted_policy_path(path):
@@ -1902,7 +1907,9 @@ def launch_role_attempt(
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
     findings_payload: Optional[bytes] = None,
-    _campaign_authorization: Optional[object] = None,
+    _authorization_store: Optional[object] = None,
+    _authorization_token: str = "",
+    _authorization_claims: Optional[Mapping[str, object]] = None,
 ) -> RoleOutcome:
     """Run one fresh role attempt through the committed launch authority.
 
@@ -1910,8 +1917,8 @@ def launch_role_attempt(
     (role prompt, operational policy, spec, plan, and the developer task
     excerpt / auditor objective), binds the digests, and mints the
     unforgeable verified-committed token (:func:`launch.authorize_launch`),
-    which applies the Task 8 real Landlock confinement.  Quota policy is a
-    campaign pre-round hook and is never re-run by per-model authorization.
+    which applies the Task 8 real Landlock confinement. The fixed quota
+    decision runs in the trusted campaign parent before every invocation.
 
     Task 9 review B2: the developer's task bytes are re-derived from the
     committed plan blob at ``head`` (:func:`launch.derive_task_excerpt`) and
@@ -2002,10 +2009,6 @@ def launch_role_attempt(
             inactivity_limit=config.inactivity_limit,
         )
         launch_module.verify_invocation(binding)
-        campaign_authorization = (
-            launch_module._mint_role_authorization(binding, config.campaign_id)
-            if _campaign_authorization is not None else None
-        )
         authority = launch_module.authorize_launch(
             binding,
             role_prompt=_blob_at(root, f".factory/prompts/{role}.md"),
@@ -2015,7 +2018,9 @@ def launch_role_attempt(
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings_payload,
-            _campaign_authorization=campaign_authorization,
+            _authorization_store=_authorization_store,
+            _authorization_token=_authorization_token,
+            _authorization_claims=_authorization_claims,
         )
     except launch_module.InvocationError as exc:
         # Task 9 review B2: every refused launch — unbound or missing bytes,
@@ -2127,6 +2132,7 @@ class Campaign:
         # authority to bind every previous-round receipt to a phase that
         # actually ran and classified findings/blocked.
         self._records: List[PhaseRecord] = []
+        self._launch_store: Optional[readiness_module.AuthorizationStore] = None
 
     # -- acquisition ------------------------------------------------------------
 
@@ -2757,6 +2763,45 @@ class Campaign:
             raise CampaignPhaseError(
                 "launch current commit is not an authorized descendant of the accepted readiness commit"
             )
+        # QUOTA-01 is per invocation, never per round.  The trusted parent runs
+        # the fixed internal decision table immediately before every real model
+        # process: check; conditional bounded wait; final check.  No quota
+        # option, credential, result, or callable crosses into model argv,
+        # environment, prompt, or tools.
+        try:
+            usage_module.require_quota(
+                max_wait=max(1, int(self._remaining_time(f"{role} quota wait"))),
+                max_polls=max(1, int(self._remaining_time(f"{role} quota wait"))) + 1,
+            )
+        except usage_module.WaitInterrupted as exc:
+            return RoleOutcome(role, 128 + exc.signum, interrupted=True,
+                               signal=exc.signum,
+                               diagnostic="quota wait interrupted before model launch")
+        except usage_module.UsageGuardError as exc:
+            return RoleOutcome(role, usage_module.EXIT_FATAL,
+                               diagnostic=("quota gate refused model launch: "
+                                           + str(exc))[:512])
+        if self._launch_store is None:
+            raise CampaignPhaseError("readiness did not mint a campaign launch authority")
+        plan_blob = self._git.blob_at(head, self._config.plan_path)
+        claims = {
+            "readiness_nonce": self._runner_readiness_nonce(),
+            "phase": state.current_phase,
+            "role": role,
+            "task": task_id,
+            "attempt": attempt,
+            "round": state.current_round,
+            "prompt_set_digest": bounded.prompt_set_digest,
+            "tools": list(launch_module.DEFAULT_ALLOWED_TOOLS[role]),
+            "provider": bounded.provider,
+            "model": bounded.model,
+            "runtime": runtime_budget,
+            "current_commit": head,
+            "accepted_commit": bounded.accepted_commit,
+            "current_tree": self._git.text(["show", "-s", "--format=%T", head]).strip(),
+            "plan_digest": plan_sha256(plan_blob),
+        }
+        token = self._launch_store.mint(claims)
         return launch_role_attempt(
             bounded,
             role=role,
@@ -2764,7 +2809,9 @@ class Campaign:
             task_id=task_id,
             round_number=state.current_round,
             findings_payload=findings_payload,
-            _campaign_authorization=self,
+            _authorization_store=self._launch_store,
+            _authorization_token=token,
+            _authorization_claims=claims,
         )
 
     def _run_driver(
@@ -3509,7 +3556,7 @@ class Campaign:
     def _exact_commit_redactor(self) -> object:
         """The verified exact-commit credential-guard redactor (fail closed).
 
-        The redactor is bound to the exact committed ``scripts/credential-
+        The redactor is bound to the exact committed ``.factory/tools/credential-
         guard.py`` blob at the current head.  An unverifiable guard fails
         the campaign closed: no findings/blocked content and no preserved
         structured result may be stored, delivered to the next planner, or
@@ -4491,6 +4538,98 @@ class Campaign:
             state=state2,
         )
 
+    # -- round-zero readiness -------------------------------------------------
+
+    def _run_readiness(self) -> str:
+        """Run the complete fixed readiness registry before any planning role."""
+        accepted = self._config.accepted_commit
+        current = self._git.head()
+        policy_raw = self._git.blob_at(accepted, readiness_module.POLICY_PATH)
+        policy, _policy_sha = readiness_module.load_policy(self._root, policy_raw)
+        if policy["production_authority"]["enrolled"] is not True:
+            return "human_block"
+        nonce = self._runner_readiness_nonce()
+        tree = self._git.text(["show", "-s", "--format=%T", accepted]).strip()
+        environment_blob = self._git.text(
+            ["rev-parse", f"{accepted}:.factory/environment.toml"]
+        ).strip()
+        aggregate_path = (self._root / ".factory-state" / "runner-evidence" /
+                          self._config.campaign_id / nonce / "aggregate.json")
+        gate_results: Dict[str, Dict[str, object]] = {}
+        gate_ids = list(dict.fromkeys(
+            list(policy["conformance_gate_ids"])
+            + list(policy["core_gate_ids"])
+            + ["conformance-implementation"]
+        ))
+        aggregate_digest = readiness_module.ZERO
+        try:
+            runner_argv = list(readiness_module.gate_argv("runner-aggregate")) + [
+                "--expected-commit", accepted,
+                "--expected-campaign-id", self._config.campaign_id,
+                "--expected-readiness-nonce", nonce,
+            ]
+            runner = self._lock.spawn_child(
+                runner_argv, env=self._gate_environment(),
+                timeout=min(self._config.gate_timeout,
+                            self._remaining_time("readiness runner aggregate")),
+            )
+            if runner.returncode != 0:
+                return "findings"
+            aggregate_raw, _ = evidence_module.secure_read_bytes(
+                aggregate_path, maximum=4 * 1024 * 1024,
+                what="readiness runner aggregate",
+            )
+            aggregate = json.loads(aggregate_raw.decode("utf-8"))
+            aggregate_digest = readiness_module.validate_aggregate(
+                aggregate, policy, accepted_commit=accepted, tree=tree,
+                environment_blob=environment_blob,
+                campaign_id=self._config.campaign_id,
+                readiness_nonce=nonce,
+            )
+            for gate_id in gate_ids:
+                argv = list(readiness_module.gate_argv(gate_id))
+                completed = self._lock.spawn_child(
+                    argv, env=self._gate_environment(),
+                    timeout=min(self._config.gate_timeout,
+                                self._remaining_time(f"readiness {gate_id}")),
+                )
+                transcript = ((completed.stdout or "") + "\0" +
+                              (completed.stderr or "")).encode("utf-8", "replace")
+                gate_results[gate_id] = {
+                    "ran": True, "exit": completed.returncode,
+                    "digest": hashlib.sha256(transcript).hexdigest(),
+                }
+        except (OSError, ValueError, evidence_module.VerifierBindingError,
+                readiness_module.ReadinessError, lock_module.RootLockError):
+            return "infrastructure_failure"
+        # Human approval is deliberately validated separately from machine
+        # gates.  A required but unavailable authority remains blocked.
+        human_digest = readiness_module.digest({"required": False})
+        if policy.get("human_approval") is not None:
+            return "human_block"
+        status, _ = readiness_module.evaluate(
+            policy, aggregate_sha256=aggregate_digest,
+            gate_results=gate_results, human_sha256=human_digest,
+        )
+        return status
+
+    def _readiness_terminal(self, status: str) -> CampaignResult:
+        phase = {"complete":"readiness_complete", "findings":"findings",
+                 "human_block":"blocked",
+                 "infrastructure_failure":"infrastructure_failure"}[status]
+        outcome = "readiness_complete" if status == "complete" else (
+            "blocked" if status == "human_block" else status)
+        result = CampaignResult(
+            campaign_id=self._config.campaign_id,
+            rounds_requested=self._config.rounds_requested,
+            rounds_completed=0, terminal_phase=phase,
+            terminal_outcome=outcome, head_commit=self._git.head(),
+            phase_history=(),
+        )
+        result.validate(); validate_campaign_result(result)
+        self._publish_result(result)
+        return result
+
     # -- campaign loop ---------------------------------------------------------
 
     def run(self) -> CampaignResult:
@@ -4519,6 +4658,15 @@ class Campaign:
     def _run_in_state_namespace(self) -> CampaignResult:
         self._acquire()
         try:
+            if self._config.role_driver is None:
+                readiness_status = self._run_readiness()
+                if readiness_status != "complete" or self._config.readiness_only:
+                    return self._readiness_terminal(readiness_status)
+                self._launch_store = readiness_module.open_locked_authorization_store(
+                    self._root, self._config.state_namespace,
+                    self._config.campaign_id, self._runner_readiness_nonce(),
+                    self._lock.fd,
+                )
             state, recovered = self._load_or_init_state()
             history: List[PhaseRecord] = []
             if recovered is not None:
@@ -4579,6 +4727,9 @@ class Campaign:
             self._publish_result(result)
             return result
         finally:
+            if self._launch_store is not None:
+                self._launch_store.close()
+                self._launch_store = None
             if self._held_verifier is not None:
                 self._held_verifier.close()
                 self._held_verifier = None
@@ -4639,6 +4790,7 @@ def derive_campaign_config(
     state_namespace: str = "",
     accepted_commit: str = "",
     install_manifest: str = "",
+    readiness_only: bool = False,
 ) -> CampaignConfig:
     """Derive every binding from the committed state at the current HEAD.
 
@@ -4709,6 +4861,7 @@ def derive_campaign_config(
         state_namespace=state_namespace,
         accepted_commit=accepted_commit,
         install_manifest=install_manifest,
+        readiness_only=readiness_only,
         role_timeout=role_timeout,
         gate_timeout=gate_timeout,
         runner_timeout=runner_timeout,
@@ -4732,9 +4885,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="factory-campaign",
         description=(
             "Trusted finite campaign orchestrator with exact-commit ordered "
-            "pre-round hooks before every planner (FACTORY-LOOP-SPEC §10-§15). "
-            "No Ollama quota hook is configured or executed. Never invoked by "
-            "a model role."
+            "pre-round hooks before every planner (FACTORY-LOOP-SPEC §10-§15) "
+            "and the fixed §10 quota decision before every model invocation. "
+            "Never invoked by a model role."
         ),
     )
     parser.add_argument(
@@ -4810,7 +4963,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--runner-command", action="append", default=[],
         help=(
             "exact coordinator-owned runner acquisition argv; production "
-            "requires ./scripts/run-factory-runners.py with no shell/arguments"
+            "requires ./.factory/tools/run-factory-runners.py with no shell/arguments"
         ),
     )
     p_run.add_argument(
@@ -4842,7 +4995,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             acceptance_command = _flatten(args.acceptance_command)
             capability_command = _flatten(args.capability_command)
             runner_command = _flatten(args.runner_command)
-            if not args.role_driver:
+            if not args.role_driver and not args.readiness_only:
                 missing_commands = [
                     option for option, command in (
                         ("--verification-command", verification_command),
@@ -4903,11 +5056,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         ("--backend", args.backend),
                     ) if not value
                 ]
-                if missing:
+                if missing and not args.readiness_only:
                     raise CampaignConfigError(
                         "production campaign launch requires explicit "
                         + ", ".join(missing)
                     )
+                if args.readiness_only:
+                    args.provider = args.provider or "synthetic"
+                    args.model = args.model or "readiness-only"
+                    args.backend = args.backend or ""
             if args.evidence_smoke:
                 _evidence_smoke_preflight(root, args)
             elif not args.role_driver:
@@ -4919,10 +5076,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(json.dumps({
                         "schema":"factory-campaign-result/v1", "campaign_id":args.campaign_id,
                         "rounds_requested":args.rounds, "rounds_completed":0,
-                        "terminal_phase":"blocked", "terminal_outcome":"human_block",
+                        "terminal_phase":"blocked", "terminal_outcome":"blocked",
                         "head_commit":_live_head(root), "exit_code":EXIT_BLOCKED,
-                        "phase_history":[], "readiness_policy_sha256":policy_sha,
-                        "reason":policy["production_authority"]["reason"],
+                        "phase_history":[],
                     }, sort_keys=True, separators=(",", ":")))
                     return EXIT_BLOCKED
                 state_namespace = _production_preflight(
@@ -4985,6 +5141,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 state_namespace=state_namespace,
                 accepted_commit=args.accepted_commit,
                 install_manifest=args.install_manifest,
+                readiness_only=args.readiness_only,
             )
         except (CampaignError, gitutil.GitBoundaryError) as exc:
             print(f"factory-campaign: {exc}", file=sys.stderr)
@@ -5159,6 +5316,20 @@ def _validate_reserved_campaign_namespace(root: Path, campaign_id: str) -> str:
     return f"{CAMPAIGN_STATE_PARENT_REL}/{campaign_id}"
 
 
+def _configured_development_branch(root: Path) -> str:
+    """Read the sole production branch authority from committed config.toml."""
+    import tomllib
+    raw = readiness_module.read_dirfd_file(root, ".factory/config.toml", maximum=64 * 1024)
+    try:
+        value = tomllib.loads(raw.decode("utf-8"))
+        branch = value["project"]["development_branch"]
+    except (UnicodeError, ValueError, KeyError, TypeError) as exc:
+        raise CampaignConfigError("configured development_branch is missing or malformed") from exc
+    if not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", branch) or branch == "main":
+        raise CampaignConfigError("configured development_branch is unsafe or names main")
+    return branch
+
+
 def _production_preflight(
     root: Path,
     args: object,
@@ -5178,10 +5349,11 @@ def _production_preflight(
     namespace fails before :class:`Campaign` acquires or starts a role.
     """
     root = Path(root).absolute()
+    readiness_only = bool(getattr(args, "readiness_only", False))
     for label, command, required in (
-        ("verification", verification_command, True),
+        ("verification", verification_command, not readiness_only),
         ("capability", capability_command, False),
-        ("acceptance", acceptance_command, True),
+        ("acceptance", acceptance_command, not readiness_only),
         ("runner acquisition", runner_command, False),
     ):
         if not command:
@@ -5197,10 +5369,11 @@ def _production_preflight(
     if runner_command and tuple(runner_command) != RUNNER_COMMAND:
         raise CampaignConfigError(
             "when configured, production runner acquisition must be exactly "
-            "./scripts/run-factory-runners.py with no shell or arguments"
+            "./.factory/tools/run-factory-runners.py with no shell or arguments"
         )
     provider = str(getattr(args, "provider", "")).lower()
-    if provider not in launch_module.SUPPORTED_PROVIDERS or provider == "synthetic":
+    if (not readiness_only and
+            (provider not in launch_module.SUPPORTED_PROVIDERS or provider == "synthetic")):
         raise CampaignConfigError(
             "normal production campaigns require a fixed real-model provider; "
             "synthetic is confined to explicit fixture/role-driver lanes"
@@ -5219,11 +5392,16 @@ def _production_preflight(
         ["-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
         timeout=GIT_TIMEOUT,
     )
-    required_branch = getattr(args, "branch", "")
+    required_branch = _configured_development_branch(root)
+    caller_branch = getattr(args, "branch", "")
+    if caller_branch != required_branch or required_branch == "main":
+        raise CampaignConfigError(
+            "--branch must equal [project].development_branch and main is never a development branch"
+        )
     if branch.returncode != 0 or branch.stdout.strip() != required_branch:
         raise CampaignConfigError(
             f"production branch {branch.stdout.strip()!r} does not equal "
-            f"required branch {required_branch!r}"
+            f"configured development branch {required_branch!r}"
         )
     status = gitutil.git_run(
         ["-C", str(root), "status", "--porcelain", "-z", "--untracked-files=all"],
@@ -5249,7 +5427,7 @@ def _production_preflight(
             "control plane, repository, and accepted commit"
         )
     try:
-        commands = [verification_command, acceptance_command]
+        commands = [command for command in (verification_command, acceptance_command) if command]
         if capability_command:
             commands.append(capability_command)
         if runner_command:

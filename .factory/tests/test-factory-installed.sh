@@ -2,7 +2,7 @@
 # test-factory-installed.sh — hidden Task 20 installed-tier evidence driver.
 #
 # The specification (HIDE-01 §3, EVID-01 §19, TEST-01 §22) keeps harness-only
-# tests out of the adopting product's visible `tests/` tree, so the installed
+# tests out of the adopting product's visible `.factory/tests/legacy/` tree, so the installed
 # smoke suite lives under the hidden `.factory/tests/` namespace like the
 # Task 13 footprint and Task 16 adversarial series.  This driver:
 #

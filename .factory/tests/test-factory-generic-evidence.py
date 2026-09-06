@@ -8,7 +8,7 @@ temporary fixture repository that carries the committed installed surface
 plus a valid ``factory-state/v1`` control state and a foreign
 ``installed-functional-evidence.env`` root artifact, and then exercises the
 real publisher (prepare + publish) and the real checker
-(``scripts/check-installed-functional-evidence.sh``):
+(``.factory/tools/check-installed-functional-evidence.sh``):
 
 1. the foreign old root environment is ignored by the checker and preserved
    byte/mode/mtime-identically by the publisher (the preservation proof
@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOOP = ROOT / ".factory" / "loop"
 STATE_DIR = ".factory-state"
 PUBLISHER = LOOP / "generic_evidence.py"
-CHECKER = ROOT / "scripts" / "check-installed-functional-evidence.sh"
+CHECKER = ROOT / ".factory" / "tools" / "check-installed-functional-evidence.sh"
 STUB_SUITE = (
     "#!/usr/bin/env bash\n"
     "set -euo pipefail\n"
@@ -215,7 +215,7 @@ class GenericEvidenceSuite(unittest.TestCase):
 
     def checker(self, check: bool = True):
         return _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh")],
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh")],
             cwd=str(self.fixture),
             env=self.base_env(),
             check=check,
@@ -454,9 +454,9 @@ class GenericEvidenceSuite(unittest.TestCase):
                                 "a forged receipt must fail closed")
             # A receipt minted for a different command is never accepted.
             receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
-            receipt_data["argv"] = ["./scripts/true"]
+            receipt_data["argv"] = ["./.factory/tools/true"]
             receipt_data["argv_sha256"] = _sha256(
-                json.dumps(["./scripts/true"], separators=(",", ":")).encode()
+                json.dumps(["./.factory/tools/true"], separators=(",", ":")).encode()
             )
             receipt_path.write_text(
                 json.dumps(receipt_data, sort_keys=True, indent=2) + "\n",
@@ -652,7 +652,7 @@ class GenericEvidenceSuite(unittest.TestCase):
         the checker fails closed (metadata commits are allowed, authority
         commits are not)."""
         self.publish_all()
-        checker = self.fixture / "scripts/check-installed-functional-evidence.sh"
+        checker = self.fixture / ".factory/tools/check-installed-functional-evidence.sh"
         checker.write_text(
             checker.read_text(encoding="utf-8") + "\n# authority drift\n",
             encoding="utf-8",
@@ -667,7 +667,7 @@ class GenericEvidenceSuite(unittest.TestCase):
 
     def test_explicit_namespace_missing_argument_fails(self) -> None:
         result = _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh"),
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh"),
              "--namespace"],
             cwd=str(self.fixture),
             env=self.base_env(),
@@ -679,7 +679,7 @@ class GenericEvidenceSuite(unittest.TestCase):
     def test_explicit_namespace_outside_root_fails(self) -> None:
         self.publish_all()
         result = _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh"),
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh"),
              "--namespace", "/tmp/outside-root"],
             cwd=str(self.fixture),
             env=self.base_env(),
@@ -691,7 +691,7 @@ class GenericEvidenceSuite(unittest.TestCase):
     def test_explicit_namespace_traversal_fails(self) -> None:
         self.publish_all()
         result = _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh"),
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh"),
              "--namespace", "../generic-evidence"],
             cwd=str(self.fixture),
             env=self.base_env(),
@@ -705,7 +705,7 @@ class GenericEvidenceSuite(unittest.TestCase):
         symlink_parent = self.state_dir / "link"
         os.symlink(self.state_dir / "generic-evidence", symlink_parent)
         result = _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh"),
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh"),
              "--namespace", ".factory-state/link/" + self.commit],
             cwd=str(self.fixture),
             env=self.base_env(),
@@ -719,7 +719,7 @@ class GenericEvidenceSuite(unittest.TestCase):
         a valid publication still satisfies the checker."""
         self.publish_all()
         check = _run(
-            ["bash", str(self.fixture / "scripts/check-installed-functional-evidence.sh"),
+            ["bash", str(self.fixture / ".factory/tools/check-installed-functional-evidence.sh"),
              "--namespace", f".factory-state/generic-evidence/{self.commit}"],
             cwd=str(self.fixture),
             env=self.base_env(),

@@ -869,7 +869,7 @@ def _run_documentation_gates(
 ) -> None:
     """Run the Task 22 documented verification gates after the round.
 
-    ``scripts/check-plan-freshness.sh`` and ``scripts/check-generic-leakage.sh``
+    ``.factory/tools/check-plan-freshness.sh`` and ``.factory/tools/check-generic-leakage.sh``
     are the acceptance-criteria gates of the live evidence round; when they
     exist in the repository the evidence smoke runs them and fails closed on
     any nonzero exit.  Every gate child receives the sanitized allowlist
@@ -881,7 +881,7 @@ def _run_documentation_gates(
     """
     bash = _pinned_bash()
     for script in ("check-plan-freshness.sh", "check-generic-leakage.sh"):
-        relpath = "scripts/" + script
+        relpath = ".factory/tools/" + script
         path = root / relpath
         if not path.is_file():
             continue

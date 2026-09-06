@@ -13,5 +13,5 @@ status: needs-planning
 No maintenance cycle is planned. Select one ordinary defect with:
 
 ```bash
-./scripts/ralph-maintenance-plan.sh BUG-0001
+./.factory/tools/ralph-maintenance-plan.sh BUG-0001
 ```

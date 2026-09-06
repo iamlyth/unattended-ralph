@@ -31,13 +31,15 @@ class ReadinessPolicyTests(unittest.TestCase):
 
     def test_aggregate_is_class_order_independent_and_exact(self):
         policy=readiness.validate_policy(self.policy()); commit="a"*40; tree="b"*40; env="c"*40
-        records=[{"class":"class-b","capabilities":["cap-c","cap-b"],"result":"pass"},{"class":"class-a","capabilities":["cap-a"],"result":"pass"}]
-        def aggregate(items): return {"schema":"factory-runner-aggregate/v4","commit":commit,"tree":tree,"environment_blob":env,"runners":items}
-        first=readiness.validate_aggregate(aggregate(records),policy,accepted_commit=commit,tree=tree,environment_blob=env)
-        second=readiness.validate_aggregate(aggregate(list(reversed(records))),policy,accepted_commit=commit,tree=tree,environment_blob=env)
+        def record(name,caps): return {"name":name,"manifest":f".factory-state/runner-evidence/{name}/manifest.json","manifest_sha256":"d"*64,"capabilities":caps,"artifact_manifest_sha256":"e"*64,"artifact_count":0,"artifact_bytes":0,"signer":{"principal":name,"key_sha256":"f"*64,"algorithm":"ssh-ed25519","signature_sha256":"1"*64}}
+        records=[record("class-b",["cap-c","cap-b"]),record("class-a",["cap-a"])]
+        def aggregate(items): return {"schema":"factory-runner-aggregate/v4","campaign_id":"fixture","readiness_nonce":"9"*64,"commit":commit,"tree":tree,"environment_blob":env,"runners":items}
+        kwargs={"accepted_commit":commit,"tree":tree,"environment_blob":env,"campaign_id":"fixture","readiness_nonce":"9"*64}
+        first=readiness.validate_aggregate(aggregate(records),policy,**kwargs)
+        second=readiness.validate_aggregate(aggregate(list(reversed(records))),policy,**kwargs)
         self.assertEqual(first,second)
-        for mutation in (records[:1], records+[{"class":"class-c","capabilities":[],"result":"pass"}]):
-            with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(aggregate(mutation),policy,accepted_commit=commit,tree=tree,environment_blob=env)
+        for mutation in (records[:1], records+[record("class-c",[])]):
+            with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(aggregate(mutation),policy,**kwargs)
 
     def test_generic_fixture_policy_passes_all_fixed_adapters(self):
         policy=readiness.validate_policy(self.policy())
@@ -62,16 +64,14 @@ class ReadinessPolicyTests(unittest.TestCase):
         policy=readiness.validate_policy(policy)
         with self.assertRaises(readiness.HumanAuthorityBlocked): readiness.validate_human_authority(policy,None,None,accepted_commit="a"*40,accepted_tree="b"*40,blob_at=lambda c,p:b"")
 
-    def test_authorization_is_one_use_exact_and_restart_bound(self):
+    def test_public_import_cannot_mint_authorization_store(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); (root/"state/campaign").mkdir(parents=True,mode=0o700)
-            store=readiness.AuthorizationStore(root,"state/campaign","fixture","a"*64,object())
-            claims={"phase":"planning","role":"planner","attempt":1,"current_commit":"b"*40,"accepted_commit":"b"*40,"tree":"c"*40,"tools":["read"],"runtime":1}
-            token=store.mint(claims); store.consume(token,claims)
-            with self.assertRaises(readiness.AuthorizationError): store.consume(token,claims)
-            other=dict(claims,role="auditor"); token2=store.mint(claims)
-            with self.assertRaises(readiness.AuthorizationError): store.consume(token2,other)
-            store.close()
+            fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                with self.assertRaises(readiness.AuthorizationError):
+                    readiness.AuthorizationStore(root,"state/campaign","fixture","a"*64,fd,object())
+            finally: os.close(fd)
 
     def test_campaign_ids_and_nonces_are_canonical_lowercase(self):
         self.assertIsNone(readiness.IDENT.fullmatch("Upper"))
@@ -80,11 +80,11 @@ class ReadinessPolicyTests(unittest.TestCase):
 
     def test_neutral_campaign_blocks_before_external_execution(self):
         head=subprocess.check_output(["git","-C",str(ROOT),"rev-parse","HEAD"],text=True).strip()
-        command=[sys.executable,str(ROOT/".factory/loop/campaign.py"),"--root",str(ROOT),"run","--campaign-id","neutral-check","--rounds","1","--branch","boilerplate-develop","--provider","ollama","--model","unused","--backend","/bin/false","--accepted-commit",head,"--install-manifest","/nonexistent","--campaign-timeout","1","--verification-command","./scripts/verify-boilerplate.sh","--acceptance-command","./scripts/verify-boilerplate.sh"]
+        command=[sys.executable,str(ROOT/".factory/loop/campaign.py"),"--root",str(ROOT),"run","--campaign-id","neutral-check","--rounds","1","--branch","boilerplate-develop","--provider","ollama","--model","unused","--backend","/bin/false","--accepted-commit",head,"--install-manifest","/nonexistent","--campaign-timeout","1","--verification-command","./.factory/tools/verify-boilerplate.sh","--acceptance-command","./.factory/tools/verify-boilerplate.sh"]
         result=subprocess.run(command,text=True,capture_output=True)
         self.assertEqual(result.returncode,campaign.EXIT_BLOCKED,result.stderr)
         value=json.loads(result.stdout)
-        self.assertEqual((value["terminal_phase"],value["terminal_outcome"]),("blocked","human_block"))
+        self.assertEqual((value["terminal_phase"],value["terminal_outcome"]),("blocked","blocked"))
         self.assertEqual(value["phase_history"],[])
 
     def test_readiness_only_is_not_success(self):

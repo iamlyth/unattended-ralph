@@ -1,7 +1,7 @@
 {
   "schema": "ralph-golden-policy/v1",
   "description": "Protected golden baseline policy. Golden baselines under golden_directories are active acceptance assets: they must never be overwritten by automatic test side effects or by unguarded regeneration. Golden approval is out-of-band and non-automatable: unattended gates never accept agent-authored human:true, reviewer strings, or environment reviewer identity. Until a verifiable external attestation mechanism is provisioned, every golden change and every review-manifest entry is rejected as a finding. Generation tooling must refuse to overwrite active goldens in unattended mode.",
-  "golden_directories": ["tests/golden"],
+  "golden_directories": [".factory/tests/legacy/golden"],
   "review_manifest": ".factory/golden-review.json",
   "generation": {
     "allow_overwrite_of_active": false,

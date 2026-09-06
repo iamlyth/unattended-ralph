@@ -88,10 +88,8 @@ INSTALLER_VERSION = "factory-installer/v1"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# The installed surface: the hidden namespaces plus the shared ``scripts/``
-# authorities the hidden control plane loads by their established absolute
-# path (``scripts/factory_state_io.py``) and the operator entrypoints.
-INSTALLED_SURFACE = (".factory", ".pi", "scripts")
+# The installed closure is descriptor-verified and wholly hidden.
+INSTALLED_SURFACE = (".factory", ".pi")
 
 # Legacy synthetic-confinement proof code is retained only as historical test
 # source in this checkout.  It is not imported by production and must never be
@@ -107,18 +105,18 @@ NON_INSTALLED_PREFIXES: Tuple[str, ...] = (
 
 # The committed shared authority the hidden control plane imports at runtime
 # and the trusted operator entrypoints of the installed copy.
-DEFAULT_SHARED: Tuple[str, ...] = ("scripts/factory_state_io.py",)
+DEFAULT_SHARED: Tuple[str, ...] = ()
 DEFAULT_ENTRYPOINTS: Tuple[str, ...] = (
     ".factory/bin/factory-launch",
     ".factory/bin/factory-campaign",
-    "scripts/machine-receipt.py",
+    ".factory/tools/machine-receipt.py",
 )
 
 # Declared shared authorities and operator entrypoints may only live under
-# these first segments: the hidden namespaces plus the shared ``scripts/``
+# these first segments: the hidden namespaces plus the shared ``.factory/tools/``
 # surface.  A declared path anywhere else would smuggle a foreign file into
 # the installed copy.
-ALLOWED_FIRST_SEGMENTS: frozenset = frozenset({".factory", ".pi", "scripts"})
+ALLOWED_FIRST_SEGMENTS: frozenset = frozenset({".factory", ".pi"})
 
 # The exact Task-20-era pending authorities that reviewer-mode staging may
 # take from the working tree while they are not yet part of the bound
@@ -133,264 +131,8 @@ ALLOWED_FIRST_SEGMENTS: frozenset = frozenset({".factory", ".pi", "scripts"})
 # installed-surface path must be either allowlisted or committed, so these
 # keep the WIP install buildable until the Task-20 commit lands, after
 # which the pending set is empty and the allowlist is inert.
-PENDING_ALLOWLIST: frozenset = frozenset({
-    '.factory/__init__.py',
-    '.factory/artifacts/implementation-plan.md',
-    '.factory/audit-objectives/registry.json',
-    '.factory/pre-round-hooks.json',
-    '.factory/readiness-policy.json',
-    '.factory/bin/factory-launch',
-    '.factory/bin/factory-campaign',
-    '.factory/bin/publish-generic-evidence',
-    '.factory/campaign-receipt-policy.json',
-    '.factory/generic-leak-allowlist',
-    '.factory/loop/__init__.py',
-    '.factory/loop/audit_objectives.py',
-    '.factory/loop/campaign.py',
-    '.factory/loop/confine_launcher.py',
-    '.factory/loop/confinement.py',
-    '.factory/loop/evidence.py',
-    '.factory/loop/findings.py',
-    '.factory/loop/footprint.py',
-    '.factory/loop/generic_evidence.py',
-    '.factory/loop/gitutil.py',
-    '.factory/loop/installer.py',
-    '.factory/loop/launch.py',
-    '.factory/loop/lock.py',
-    '.factory/loop/migration.py',
-    '.factory/loop/plan_parser.py',
-    '.factory/loop/pi2_backend.py',
-    '.factory/loop/pre_round.py',
-    '.factory/loop/promptset.py',
-    '.factory/loop/redaction.py',
-    '.factory/loop/readiness.py',
-    '.factory/loop/selector.py',
-    '.factory/loop/state.py',
-    '.factory/loop/usage.py',
-    '.factory/loop/usage_fetch.py',
-    '.factory/loop/workspace_confinement.py',
-    '.factory/prompts/auditor.md',
-    '.factory/prompts/developer.md',
-    '.factory/prompts/planner.md',
-    '.factory/prompts/tester.md',
-    '.factory/ralph-freeze',
-    '.factory/schemas/audit-objectives-v1.schema.json',
-    '.factory/schemas/factory-campaign-result-v1.schema.json',
-    '.factory/schemas/factory-campaign-launch-authority-v1.schema.json',
-    '.factory/schemas/factory-confinement-v1.schema.json',
-    '.factory/schemas/factory-findings-receipt-v1.schema.json',
-    '.factory/schemas/factory-findings-v1.schema.json',
-    '.factory/schemas/factory-launch-result-v1.schema.json',
-    '.factory/schemas/factory-phase-result-v1.schema.json',
-    '.factory/schemas/factory-plan-v1.requirements.json',
-    '.factory/schemas/factory-plan-v1.schema.json',
-    '.factory/schemas/factory-plan-v1.schema.md',
-    '.factory/schemas/factory-state-v1.schema.md',
-    '.factory/schemas/factory-state-v2.schema.md',
-    '.factory/schemas/factory-readiness-policy-v1.schema.json',
-    '.factory/schemas/factory-readiness-result-v2.schema.json',
-    '.factory/schemas/ollama-usage-v1.schema.json',
-    '.factory/smoke/evidence_smoke.py',
-    '.factory/smoke/evidence_smoke_common.py',
-    '.factory/smoke/evidence_smoke_driver.py',
-    '.factory/smoke/evidence_smoke_gate.py',
-    '.factory/tests/adversarial-manifest.json',
-    '.factory/tests/fixtures/campaign_driver.py',
-    '.factory/tests/fixtures/conformance/sidecar-below-tier.json',
-    '.factory/tests/fixtures/conformance/sidecar-capability-relax.json',
-    '.factory/tests/fixtures/conformance/sidecar-human-tier.json',
-    '.factory/tests/fixtures/conformance/sidecar-missing-with-refs.json',
-    '.factory/tests/fixtures/conformance/sidecar-ref-absolute.json',
-    '.factory/tests/fixtures/conformance/sidecar-ref-prefix-alias.json',
-    '.factory/tests/fixtures/conformance/sidecar-ref-stale.json',
-    '.factory/tests/fixtures/conformance/sidecar-ref-traversal.json',
-    '.factory/tests/fixtures/fixture_plan_tool.py',
-    '.factory/tests/fixtures/plan-ambiguous-task-section.md',
-    '.factory/tests/fixtures/plan-bad-priority.md',
-    '.factory/tests/fixtures/plan-blocked-without-reference.md',
-    '.factory/tests/fixtures/plan-bom.md',
-    '.factory/tests/fixtures/plan-classification-blocked.md',
-    '.factory/tests/fixtures/plan-classification-not-applicable.md',
-    '.factory/tests/fixtures/plan-cyclic-dependency.md',
-    '.factory/tests/fixtures/plan-dependency-range-oversize.md',
-    '.factory/tests/fixtures/plan-duplicate-field.md',
-    '.factory/tests/fixtures/plan-duplicate-heading.md',
-    '.factory/tests/fixtures/plan-duplicate-task-id.md',
-    '.factory/tests/fixtures/plan-duplicate-task-title.md',
-    '.factory/tests/fixtures/plan-duplicate-title.md',
-    '.factory/tests/fixtures/plan-empty-interaction.md',
-    '.factory/tests/fixtures/plan-empty-required-value.md',
-    '.factory/tests/fixtures/plan-final-audit-misplaced.md',
-    '.factory/tests/fixtures/plan-final-audit-missing-dependency.md',
-    '.factory/tests/fixtures/plan-front-matter-absolute-path.md',
-    '.factory/tests/fixtures/plan-front-matter-bad-sha.md',
-    '.factory/tests/fixtures/plan-front-matter-duplicate-key.md',
-    '.factory/tests/fixtures/plan-front-matter-missing.md',
-    '.factory/tests/fixtures/plan-front-matter-traversal-path.md',
-    '.factory/tests/fixtures/plan-lifecycle-inconsistent.md',
-    '.factory/tests/fixtures/plan-malformed-dependencies.md',
-    '.factory/tests/fixtures/plan-matrix-bad-classification.md',
-    '.factory/tests/fixtures/plan-matrix-bad-header.md',
-    '.factory/tests/fixtures/plan-matrix-complete-nonverified.md',
-    '.factory/tests/fixtures/plan-matrix-complete-only-pending.md',
-    '.factory/tests/fixtures/plan-matrix-duplicate-id.md',
-    '.factory/tests/fixtures/plan-matrix-extra-id.md',
-    '.factory/tests/fixtures/plan-matrix-missing-id.md',
-    '.factory/tests/fixtures/plan-matrix-range-oversize.md',
-    '.factory/tests/fixtures/plan-matrix-unknown-task.md',
-    '.factory/tests/fixtures/plan-missing-field.md',
-    '.factory/tests/fixtures/plan-missing-interaction-boundary.md',
-    '.factory/tests/fixtures/plan-missing-interactions.md',
-    '.factory/tests/fixtures/plan-missing-title.md',
-    '.factory/tests/fixtures/plan-no-tasks.md',
-    '.factory/tests/fixtures/plan-no-title.md',
-    '.factory/tests/fixtures/plan-noncontiguous-ids.md',
-    '.factory/tests/fixtures/plan-out-of-order-dependency.md',
-    '.factory/tests/fixtures/plan-range-overflow.md',
-    '.factory/tests/fixtures/plan-select-blocked.md',
-    '.factory/tests/fixtures/plan-select-dependency-gate.md',
-    '.factory/tests/fixtures/plan-select-inconsistent-in-progress.md',
-    '.factory/tests/fixtures/plan-select-lexicographic-tiebreak.md',
-    '.factory/tests/fixtures/plan-select-priority-order.md',
-    '.factory/tests/fixtures/plan-select-resume-in-progress.md',
-    '.factory/tests/fixtures/plan-select-stale.md',
-    '.factory/tests/fixtures/plan-select-work-exhausted.md',
-    '.factory/tests/fixtures/plan-self-dependency.md',
-    '.factory/tests/fixtures/plan-structured-field-continuation.md',
-    '.factory/tests/fixtures/plan-trailing-blank-line.md',
-    '.factory/tests/fixtures/plan-two-in-progress.md',
-    '.factory/tests/fixtures/plan-unknown-dependency.md',
-    '.factory/tests/fixtures/plan-unknown-field.md',
-    '.factory/tests/fixtures/plan-unknown-lifecycle-status.md',
-    '.factory/tests/fixtures/plan-unknown-status.md',
-    '.factory/tests/fixtures/plan-unrecognized-heading.md',
-    '.factory/tests/fixtures/plan-valid-base.md',
-    '.factory/tests/fixtures/plan-verified-empty-refs.md',
-    '.factory/tests/fixtures/plan-verified-in-active-plan.md',
-    '.factory/tests/fixtures/plan-verified-pending.md',
-    '.factory/tests/fixtures/smoke_build.py',
-    '.factory/tests/fixtures/smoke_scenarios.py',
-    '.factory/tests/fixtures/state-attempt-before-phase.json',
-    '.factory/tests/fixtures/state-attempt-marker-without-attempt.json',
-    '.factory/tests/fixtures/state-attempt-monotonic-negative.json',
-    '.factory/tests/fixtures/state-attempt-number-bool.json',
-    '.factory/tests/fixtures/state-attempt-number-negative.json',
-    '.factory/tests/fixtures/state-attempt-without-task.json',
-    '.factory/tests/fixtures/state-attempt-without-timestamp.json',
-    '.factory/tests/fixtures/state-audit-digest-invalid.json',
-    '.factory/tests/fixtures/state-branch-empty.json',
-    '.factory/tests/fixtures/state-campaign-empty.json',
-    '.factory/tests/fixtures/state-current-round-bool.json',
-    '.factory/tests/fixtures/state-current-round-exceeds-requested.json',
-    '.factory/tests/fixtures/state-current-round-zero.json',
-    '.factory/tests/fixtures/state-digest-uppercase.json',
-    '.factory/tests/fixtures/state-digest-valid-audit.json',
-    '.factory/tests/fixtures/state-digest-valid-implementation.json',
-    '.factory/tests/fixtures/state-digest-valid-initial.json',
-    '.factory/tests/fixtures/state-empty-object.json',
-    '.factory/tests/fixtures/state-field-extra.json',
-    '.factory/tests/fixtures/state-field-missing.json',
-    '.factory/tests/fixtures/state-identity-empty.json',
-    '.factory/tests/fixtures/state-identity-malformed.json',
-    '.factory/tests/fixtures/state-ledger-bad-digest.jsonl',
-    '.factory/tests/fixtures/state-ledger-bad-tag.jsonl',
-    '.factory/tests/fixtures/state-ledger-empty-line.jsonl',
-    '.factory/tests/fixtures/state-ledger-extra-key.jsonl',
-    '.factory/tests/fixtures/state-ledger-malformed.jsonl',
-    '.factory/tests/fixtures/state-ledger-repeated-tag.jsonl',
-    '.factory/tests/fixtures/state-outcome-number.json',
-    '.factory/tests/fixtures/state-outcome-phase-mismatch.json',
-    '.factory/tests/fixtures/state-outcome-unknown.json',
-    '.factory/tests/fixtures/state-phase-base-commit-invalid.json',
-    '.factory/tests/fixtures/state-phase-base-commit-uppercase.json',
-    '.factory/tests/fixtures/state-phase-monotonic-negative.json',
-    '.factory/tests/fixtures/state-phase-monotonic-zero.json',
-    '.factory/tests/fixtures/state-phase-unknown.json',
-    '.factory/tests/fixtures/state-plan-digest-invalid.json',
-    '.factory/tests/fixtures/state-role-digest-empty-role.json',
-    '.factory/tests/fixtures/state-role-digest-invalid.json',
-    '.factory/tests/fixtures/state-role-digests-empty.json',
-    '.factory/tests/fixtures/state-role-digests-not-object.json',
-    '.factory/tests/fixtures/state-rounds-requested-bool.json',
-    '.factory/tests/fixtures/state-rounds-requested-negative.json',
-    '.factory/tests/fixtures/state-rounds-requested-zero.json',
-    '.factory/tests/fixtures/state-schema-missing.json',
-    '.factory/tests/fixtures/state-schema-wrong.json',
-    '.factory/tests/fixtures/state-spec-digest-invalid.json',
-    '.factory/tests/fixtures/state-task-id-bool.json',
-    '.factory/tests/fixtures/state-task-id-zero.json',
-    '.factory/tests/fixtures/state-task-outside-implementation.json',
-    '.factory/tests/fixtures/state-task-without-attempt.json',
-    '.factory/tests/fixtures/state-terminal-outcome-mismatch.json',
-    '.factory/tests/fixtures/state-terminal-outcome-null.json',
-    '.factory/tests/fixtures/state-transition-audit-final.json',
-    '.factory/tests/fixtures/state-transition-audit-nonfinal.json',
-    '.factory/tests/fixtures/state-transition-implementation-completed.json',
-    '.factory/tests/fixtures/state-transition-planning-failed.json',
-    '.factory/tests/fixtures/state-transition-planning-planned.json',
-    '.factory/tests/fixtures/state-transition-verification-pass.json',
-    '.factory/tests/fixtures/state-unsafe-binary.json',
-    '.factory/tests/fixtures/state-unsafe-not-json.json',
-    '.factory/tests/fixtures/state-unsafe-oversized.json',
-    '.factory/tests/fixtures/state-valid-audit.json',
-    '.factory/tests/fixtures/state-valid-final-round-audit.json',
-    '.factory/tests/fixtures/state-valid-implementation-planned.json',
-    '.factory/tests/fixtures/state-valid-implementation.json',
-    '.factory/tests/fixtures/state-valid-initial.json',
-    '.factory/tests/fixtures/state-valid-planning-post-audit.json',
-    '.factory/tests/fixtures/state-valid-retry-planning.json',
-    '.factory/tests/fixtures/state-valid-terminal-blocked.json',
-    '.factory/tests/fixtures/state-valid-terminal-failed.json',
-    '.factory/tests/fixtures/state-valid-terminal-findings.json',
-    '.factory/tests/fixtures/state-valid-terminal-infrastructure-failure.json',
-    '.factory/tests/fixtures/state-valid-terminal-interrupted.json',
-    '.factory/tests/fixtures/state-valid-terminal-success.json',
-    '.factory/tests/fixtures/state-valid-verification.json',
-    '.factory/tests/fixtures/usage-malformed.html',
-    '.factory/tests/fixtures/usage-partial.html',
-    '.factory/tests/fixtures/usage-secret-hint.html',
-    '.factory/tests/test-factory-adversarial.py',
-    '.factory/tests/test-factory-adversarial.sh',
-    '.factory/tests/test-factory-campaign.py',
-    '.factory/tests/test-factory-confinement.py',
-    '.factory/tests/test-factory-conformance.py',
-    '.factory/tests/test-factory-evidence.py',
-    '.factory/tests/test-factory-findings.py',
-    '.factory/tests/test-factory-footprint.py',
-    '.factory/tests/test-factory-footprint.sh',
-    '.factory/tests/test-factory-generic-evidence.py',
-    '.factory/tests/test-factory-generic-evidence.sh',
-    '.factory/tests/test-factory-installed.py',
-    '.factory/tests/test-factory-installed.sh',
-    '.factory/tests/test-factory-launch.py',
-    '.factory/tests/test-factory-lock.py',
-    '.factory/tests/test-factory-migration.py',
-    '.factory/tests/test-factory-migration.sh',
-    '.factory/tests/test-factory-plan-parser.py',
-    '.factory/tests/test-factory-pre-round.py',
-    '.factory/tests/test-factory-redaction.py',
-    '.factory/tests/test-factory-readiness.py',
-    '.factory/tests/test-factory-selector.py',
-    '.factory/tests/test-factory-smoke.py',
-    '.factory/tests/test-factory-smoke.sh',
-    '.factory/tests/test-factory-state.py',
-    '.factory/tests/test-factory-supervision.sh',
-    '.factory/tests/test-factory-usage.py',
-    'scripts/factory_state_io.py',
-    'scripts/machine-receipt.py',
-})
+PENDING_ALLOWLIST: frozenset = frozenset()
 
-
-
-# Secret/credential-shaped path detection.  A path is never staged when
-# its basename looks like an actual credential artifact: a dot-env file, a
-# key/keystore suffix, an exact credential artifact name (``id_rsa``,
-# ``authorized_keys``, ``api_key``, ...), an exact credential word
-# (``password``, ``token``, ``secret``, ...), or a delimiter compound that
-# carries two or more credential words (``secret_token``).  Descriptive
-# names that merely mention secrets — for example the committed redaction
-# fixture ``usage-secret-hint.html`` — are not credential artifacts and are
-# not flagged (a ``secret-hint`` fixture must keep installing).
 _SECRET_NAME_WORDS: frozenset = frozenset({
     "secret", "token", "password", "passwd", "credential",
     "credentials", "keyring", "cookie", "oauth", "bearer",
@@ -632,7 +374,7 @@ def _pending_is_production_authority(root: Path, rel: str) -> bool:
     """Whether pending bytes could execute or control an installed harness."""
     authority_prefixes = (
         ".factory/bin/", ".factory/loop/", ".factory/prompts/",
-        ".factory/schemas/", ".pi/", "scripts/",
+        ".factory/schemas/", ".pi/", ".factory/tools/",
     )
     authority_exact = {
         ".factory/__init__.py", ".factory/campaign-receipt-policy.json",
@@ -1098,7 +840,7 @@ def install_harness(
         # 2. Pending harness content under the hidden namespaces
         #    (Task-20-era additions): staged from the worktree only when on
         #    the exact reviewer allowlist, and explicitly flagged.  A
-        #    visible-``scripts/`` worktree change that is not a declared
+        #    visible-``.factory/tools/`` worktree change that is not a declared
         #    authority is never an installed authority and is never staged.
         for rel in sorted(pending):
             if rel in NON_INSTALLED_MODULES or rel.startswith(NON_INSTALLED_PREFIXES):
@@ -1106,7 +848,7 @@ def install_harness(
             if rel in declared:
                 # Staged below as a shared authority or operator entrypoint.
                 continue
-            if rel.startswith("scripts/"):
+            if rel.startswith(".factory/tools/"):
                 continue
             if rel.startswith(".factory/") or rel.startswith(".pi/"):
                 if not os.path.lexists(root / rel):

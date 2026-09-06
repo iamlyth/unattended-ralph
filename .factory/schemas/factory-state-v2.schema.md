@@ -20,7 +20,7 @@ transition it.
   invariant is a tamper (`StateTamperError`) and never reaches a transition,
   a digest, or a write.
 - All file I/O is atomic, no-follow, and ownership/mode/link-count checked
-  through the established dirfd authority `scripts/factory_state_io.py`
+  through the established dirfd authority `.factory/tools/factory_state_io.py`
   (`state_dir`/`read_bytes`/`atomic_write_json`). The file is published
   through a mode-0600 temporary inode and `linkat`, so a raced pathname is
   never silently replaced, and every open re-validates the recorded

@@ -74,10 +74,10 @@ class ConformanceFixture:
     def __init__(self, root: Path) -> None:
         self.root = root
         for rel in (".factory/artifacts", ".factory/schemas", ".factory/loop",
-                    ".factory-state", "tests/fixtures", "docs", "scripts"):
+                    ".factory-state", ".factory/tests/legacy/fixtures", "docs", "scripts"):
             (root / rel).mkdir(parents=True, exist_ok=True)
         for script in (VALIDATOR, FACTS_VALIDATOR, CAPABILITY_CHECKER, CONTRACT_CHECKER):
-            shutil.copy2(script, root / "scripts" / script.name)
+            shutil.copy2(script, root / ".factory" / "tools" / script.name)
         # The validators run every trusted Git call through the committed
         # pinned-Git authority (.factory/loop/gitutil.py).  The fixture
         # receives the exact committed module (never a weakened stub): the
@@ -87,10 +87,10 @@ class ConformanceFixture:
         if gitutil.is_symlink() or not gitutil.is_file():
             raise AssertionError(f"missing pinned-Git authority: {gitutil}")
         shutil.copy2(gitutil, root / ".factory" / "loop" / "gitutil.py")
-        (root / "scripts" / "verify-boilerplate.sh").write_text(
+        (root / ".factory" / "tools" / "verify-boilerplate.sh").write_text(
             "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
         )
-        (root / "scripts" / "verify-boilerplate.sh").chmod(0o755)
+        (root / ".factory" / "tools" / "verify-boilerplate.sh").chmod(0o755)
         (root / "docs" / "SPEC.md").write_text("# Spec\n", encoding="utf-8")
         (root / ".gitignore").write_text(".factory-state/\n", encoding="utf-8")
         (root / ".factory" / "environment.toml").write_text(
@@ -169,8 +169,8 @@ class ConformanceFixture:
                 {"id": "REQ-01", "spec_sections": ["§1"], "classification": "verified",
                  "evidence_tier": "unit", "required_tier": "unit",
                  "required_capabilities": [], "evidence_commit": head,
-                 "receipts": ["tests/fixtures/runner-manifest.json"],
-                 "artifacts": ["tests/probe.c"], "fact_refs": [], "reason": ""},
+                 "receipts": [".factory/tests/legacy/fixtures/runner-manifest.json"],
+                 "artifacts": [".factory/tests/legacy/probe.c"], "fact_refs": [], "reason": ""},
                 {"id": "REQ-02", "spec_sections": ["§2"], "classification": "partial",
                  "evidence_tier": "unit", "required_tier": "unit",
                  "required_capabilities": [], "evidence_commit": head,
@@ -216,7 +216,7 @@ class ConformanceFixture:
     def validator(self, mode: str, *extra: str,
                   env: dict | None = None) -> subprocess.CompletedProcess:
         return run(
-            [sys.executable, "./scripts/validate-conformance.py", mode,
+            [sys.executable, "./.factory/tools/validate-conformance.py", mode,
              ".factory/artifacts/conformance.json", *extra],
             self.root,
             env=env,
@@ -286,8 +286,8 @@ class RuntimeReceiptTests(unittest.TestCase):
                      root / ".factory" / "loop" / "evidence.py")
         shutil.copy2(ROOT / ".factory" / "loop" / "lock.py",
                      root / ".factory" / "loop" / "lock.py")
-        shutil.copy2(ROOT / "scripts" / "machine-receipt.py",
-                     root / "scripts" / "machine-receipt.py")
+        shutil.copy2(ROOT / ".factory" / "tools" / "machine-receipt.py",
+                     root / ".factory" / "tools" / "machine-receipt.py")
         self.state_dir = root / ".factory-state"
         self.state_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.state_dir, 0o700)
@@ -311,7 +311,7 @@ class RuntimeReceiptTests(unittest.TestCase):
 
     def _mint(self, tag: str, *argv: str) -> subprocess.CompletedProcess[str]:
         return run(
-            [sys.executable, "scripts/machine-receipt.py", "--root", str(self.fixture.root),
+            [sys.executable, ".factory/tools/machine-receipt.py", "--root", str(self.fixture.root),
              "--tag", tag, "--audit-round", "1", "--evidence-commit", self.head,
              "--nonce", self.nonce, "--", *argv],
             self.fixture.root,
@@ -325,7 +325,7 @@ class RuntimeReceiptTests(unittest.TestCase):
         for req in data["requirements"]:
             if req["id"] == "REQ-01":
                 req["receipts"] = [] if in_artifacts else [ref]
-                req["artifacts"] = [ref] if in_artifacts else ["tests/probe.c"]
+                req["artifacts"] = [ref] if in_artifacts else [".factory/tests/legacy/probe.c"]
                 req["evidence_commit"] = self.head
         self.fixture.sidecar_path.write_text(json.dumps(data), encoding="utf-8")
         self.head = self.fixture.commit_all("sidecar runtime receipt")
@@ -540,7 +540,7 @@ class RefSafetyTests(unittest.TestCase):
         self.assertIn("not a Git blob", result.stderr)
 
     def test_traversal_refs_fail(self) -> None:
-        for name, ref in (("sidecar-ref-traversal.json", "tests/../../escape"),):
+        for name, ref in (("sidecar-ref-traversal.json", ".factory/tests/legacy/../../escape"),):
             with self.subTest(ref=ref):
                 self.fixture.apply_fixture(name)
                 result = self.fixture.validator("planning")
@@ -557,7 +557,7 @@ class RefSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
 
     def test_special_and_control_refs_fail(self) -> None:
-        for ref in ("C:\\evil", "tests//x", "tests/a\\b", "tests/evil\x00name"):
+        for ref in ("C:\\evil", ".factory/tests/legacy//x", ".factory/tests/legacy/a\\b", ".factory/tests/legacy/evil\x00name"):
             with self.subTest(ref=ref):
                 self.fixture.sidecar_patch("REQ-01", artifacts=[ref])
                 result = self.fixture.validator("planning")
@@ -700,13 +700,13 @@ class UnevidencedCapabilityTests(unittest.TestCase):
             "ssh_config_alias = \"probe-runner\"\n"
             "working_directory = \"/srv/dev-runner/workspaces/probe\"\n"
             "capabilities = [\"probe-capability\"]\n"
-            "verify_argv = [\"./scripts/verify-boilerplate.sh\"]\n",
+            "verify_argv = [\"./.factory/tools/verify-boilerplate.sh\"]\n",
             encoding="utf-8",
         )
         (self.fixture.root / ".factory" / "capability-contracts.json").write_text(
             json.dumps({"schema": "ralph-capability-contract/v1", "capabilities": [
                 {"name": "probe-capability",
-                 "probe_argv": ["./scripts/verify-boilerplate.sh"],
+                 "probe_argv": ["./.factory/tools/verify-boilerplate.sh"],
                  "probe_marker": "--- probe-capability contract ---",
                  "must_execute": True,
                  "must_not_skip": ["Skipped"],
@@ -767,7 +767,7 @@ class DuplicateAuthorityTests(unittest.TestCase):
             ".factory/artifacts/blocked-facts.json",
             '{"schema": "ralph-blocked-facts/v1", "facts": [], "facts": []}',
         )
-        result = run([sys.executable, "./scripts/validate-blocked-facts.py",
+        result = run([sys.executable, "./.factory/tools/validate-blocked-facts.py",
                       "planning", ".factory/artifacts/blocked-facts.json"],
                      self.fixture.root)
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -782,14 +782,14 @@ class DuplicateAuthorityTests(unittest.TestCase):
             "ssh_config_alias = \"probe-runner\"\n"
             "working_directory = \"/srv/dev-runner/workspaces/probe\"\n"
             "capabilities = [\"probe-capability\"]\n"
-            "verify_argv = [\"./scripts/verify-boilerplate.sh\"]\n",
+            "verify_argv = [\"./.factory/tools/verify-boilerplate.sh\"]\n",
             encoding="utf-8",
         )
         self._write(
             ".factory/capability-contracts.json",
             '{"schema": "ralph-capability-contract/v1", "capabilities": [], "capabilities": []}',
         )
-        result = run([sys.executable, "./scripts/check-capability-contracts.py"],
+        result = run([sys.executable, "./.factory/tools/check-capability-contracts.py"],
                      self.fixture.root)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("duplicate JSON object key", result.stderr)
@@ -825,7 +825,7 @@ class DuplicateAuthorityTests(unittest.TestCase):
         data = json.loads(self.fixture.facts_path.read_text(encoding="utf-8"))
         data["facts"].append(dict(data["facts"][0], id="FACT-001"))
         self.fixture.facts_path.write_text(json.dumps(data), encoding="utf-8")
-        result = run([sys.executable, "./scripts/validate-blocked-facts.py",
+        result = run([sys.executable, "./.factory/tools/validate-blocked-facts.py",
                       "planning", ".factory/artifacts/blocked-facts.json"],
                      self.fixture.root)
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -839,25 +839,25 @@ class DuplicateAuthorityTests(unittest.TestCase):
             "ssh_config_alias = \"probe-runner\"\n"
             "working_directory = \"/srv/dev-runner/workspaces/probe\"\n"
             "capabilities = [\"probe-capability\"]\n"
-            "verify_argv = [\"./scripts/verify-boilerplate.sh\"]\n",
+            "verify_argv = [\"./.factory/tools/verify-boilerplate.sh\"]\n",
             encoding="utf-8",
         )
         self.fixture.root.joinpath(".factory/capability-contracts.json").write_text(
             json.dumps({"schema": "ralph-capability-contract/v1", "capabilities": [
                 {"name": "probe-capability",
-                 "probe_argv": ["./scripts/verify-boilerplate.sh"],
+                 "probe_argv": ["./.factory/tools/verify-boilerplate.sh"],
                  "probe_marker": "--- probe-capability contract ---",
                  "must_execute": True,
                  "must_not_skip": ["Skipped"],
                  "deny_simulated_markers": ["mock"]},
                 {"name": "probe-capability",
-                 "probe_argv": ["./scripts/verify-boilerplate.sh"],
+                 "probe_argv": ["./.factory/tools/verify-boilerplate.sh"],
                  "probe_marker": "--- probe-capability contract ---",
                  "must_execute": True,
                  "must_not_skip": ["Skipped"],
                  "deny_simulated_markers": ["mock"]},
             ]}), encoding="utf-8")
-        result = run([sys.executable, "./scripts/check-capability-contracts.py"],
+        result = run([sys.executable, "./.factory/tools/check-capability-contracts.py"],
                      self.fixture.root)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("contract names must be unique", result.stderr)
@@ -932,7 +932,7 @@ class GitBoundaryTests(unittest.TestCase):
         git(self.fixture.root, "replace", head, tamper)
         # Planning stays valid: GIT_NO_REPLACE_OBJECTS=1 makes object
         # resolution ignore refs/replace/*, so the original evidence commit
-        # (with tests/probe.c) resolves and the ref is a real blob.
+        # (with .factory/tests/legacy/probe.c) resolves and the ref is a real blob.
         result = self.fixture.validator("planning")
         self.assertEqual(result.returncode, 0, result.stderr)
         # Control: with the boundary absent (GIT_NO_REPLACE_OBJECTS unset) the

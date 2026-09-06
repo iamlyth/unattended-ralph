@@ -1,18 +1,18 @@
 {
   "schema": "ralph-receipt-policy/v1",
-  "description": "Authorizes campaign objective receipt categories in the product-neutral boilerplate. A machine receipt satisfies a category only when its recorded argv equals one of the category's allowlisted argv exactly, its evidence_commit equals the active campaign audit base, and it carries the audit coordinator round/nonce binding. A runner manifest satisfies a category only when the category allows manifests and the manifest is an accepted exact-commit runner receipt whose recorded capabilities contain the exact capability that runs the category's allowlisted probe command (resolved through .factory/capability-contracts.json): every [manifest:] reference must be an exact signed record in the runner-evidence aggregate at the audit base, validated by scripts/check-factory-runner-evidence.py --verify-manifest. Manifest matching is exact capability evidence, never a path-substring proxy: the manifest path is ignored. Standalone/minimal, unsigned, fabricated, and path-category-only manifests are rejected. Arbitrary commands (for example a bare `true`) are never allowed; receipt tags alone never authorize. The allowlists bind each category to the generic boilerplate's own gate tooling; an adopting product replaces this policy with its product commands before running campaigns.",
+  "description": "Authorizes campaign objective receipt categories in the product-neutral boilerplate. A machine receipt satisfies a category only when its recorded argv equals one of the category's allowlisted argv exactly, its evidence_commit equals the active campaign audit base, and it carries the audit coordinator round/nonce binding. A runner manifest satisfies a category only when the category allows manifests and the manifest is an accepted exact-commit runner receipt whose recorded capabilities contain the exact capability that runs the category's allowlisted probe command (resolved through .factory/capability-contracts.json): every [manifest:] reference must be an exact signed record in the runner-evidence aggregate at the audit base, validated by .factory/tools/check-factory-runner-evidence.py --verify-manifest. Manifest matching is exact capability evidence, never a path-substring proxy: the manifest path is ignored. Standalone/minimal, unsigned, fabricated, and path-category-only manifests are rejected. Arbitrary commands (for example a bare `true`) are never allowed; receipt tags alone never authorize. The allowlists bind each category to the generic boilerplate's own gate tooling; an adopting product replaces this policy with its product commands before running campaigns.",
   "categories": [
     {
       "name": "runner-evidence",
       "tier": "installed",
       "allow_manifest": true,
-      "argv": [["./scripts/run-factory-runners.py"]]
+      "argv": [["./.factory/tools/run-factory-runners.py"]]
     },
     {
       "name": "project-verify",
       "tier": "installed",
       "allow_manifest": false,
-      "argv": [["./scripts/verify-boilerplate.sh"]]
+      "argv": [["./.factory/tools/verify-boilerplate.sh"]]
     },
     {
       "name": "installed-harness-smoke",
@@ -24,49 +24,49 @@
       "name": "installed-functional",
       "tier": "installed",
       "allow_manifest": true,
-      "argv": [["./scripts/check-installed-functional-evidence.sh"]]
+      "argv": [["./.factory/tools/check-installed-functional-evidence.sh"]]
     },
     {
       "name": "visual-render",
       "tier": "installed",
       "allow_manifest": false,
-      "argv": [["./scripts/check-golden-policy.py"]]
+      "argv": [["./.factory/tools/check-golden-policy.py"]]
     },
     {
       "name": "real-system-service",
       "tier": "real_system",
       "allow_manifest": false,
-      "argv": [["./scripts/check-factory-environment.py"]]
+      "argv": [["./.factory/tools/check-factory-environment.py"]]
     },
     {
       "name": "external-observer",
       "tier": "real_system",
       "allow_manifest": false,
-      "argv": [["./scripts/check-factory-environment.py"]]
+      "argv": [["./.factory/tools/check-factory-environment.py"]]
     },
     {
       "name": "package-build",
       "tier": "installed",
       "allow_manifest": true,
-      "argv": [["./scripts/verify-boilerplate.sh"]]
+      "argv": [["./.factory/tools/verify-boilerplate.sh"]]
     },
     {
       "name": "package-install",
       "tier": "installed",
       "allow_manifest": true,
-      "argv": [["./scripts/verify-boilerplate.sh"]]
+      "argv": [["./.factory/tools/verify-boilerplate.sh"]]
     },
     {
       "name": "final-gate",
       "tier": "installed",
       "allow_manifest": false,
-      "argv": [["./scripts/final-gate.sh", "--implementation"]]
+      "argv": [["./.factory/tools/final-gate.sh", "--implementation"]]
     },
     {
       "name": "audit-report",
       "tier": "unit",
       "allow_manifest": false,
-      "argv": [["./scripts/validate-campaign-audit.py", "complete", ".factory/artifacts/campaign-audit.md"]]
+      "argv": [["./.factory/tools/validate-campaign-audit.py", "complete", ".factory/artifacts/campaign-audit.md"]]
     }
   ]
 }

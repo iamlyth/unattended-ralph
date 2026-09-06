@@ -13,7 +13,7 @@ evidence tiers, and the coordinator-bounded receipt wrapper under the hidden
    later execution re-validates the binding (inode identity, owner,
    mode/link-count, byte digest, and committed blob at the current head) and
    fails closed on any pathname, content, or committed-tree substitution.
-   The mechanism mirrors the accepted ``scripts/campaign-verifier-binding.py``
+   The mechanism mirrors the accepted ``.factory/tools/campaign-verifier-binding.py``
    authority (immutable descriptor; pathname replacement rejected) as hidden
    standard-library code.  The retained descriptor is executed through
    ``/proc/self/fd/<fd>`` with the bound command argv passed to the kernel
@@ -91,7 +91,7 @@ RECEIPT_RE = re.compile(r"\[receipt:\s*([^\]]+)\]")
 MANIFEST_RE = re.compile(r"\[manifest:\s*([^\]]+)\]")
 TIER_CLAIM_RE = re.compile(r"\btier\s*=\s*([a-z_]+)")
 
-MANIFEST_CHECKER_REL = "scripts/check-factory-runner-evidence.py"
+MANIFEST_CHECKER_REL = ".factory/tools/check-factory-runner-evidence.py"
 
 
 class EvidenceError(RuntimeError):
@@ -751,7 +751,7 @@ def validate_manifest_ref(
 
     The reference must be an exact record in the runner-evidence aggregate
     that passes the same signer/commit/tree/environment/archive/argv
-    validation as ``scripts/check-factory-runner-evidence.py``.  Unsigned,
+    validation as ``.factory/tools/check-factory-runner-evidence.py``.  Unsigned,
     fabricated, standalone/minimal, and path-category-only manifests are
     rejected; a manifest certifies only a clean pass.
     """

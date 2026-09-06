@@ -1,0 +1,21 @@
+{
+  "schema": "factory-extension-requirements/v1",
+  "requirements": [
+    {
+      "id": "EXT-PREROUND-01",
+      "summary": "Fixed exact-commit pre-round hooks execute once in order before each planner and fail closed."
+    },
+    {
+      "id": "EXT-READINESS-01",
+      "summary": "Round-zero production readiness executes the fixed aggregate, gate, human-authority, and invalidation policy before planning."
+    },
+    {
+      "id": "EXT-STATE-V2-01",
+      "summary": "factory-state/v2 is an explicitly versioned extension of canonical STATE-01; its additional readiness and pre-round fields are not claimed to be the exact section 11 field set."
+    },
+    {
+      "id": "EXT-RUNNER-V4-01",
+      "summary": "Runner aggregate v4 adds campaign/readiness namespace and bounded artifact metadata while preserving RUNNER-01 fail-closed trust semantics."
+    }
+  ]
+}

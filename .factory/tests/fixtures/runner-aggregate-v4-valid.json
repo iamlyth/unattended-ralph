@@ -1,0 +1,25 @@
+{
+  "schema": "factory-runner-aggregate/v4",
+  "campaign_id": "fixture",
+  "readiness_nonce": "9999999999999999999999999999999999999999999999999999999999999999",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "environment_blob": "cccccccccccccccccccccccccccccccccccccccc",
+  "runners": [
+    {
+      "name": "class-a",
+      "manifest": ".factory-state/runner-evidence/fixture/9999999999999999999999999999999999999999999999999999999999999999/class-a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/manifest.json",
+      "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "capabilities": ["cap-a"],
+      "artifact_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "artifact_count": 0,
+      "artifact_bytes": 0,
+      "signer": {
+        "principal": "class-a",
+        "key_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "algorithm": "ssh-ed25519",
+        "signature_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  ]
+}

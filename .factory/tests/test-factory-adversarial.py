@@ -3,7 +3,7 @@
 
 This test lives under the hidden ``.factory/tests/`` namespace because the
 specification (HIDE-01, §3) keeps harness-only tests out of the adopting
-product's visible ``tests/`` tree.  It is the deterministic verification for
+product's visible ``.factory/tests/legacy/`` tree.  It is the deterministic verification for
 TEST-01 (§22, tests 1-27) and drives the *real* authorities of the new
 Python control plane — never reimplementations — through fresh subprocesses
 and test-owned temporary Git repositories:
@@ -15,7 +15,7 @@ and test-owned temporary Git repositories:
   does not declare (the manifest is the single authority, never a comment);
 * **every case is non-vacuous**: each of the 27 cases runs against the
   committed authority (``campaign.py``, ``launch.py`` through the real
-  ``scripts/pi2-secure-exec.py`` wrapper, ``lock.py``, ``selector.py``,
+  ``.factory/tools/pi2-secure-exec.py`` wrapper, ``lock.py``, ``selector.py``,
   ``state.py``, ``usage.py``, ``evidence.py``, ``migration.py``,
   ``workspace_confinement.py`` + the committed confine launcher,
   ``machine-receipt.py``/``check-audit-receipts.py``,
@@ -128,7 +128,7 @@ gen_plan = FACTORY_CAMPAIGN.gen_plan
 PLAN_REL = FACTORY_CAMPAIGN.PLAN_REL
 DRIVER_REL = FACTORY_CAMPAIGN.DRIVER_REL
 
-VISIBLE_FIXTURES = ROOT / "tests" / "fixtures"
+VISIBLE_FIXTURES = ROOT / ".factory" / "tests" / "legacy" / "fixtures"
 # Synthetic secret marker: never a real credential.  Its presence in any
 # migration report proves a foreign ``.ralph`` byte leaked.
 RALPH_SECRET = b"RALPH-FOREIGN-SENTINEL-9f4c1a"
@@ -399,19 +399,20 @@ def prepare_launch_workspace(ws: FixtureWorkspace, *backend_rel: str) -> None:
     committed blobs (F2/F5).  Returns nothing; the workspace root is updated
     in place."""
     root = ws.root
-    scripts = root / "scripts"
+    scripts = root / ".factory" / "tools"
+    scripts.mkdir(parents=True, exist_ok=True)
     (root / ".factory" / "loop").mkdir(parents=True, exist_ok=True)
     (root / ".factory" / "schemas").mkdir(parents=True, exist_ok=True)
     (root / "src" / ".factory-test-output").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "scripts" / "pi2-secure-exec.py",
+    shutil.copy2(ROOT / ".factory" / "tools" / "pi2-secure-exec.py",
                  scripts / "pi2-secure-exec.py")
     # Task 11: the model-side Pi guard extension is a committed fixture blob
     # too — the launch authority verifies the working-tree extension equals
     # the committed blob and always loads it through ``--extension``.
-    shutil.copy2(ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+    shutil.copy2(ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
                  scripts / "pi-factory-guard-extension.mjs")
     (scripts / "pi-cli-shims").mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "scripts" / "pi-cli-shims" / "git",
+    shutil.copy2(ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
                  scripts / "pi-cli-shims" / "git")
     for module in ("confine_launcher.py", "usage.py", "usage_fetch.py"):
         shutil.copy2(LOOP / module, root / ".factory" / "loop" / module)
@@ -1506,7 +1507,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         state_file.write_bytes(original)
         os.chmod(state_file, 0o600)
 
-    # -- case 13: Ollama decision belongs only to the pre-round registry -----
+    # -- case 13: canonical per-invocation Ollama decision table -------------
 
     def test_case_13_ollama_check_wait_before_invocation(self) -> None:
         # The guard exit table (real CLI, fresh subprocesses) is the
@@ -1536,9 +1537,9 @@ class CaseAdversarialSuite(_AdversarialBase):
             input_bytes=SYNTH_COOKIE.encode(),
         )
         self.assertEqual(waited.returncode, usage_module.EXIT_ALLOWED, waited.stderr)
-        # Per-model authorization must not expose a quota-driver API or call
-        # the retired launch gate. The committed pre-round registry contains
-        # only the enabled branch hook; Ollama policy is not implemented yet.
+        # Quota remains parent-side and exposes no model-side option. The
+        # pre-round registry is independent: it cannot substitute a once-per-
+        # round check for the mandatory check before every invocation.
         ws = self.make(SUCCESS_SCENARIO)
         backend = ws.root / "backend-ollama.py"
         backend.write_text("#!/usr/bin/env python3\nprint('ok')\n",
@@ -1572,10 +1573,13 @@ class CaseAdversarialSuite(_AdversarialBase):
                 spec=(ws.root / "docs" / "SPEC.md").read_bytes(),
                 plan=(ws.root / PLAN_REL).read_bytes(),
             )
-        self.assertIn("campaign-only", str(denied.exception))
+        self.assertIn("locked readiness store", str(denied.exception))
         registry = json.loads((ws.root / ".factory/pre-round-hooks.json").read_text())
         enabled = {item["id"]: item["enabled"] for item in registry["hooks"]}
         self.assertEqual(enabled, {"branch-guard": True})
+        campaign_source=(ROOT/".factory/loop/campaign.py").read_text()
+        self.assertIn("usage_module.require_quota", campaign_source)
+        self.assertIn("final_rc", (ROOT/".factory/loop/usage.py").read_text())
 
     # -- case 14: credential tool-call blocking and redaction stay active ----
 
@@ -1585,7 +1589,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # a fake credential-shaped secret in a gate/role output is masked
         # before it can enter a result, log, receipt, or repository state.
         secret = "FAKE_TOOLCALL_SECRET_7f3a"
-        guard_src = (ROOT / "scripts" / "credential-guard.py").read_bytes()
+        guard_src = (ROOT / ".factory" / "tools" / "credential-guard.py").read_bytes()
         redactor = redaction_module.redactor_from_bytes(
             guard_src, guard_src, "0" * 40)
         out = redactor.redact_text(
@@ -1596,7 +1600,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # The guard itself (the tool-call blocking boundary) fails closed on
         # a credential-bearing shell command through the real CLI.
         guard_proc = run(
-            [PY, str(ROOT / "scripts" / "credential-guard.py"),
+            [PY, str(ROOT / ".factory" / "tools" / "credential-guard.py"),
              "check-command", "--command", 'echo "$OLLAMA_COOKIE"'],
             check=False,
         )
@@ -1607,7 +1611,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # An ordinary command stays allowed (the guard is a classifier, never
         # a blanket rejector).
         allowed_proc = run(
-            [PY, str(ROOT / "scripts" / "credential-guard.py"),
+            [PY, str(ROOT / ".factory" / "tools" / "credential-guard.py"),
              "check-command", "--command", "echo hello"],
             check=False,
         )
@@ -1615,7 +1619,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                          "an ordinary command must stay allowed")
         # The campaign's gate-output redaction is bound to the committed
         # guard: a missing guard source fails closed (CRED-01 never weakens).
-        self.assertTrue((ROOT / "scripts" / "credential-guard.py").is_file())
+        self.assertTrue((ROOT / ".factory" / "tools" / "credential-guard.py").is_file())
 
     # -- case 15: exact-commit runner, visual, installed, and audit receipts --
 
@@ -1631,8 +1635,8 @@ class CaseAdversarialSuite(_AdversarialBase):
         # test-owned fixture state; no fake receipt is ever claimed as
         # passing evidence and no external runner/hardware is used.
         root = Path(tempfile.mkdtemp(prefix="adversarial-receipt.", dir=self.tmp))
-        (root / "scripts").mkdir()
         (root / ".factory").mkdir()
+        (root / ".factory" / "tools").mkdir()
         (root / ".factory" / "artifacts").mkdir()
         (root / STATE_DIR).mkdir()
         os.chmod(root / STATE_DIR, 0o700)
@@ -1643,7 +1647,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "check-factory-runner-evidence.py", "check-factory-environment.py",
             "visual-audit-provenance.py", "check-installed-functional-evidence.sh",
         ):
-            shutil.copy2(ROOT / "scripts" / script, root / "scripts" / script)
+            shutil.copy2(ROOT / ".factory" / "tools" / script, root / ".factory" / "tools" / script)
         # Committed runner declaration (validated by the retained
         # check-factory-environment policy) plus the enabled signer trust
         # bound to an ephemeral test-owned ed25519 key (never committed).
@@ -1655,7 +1659,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             'ssh_config_alias = "fixture-runner"\n'
             'working_directory = "/srv/dev-runner/workspaces/fixture-project"\n'
             'capabilities = ["project-gate"]\n'
-            'verify_argv = ["./scripts/verify-boilerplate.sh"]\n',
+            'verify_argv = ["./.factory/tools/verify-boilerplate.sh"]\n',
             encoding="utf-8")
         (root / ".gitignore").write_text(".factory-state/\n", encoding="utf-8")
         signer_key = self.tmp / "signer-key"
@@ -1726,7 +1730,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                 root, "rev-parse", f"{head}:.factory/environment.toml"
             ).stdout.strip()
             argv_digest = sha256(json.dumps(
-                ["./scripts/verify-boilerplate.sh"],
+                ["./.factory/tools/verify-boilerplate.sh"],
                 separators=(",", ":")).encode("utf-8"))
             archive = root / "commit-archive.tar"
             _git(root, "archive", "--format=tar", "--output",
@@ -1783,7 +1787,7 @@ class CaseAdversarialSuite(_AdversarialBase):
 
         def runner_check(ref: str, commit: str) -> subprocess.CompletedProcess[str]:
             return run(
-                [PY, str(root / "scripts" / "check-factory-runner-evidence.py"),
+                [PY, str(root / ".factory" / "tools" / "check-factory-runner-evidence.py"),
                  "--verify-manifest", ref, "--expected-commit", commit],
                 root=root, check=False,
             )
@@ -1839,7 +1843,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         }), encoding="utf-8")
         os.chmod(coordinator, 0o600)
         minted = run(
-            [PY, str(root / "scripts" / "machine-receipt.py"), "--root",
+            [PY, str(root / ".factory" / "tools" / "machine-receipt.py"), "--root",
              str(root), "--tag", "adversarial.gate",
              "--audit-round", "1", "--evidence-commit", head,
              "--nonce", "a" * 64, "--", str(TRUE_EXECUTABLE)],
@@ -1862,7 +1866,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         )
         audit.write_text(audit_body, encoding="utf-8")
         checked = run(
-            [PY, str(root / "scripts" / "check-audit-receipts.py"), str(audit),
+            [PY, str(root / ".factory" / "tools" / "check-audit-receipts.py"), str(audit),
              "--root", str(root)],
             check=False,
         )
@@ -1882,7 +1886,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             encoding="utf-8")
         os.chmod(receipt, 0o600)
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "check-audit-receipts.py"),
+            run([PY, str(root / ".factory" / "tools" / "check-audit-receipts.py"),
                  str(audit), "--root", str(root)], check=False).returncode, 0,
             "a tampered receipt record must fail the audit checker")
         receipt.write_bytes(original_receipt)
@@ -1891,7 +1895,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         with open(transcript, "ab") as stream:
             stream.write(b"intruder\n")
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "check-audit-receipts.py"),
+            run([PY, str(root / ".factory" / "tools" / "check-audit-receipts.py"),
                  str(audit), "--root", str(root)], check=False).returncode, 0,
             "a tampered receipt transcript must fail the audit checker")
         transcript.write_bytes(original_stdout)
@@ -1900,7 +1904,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "[receipt: .factory-state/audit-receipts/ghost.json]"),
             encoding="utf-8")
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "check-audit-receipts.py"),
+            run([PY, str(root / ".factory" / "tools" / "check-audit-receipts.py"),
                  str(audit), "--root", str(root)], check=False).returncode, 0,
             "a missing receipt reference must fail the audit checker")
         audit.write_text(
@@ -1915,7 +1919,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "(no real system service available)\n",
             encoding="utf-8")
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "check-audit-receipts.py"),
+            run([PY, str(root / ".factory" / "tools" / "check-audit-receipts.py"),
                  str(audit), "--root", str(root)], check=False).returncode, 0,
             "BLOCKED evidence in a pass audit must fail the checker")
         # The shared machine-receipt authority refuses a bare (unauthorized)
@@ -1923,7 +1927,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         scrubbed = {key: value for key, value in os.environ.items()
                     if not key.startswith("FACTORY_CAMPAIGN_AUDIT_")}
         bare = run(
-            [PY, str(root / "scripts" / "machine-receipt.py"), "--root",
+            [PY, str(root / ".factory" / "tools" / "machine-receipt.py"), "--root",
              str(root), "--tag", "bare.tag", "--", str(TRUE_EXECUTABLE)],
             check=False, env=scrubbed,
         )
@@ -1937,7 +1941,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         image = captures / "state-a.png"
         image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
         made = run(
-            [PY, str(root / "scripts" / "visual-audit-provenance.py"),
+            [PY, str(root / ".factory" / "tools" / "visual-audit-provenance.py"),
              "manifest", "--out", str(captures),
              "--commit", head, "--tree", tree],
             root=root, check=False,
@@ -1951,7 +1955,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                          "the visual provenance must bind the exact tree")
         self.assertEqual(provenance["schema"], "ralph-visual-audit-provenance/v1")
         verified = run(
-            [PY, str(root / "scripts" / "visual-audit-provenance.py"),
+            [PY, str(root / ".factory" / "tools" / "visual-audit-provenance.py"),
              "verify", "--out", str(captures)],
             root=root, check=False,
         )
@@ -1962,7 +1966,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # manifest's embedded fields).
         image.write_bytes(b"tampered-image-bytes")
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "visual-audit-provenance.py"),
+            run([PY, str(root / ".factory" / "tools" / "visual-audit-provenance.py"),
                  "verify", "--out", str(captures)], root=root,
                 check=False).returncode, 0,
             "an altered capture image must fail provenance verification")
@@ -1973,7 +1977,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             encoding="utf-8")
         os.chmod(captures / "provenance.json", 0o600)
         self.assertNotEqual(
-            run([PY, str(root / "scripts" / "visual-audit-provenance.py"),
+            run([PY, str(root / ".factory" / "tools" / "visual-audit-provenance.py"),
                  "verify", "--out", str(captures)], root=root,
                 check=False).returncode, 0,
             "a forged environment binding must fail provenance verification")
@@ -2009,7 +2013,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             "installed-harness-smoke.json"
         (root / STATE_DIR / "audit-receipts").mkdir(exist_ok=True)
         minted = run(
-            [PY, str(root / "scripts" / "machine-receipt.py"),
+            [PY, str(root / ".factory" / "tools" / "machine-receipt.py"),
              "--root", str(root), "--tag", "installed-harness-smoke",
              "--audit-round", "1", "--evidence-commit", head,
              "--nonce", installed_nonce, "--",
@@ -2039,7 +2043,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             encoding="utf-8")
         os.chmod(installed_record, 0o600)
         installed = run(
-            ["bash", str(root / "scripts" /
+            ["bash", str(root / ".factory" / "tools" /
                           "check-installed-functional-evidence.sh")],
             root=root, check=False,
         )
@@ -2058,13 +2062,13 @@ class CaseAdversarialSuite(_AdversarialBase):
 
         write_installed(skipped=1)
         self.assertNotEqual(
-            run(["bash", str(root / "scripts" /
+            run(["bash", str(root / ".factory" / "tools" /
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "skipped installed evidence must fail closed")
         write_installed(result="FAIL")
         self.assertNotEqual(
-            run(["bash", str(root / "scripts" /
+            run(["bash", str(root / ".factory" / "tools" /
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "failed installed evidence must fail closed")
@@ -2076,13 +2080,13 @@ class CaseAdversarialSuite(_AdversarialBase):
             encoding="utf-8")
         os.chmod(installed_record, 0o600)
         self.assertNotEqual(
-            run(["bash", str(root / "scripts" /
+            run(["bash", str(root / ".factory" / "tools" /
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "installed evidence bound to a non-ancestor commit must fail closed")
         shutil.rmtree(installed_ns)
         self.assertNotEqual(
-            run(["bash", str(root / "scripts" /
+            run(["bash", str(root / ".factory" / "tools" /
                              "check-installed-functional-evidence.sh")],
                 root=root, check=False).returncode, 0,
             "missing installed evidence must fail closed")
@@ -2323,11 +2327,8 @@ class CaseAdversarialSuite(_AdversarialBase):
         # unsafe marker fails closed (exit 2) instead of silently unfreezing.
         fixture = Path(tempfile.mkdtemp(prefix="adversarial-freeze.", dir=self.tmp))
         (fixture / ".factory" / "loop").mkdir(parents=True)
-        (fixture / "scripts").mkdir()
-        for module in ("migration", "gitutil", "plan_parser", "state"):
+        for module in ("migration", "gitutil", "plan_parser", "state", "factory_state_io"):
             shutil.copy2(LOOP / f"{module}.py", fixture / ".factory" / "loop" / f"{module}.py")
-        shutil.copy2(ROOT / "scripts" / "factory_state_io.py",
-                     fixture / "scripts" / "factory_state_io.py")
         marker = fixture / ".factory" / "ralph-freeze"
         guard = [PY, str(fixture / ".factory" / "loop" / "migration.py"),
                  "--root", str(fixture), "freeze", "--guard"]
@@ -2886,17 +2887,17 @@ class CaseAdversarialSuite(_AdversarialBase):
         # can never substitute the verifier that runs (EVID-01 §19).
         root = Path(tempfile.mkdtemp(prefix="adversarial-verifier.", dir=self.tmp))
         (root / ".factory").mkdir()
-        (root / "scripts").mkdir()
-        shutil.copy2(ROOT / "scripts" / "campaign-verifier-binding.py",
-                     root / "scripts" / "campaign-verifier-binding.py")
-        verifier = root / "scripts" / "verify-project.sh"
+        (root / ".factory" / "tools").mkdir()
+        shutil.copy2(ROOT / ".factory" / "tools" / "campaign-verifier-binding.py",
+                     root / ".factory" / "tools" / "campaign-verifier-binding.py")
+        verifier = root / ".factory" / "tools" / "verify-project.sh"
         verifier.write_text(
             "#!/usr/bin/env bash\necho ORIGINAL-VERIFIER-RAN\n"
             "exit 0\n", encoding="utf-8")
         verifier.chmod(0o755)
         (root / ".factory" / "config.toml").write_text(
             '[verification]\n'
-            'campaign_command = ["./scripts/verify-project.sh"]\n',
+            'campaign_command = ["./.factory/tools/verify-project.sh"]\n',
             encoding="utf-8")
         (root / ".factory" / "verifier-acceptance.json").write_text(
             json.dumps({"schema": "ralph-verifier-acceptance/v1",
@@ -2907,7 +2908,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         _git(root, "config", "user.name", "factory")
         _git(root, "add", "-A")
         _git(root, "commit", "-qm", "base")
-        helper = root / "scripts" / "campaign-verifier-binding.py"
+        helper = root / ".factory" / "tools" / "campaign-verifier-binding.py"
 
         def helper_run(*args: str, pass_fds: tuple = ()) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -2922,17 +2923,17 @@ class CaseAdversarialSuite(_AdversarialBase):
         self.assertEqual(bound.returncode, 0, bound.stderr[-1000:])
         binding = json.loads(bound.stdout)
         self.assertEqual(binding["binding"]["schema"], "campaign-verifier-binding/v1")
-        self.assertEqual(binding["binding"]["executable"], "scripts/verify-project.sh")
+        self.assertEqual(binding["binding"]["executable"], ".factory/tools/verify-project.sh")
         self.assertEqual(binding["binding"]["argv"],
-                         ["./scripts/verify-project.sh"])
+                         ["./.factory/tools/verify-project.sh"])
         digest = binding["sha256"]
         # The bound inode executes through the retained descriptor; a
         # pathname substitution of the helper can never run the substitute.
         fd = os.open(helper, os.O_RDONLY)
         try:
             os.set_inheritable(fd, True)
-            helper.rename(root / "scripts" / "campaign-verifier-binding.py.orig")
-            substitute = root / "scripts" / "campaign-verifier-binding.py"
+            helper.rename(root / ".factory" / "tools" / "campaign-verifier-binding.py.orig")
+            substitute = root / ".factory" / "tools" / "campaign-verifier-binding.py"
             substitute.write_text(
                 "#!/usr/bin/env python3\n"
                 "print('SUBSTITUTE-HELPER-RAN')\n", encoding="utf-8")
@@ -2958,7 +2959,7 @@ class CaseAdversarialSuite(_AdversarialBase):
             # was moved aside for the retained-descriptor proof, so the
             # substitution swap is reverted before any pathname invocation
             # of the helper in the remaining checks.
-            (root / "scripts" / "campaign-verifier-binding.py.orig").rename(helper)
+            (root / ".factory" / "tools" / "campaign-verifier-binding.py.orig").rename(helper)
         # A verifier byte substitution fails closed before execution.
         verifier.write_text(
             "#!/usr/bin/env bash\necho SUBSTITUTE-VERIFIER-RAN\nexit 7\n",
@@ -2968,7 +2969,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         self.assertNotEqual(rejected.returncode, 0,
                             "a substituted campaign verifier must fail closed")
         self.assertNotIn("SUBSTITUTE-VERIFIER-RAN", rejected.stdout)
-        run(["git", "-C", str(root), "restore", "--", "scripts/verify-project.sh"],
+        run(["git", "-C", str(root), "restore", "--", ".factory/tools/verify-project.sh"],
             check=True)
         # No missing verifier: a config without campaign_command fails
         # closed with the exact diagnostic, and a nonexistent configured
@@ -2980,7 +2981,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         self.assertIn("verification.campaign_command must be a non-empty argv array",
                       missing.stderr)
         config.write_text(
-            '[verification]\ncampaign_command = ["./scripts/does-not-exist.sh"]\n',
+            '[verification]\ncampaign_command = ["./.factory/tools/does-not-exist.sh"]\n',
             encoding="utf-8")
         run(["git", "-C", str(root), "add", "-A"], check=True)
         run(["git", "-C", str(root), "commit", "-qm", "config update"], check=True)
@@ -2994,7 +2995,7 @@ class CaseAdversarialSuite(_AdversarialBase):
     def test_case_26_git_commit_boundary_bypass_rejected(self) -> None:
         # The fail-closed pre-commit boundary plus the shim argv boundary:
         # bypass flags and hooksPath redirects are rejected before Git runs.
-        shim = ROOT / "scripts" / "pi-cli-shims" / "git"
+        shim = ROOT / ".factory" / "tools" / "pi-cli-shims" / "git"
         self.assertTrue(shim.is_file())
         for bypass in ("--no-verify", "-n"):
             proc = run(
@@ -3017,10 +3018,10 @@ class CaseAdversarialSuite(_AdversarialBase):
         # fail-closed pre-commit boundary installation for every
         # commit-creation path (the deprecated ralph launchers that once
         # installed it are removed).
-        guard_text = (ROOT / "scripts" / "git-commit-guard.sh").read_text(
+        guard_text = (ROOT / ".factory" / "tools" / "git-commit-guard.sh").read_text(
             encoding="utf-8")
         self.assertIn("pre-commit", guard_text)
-        shim_text = (ROOT / "scripts" / "pi-cli-shims" / "git").read_text(
+        shim_text = (ROOT / ".factory" / "tools" / "pi-cli-shims" / "git").read_text(
             encoding="utf-8")
         self.assertIn("install-git-commit-guard.sh", shim_text,
                       "the git shim must install the commit boundary")
@@ -3099,7 +3100,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                     and candidate.name not in frozen_launchers
                     and candidate.name not in legacy_lifecycle_tools):
                 scanned_scripts.append(candidate)
-        for candidate in sorted((ROOT / "scripts" / "pi-cli-shims").glob("*")):
+        for candidate in sorted((ROOT / ".factory" / "tools" / "pi-cli-shims").glob("*")):
             if candidate.is_file() and candidate.name != "ralph":
                 scanned_scripts.append(candidate)
         self.assertTrue(scanned_scripts, "the script scan must cover scripts")
@@ -3208,10 +3209,10 @@ class CaseAdversarialSuite(_AdversarialBase):
         # extension or the ralph emit protocol (an artifact inventory that
         # merely requires the frozen shim to *exist* is retention, not an
         # invocation, and is covered by the required-artifacts gate).
-        for script in ("scripts/verify-boilerplate.sh", "scripts/final-gate.sh",
-                       "scripts/campaign-verifier-binding.py",
-                       "scripts/check-installed-functional-evidence.sh",
-                       "scripts/visual-audit-provenance.py"):
+        for script in (".factory/tools/verify-boilerplate.sh", ".factory/tools/final-gate.sh",
+                       ".factory/tools/campaign-verifier-binding.py",
+                       ".factory/tools/check-installed-functional-evidence.sh",
+                       ".factory/tools/visual-audit-provenance.py"):
             text = (ROOT / script).read_text(encoding="utf-8")
             for token in ("pi-ralph-emit-extension", "ralph emit",
                           "ralph-event"):

@@ -14,7 +14,7 @@
     "accepted_commit": ["runner-aggregate", "capability-evidence", "conformance-planning"],
     "current_product": ["boilerplate-verification"],
     "paths": {
-      "boilerplate-verification": [".factory/", ".pi/", "scripts/", "tests/", "docs/", "AGENTS.md", "README.md"]
+      "boilerplate-verification": [".factory/", ".pi/", ".factory/tools/", ".factory/tests/legacy/", "docs/", "AGENTS.md", "README.md"]
     }
   }
 }

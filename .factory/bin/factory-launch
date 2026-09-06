@@ -1,126 +1,24 @@
-#!/usr/bin/env bash
-# factory-launch — external-prefix operator interface for the installed
-# generic harness (FACTORY-LOOP-SPEC §3 operator interface; Task 20).
-#
-# The installed copy's hidden `.factory/` control plane is imported under
-# the public package name `factory` through a private alias directory in
-# the operator runtime directory (never the source tree), so
-# `python -m factory.loop.launch` executes the *installed* harness bytes.
-# The installed root is derived from this file's own location and every
-# argument is forwarded unchanged.
-#
-# The alias directory is created for the lifetime of one invocation and is
-# removed only after the child has actually exited — the EXIT trap runs
-# after the bounded reap, so a signal that the child takes time to honor
-# never leaves an early `rm -rf` while the model process still runs.  The
-# launcher never `exec`s the model process: the shell stays alive to own
-# the cleanup, forwards INT/TERM/HUP/QUIT to the child, then bounded-waits
-# for the child: a child that exits on the forwarded signal is reaped with
-# its actual status, a child that ignores the signal is escalated to
-# SIGKILL after a bounded grace (TERM is best-effort, KILL is not), and
-# the child is reaped before the alias directory is removed.  The exit
-# status is the child's actual status — a normal code, or 128+signal when
-# the child was killed by a signal.
-set -u
+#!/usr/bin/env -S python3 -I
+"""Installed standalone launcher with an in-memory package binding."""
+import importlib.util
+import os
+import pathlib
+import sys
+sys.dont_write_bytecode = True
 
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-if [[ ! -f "$root/.factory/loop/launch.py" ]]; then
-    echo "factory-launch: installed harness root is missing: $root" >&2
-    exit 1
-fi
-
-# Bounded grace (seconds) between the forwarded TERM and the unconditional
-# KILL escalation.  KILL cannot be ignored, so a child that ignores TERM
-# is reaped within this bound plus a short KILL reap window.
-LAUNCH_GRACE=${FACTORY_LAUNCH_GRACE:-5}
-
-runtime=${FACTORY_INSTALL_RUNTIME:-${TMPDIR:-/tmp}}
-alias_dir=$(mktemp -d "${runtime%/}/factory-launch-alias.XXXXXX") || {
-    echo "factory-launch: cannot create the operator alias directory" >&2
-    exit 1
-}
-
-child_pid=
-cleanup() {
-    # Only reached once the child has been reaped (bounded), so the
-    # operator alias outlives the model process on every exit path.
-    rm -rf -- "$alias_dir"
-}
-forward_signal() {
-    # Forward the signal to the child so the model process observes the
-    # same signal; the child's own exit status then preserves the
-    # 128+signal convention through the final `exit "$rc"`.
-    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
-        kill -"$1" "$child_pid" 2>/dev/null || true
-    fi
-}
-# 1 = the child is dead (or a reapable zombie), 0 = still running.
-# The poll distinguishes a zombie (still answering `kill -0`) from a
-# running process via its kernel state, so the bounded wait never blocks
-# in `wait` while the child ignores the forwarded signal.
-_child_gone() {
-    local state
-    state=$(awk '{print $3}' "/proc/$child_pid/stat" 2>/dev/null || echo gone)
-    [[ "$state" == "Z" || "$state" == "gone" ]]
-}
-
-# Bounded wait/reap of the child *before* cleanup: poll until the child is
-# dead (a zombie is dead), escalating to SIGKILL after the grace deadline,
-# then reap it with its actual exit status.  A further signal that
-# interrupts the reap simply loops back (the trap already forwarded it).
-# Only the pathological uninterruptible kernel state (where KILL cannot
-# apply and a blocking `wait` would hang the launcher forever) gives up,
-# reporting the forwarded-signal status; such a child is reparented and
-# reaped by init when this shell exits rather than being left as a caller
-# zombie.
-wait_child_bounded() {
-    local grace=$1 rc deadline kill_deadline now_ns
-    now_ns=$(date +%s%N)
-    deadline=$((now_ns + grace * 1000000000))
-    kill_deadline=$((deadline + 5 * 1000000000))
-    while ! _child_gone; do
-        now_ns=$(date +%s%N)
-        if (( now_ns >= deadline )); then
-            kill -KILL "$child_pid" 2>/dev/null || true
-        fi
-        if (( now_ns >= kill_deadline )); then
-            return 128
-        fi
-        sleep 0.05
-    done
-    while :; do
-        wait "$child_pid" 2>/dev/null
-        rc=$?
-        if (( rc <= 128 )) || ! kill -0 "$child_pid" 2>/dev/null; then
-            return "$rc"
-        fi
-    done
-}
-trap cleanup EXIT
-trap 'forward_signal INT' INT
-trap 'forward_signal TERM' TERM
-trap 'forward_signal HUP' HUP
-trap 'forward_signal QUIT' QUIT
-
-ln -s -- "$root/.factory" "$alias_dir/factory"
-env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$alias_dir" python3 -m factory.loop.launch "$@" &
-child_pid=$!
-set +e
-wait "$child_pid" 2>/dev/null
-rc=$?
-set -e
-# A forwarded signal interrupts `wait` with 128+signal while the child may
-# still be running (or a zombie): bounded-wait and reap it so the alias is
-# removed only after the child is truly gone, preserving the child's
-# actual status (or 128+signal when it was killed by the forwarded signal
-# or by the KILL escalation).
-if kill -0 "$child_pid" 2>/dev/null; then
-    wait_child_bounded "$LAUNCH_GRACE"
-    rc=$?
-else
-    # The child exited concurrently with the interrupt: reap the zombie
-    # to report its actual status rather than the interrupt's 128+signal.
-    wait "$child_pid" 2>/dev/null
-    rc=$?
-fi
-exit "$rc"
+root = pathlib.Path(__file__).resolve().parents[2]
+factory_dir = root / ".factory"
+info = os.stat(factory_dir, follow_symlinks=False)
+if not factory_dir.is_dir() or info.st_mode & 0o022:
+    raise SystemExit("factory-launch: installed closure is mutable or unsafe")
+spec = importlib.util.spec_from_file_location(
+    "factory", factory_dir / "__init__.py",
+    submodule_search_locations=[str(factory_dir)],
+)
+if spec is None or spec.loader is None:
+    raise SystemExit("factory-launch: installed package unavailable")
+module = importlib.util.module_from_spec(spec)
+sys.modules["factory"] = module
+spec.loader.exec_module(module)
+from factory.loop.launch import main
+raise SystemExit(main())

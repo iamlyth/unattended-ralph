@@ -7,7 +7,7 @@ This module implements the fresh-context boundary of
 is the deterministic Task-6 deliverable:
 
 * **Fresh process per role.** Every role attempt starts a *new* process via
-  the existing secure wrapper (``scripts/pi2-secure-exec.py``, invoked never
+  the existing secure wrapper (``.factory/tools/pi2-secure-exec.py``, invoked never
   reimplemented) in one-shot mode: a new process session/group, no resumed
   session, no session storage shared with any previous loop identity, no
   automatic memory injection, and only allowlisted prompt inputs.
@@ -211,7 +211,7 @@ PROVIDER_GUARD_REQUIRED = frozenset({"ollama"})
 CANONICAL_OLLAMA_SETTINGS_URL = "https://ollama.com/settings"
 
 # The existing secure wrapper — invoked, never reimplemented (§18).
-SECURE_WRAPPER = "scripts/pi2-secure-exec.py"
+SECURE_WRAPPER = ".factory/tools/pi2-secure-exec.py"
 PI2_BACKEND_ADAPTER = ".factory/loop/pi2_backend.py"
 
 # Hard bounds: the wrapper itself caps the prompt at 4 MiB; the composition
@@ -255,10 +255,10 @@ STAGED_CREDENTIAL_GUARD_NAME = "credential-guard.py"
 STAGED_GIT_SHIM_NAME = "git"
 STAGED_USAGE_GUARD_NAME = "usage.py"
 STAGED_USAGE_FETCH_NAME = "usage_fetch.py"
-CREDENTIAL_GUARD = "scripts/credential-guard.py"
-PI_GIT_SHIM = "scripts/pi-cli-shims/git"
+CREDENTIAL_GUARD = ".factory/tools/credential-guard.py"
+PI_GIT_SHIM = ".factory/tools/pi-cli-shims/git"
 USAGE_GUARD_SOURCES = (".factory/loop/usage.py", ".factory/loop/usage_fetch.py")
-# Staged scripts/modules are readable data, never direct execve targets. They
+# Staged .factory/tools/modules are readable data, never direct execve targets. They
 # run only as arguments to an approved immutable interpreter inside the
 # seccomp broker boundary.
 STAGED_FILE_MODE = 0o400
@@ -310,13 +310,13 @@ PI_FACTORY_TOOL_FD_INO_ENV = "PI_FACTORY_TOOL_FD_INO"
 # The committed model-side Pi extension (Task 11 review): the generic
 # factory guard extension loaded by the model backend through ``--extension``
 # in the exact child argv.  It enforces the model-side Git command boundary
-# (routing direct commit verbs through ``scripts/pi-cli-shims/git`` and
+# (routing direct commit verbs through ``.factory/tools/pi-cli-shims/git`` and
 # blocking bypass/unguarded verbs), the credential/path tool-input guard,
 # the exact-commit credential-guard digest binding, bounded tool-result
 # redaction, and overflow-log process cleanup.  The extension is a committed
 # workspace blob verified against the bound commit (F5) and is readable by
-# the confined model through the workspace ``scripts/`` read allowlist.
-PI_FACTORY_GUARD_EXTENSION = "scripts/pi-factory-guard-extension.mjs"
+# the confined model through the workspace ``.factory/tools/`` read allowlist.
+PI_FACTORY_GUARD_EXTENSION = ".factory/tools/pi-factory-guard-extension.mjs"
 
 # Explicit environment allowlist for model children.  The child environment
 # is *constructed* from these benign keys only (when present in the parent)
@@ -2866,8 +2866,8 @@ def _add_common_binding(parser: argparse.ArgumentParser) -> None:
         help="(optional, planner only) claimed findings-payload digest; "
         "verified against the re-derived payload bytes, never authoritative",
     )
-    # Quota policy is deliberately absent from this per-model interface.
-    # The campaign's exact-commit ordered pre-round registry owns it.
+    # Quota credentials and controls are deliberately absent from this model-
+    # side interface. The campaign parent runs QUOTA-01 for each invocation.
 
 
 def _read_blob_anchored(path_text: str, label: str, maximum: int) -> bytes:
@@ -3985,41 +3985,6 @@ def _canonical_ollama_settings_url(guard: object) -> str:
     return CANONICAL_OLLAMA_SETTINGS_URL
 
 
-class _RoleAuthorization:
-    """One-use exact-invocation mint held only by the locked campaign."""
-    __slots__ = ("descriptor_sha256", "campaign_id", "used", "_marker")
-
-    def __init__(self, binding: "InvocationBinding", campaign_id: str, marker: object) -> None:
-        if marker is not _ROLE_AUTHORIZATION_SECRET:
-            raise InvocationError("campaign authorization mint is private")
-        fields = dict(binding.__dict__)
-        fields["backend"] = str(fields["backend"])
-        fields["workspace"] = str(fields["workspace"])
-        fields["allowed_tools"] = list(fields["allowed_tools"])
-        self.descriptor_sha256 = hashlib.sha256(
-            json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        self.campaign_id = campaign_id
-        self.used = False
-        self._marker = marker
-
-    def consume(self, binding: "InvocationBinding") -> None:
-        if self.used or self._marker is not _ROLE_AUTHORIZATION_SECRET:
-            raise InvocationError("campaign authorization was replayed")
-        candidate = _RoleAuthorization(binding, self.campaign_id, self._marker)
-        if candidate.descriptor_sha256 != self.descriptor_sha256:
-            raise InvocationError("campaign authorization descriptor binding differs")
-        self.used = True
-
-
-_ROLE_AUTHORIZATION_SECRET = object()
-
-
-def _mint_role_authorization(binding: "InvocationBinding", campaign_id: str) -> _RoleAuthorization:
-    """Private locked-coordinator bridge; public launch surfaces never call this."""
-    return _RoleAuthorization(binding, campaign_id, _ROLE_AUTHORIZATION_SECRET)
-
-
 def authorize_launch(
     binding: "InvocationBinding",
     *,
@@ -4030,7 +3995,9 @@ def authorize_launch(
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
     findings: Optional[bytes] = None,
-    _campaign_authorization: Optional[object] = None,
+    _authorization_store: Optional[object] = None,
+    _authorization_token: str = "",
+    _authorization_claims: Optional[Mapping[str, object]] = None,
 ) -> LaunchAuthority:
     """Mint the unforgeable verified-committed authority token (F2/F5).
 
@@ -4063,8 +4030,8 @@ def authorize_launch(
     receives the same exact-commit staged usage-source and Task 8 proof that
     keeps operator credential stores inaccessible to model tools.  The
     decision table itself is absent from this mint and from its public API:
-    the campaign's ordered pre-round registry owns that policy once per
-    round.  No ``--usage-guard-*`` launch option exists, and authorization
+    the campaign parent has already run it immediately before this invocation.
+    No ``--usage-guard-*`` launch option exists, and authorization
     neither opens a cookie store nor invokes ``require_quota``.
 
     Real providers also require a fresh one-use mint from the exclusively
@@ -4072,11 +4039,21 @@ def authorize_launch(
     """
     verify_invocation(binding)
     if binding.provider.lower() != "synthetic":
-        if not isinstance(_campaign_authorization, _RoleAuthorization):
+        try:
+            from . import readiness as _readiness
+        except ImportError:
+            import readiness as _readiness  # type: ignore[no-redef]
+        if type(_authorization_store) is not _readiness.AuthorizationStore:
             raise InvocationError(
-                "real-provider authorization is campaign-only; standalone/programmatic launch is synthetic-only"
+                "real-provider authorization requires the locked readiness store; standalone/programmatic launch is synthetic-only"
             )
-        _campaign_authorization.consume(binding)
+        if not isinstance(_authorization_claims, Mapping):
+            raise InvocationError("real-provider launch claims are absent")
+        try:
+            _authorization_store.consume(_authorization_token,
+                                         _authorization_claims)
+        except _readiness.AuthorizationError as exc:
+            raise InvocationError(f"real-provider authorization refused: {exc}") from exc
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
     _verify_input_digest("specification", spec, binding.specification_digest)
@@ -4260,8 +4237,8 @@ def authorize_launch(
                 "the production launch fails closed: the real confinement "
                 f"proof/rule anchor cannot bind this invocation ({exc})"
             ) from exc
-        # Per-model authorization never executes quota policy.  The ordered
-        # campaign pre-round registry owns that decision once per round.
+        # Quota has already run in the trusted campaign parent for this exact
+        # invocation; no credential or quota surface enters LaunchAuthority.
         verified = replace(binding, backend=backend)
         return LaunchAuthority(
             verified,

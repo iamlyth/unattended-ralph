@@ -166,9 +166,9 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/ollama-usage-guard.sh",
+        ".factory/tools/ollama-usage-guard.sh",
         ".factory/loop/usage.py",
-        "tests/test-pi2-ollama-wrapper.sh"
+        ".factory/tests/legacy/test-pi2-ollama-wrapper.sh"
       ],
       "fact_refs": [
         "FACT-008"
@@ -232,7 +232,7 @@
       "artifacts": [
         ".factory/loop/lock.py",
         ".factory/tests/test-factory-lock.py",
-        "tests/test-factory-lock.py"
+        ".factory/tests/legacy/test-factory-lock.py"
       ],
       "fact_refs": [
         "FACT-011"
@@ -275,9 +275,9 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/git-commit-guard.sh",
-        "scripts/install-git-commit-guard.sh",
-        "tests/test-git-commit-guard.sh"
+        ".factory/tools/git-commit-guard.sh",
+        ".factory/tools/install-git-commit-guard.sh",
+        ".factory/tests/legacy/test-git-commit-guard.sh"
       ],
       "fact_refs": [
         "FACT-013"
@@ -358,10 +358,10 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/credential-guard.py",
-        "scripts/pi2-secure-exec.py",
-        "tests/test-credential-guard.sh",
-        "tests/test-credential-extension.sh"
+        ".factory/tools/credential-guard.py",
+        ".factory/tools/pi2-secure-exec.py",
+        ".factory/tests/legacy/test-credential-guard.sh",
+        ".factory/tests/legacy/test-credential-extension.sh"
       ],
       "fact_refs": [
         "FACT-017"
@@ -380,10 +380,10 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/machine-receipt.py",
+        ".factory/tools/machine-receipt.py",
         ".factory/loop/evidence.py",
         ".factory/tests/test-factory-evidence.py",
-        "tests/test-audit-receipts.sh"
+        ".factory/tests/legacy/test-audit-receipts.sh"
       ],
       "fact_refs": [
         "FACT-018"
@@ -402,9 +402,9 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/visual-audit-provenance.py",
-        "scripts/check-visual-audit.py",
-        "tests/test-visual-audit.sh"
+        ".factory/tools/visual-audit-provenance.py",
+        ".factory/tools/check-visual-audit.py",
+        ".factory/tests/legacy/test-visual-audit.sh"
       ],
       "fact_refs": [
         "FACT-019"
@@ -425,10 +425,10 @@
       "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
       "receipts": [],
       "artifacts": [
-        "scripts/run-factory-runners.py",
-        "scripts/check-factory-runner-evidence.py",
-        "tests/test-factory-runner.sh",
-        "tests/test-runner-signer.sh"
+        ".factory/tools/run-factory-runners.py",
+        ".factory/tools/check-factory-runner-evidence.py",
+        ".factory/tests/legacy/test-factory-runner.sh",
+        ".factory/tests/legacy/test-runner-signer.sh"
       ],
       "fact_refs": [
         "FACT-020"
@@ -449,7 +449,7 @@
       "artifacts": [
         ".factory/tests/test-factory-footprint.py",
         ".factory/tests/test-factory-footprint.sh",
-        "scripts/check-generic-leakage.sh"
+        ".factory/tools/check-generic-leakage.sh"
       ],
       "fact_refs": [
         "FACT-021"

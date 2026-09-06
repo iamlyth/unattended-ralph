@@ -1,21 +1,24 @@
-#!/usr/bin/env bash
-# Installed-copy production campaign entrypoint.  The package alias points
-# only at this external prefix, so campaign.py can prove its executing install
-# manifest/commit before any model role launches.
-set -euo pipefail
+#!/usr/bin/env -S python3 -I
+"""Installed campaign entrypoint with an in-memory package binding."""
+import importlib.util
+import os
+import pathlib
+import sys
+sys.dont_write_bytecode = True
 
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-[[ -f "$root/.factory/loop/campaign.py" ]] || {
-    echo "factory-campaign: installed campaign control plane is missing: $root" >&2
-    exit 1
-}
-runtime=${FACTORY_INSTALL_RUNTIME:-${TMPDIR:-/tmp}}
-alias_dir=$(mktemp -d "${runtime%/}/factory-campaign-alias.XXXXXX") || {
-    echo "factory-campaign: cannot create installed package alias" >&2
-    exit 1
-}
-cleanup() { rm -rf -- "$alias_dir"; }
-trap cleanup EXIT INT TERM HUP
-ln -s -- "$root/.factory" "$alias_dir/factory"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$alias_dir" \
-    python3 -m factory.loop.campaign "$@"
+root = pathlib.Path(__file__).resolve().parents[2]
+factory_dir = root / ".factory"
+info = os.stat(factory_dir, follow_symlinks=False)
+if not factory_dir.is_dir() or info.st_mode & 0o022:
+    raise SystemExit("factory-campaign: installed closure is mutable or unsafe")
+spec = importlib.util.spec_from_file_location(
+    "factory", factory_dir / "__init__.py",
+    submodule_search_locations=[str(factory_dir)],
+)
+if spec is None or spec.loader is None:
+    raise SystemExit("factory-campaign: installed package unavailable")
+module = importlib.util.module_from_spec(spec)
+sys.modules["factory"] = module
+spec.loader.exec_module(module)
+from factory.loop.campaign import main
+raise SystemExit(main())

@@ -10,6 +10,8 @@ import os
 import re
 import secrets
 import stat
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
@@ -23,11 +25,12 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 IDENT = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 ZERO = "0" * 64
 GATE_REGISTRY = {
-    "runner-aggregate": ("./scripts/check-factory-runner-evidence.py",),
-    "capability-evidence": ("./scripts/check-capability-evidence.py",),
-    "conformance-planning": ("./scripts/validate-conformance.py", "planning", ".factory/artifacts/conformance.json"),
-    "boilerplate-verification": ("./scripts/verify-boilerplate.sh",),
-    "final-acceptance": ("./scripts/final-gate.sh", "--implementation"),
+    "runner-aggregate": ("./.factory/tools/check-factory-runner-evidence.py",),
+    "capability-evidence": ("./.factory/tools/check-capability-evidence.py",),
+    "conformance-planning": ("./.factory/tools/validate-conformance.py", "planning", ".factory/artifacts/conformance.json"),
+    "conformance-implementation": ("./.factory/tools/validate-conformance.py", "implementation", ".factory/artifacts/conformance.json"),
+    "boilerplate-verification": ("./.factory/tools/verify-boilerplate.sh",),
+    "final-acceptance": ("./.factory/tools/final-gate.sh", "--implementation"),
 }
 
 class ReadinessError(RuntimeError): pass
@@ -144,10 +147,13 @@ def gate_argv(gate_id: str) -> tuple[str,...]:
     except KeyError as exc: raise ReadinessError(f"unknown fixed readiness gate adapter: {gate_id}") from exc
 
 
-def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_commit: str, tree: str, environment_blob: str) -> str:
-    """Canonical class/capability interface; input ordering has no authority."""
-    if not isinstance(value,dict) or set(value)!={"schema","commit","tree","environment_blob","runners"} or value.get("schema") not in {"factory-runner-aggregate/v1","factory-runner-aggregate/v4"}:
+def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_commit: str, tree: str, environment_blob: str, campaign_id: str = "", readiness_nonce: str = "") -> str:
+    """Canonical aggregate-v4 class/capability interface."""
+    fields={"schema","campaign_id","readiness_nonce","commit","tree","environment_blob","runners"}
+    if not isinstance(value,dict) or set(value)!=fields or value.get("schema")!="factory-runner-aggregate/v4":
         raise ReadinessFindings("runner aggregate schema is invalid")
+    if value.get("campaign_id")!=campaign_id or value.get("readiness_nonce")!=readiness_nonce:
+        raise ReadinessFindings("runner aggregate campaign/readiness binding is stale")
     if (value["commit"],value["tree"],value["environment_blob"]) != (accepted_commit,tree,environment_blob): raise ReadinessFindings("runner aggregate binding is stale")
     records=value["runners"]
     if not isinstance(records,list): raise ReadinessFindings("runner aggregate records are malformed")
@@ -168,25 +174,41 @@ def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_c
     return digest(normalized)
 
 
-def validate_human_authority(policy: Mapping[str, object], approval_raw: bytes | None, trust_raw: bytes | None, *, accepted_commit: str, accepted_tree: str, blob_at: Callable[[str, str], bytes]) -> str:
-    """Validate project-adapted external human authority without product assumptions."""
+def validate_human_authority(policy: Mapping[str, object], approval_raw: bytes | None,
+                             trust_raw: bytes | None, *, signature_raw: bytes | None = None,
+                             accepted_commit: str, accepted_tree: str,
+                             blob_at: Callable[[str, str], bytes], now: int | None = None) -> str:
+    """Cryptographically verify canonical approval bytes with external SSH trust."""
     human = policy.get("human_approval")
     if human is None:
         return digest({"required": False})
-    if approval_raw is None or trust_raw is None:
+    if approval_raw is None or trust_raw is None or signature_raw is None:
         raise HumanAuthorityBlocked("required external human authority is missing")
+    if len(approval_raw)>256*1024 or len(trust_raw)>256*1024 or len(signature_raw)>64*1024:
+        raise HumanAuthorityBlocked("external human authority exceeds its bound")
     try:
         approval=json.loads(approval_raw); trust=json.loads(trust_raw)
     except (UnicodeError,ValueError) as exc:
         raise HumanAuthorityBlocked(f"external human authority is malformed: {exc}") from exc
     if not isinstance(human,Mapping): raise HumanAuthorityBlocked("human policy is malformed")
-    if not isinstance(trust,dict) or set(trust)!={"schema","status","scope","keys"} or trust.get("schema")!="factory-human-trust/v1" or trust.get("status")!="active" or trust.get("scope")!=human["trust_scope"] or not isinstance(trust.get("keys"),list) or not trust["keys"]:
+    trust_fields={"schema","status","scope","namespace","keys"}
+    if not isinstance(trust,dict) or set(trust)!=trust_fields or trust.get("schema")!="factory-human-trust/v2" or trust.get("status")!="active" or trust.get("scope")!=human["trust_scope"] or trust.get("namespace")!=human["signature_namespace"] or not isinstance(trust.get("keys"),list) or not trust["keys"]:
         raise HumanAuthorityBlocked("external human trust is absent, inactive, or wrong-scope")
-    required={"schema","status","commit","tree","checklist","captures","reviewer","signature_sha256"}
-    if not isinstance(approval,dict) or set(approval)!=required or approval.get("schema")!=human["approval_schema"] or approval.get("status")!="approved" or approval.get("commit")!=accepted_commit or approval.get("tree")!=accepted_tree or approval.get("checklist")!=human["checklist"] or not SHA256.fullmatch(str(approval.get("signature_sha256",""))):
+    required={"schema","status","commit","tree","checklist","captures","reviewer","issued_at"}
+    if not isinstance(approval,dict) or set(approval)!=required or approval.get("schema")!=human["approval_schema"] or approval.get("status")!="approved" or approval.get("commit")!=accepted_commit or approval.get("tree")!=accepted_tree or approval.get("checklist")!=human["checklist"] or type(approval.get("issued_at")) is not int:
         raise HumanAuthorityBlocked("human approval binding/checklist is incomplete")
-    reviewers=[k for k in trust["keys"] if isinstance(k,dict) and set(k)=={"id","public_key"} and k.get("id")==approval.get("reviewer")]
+    reviewer=approval.get("reviewer")
+    key_fields={"principal","public_key","issued_at","revoked_at"}
+    reviewers=[k for k in trust["keys"] if isinstance(k,dict) and set(k)==key_fields and k.get("principal")==reviewer]
     if len(reviewers)!=1: raise HumanAuthorityBlocked("human reviewer is not uniquely trusted")
+    key=reviewers[0]; current=int(time.time()) if now is None else now
+    if type(key["issued_at"]) is not int or key["issued_at"]>approval["issued_at"] or approval["issued_at"]>current:
+        raise HumanAuthorityBlocked("human approval/key issuance time is invalid")
+    if key["revoked_at"] is not None:
+        raise HumanAuthorityBlocked("human approval key is currently revoked")
+    public_key=key["public_key"]
+    if not isinstance(public_key,str) or "\n" in public_key or not public_key.startswith("ssh-ed25519 ") or not IDENT.fullmatch(str(reviewer)):
+        raise HumanAuthorityBlocked("human trust key/principal is invalid")
     captures=approval.get("captures")
     if not isinstance(captures,list) or len(captures)!=len(human["captures"]): raise HumanAuthorityBlocked("human capture set is incomplete")
     by_id={item.get("id"):item for item in captures if isinstance(item,dict)}
@@ -195,7 +217,27 @@ def validate_human_authority(policy: Mapping[str, object], approval_raw: bytes |
         if not isinstance(item,dict): raise HumanAuthorityBlocked(f"human capture {binding['id']} is missing")
         path=_safe_relative(item.get(binding["path_field"]),"human capture")
         if hashlib.sha256(blob_at(accepted_commit,path)).hexdigest()!=item.get(binding["digest_field"]): raise HumanAuthorityBlocked(f"human capture {binding['id']} digest is stale")
-    return digest(approval_raw+b"\0"+trust_raw)
+    signed=canonical_bytes(approval)
+    if approval_raw != signed:
+        raise HumanAuthorityBlocked("human approval bytes are not canonical")
+    allowed_fd=os.memfd_create("factory-human-allowed",os.MFD_CLOEXEC)
+    sig_fd=os.memfd_create("factory-human-signature",os.MFD_CLOEXEC)
+    try:
+        os.write(allowed_fd,f"{reviewer} {public_key}\n".encode()); os.lseek(allowed_fd,0,0)
+        os.write(sig_fd,signature_raw); os.lseek(sig_fd,0,0)
+        verified=subprocess.run(
+            ["/usr/bin/ssh-keygen","-Y","verify","-f",f"/proc/self/fd/{allowed_fd}",
+             "-I",str(reviewer),"-n",str(human["signature_namespace"]),
+             "-s",f"/proc/self/fd/{sig_fd}"], input=signed,
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            pass_fds=(allowed_fd,sig_fd),timeout=10,check=False,
+        )
+        if verified.returncode!=0: raise HumanAuthorityBlocked("human detached signature verification failed")
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        raise HumanAuthorityBlocked(f"human signature verifier unavailable: {exc}") from exc
+    finally:
+        os.close(allowed_fd); os.close(sig_fd)
+    return digest(signed+b"\0"+trust_raw+b"\0"+signature_raw)
 
 
 def readiness_bindings(*, accepted_commit:str, accepted_tree:str, current_commit:str, current_tree:str, config_sha256:str, environment_sha256:str, specification_sha256:str, plan_sha256:str, contracts_sha256:str, policy_sha256:str, trust_sha256:str, install_manifest_sha256:str) -> dict:
@@ -254,37 +296,75 @@ class CampaignPermit:
     marker: object
 
 
+_AUTH_STORE_MINT = object()
+
+
 class AuthorizationStore:
-    """FD-backed coordinator secret plus durable one-use, restart-bound records."""
-    def __init__(self, root:Path, namespace:str, campaign_id:str, nonce:str, marker:object):
-        if not IDENT.fullmatch(campaign_id) or not SHA256.fullmatch(nonce): raise AuthorizationError("authorization identity is invalid")
-        self.root=Path(root).absolute(); self.namespace=_safe_relative(namespace,"campaign namespace"); self.campaign_id=campaign_id; self.nonce=nonce; self.marker=marker
-        directory=self.root/self.namespace; directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+    """Campaign-lock-bound, FD-secret-backed, durable one-use launch records.
+
+    Construction is private to :func:`open_locked_authorization_store`; public
+    imports and standalone launch code cannot create this authority merely by
+    possessing Python objects or module globals.
+    """
+    def __init__(self, root:Path, namespace:str, campaign_id:str, nonce:str,
+                 lock_fd:int, marker:object):
+        if marker is not _AUTH_STORE_MINT:
+            raise AuthorizationError("authorization stores are minted only by the locked campaign")
+        if not IDENT.fullmatch(campaign_id) or not SHA256.fullmatch(nonce):
+            raise AuthorizationError("authorization identity is invalid")
+        root=Path(root).absolute(); root_info=os.stat(root,follow_symlinks=False)
+        lock_info=os.fstat(lock_fd)
+        if not stat.S_ISDIR(lock_info.st_mode) or (root_info.st_dev,root_info.st_ino)!=(lock_info.st_dev,lock_info.st_ino):
+            raise AuthorizationError("authorization store is not bound to the campaign root lock")
+        self.root=root; self.namespace=_safe_relative(namespace,"campaign namespace")
+        self.campaign_id=campaign_id; self.nonce=nonce
+        directory=self.root/self.namespace
+        info=os.stat(directory,follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+            raise AuthorizationError("campaign authorization directory is unsafe")
         self.dirfd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|getattr(os,"O_CLOEXEC",0))
-        self.key=secrets.token_bytes(32); self.pid=os.getpid(); self.start=_proc_start(self.pid)
+        self.keyfd=os.memfd_create("factory-launch-key", os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
+        os.write(self.keyfd,secrets.token_bytes(32)); os.lseek(self.keyfd,0,os.SEEK_SET)
+        self.pid=os.getpid(); self.start=_proc_start(self.pid)
+    def _key(self)->bytes:
+        if self.keyfd<0: raise AuthorizationError("authorization store is closed")
+        return os.pread(self.keyfd,32,0)
     def close(self):
-        if getattr(self,"dirfd",-1)>=0: os.close(self.dirfd); self.dirfd=-1
+        for name in ("keyfd","dirfd"):
+            fd=getattr(self,name,-1)
+            if fd>=0: os.close(fd); setattr(self,name,-1)
     def mint(self, claims:Mapping[str,object]) -> str:
-        token=secrets.token_hex(32); body={"schema":AUTH_SCHEMA,"campaign_id":self.campaign_id,"readiness_nonce":self.nonce,"token":token,"coordinator_pid":self.pid,"coordinator_start":self.start,"used":False,"claims":dict(claims)}
-        body["mac"]=hmac.new(self.key,canonical_bytes(body),hashlib.sha256).hexdigest()
+        token=secrets.token_hex(32); body={"schema":AUTH_SCHEMA,"campaign_id":self.campaign_id,"readiness_nonce":self.nonce,"token":token,"coordinator_pid":self.pid,"coordinator_start":self.start,"claims":dict(claims)}
+        body["mac"]=hmac.new(self._key(),canonical_bytes(body),hashlib.sha256).hexdigest()
         raw=canonical_bytes(body); name=f"launch-{token}.json"; fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=self.dirfd)
         try: os.write(fd,raw); os.fsync(fd)
         finally: os.close(fd)
+        os.fsync(self.dirfd)
         return token
     def consume(self,token:str,expected:Mapping[str,object]) -> None:
         if not SHA256.fullmatch(token) or os.getpid()!=self.pid or _proc_start(self.pid)!=self.start: raise AuthorizationError("authorization cannot cross restart")
-        name=f"launch-{token}.json"; fd=os.open(name,os.O_RDWR|os.O_NOFOLLOW,dir_fd=self.dirfd)
+        name=f"launch-{token}.json"; used=f"consumed-{token}.json"
         try:
-            info=os.fstat(fd); raw=os.read(fd,256*1024)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600: raise AuthorizationError("authorization record is unsafe")
-            data=json.loads(raw)
-            mac=data.pop("mac",None)
-            if not isinstance(mac,str) or not hmac.compare_digest(mac,hmac.new(self.key,canonical_bytes(data),hashlib.sha256).hexdigest()): raise AuthorizationError("authorization MAC is invalid")
-            if data.get("used") is not False or data.get("campaign_id")!=self.campaign_id or data.get("readiness_nonce")!=self.nonce or data.get("claims")!=dict(expected): raise AuthorizationError("authorization replay or binding mismatch")
-            data["used"]=True; data["mac"]=hmac.new(self.key,canonical_bytes(data),hashlib.sha256).hexdigest(); updated=canonical_bytes(data)
-            os.lseek(fd,0,os.SEEK_SET); os.write(fd,updated); os.ftruncate(fd,len(updated)); os.fsync(fd)
+            fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=self.dirfd)
+            try:
+                info=os.fstat(fd); raw=os.read(fd,256*1024+1)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or len(raw)>256*1024: raise AuthorizationError("authorization record is unsafe")
+                data=json.loads(raw); mac=data.pop("mac",None)
+                if not isinstance(mac,str) or not hmac.compare_digest(mac,hmac.new(self._key(),canonical_bytes(data),hashlib.sha256).hexdigest()): raise AuthorizationError("authorization MAC is invalid")
+                if data.get("campaign_id")!=self.campaign_id or data.get("readiness_nonce")!=self.nonce or data.get("claims")!=dict(expected): raise AuthorizationError("authorization binding mismatch")
+            finally: os.close(fd)
+            # Atomic rename is the durable consume point.  A crash after this
+            # point cannot make the token reusable after restart.
+            os.rename(name,used,src_dir_fd=self.dirfd,dst_dir_fd=self.dirfd)
+            os.fsync(self.dirfd)
+        except FileNotFoundError as exc: raise AuthorizationError("authorization was replayed or is absent") from exc
         except (OSError,ValueError) as exc: raise AuthorizationError(f"authorization record unavailable: {exc}") from exc
-        finally: os.close(fd)
+
+
+def open_locked_authorization_store(root:Path, namespace:str, campaign_id:str,
+                                    nonce:str, lock_fd:int)->AuthorizationStore:
+    """Private coordinator mint requiring the already-held root descriptor."""
+    return AuthorizationStore(root,namespace,campaign_id,nonce,lock_fd,_AUTH_STORE_MINT)
 
 
 def _proc_start(pid:int)->str:

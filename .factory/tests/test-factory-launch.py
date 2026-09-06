@@ -6,7 +6,7 @@ This test lives under the hidden ``.factory/tests/`` namespace because the
 specification (HIDE-01, §3) keeps harness-only tests out of the adopting
 product's visible test tree.  It is the deterministic verification for
 Task 6, exercising ``.factory/loop/launch.py`` through the real
-``scripts/pi2-secure-exec.py`` wrapper (invoked, never reimplemented) with
+``.factory/tools/pi2-secure-exec.py`` wrapper (invoked, never reimplemented) with
 synthetic backends:
 
 * **invocation / task-excerpt exact byte binding (TASK-02, §9/§20)**: the
@@ -358,7 +358,7 @@ class _Base(unittest.TestCase):
         # committed blob at the bound commit before any child output channel
         # is redacted, so every fixture repository commits the exact guard.
         shutil.copy2(
-            ROOT / "scripts" / "credential-guard.py",
+            ROOT / ".factory" / "tools" / "credential-guard.py",
             scripts / "credential-guard.py",
         )
         # Task 11: the model-side Pi guard extension is a fixture blob too —
@@ -366,12 +366,12 @@ class _Base(unittest.TestCase):
         # committed blob at the bound commit and always loads it through
         # ``--extension`` in the child argv.
         shutil.copy2(
-            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
             scripts / "pi-factory-guard-extension.mjs",
         )
         (scripts / "pi-cli-shims").mkdir()
         shutil.copy2(
-            ROOT / "scripts" / "pi-cli-shims" / "git",
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
             scripts / "pi-cli-shims" / "git",
         )
         loop = self.workspace / ".factory" / "loop"
@@ -1986,18 +1986,18 @@ class CliTests(_Base):
         # (the launch redacts every child output channel through the exact
         # committed guard before any result is produced).
         shutil.copy2(
-            ROOT / "scripts" / "credential-guard.py",
+            ROOT / ".factory" / "tools" / "credential-guard.py",
             repo / "scripts" / "credential-guard.py",
         )
         # Task 11: commit the exact model-side Pi guard extension into every
         # fixture repo (the launch always loads it through ``--extension``).
         shutil.copy2(
-            ROOT / "scripts" / "pi-factory-guard-extension.mjs",
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
             repo / "scripts" / "pi-factory-guard-extension.mjs",
         )
         (repo / "scripts" / "pi-cli-shims").mkdir()
         shutil.copy2(
-            ROOT / "scripts" / "pi-cli-shims" / "git",
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
             repo / "scripts" / "pi-cli-shims" / "git",
         )
         # Task 8 confined launch: the fixture repo commits the exact
@@ -2207,11 +2207,11 @@ class CliTests(_Base):
             self.assertIn("factory-launch", proc.stdout)
         finally:
             shutil.rmtree(alias_dir, ignore_errors=True)
-        # No visible bare ``scripts/`` wrapper may expose the launcher.
+        # No visible bare ``.factory/tools/`` wrapper may expose the launcher.
         self.assertEqual(
             list((ROOT / "scripts").glob("*launch*")),
             [],
-            "a visible scripts/ wrapper must never expose the launcher",
+            "a visible .factory/tools/ wrapper must never expose the launcher",
         )
 
     def test_launch_cli_rejects_mismatched_excerpt_digest(self) -> None:

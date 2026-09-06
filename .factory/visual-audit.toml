@@ -4,10 +4,10 @@
 # only after it has (1) configured a vision model in `vision_model` (default
 # empty: the generic scaffold never assumes or defaults a provider/model),
 # (2) implemented an installed exact-commit capture driver at
-# scripts/visual-capture-driver.sh (the scaffold adapter fails closed until
+# .factory/tools/visual-capture-driver.sh (the scaffold adapter fails closed until
 # then), (3) replaced the placeholder inventory and calibration templates
 # with consumer visual states, and (4) proven a real non-skipping image
-# round-trip with scripts/visual-audit-probe.sh. Captures are exact-commit
+# round-trip with .factory/tools/visual-audit-probe.sh. Captures are exact-commit
 # installed production windows, serial and isolated, under the dedicated
 # lease. Every untrusted capture driver and the vision model run in their
 # own process session/group under hard configured timeouts: on timeout the
@@ -21,7 +21,7 @@ schema_version = 1
 [visual-audit]
 enabled = false
 vision_model = ""
-sdk_driver = "scripts/visual-audit-review-sdk.mjs"
+sdk_driver = ".factory/tools/visual-audit-review-sdk.mjs"
 lease_file = ".factory-state/visual-audit/lease"
 review_parallelism = 4
 review_timeout_seconds = 300
@@ -32,7 +32,7 @@ review_timeout_seconds = 300
 capture_timeout_seconds = 120
 # Bounded grace (seconds, default 5, ceiling 5) between TERM and KILL.
 capture_cleanup_grace_seconds = 5
-capture_driver = "scripts/visual-capture-driver.sh"
+capture_driver = ".factory/tools/visual-capture-driver.sh"
 capture_dir = ".factory-state/visual-audit/captures"
 review_dir = ".factory-state/visual-audit/reviews"
 prompt_template = ".factory/prompts/visual-audit.md"
