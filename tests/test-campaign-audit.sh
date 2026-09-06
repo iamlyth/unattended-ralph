@@ -48,7 +48,9 @@ git -C "$tmp" config user.email test@example.invalid
 git -C "$tmp" add .
 git -C "$tmp" commit -qm base
 base=$(git -C "$tmp" rev-parse HEAD)
-export FACTORY_CAMPAIGN_ID=fixture-audit FACTORY_READINESS_NONCE=$(printf fixture-audit | sha256sum | cut -d' ' -f1)
+FACTORY_CAMPAIGN_ID=fixture-audit
+FACTORY_READINESS_NONCE=$(printf fixture-audit | sha256sum | cut -d' ' -f1)
+export FACTORY_CAMPAIGN_ID FACTORY_READINESS_NONCE
 (cd "$tmp" && ./scripts/run-factory-runners.py >/dev/null)
 runner_digest=$(cd "$tmp" && ./scripts/check-factory-runner-evidence.py --expected-commit "$base" --expected-campaign-id "$FACTORY_CAMPAIGN_ID" --expected-readiness-nonce "$FACTORY_READINESS_NONCE" --print-digest)
 (cd "$tmp" && ./scripts/initialize-campaign-audit.py --round 1 --base "$base" \
