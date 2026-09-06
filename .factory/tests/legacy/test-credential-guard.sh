@@ -84,6 +84,18 @@ expect_block proc-cmdline-dump "procfs-environ-cmdline" 'head /proc/1234/cmdline
 expect_block proc-chained "procfs-environ-cmdline" 'true && tail -c 64 /proc/self/environ'
 expect_block proc-redirect "procfs-environ-cmdline" 'cat < /proc/self/environ'
 expect_block proc-sudo "procfs-environ-cmdline" 'sudo cat /proc/self/environ'
+# The sudo/doas wrapper is stripped only for inspection; it is never an
+# execution authority.  A privilege-wrapped sensitive command is still blocked
+# (the inner verb is inspected), and a privilege-wrapped ordinary command is
+# still allowed (the wrapper does not over-block).
+expect_block proc-sudo-flag "procfs-environ-cmdline" 'sudo -n -u root cat /proc/self/environ'
+expect_block proc-doas "procfs-environ-cmdline" 'doas cat /proc/self/environ'
+expect_block sudo-ssh-key "ssh-key-material" 'sudo cat ~/.ssh/id_rsa'
+expect_block sudo-netrc "netrc-password-store" 'sudo cat ~/.netrc'
+expect_block sudo-dotenv "dotenv-store" 'sudo cat .env'
+expect_block sudo-env-dump "environment-dump" 'sudo env'
+expect_block sudo-ps-env "ps-environ-column" 'sudo ps eww'
+expect_block sudo-interpreter "interpreter-bypass" "sudo sh -c 'cat /proc/self/environ'"
 expect_block ssh-id-rsa "ssh-key-material" 'cat ~/.ssh/id_rsa'
 expect_block ssh-config "ssh-key-material" 'cat /home/alice/.ssh/config'
 expect_block git-c-ssh-dir "ssh-key-material" 'git -C ~/.ssh log'
@@ -148,6 +160,9 @@ expect_allow grep-quoted-id-rsa 'grep -rn "id_rsa" src/'
 expect_allow grep-quoted-token 'grep -rn "token" src/'
 expect_allow grep-quoted-secret 'grep -rn "secret" docs/'
 expect_allow grep-password 'grep -rn "password" .'
+expect_allow sudo-cmake-build 'sudo cmake --build build-check --parallel'
+expect_allow sudo-git-status 'sudo git status --short'
+expect_allow sudo-ctest 'sudo ctest --test-dir build-check --output-on-failure'
 expect_allow cmake-build 'cmake --build build-check --parallel'
 expect_allow ctest-run 'ctest --test-dir build-check --output-on-failure'
 expect_allow git-status 'git status --short'

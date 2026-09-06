@@ -118,6 +118,31 @@ class ReadinessPolicyTests(unittest.TestCase):
         self.assertIsNotNone(readiness.IDENT.fullmatch("lower-1"))
         self.assertIsNone(readiness.SHA256.fullmatch("A"*64))
 
+    def test_campaign_permit_is_a_real_authorization_not_a_sentinel(self):
+        # CampaignPermit is a concrete authorization record bound to a real
+        # campaign id, readiness nonce, and a caller-supplied marker.  It is
+        # never a fixed sentinel/placeholder: two permits for different
+        # campaigns/nonces/markers are distinct, and the fields round-trip
+        # exactly.  A sentinel would collapse every permit to one constant.
+        marker = object()
+        permit = readiness.CampaignPermit(
+            campaign_id="campaign-1", nonce="a" * 64, marker=marker,
+        )
+        self.assertEqual(permit.campaign_id, "campaign-1")
+        self.assertEqual(permit.nonce, "a" * 64)
+        self.assertIs(permit.marker, marker)
+        other = readiness.CampaignPermit(
+            campaign_id="campaign-2", nonce="b" * 64, marker=object(),
+        )
+        self.assertNotEqual(permit, other)
+        self.assertNotEqual(permit.campaign_id, other.campaign_id)
+        self.assertNotEqual(permit.nonce, other.nonce)
+        self.assertIsNot(permit.marker, other.marker)
+        # The permit is frozen: it cannot be mutated into a different binding.
+        with self.assertRaises(AttributeError):
+            permit.campaign_id = "forged"
+
+
     def test_neutral_campaign_blocks_before_external_execution(self):
         head=subprocess.check_output(["git","-C",str(ROOT),"rev-parse","HEAD"],text=True).strip()
         command=[sys.executable,str(ROOT/".factory/loop/campaign.py"),"--root",str(ROOT),"run","--campaign-id","neutral-check","--rounds","1","--branch","boilerplate-develop","--provider","ollama","--model","unused","--backend","/bin/false","--accepted-commit",head,"--install-manifest","/nonexistent","--campaign-timeout","1","--verification-command","./.factory/tools/verify-boilerplate.sh","--acceptance-command","./.factory/tools/verify-boilerplate.sh"]

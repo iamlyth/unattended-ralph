@@ -360,9 +360,35 @@ _SEARCH_TOOLS = {"grep", "rg", "ag", "egrep", "fgrep", "ack"}
 
 
 def _strip_privilege(segment: str) -> str:
-    """Remove a leading sudo/doas wrapper so the inner verb is inspected."""
-    match = re.match(r"\s*(?:sudo|doas)(?:\s+[^\s|;&#]+)*\s+(.*)$", segment, re.S)
-    return match.group(1) if match else segment
+    """Remove a leading sudo/doas wrapper so the inner verb is inspected.
+
+    The wrapper is stripped for inspection only and is never an execution
+    authority: the inner verb is still classified exactly as if it had been
+    invoked directly.  Only sudo/doas option tokens (``-n``, ``-u root``,
+    ``-E``, ...) are consumed; the first non-option token is the command word
+    and is always preserved, so a privilege-wrapped sensitive command (for
+    example ``sudo ps eww``) is still blocked.
+    """
+    match = re.match(r"\s*(?:sudo|doas)\s+(.*)$", segment, re.S)
+    if not match:
+        return segment
+    rest = match.group(1)
+    # A sudo/doas option token starts with ``-``.  A value-taking option
+    # (``-u root``, ``-p prompt``, ...) also consumes the following token as
+    # its value; every other token is the command word and ends the strip.
+    value_taking = frozenset("aCDFgprRtTUuZ")
+    tokens = rest.split()
+    consumed = 0
+    while consumed < len(tokens):
+        token = tokens[consumed]
+        if not token.startswith("-"):
+            break
+        body = token[1:]
+        if body and body[0] in value_taking and consumed + 1 < len(tokens):
+            consumed += 2
+        else:
+            consumed += 1
+    return " ".join(tokens[consumed:])
 
 
 def _env_dump_reason(segment: str) -> Optional[str]:
