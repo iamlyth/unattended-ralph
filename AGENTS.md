@@ -38,17 +38,13 @@ determine its cause, fix it when safe, or append a remediation task.
 ## Run and inspect
 
 ```bash
-# Finite production campaign from a verified installed control plane.
+# Finite production campaign; add capability/runner commands only if declared.
 "${INSTALL_PREFIX:?verified install}/.factory/bin/factory-campaign" --root "$PWD" run \
-  --campaign-id "${CAMPAIGN_ID:?unique id}" --rounds "${ROUNDS:?finite bound}" \
-  --branch boilerplate-develop --provider "${PI_PROVIDER:?real provider}" \
-  --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?immutable pi2 path}" \
-  --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" \
-  --install-manifest "${INSTALL_MANIFEST:?verified manifest}" \
-  --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" \
-  --verification-command ./scripts/verify-boilerplate.sh \
+  --campaign-id "${CAMPAIGN_ID:?unique}" --rounds "${ROUNDS:?finite}" --branch boilerplate-develop \
+  --provider "${PI_PROVIDER:?real}" --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?pi2}" \
+  --accepted-commit "${ACCEPTED_COMMIT:?clean HEAD}" --install-manifest "${INSTALL_MANIFEST:?verified}" \
+  --campaign-timeout "${CAMPAIGN_TIMEOUT:-21600}" --verification-command ./scripts/verify-boilerplate.sh \
   --acceptance-command ./scripts/verify-boilerplate.sh
-# Add --capability-command/--runner-command only when declared by the project.
 python3 .factory/loop/state.py --root "$PWD" show
 python3 .factory/loop/migration.py --root "$PWD" status  # Ralph migration
 ```
