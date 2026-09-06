@@ -3985,6 +3985,41 @@ def _canonical_ollama_settings_url(guard: object) -> str:
     return CANONICAL_OLLAMA_SETTINGS_URL
 
 
+class _CampaignOnlyAuthorization:
+    """One-use exact-invocation mint held only by the locked campaign."""
+    __slots__ = ("descriptor_sha256", "campaign_id", "used", "_marker")
+
+    def __init__(self, binding: "InvocationBinding", campaign_id: str, marker: object) -> None:
+        if marker is not _CAMPAIGN_AUTHORIZATION_SECRET:
+            raise InvocationError("campaign authorization mint is private")
+        fields = dict(binding.__dict__)
+        fields["backend"] = str(fields["backend"])
+        fields["workspace"] = str(fields["workspace"])
+        fields["allowed_tools"] = list(fields["allowed_tools"])
+        self.descriptor_sha256 = hashlib.sha256(
+            json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.campaign_id = campaign_id
+        self.used = False
+        self._marker = marker
+
+    def consume(self, binding: "InvocationBinding") -> None:
+        if self.used or self._marker is not _CAMPAIGN_AUTHORIZATION_SECRET:
+            raise InvocationError("campaign authorization was replayed")
+        candidate = _CampaignOnlyAuthorization(binding, self.campaign_id, self._marker)
+        if candidate.descriptor_sha256 != self.descriptor_sha256:
+            raise InvocationError("campaign authorization descriptor binding differs")
+        self.used = True
+
+
+_CAMPAIGN_AUTHORIZATION_SECRET = object()
+
+
+def _mint_campaign_authorization(binding: "InvocationBinding", campaign_id: str) -> _CampaignOnlyAuthorization:
+    """Private campaign bridge; public launch surfaces never call this."""
+    return _CampaignOnlyAuthorization(binding, campaign_id, _CAMPAIGN_AUTHORIZATION_SECRET)
+
+
 def authorize_launch(
     binding: "InvocationBinding",
     *,
@@ -3995,6 +4030,7 @@ def authorize_launch(
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
     findings: Optional[bytes] = None,
+    _campaign_authorization: Optional[object] = None,
 ) -> LaunchAuthority:
     """Mint the unforgeable verified-committed authority token (F2/F5).
 
@@ -4030,8 +4066,17 @@ def authorize_launch(
     the campaign's ordered pre-round registry owns that policy once per
     round.  No ``--usage-guard-*`` launch option exists, and authorization
     neither opens a cookie store nor invokes ``require_quota``.
+
+    Real providers also require a fresh one-use mint from the exclusively
+    locked Campaign. Standalone and programmatic launch remain synthetic-only.
     """
     verify_invocation(binding)
+    if binding.provider.lower() != "synthetic":
+        if not isinstance(_campaign_authorization, _CampaignOnlyAuthorization):
+            raise InvocationError(
+                "real-provider authorization is campaign-only; standalone/programmatic launch is synthetic-only"
+            )
+        _campaign_authorization.consume(binding)
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
     _verify_input_digest("specification", spec, binding.specification_digest)

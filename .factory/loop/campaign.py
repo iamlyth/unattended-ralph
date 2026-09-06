@@ -90,6 +90,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import launch as launch_module
     from . import workspace_confinement as confinement_authority
     from . import redaction as output_redaction
+    from . import readiness as readiness_module
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
     import evidence as evidence_module  # type: ignore[no-redef]
@@ -104,6 +105,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import launch as launch_module  # type: ignore[no-redef]
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
+    import readiness as readiness_module  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -116,8 +118,8 @@ PHASE_RESULT_SCHEMA_FILE = "factory-phase-result-v1.schema.json"
 
 PHASES = ("planning", "implementation", "verification", "audit")
 TERMINAL_PHASES = (
-    "success", "findings", "blocked", "failed", "interrupted",
-    "infrastructure_failure",
+    "success", "readiness_complete", "findings", "blocked", "failed",
+    "interrupted", "infrastructure_failure",
 )
 
 # §13 phase-outcome classification sets (subsets of the trusted outcome enum).
@@ -156,6 +158,7 @@ EXIT_ERROR = 6
 
 TERMINAL_EXIT_CODES: Mapping[str, int] = {
     "success": EXIT_SUCCESS,
+    "readiness_complete": EXIT_SUCCESS,
     "findings": EXIT_FINDINGS,
     "blocked": EXIT_BLOCKED,
     "failed": EXIT_FAILED,
@@ -238,7 +241,7 @@ GATE_DETAIL_MAX = 4000
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
-SAFE_CAMPAIGN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SAFE_CAMPAIGN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 
 # The trusted scope authority: no untrusted role may ever modify Git history,
 # the mutable control state, legacy runtime namespaces, model tool stores, or
@@ -406,6 +409,15 @@ class CampaignResult:
             raise CampaignResultError(
                 "rounds_completed must be between zero and rounds_requested"
             )
+        if self.terminal_phase == "readiness_complete":
+            if self.terminal_outcome != "readiness_complete" or self.rounds_completed != 0 or self.phase_history:
+                raise CampaignResultError("readiness-only cannot impersonate campaign success")
+        if self.terminal_phase == "success":
+            if self.rounds_completed != self.rounds_requested:
+                raise CampaignResultError("campaign success requires every requested round")
+            completed_audits = {record.round for record in self.phase_history if record.phase == "audit"}
+            if completed_audits != set(range(1, self.rounds_requested + 1)):
+                raise CampaignResultError("campaign success requires complete passing phase history")
         for record in self.phase_history:
             if record.round < 1 or record.round > self.rounds_requested:
                 raise CampaignResultError(
@@ -513,8 +525,8 @@ class CampaignConfig:
     def validate(self) -> None:
         if not SAFE_CAMPAIGN_ID_RE.fullmatch(self.campaign_id):
             raise CampaignConfigError(
-                "campaign_id must match the safe campaign-id pattern "
-                "`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`"
+                "campaign_id must be canonical lowercase and match "
+                "`[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?`"
             )
         if (
             isinstance(self.rounds_requested, bool)
@@ -1890,6 +1902,7 @@ def launch_role_attempt(
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
     findings_payload: Optional[bytes] = None,
+    _campaign_authorization: Optional[object] = None,
 ) -> RoleOutcome:
     """Run one fresh role attempt through the committed launch authority.
 
@@ -1989,6 +2002,10 @@ def launch_role_attempt(
             inactivity_limit=config.inactivity_limit,
         )
         launch_module.verify_invocation(binding)
+        campaign_authorization = (
+            launch_module._mint_campaign_authorization(binding, config.campaign_id)
+            if _campaign_authorization is not None else None
+        )
         authority = launch_module.authorize_launch(
             binding,
             role_prompt=_blob_at(root, f".factory/prompts/{role}.md"),
@@ -1998,6 +2015,7 @@ def launch_role_attempt(
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings_payload,
+            _campaign_authorization=campaign_authorization,
         )
     except launch_module.InvocationError as exc:
         # Task 9 review B2: every refused launch — unbound or missing bytes,
@@ -2724,6 +2742,18 @@ class Campaign:
                 float(self._config.inactivity_limit), runtime_budget
             ),
         )
+        # A cache is never role authority. Reopen the accepted policy at each
+        # mint and ensure campaign progress is an authorized descendant.
+        policy_raw = self._git.blob_at(
+            self._config.accepted_commit, readiness_module.POLICY_PATH
+        )
+        policy, _ = readiness_module.load_policy(self._root, policy_raw)
+        if policy["production_authority"]["enrolled"] is not True:
+            raise CampaignPhaseError("human_block: no production authority is enrolled")
+        if not self._git.is_ancestor(self._config.accepted_commit, head):
+            raise CampaignPhaseError(
+                "launch current commit is not an authorized descendant of the accepted readiness commit"
+            )
         return launch_role_attempt(
             bounded,
             role=role,
@@ -2731,6 +2761,7 @@ class Campaign:
             task_id=task_id,
             round_number=state.current_round,
             findings_payload=findings_payload,
+            _campaign_authorization=self,
         )
 
     def _run_driver(
@@ -4768,6 +4799,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_run.add_argument(
         "--preflight-only", action="store_true", help=argparse.SUPPRESS,
     )
+    p_run.add_argument(
+        "--readiness-only", action="store_true",
+        help="run mandatory round-zero readiness only; never report campaign success",
+    )
     p_run.add_argument("--role-timeout", type=float, default=DEFAULT_ROLE_TIMEOUT)
     p_run.add_argument("--gate-timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
     p_run.add_argument(
@@ -4859,6 +4894,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.evidence_smoke:
                 _evidence_smoke_preflight(root, args)
             elif not args.role_driver:
+                # Neutral production is explicitly blocked before install,
+                # runner, gate, or model execution. Configuration errors above
+                # remain distinguishable from missing human/project authority.
+                policy, policy_sha = readiness_module.load_policy(root)
+                if policy["production_authority"]["enrolled"] is not True:
+                    print(json.dumps({
+                        "schema":"factory-campaign-result/v1", "campaign_id":args.campaign_id,
+                        "rounds_requested":args.rounds, "rounds_completed":0,
+                        "terminal_phase":"blocked", "terminal_outcome":"human_block",
+                        "head_commit":_live_head(root), "exit_code":EXIT_BLOCKED,
+                        "phase_history":[], "readiness_policy_sha256":policy_sha,
+                        "reason":policy["production_authority"]["reason"],
+                    }, sort_keys=True, separators=(",", ":")))
+                    return EXIT_BLOCKED
                 state_namespace = _production_preflight(
                     root, args, verification_command,
                     acceptance_command=acceptance_command,

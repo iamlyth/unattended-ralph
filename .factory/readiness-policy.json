@@ -1,0 +1,20 @@
+{
+  "schema": "factory-readiness-policy/v1",
+  "status": "active",
+  "production_authority": {
+    "enrolled": false,
+    "reason": "No production authority is enrolled by the generic boilerplate. An adopting project must commit a project-specific policy and independently provision its declared external authorities."
+  },
+  "required_runner_classes": [],
+  "required_capabilities": [],
+  "conformance_gate_ids": ["conformance-planning"],
+  "core_gate_ids": ["boilerplate-verification"],
+  "human_approval": null,
+  "invalidation": {
+    "accepted_commit": ["runner-aggregate", "capability-evidence", "conformance-planning"],
+    "current_product": ["boilerplate-verification"],
+    "paths": {
+      "boilerplate-verification": [".factory/", ".pi/", "scripts/", "tests/", "docs/", "AGENTS.md", "README.md"]
+    }
+  }
+}

@@ -2275,18 +2275,12 @@ class ReviewHardening(_CampaignBase):
         result_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor = os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(descriptor)
-        outcome = campaign_module.launch_role_attempt(
-            config, role="tester", head=head, round_number=1,
-        )
-        self.assertEqual(outcome.exit_status, 0)
-        consumed = campaign_module.read_phase_result(
-            ws.root, config.phase_result_path, "verification"
-        )
-        self.assertIsNotNone(consumed)
-        self.assertEqual(consumed[0], {
-            "schema": "factory-phase-result/v1", "outcome": "pass",
-        })
-        self.assertFalse(result_path.exists(), "result handoff must be consumed")
+        with self.assertRaises(campaign_module.CampaignPhaseError) as denied:
+            campaign_module.launch_role_attempt(
+                config, role="tester", head=head, round_number=1,
+            )
+        self.assertIn("campaign-only", str(denied.exception))
+        self.assertEqual(result_path.read_bytes(), b"", "standalone denial must occur before model execution")
 
     def test_production_launch_invocation_error_is_clean_campaign_error(
         self,

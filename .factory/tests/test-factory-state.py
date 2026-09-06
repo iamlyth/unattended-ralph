@@ -27,6 +27,7 @@ product's visible test tree. It is the deterministic verification for Task 4:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -129,7 +130,7 @@ TAMPER_FIXTURES = {
     "state-rounds-requested-zero.json": "`rounds_requested` must be a positive integer",
     "state-rounds-requested-negative.json": "`rounds_requested` must be a positive integer",
     "state-rounds-requested-bool.json": "`rounds_requested` must be an integer",
-    "state-current-round-zero.json": "`current_round` must be a positive integer",
+    "state-current-round-zero.json": "round zero is reserved for readiness",
     "state-current-round-bool.json": "`current_round` must be an integer",
     "state-current-round-exceeds-requested.json": "`current_round` may not exceed",
     "state-phase-unknown.json": "`current_phase` must be one of",
@@ -207,6 +208,10 @@ ALL_FIXTURES = sorted(
 
 # The documented §11 advance edge set (audit finality is handled explicitly).
 ADVANCE_EDGES = {
+    ("readiness", "pass"): "planning",
+    ("readiness", "findings"): "findings",
+    ("readiness", "blocked"): "blocked",
+    ("readiness", "infrastructure_failure"): "infrastructure_failure",
     ("planning", "planned"): "implementation",
     ("planning", "failed"): "failed",
     ("planning", "interrupted"): "interrupted",
@@ -251,14 +256,23 @@ def make_state(**overrides) -> FactoryState:
         "plan_digest": PLAN_SHA,
         "role_prompt_digests": {"planner": ROLE_SHA},
         "audit_objectives_digest": AUDIT_SHA,
+        "pre_round_hook_configuration_digest": "0" * 64,
+        "pre_round_hook_commit": "0" * 40,
+        "pre_round_hook_results_digest": "0" * 64,
+        "pre_round_hook_started_round": 1,
+        "pre_round_hook_completed_round": 1,
         "phase_base_commit": BASE_COMMIT,
         "selected_task_id": None,
         "attempt_number": 0,
         "phase_started_at_monotonic": MONOTONIC,
         "attempt_started_at_monotonic": 0,
         "last_outcome": None,
+        "readiness": state_module.empty_readiness(),
     }
     data.update(overrides)
+    if data["current_round"] == 0:
+        data["pre_round_hook_started_round"] = 0
+        data["pre_round_hook_completed_round"] = 0
     return parse_state(data)
 
 
@@ -413,10 +427,10 @@ class FieldSetTest(StateConformanceCase):
                 "pre_round_hook_completed_round", "phase_base_commit",
                 "selected_task_id", "attempt_number",
                 "phase_started_at_monotonic", "attempt_started_at_monotonic",
-                "last_outcome",
+                "last_outcome", "readiness",
             ),
         )
-        self.assertEqual(len(FIELD_NAMES), 22)
+        self.assertEqual(len(FIELD_NAMES), 23)
 
     def test_extra_field_is_rejected(self) -> None:
         data = json.loads(self.fixture("state-field-extra.json").read_text("utf-8"))
@@ -497,7 +511,7 @@ class CounterTest(StateConformanceCase):
             parse_state(data)
 
     def test_current_round_invariants(self) -> None:
-        with self.assertRaisesRegex(StateTamperError, "positive integer"):
+        with self.assertRaisesRegex(StateTamperError, "round zero is reserved"):
             parse_state(json.loads(
                 self.fixture("state-current-round-zero.json").read_text("utf-8")
             ))
@@ -571,7 +585,7 @@ class CounterTest(StateConformanceCase):
             parse_state(null_verification)
 
     def test_phase_enum_is_exact(self) -> None:
-        self.assertEqual(PHASES, ("planning", "implementation", "verification", "audit"))
+        self.assertEqual(PHASES, ("readiness", "planning", "implementation", "verification", "audit"))
         self.assertEqual(
             TERMINAL_PHASES,
             (
@@ -582,7 +596,7 @@ class CounterTest(StateConformanceCase):
         self.assertEqual(
             PHASE_VALUES,
             (
-                "planning", "implementation", "verification", "audit",
+                "readiness", "planning", "implementation", "verification", "audit",
                 "success", "findings", "blocked", "failed", "interrupted",
                 "infrastructure_failure",
             ),
@@ -786,6 +800,11 @@ class TransitionTableTest(StateConformanceCase):
     """The §11 transition table holds edge for edge."""
 
     def _source(self, phase: str) -> FactoryState:
+        if phase == "readiness":
+            binding = state_module.empty_readiness(required=True)
+            binding["nonce"] = "1" * 64
+            return make_state(current_phase="readiness", current_round=0,
+                              readiness=binding)
         if phase == "planning":
             return make_state()
         if phase == "implementation":
@@ -803,7 +822,22 @@ class TransitionTableTest(StateConformanceCase):
                 if (phase, outcome) == ("planning", "planned"):
                     kwargs["plan_digest"] = "0" * 64
                     kwargs["phase_base_commit"] = "0" * 40
-                result = advance(self._source(phase), outcome, **kwargs)
+                source = self._source(phase)
+                if phase == "readiness":
+                    binding = dict(source.readiness)
+                    binding.update({
+                        "cursor": 6,
+                        "status": {"pass": "complete", "findings": "findings", "blocked": "human_blocked", "infrastructure_failure": "infrastructure_failure"}[outcome],
+                        "terminal_outcome": outcome,
+                        "result_sha256": "2" * 64,
+                        "aggregate_sha256": "3" * 64,
+                        "capability_result_sha256": "4" * 64,
+                        "core_result_sha256": "5" * 64,
+                        "conformance_result_sha256": "6" * 64,
+                        "human_result_sha256": "7" * 64,
+                    })
+                    source = dataclasses.replace(source, readiness=binding)
+                result = advance(source, outcome, **kwargs)
                 self.assertEqual(result.current_phase, target)
                 if target in TERMINAL_PHASES:
                     self.assertEqual(result.last_outcome, target)

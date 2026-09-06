@@ -172,8 +172,15 @@ required = [
     '.factory/tests/test-factory-migration.sh',
     '.factory/tests/adversarial-manifest.json',
     '.factory/pre-round-hooks.json',
+    '.factory/readiness-policy.json',
+    '.factory/schemas/factory-readiness-policy-v1.schema.json',
+    '.factory/schemas/factory-readiness-result-v2.schema.json',
+    '.factory/schemas/factory-campaign-launch-authority-v1.schema.json',
+    '.factory/schemas/factory-state-v2.schema.md',
     '.factory/loop/pre_round.py',
+    '.factory/loop/readiness.py',
     '.factory/tests/test-factory-pre-round.py',
+    '.factory/tests/test-factory-readiness.py',
     '.factory/tests/test-factory-adversarial.py',
     '.factory/tests/test-factory-adversarial.sh',
     '.factory/tests/test-factory-confinement-order.sh',
@@ -391,6 +398,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./.factory/tests/test-factory-generic-evidence.sh
 ./.factory/tests/test-factory-migration.sh
 python3 .factory/tests/test-factory-pre-round.py
+python3 .factory/tests/test-factory-readiness.py
 ./.factory/tests/test-factory-confinement-order.sh
 ./.factory/tests/test-factory-adversarial.sh
 ./.factory/tests/test-factory-smoke.sh

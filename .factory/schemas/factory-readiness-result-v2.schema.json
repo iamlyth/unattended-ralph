@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-readiness-result/v2",
+  "$comment": "Unauthoritative cache. Every launch reopens canonical authorities.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema","campaign_id","nonce","status","terminal_outcome","bindings","results"],
+  "properties": {
+    "schema":{"const":"factory-readiness-result/v2"},
+    "campaign_id":{"type":"string","pattern":"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"},
+    "nonce":{"$ref":"#/$defs/sha256"},
+    "status":{"enum":["complete","findings","human_block","infrastructure_failure"]},
+    "terminal_outcome":{"enum":["pass","findings","blocked","infrastructure_failure"]},
+    "bindings":{"type":"object","additionalProperties":false,"required":["accepted_commit","accepted_tree","current_commit","current_tree","config_sha256","environment_sha256","specification_sha256","plan_sha256","contracts_sha256","policy_sha256","trust_sha256","install_manifest_sha256"],"properties":{"accepted_commit":{"$ref":"#/$defs/sha1"},"accepted_tree":{"$ref":"#/$defs/sha1"},"current_commit":{"$ref":"#/$defs/sha1"},"current_tree":{"$ref":"#/$defs/sha1"},"config_sha256":{"$ref":"#/$defs/sha256"},"environment_sha256":{"$ref":"#/$defs/sha256"},"specification_sha256":{"$ref":"#/$defs/sha256"},"plan_sha256":{"$ref":"#/$defs/sha256"},"contracts_sha256":{"$ref":"#/$defs/sha256"},"policy_sha256":{"$ref":"#/$defs/sha256"},"trust_sha256":{"$ref":"#/$defs/sha256"},"install_manifest_sha256":{"$ref":"#/$defs/sha256"}}},
+    "results":{"type":"object","minProperties":1,"additionalProperties":{"$ref":"#/$defs/sha256"}}
+  },
+  "$defs":{"sha1":{"type":"string","pattern":"^[0-9a-f]{40}$"},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

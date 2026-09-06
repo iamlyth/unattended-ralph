@@ -37,7 +37,7 @@ tracks task status and verification evidence.
 - Exactly one primary worker may edit, stage, or commit repository files; Git history and commit operations run in the trusted orchestrator, never in model tools.
 - Tests, documentation, machine evidence, and an independent audit are completion gates.
 - Before each round's planner, the trusted campaign executes the exact committed `.factory/pre-round-hooks.json` registry once in order. Its strict schema admits only fixed internal implementations and initially contains mandatory `branch_guard`; no command, argv, quota, or cookie surface is accepted.
-- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored) carries the lifecycle fields plus the exact hook configuration/commit binding, ordered result digest chain, and durable start/completion cursor.
+- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v2`, ignored) carries the lifecycle fields plus the exact hook configuration/commit binding, ordered result digest chain, and durable start/completion cursor.
 - You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used.
@@ -338,6 +338,29 @@ passing attestation.
 
 These controls require Linux `O_NOFOLLOW`, dirfd, `/proc`, and directory
 `flock` primitives; the lifecycle exits explicitly when they are unavailable.
+
+## Production round-zero readiness
+
+Real-provider production has a mandatory round zero governed by the strict
+committed `.factory/readiness-policy.json` (`factory-readiness-policy/v1`). The
+policy declares generic runner classes/capabilities, conformance/core gate IDs,
+optional externally provisioned human trust/checklist/capture bindings, and
+accepted-commit/current-product invalidation scopes. Gate IDs resolve through a
+fixed internal adapter registry; arbitrary commands are not admitted. The
+boilerplate default enrolls no production authority, so it explicitly reports
+`blocked` before external execution and imposes no product hardware.
+
+All readiness inputs are exact commit/tree/config/environment/specification/
+plan/contracts/policy/trust/install bindings. Evidence remains attached to its
+accepted commit; later campaign HEADs must be descendants and current-product
+gates rerun according to invalidation policy. Every role mint freshly reopens
+canonical authority; cached readiness output is never authorization. Only the
+exclusively locked Campaign can mint a one-use role token bound to exact phase,
+role, task, attempt, prompt/tools, provider/model/runtime and current/accepted
+commit/tree. Standalone launch is synthetic-only. Missing human authority is
+`human_block`, acceptance gaps are `findings`, and unavailable primitives are
+`infrastructure_failure`. `--readiness-only` ends at `readiness_complete`,
+never campaign `success`.
 
 ## Run a finite multi-round campaign
 

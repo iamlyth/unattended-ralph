@@ -1,0 +1,16 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"factory-campaign-launch-authority/v1",
+  "type":"object","additionalProperties":false,
+  "required":["schema","campaign_id","readiness_nonce","token","coordinator_pid","coordinator_start","used","claims","mac"],
+  "properties":{
+    "schema":{"const":"factory-campaign-launch-authority/v1"},
+    "campaign_id":{"type":"string","pattern":"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"},
+    "readiness_nonce":{"$ref":"#/$defs/sha256"},"token":{"$ref":"#/$defs/sha256"},
+    "coordinator_pid":{"type":"integer","minimum":1},"coordinator_start":{"type":"string","pattern":"^[0-9]+$"},
+    "used":{"type":"boolean"},
+    "claims":{"type":"object","additionalProperties":false,"required":["phase","role","task","attempt","prompt","tools","provider","model","backend","runtime","current_commit","current_tree","accepted_commit","accepted_tree"],"properties":{"phase":{"enum":["planning","implementation","verification","audit"]},"role":{"enum":["planner","developer","tester","auditor"]},"task":{"type":["integer","null"],"minimum":1},"attempt":{"type":"integer","minimum":1},"prompt":{"$ref":"#/$defs/sha256"},"tools":{"type":"array","uniqueItems":true,"items":{"type":"string"}},"provider":{"type":"string","minLength":1},"model":{"type":"string","minLength":1},"backend":{"type":"string","minLength":1},"runtime":{"type":"number","exclusiveMinimum":0},"current_commit":{"$ref":"#/$defs/sha1"},"current_tree":{"$ref":"#/$defs/sha1"},"accepted_commit":{"$ref":"#/$defs/sha1"},"accepted_tree":{"$ref":"#/$defs/sha1"}}},
+    "mac":{"$ref":"#/$defs/sha256"}
+  },
+  "$defs":{"sha1":{"type":"string","pattern":"^[0-9a-f]{40}$"},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

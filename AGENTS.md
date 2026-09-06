@@ -8,8 +8,8 @@ legacy crash handoff is excluded from model context.
 - Canonical specification: `docs/FACTORY-LOOP-SPEC.md` (`.factory/config.toml` `[project].spec`); `docs/SPEC.md` is the adopting placeholder, never planned.
 - Canonical plan and sole task ledger: `.factory/artifacts/implementation-plan.md`
   (schema `factory-plan/v1`, parser `.factory/loop/plan_parser.py`).
-- Single mutable control-state file: `.factory-state/factory-loop.json` (ignored).
-  Capabilities: `.factory/environment.toml`; defects: `.factory/bugs/open.md`/`closed.md`.
+- Single mutable control-state file: `.factory-state/factory-loop.json` (`factory-state/v2`, ignored).
+  Readiness policy: `.factory/readiness-policy.json`; capabilities: `.factory/environment.toml`; defects: `.factory/bugs/open.md`/`closed.md`.
 - Work only on the configured development branch (`.factory/config.toml`);
   the human promotes to `main`. No worktrees; never edit the committed spec.
 
@@ -27,6 +27,7 @@ stdlib-only Python under `.factory/loop/`; the gates below verify it.
 python3 .factory/tests/test-factory-plan-parser.py
 python3 .factory/tests/test-factory-selector.py
 python3 .factory/tests/test-factory-state.py
+python3 .factory/tests/test-factory-readiness.py
 ./scripts/run-factory-runners.py             # exact-commit runner gate
 ./scripts/check-factory-runner-evidence.py   # (needs provisioning)
 ```
@@ -37,7 +38,8 @@ determine its cause, fix it when safe, or append a remediation task.
 ## Run and inspect
 
 ```bash
-# Finite production campaign; add capability/runner commands only if declared.
+# Finite production campaign. The neutral policy is intentionally BLOCKED;
+# an adopting project must commit and provision its generic readiness authorities.
 "${INSTALL_PREFIX:?verified install}/.factory/bin/factory-campaign" --root "$PWD" run \
   --campaign-id "${CAMPAIGN_ID:?unique}" --rounds "${ROUNDS:?finite}" --branch boilerplate-develop \
   --provider "${PI_PROVIDER:?real}" --model "${PI_MODEL:?model}" --backend "${PI2_BACKEND:?pi2}" \

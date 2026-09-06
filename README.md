@@ -13,7 +13,7 @@ campaigns are finite with exact terminal outcomes.
 > (`.factory/ralph-freeze`). The hidden Python control plane under
 > `.factory/loop/` implements the canonical
 > [Factory Loop Specification](docs/FACTORY-LOOP-SPEC.md) using
-> `factory-plan/v1` and the single `factory-state/v1` control-state file; it
+> `factory-plan/v1` and the single `factory-state/v2` control-state file; it
 > does not import Ralph tasks, memories, events, completion tokens,
 > scratchpads, or persisted context summaries. Visible `scripts/ralph-*`
 > commands are frozen deprecated compatibility forwarders and are not
@@ -49,8 +49,8 @@ against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
   The registry accepts only fixed internal implementations and initially
   contains the mandatory `branch_guard`; it cannot carry commands or argv.
 - Exactly one minimal mutable control-state file
-  `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored)
-  also carries the exact hook configuration/commit binding, ordered result
+  `.factory-state/factory-loop.json` (schema `factory-state/v2`, ignored)
+  also carries mandatory round-zero readiness and the exact hook configuration/commit binding, ordered result
   digest chain, and durable start/completion cursor.
 - Tests, documentation, machine evidence, and an independent audit are
   completion gates. A campaign always terminates with one of six outcomes:
@@ -92,9 +92,14 @@ audit):
 ```
 
 Production accepts only the authenticated, immutable Pi2 launch contract;
-`synthetic` and `--role-driver` are explicit fixture-only seams. Capability
-and runner commands are supplied only when the adopting project's committed
-configuration declares them.
+`synthetic` and `--role-driver` are explicit fixture-only seams. Before model
+execution, `.factory/readiness-policy.json` selects only fixed internal gate
+adapters and binds the accepted commit/tree, configuration, environment,
+specification, plan, contracts, install manifest, and external trust. The
+boilerplate enrolls no production authority, so real-provider production is
+explicitly blocked until an adopting project commits and provisions one.
+Readiness-only terminates as `readiness_complete`, never campaign `success`;
+each real role consumes a fresh campaign-only one-use authorization.
 
 Inspect the lifecycle:
 

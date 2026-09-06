@@ -28,7 +28,7 @@ control-state authority.
 ## Control-state authority (STATE-01)
 
 The trusted control plane keeps exactly one mutable lifecycle file,
-`.factory-state/factory-loop.json` (schema `factory-state/v1`), carrying only
+`.factory-state/factory-loop.json` (schema `factory-state/v2`), carrying only
 the §11 lifecycle fields plus the exact pre-round registry configuration
 and commit binding, ordered result digest chain, and monotonic hook
 start/completion cursor. The cursor is written before execution, so a crash
@@ -101,6 +101,34 @@ mutation of content, mode, owner, link-count, or pathname identity not
 produced by a trusted transition fails closed. Resume by reloading
 `.factory-state/factory-loop.json` (phase never moves backward, counters are
 monotonic); `init` refuses to overwrite existing state.
+
+## Mandatory production readiness and role authorization
+
+Round zero is mandatory for every real provider. The strict committed
+`.factory/readiness-policy.json` names runner classes/capabilities and only
+IDs from the internal adapter registry; command strings and argv are not policy
+syntax. It also defines accepted-commit versus current-product invalidation and
+an optional project-adapted external human trust/checklist/capture contract.
+The generic policy intentionally enrolls no production authority and therefore
+returns `human_block`/`blocked` before any runner, gate, or model executes. It
+never infers hardware requirements.
+
+Readiness binds the exact accepted commit/tree, current commit/tree, config,
+environment, specification, plan, capability contracts, policy, install
+manifest, and external trust digests. Aggregate validation is class-based and
+order-independent. Accepted runner/human evidence remains bound to the accepted
+commit; later role heads must be descendants, while policy-selected current
+product gates rerun against the descendant. Cached readiness JSON is recovery
+data only.
+
+Only the Campaign, while holding the exclusive root-descriptor lock, may mint
+a real-provider role authorization. Each mint is fresh and one-use and binds
+campaign/readiness nonces, phase, role, task, attempt, prompt, tools,
+provider/model/backend/runtime, and current plus accepted commit/tree. Replay,
+restart, cross-campaign, phase, task, commit, or tree substitution fails closed.
+Standalone and programmatic launch are synthetic-only. `--readiness-only`
+terminates as `readiness_complete`; campaign `success` additionally requires
+all requested rounds and passing audit history.
 
 ## Finite campaign authority (Task 9)
 
@@ -892,7 +920,7 @@ terminate normally.
 ## Recovery
 
 Recovery is derived from Git, the canonical plan, the single
-`factory-state/v1` file, and process liveness — never from model prose or
+`factory-state/v2` file, and process liveness — never from model prose or
 runtime ledgers. Confirm no role process is alive, then re-run the same
 campaign command; `state.py recover` deterministically restores a torn write
 or removes validated orphaned writer artifacts:
@@ -956,6 +984,6 @@ Every implementation plan ends with **Final documentation and specification audi
 - **missing plan draft on resume**: `state.py recover` restores a torn write or removes validated orphaned writer markers; never restore an old completed plan as the active draft.
 - **`lifecycle marker is missing` from `state.py show`**: no campaign has initialized `.factory-state/factory-loop.json` on this tree; start or resume a campaign before expecting lifecycle state.
 - **`specification changed after planning`**: commit the revised canonical specification and start a new campaign from a clean tree.
-- **`factory-state/v1` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
+- **`factory-state/v2` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
 - **quota wait appears idle**: the usage guard prints each usage poll; lower the polling interval temporarily for diagnostics.
 - **cookie expired**: refresh the external operator store (`$OLLAMA_USAGE_ENV_FILE`, else `$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`) with `source scripts/update-ollama-cookies.sh`.

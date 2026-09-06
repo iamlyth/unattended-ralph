@@ -28,6 +28,7 @@
       "type": "string",
       "enum": [
         "success",
+        "readiness_complete",
         "findings",
         "blocked",
         "failed",
@@ -49,6 +50,7 @@
         "pass",
         "findings",
         "infrastructure_failure",
+        "readiness_complete",
         "success"
       ]
     },

@@ -1663,8 +1663,14 @@ elevated by prose.
   authenticated immutable Pi2/Node/CLI identity, FD-backed credential
   handling and tool-boundary revalidation, bounded high-FD supervision,
   single-write phase results, role retries, generic optional capability/runner
-  gates, and residual cleanup. The canonical specification remains unchanged.
-  Its §10 mandatory per-invocation Ollama check/wait contract conflicts with
+  gates, and residual cleanup. It additionally covers the generic mandatory
+  round-zero readiness policy/schema, fixed gate adapters, exact accepted and
+  descendant bindings, optional external human authority, `factory-state/v2`
+  migration, readiness-only terminal, and campaign-only one-use role launch
+  authorization. The neutral boilerplate remains deliberately blocked with no
+  enrolled production authority and no product hardware assumptions. The
+  canonical specification remains unchanged. Its §10 mandatory per-invocation
+  Ollama check/wait contract conflicts with
   the newer no-quota-policy launch surface; that mismatch is an explicit
   acceptance blocker and must not be reclassified as verified without human
   specification authority.
