@@ -73,7 +73,6 @@ from .launch import (  # fresh-context execution and supervision (Task 6)
     verify_child_env,
     verify_invocation,
     verify_task_excerpt,
-    write_prompt_file,
 )
 from .plan_parser import (
     ALLOWED_TRANSITIONS,
