@@ -187,13 +187,17 @@ class StateCursorTest(unittest.TestCase):
 
     def test_legacy_state_is_diagnostic_only_and_cannot_match_binding(self) -> None:
         legacy = self.initial().to_dict()
+        legacy["schema"] = state.LEGACY_SCHEMA_NAME
         for key in (
             "pre_round_hook_configuration_digest", "pre_round_hook_commit",
             "pre_round_hook_results_digest",
             "pre_round_hook_started_round", "pre_round_hook_completed_round",
+            "readiness",
         ):
             legacy.pop(key)
-        migrated = state.parse_state(legacy)
+        with self.assertRaises(state.StateTamperError):
+            state.parse_state(legacy)
+        migrated = state.parse_state(state.migrate_offline_state(legacy))
         self.assertEqual(migrated.pre_round_hook_configuration_digest, "0" * 64)
         self.assertNotEqual(migrated.pre_round_hook_configuration_digest, SHA)
 
