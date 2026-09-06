@@ -69,10 +69,33 @@ def verify_prompt_memfd(descriptor: int, expected_sha256: str) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
 
 
+def open_legacy_prompt(path: str) -> int:
+    """Open the deprecated pathname prompt without following substitutions.
+
+    Production factory launches never use this compatibility path; they must
+    supply the sealed descriptor and digest pair above. The legacy Ralph
+    forwarder may still pass one bounded regular file while migration remains
+    supported.
+    """
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        )
+        info = os.fstat(descriptor)
+    except OSError as exc:
+        die(f"cannot open legacy prompt file: {exc}")
+    if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_PROMPT_BYTES
+            or info.st_uid != os.getuid() or info.st_nlink != 1):
+        os.close(descriptor)
+        die("legacy prompt file has unsafe identity or size")
+    return descriptor
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--prompt-fd", type=int, required=True)
-    parser.add_argument("--prompt-sha256", required=True)
+    parser.add_argument("--prompt-fd", type=int)
+    parser.add_argument("--prompt-sha256")
+    parser.add_argument("--prompt-file")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command
@@ -80,10 +103,18 @@ def main() -> None:
         command = command[1:]
     if not command:
         die("missing backend command")
-    verify_prompt_memfd(args.prompt_fd, args.prompt_sha256)
-    if args.prompt_fd != 0:
-        os.dup2(args.prompt_fd, 0)
-        os.close(args.prompt_fd)
+    if args.prompt_file and (args.prompt_fd is not None or args.prompt_sha256):
+        die("legacy prompt path cannot be combined with a sealed prompt binding")
+    if (args.prompt_fd is None) != (args.prompt_sha256 is None):
+        die("prompt descriptor and SHA-256 must be supplied together")
+    descriptor = args.prompt_fd
+    if descriptor is not None:
+        verify_prompt_memfd(descriptor, args.prompt_sha256)
+    elif args.prompt_file:
+        descriptor = open_legacy_prompt(args.prompt_file)
+    if descriptor is not None and descriptor != 0:
+        os.dup2(descriptor, 0)
+        os.close(descriptor)
     os.execvpe(command[0], command, os.environ)
 
 
