@@ -498,8 +498,9 @@ Ordinary defects stay out of `docs/SPEC.md`. Canonical state is tracked in
 Forgejo, or both. Validate and inspect it with `.factory/tools/bug-ledger.py`.
 
 The legacy maintenance loops (`.factory/tools/ralph-maintenance-plan.sh` /
-`.factory/tools/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
-fresh Python loop's complete role set is planner, developer, tester, and
+`.factory/tools/ralph-maintenance-run.sh`) are retired and not invocable under
+the canonical factory loop: the forwarders are absent from the shipped tooling.
+The fresh Python loop's complete role set is planner, developer, tester, and
 auditor, so it has no maintenance role. Product defects are triaged by the
 human and enter the canonical plan through a planning revision. See
 [BUG_WORKFLOW.md](BUG_WORKFLOW.md) for the ledger contract.
@@ -602,9 +603,10 @@ file, stale specification binding, changed plan base, rewound counter, or
 invalid state transition fails closed for human/operator inspection. Recovery
 never resets Git and never starts a second writer.
 
-The frozen legacy recovery path (`.factory/tools/ralph-recover.sh`) exists only for
-an already in-flight legacy cycle; it requires the operator-only
-`FACTORY_RALPH_FREEZE_OVERRIDE=1` escape and is not a new launch.
+The frozen legacy recovery path (`.factory/tools/ralph-recover.sh`) is retired
+and not invocable under the canonical factory loop: the forwarder is absent from
+the shipped tooling and the `FACTORY_RALPH_FREEZE_OVERRIDE=1` escape no longer
+applies to a new launch.
 
 ## Specification changes
 

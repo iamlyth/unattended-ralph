@@ -1649,7 +1649,7 @@ elevated by prose.
 
 - Status: pending
 - Dependencies: Tasks 1-24
-- Scope: Independent read-only audit and review at the final committed
+- Scope: Current checkpoint: the security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the
   required tier (installed-tier receipts minted from the installed copy,

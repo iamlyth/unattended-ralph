@@ -995,20 +995,21 @@ file, stale specification binding, changed plan base, rewound counter, or
 invalid state transition fails closed for human/operator inspection. Recovery
 never resets Git and never starts a second writer.
 
-The frozen legacy recovery path (`.factory/tools/ralph-recover.sh`) exists only for
-an already in-flight legacy cycle; it requires the operator-only
-`FACTORY_RALPH_FREEZE_OVERRIDE=1` escape and is not a new launch.
+The frozen legacy recovery path (`.factory/tools/ralph-recover.sh`) is retired
+and not invocable under the canonical factory loop: the forwarder is absent from
+the shipped tooling and the `FACTORY_RALPH_FREEZE_OVERRIDE=1` escape no longer
+applies to a new launch.
 
 ## Bug maintenance
 
 GitHub and Forgejo issues are optional manual references; a bug may link either or both with `bug-ledger.py link|unlink`. Never store PATs in the repo or embed credentials/query tokens in URLs. Validate and inspect canonical state with `.factory/tools/bug-ledger.py validate|list|show|fingerprint` and maintain it with `add`, `link`, `unlink`, `set-status`, `close`, and safe interrupted-close `recover`. States are `open`, `triaged`, `planned`, `in_progress`, `blocked`, and `closed`; close requires `in_progress`.
 
 The legacy maintenance loops (`.factory/tools/ralph-maintenance-plan.sh` /
-`.factory/tools/ralph-maintenance-run.sh`) are frozen deprecated forwarders: the
-fresh loop's complete role set is planner, developer, tester, and auditor, so
-it has no maintenance role. Product defects are triaged by the human and enter
-the canonical plan through a planning revision; `[verification].maintenance_command`
-and `.factory/tools/verify-project.sh` are project-supplied. Full details are in
+`.factory/tools/ralph-maintenance-run.sh`) are retired and not invocable under
+the canonical factory loop: the forwarders are absent from the shipped tooling.
+The fresh loop's complete role set is planner, developer, tester, and auditor,
+so it has no maintenance role. Product defects are triaged by the human and
+enter the canonical plan through a planning revision. Full details are in
 `docs/BUG_WORKFLOW.md`.
 
 ## Specification changes
