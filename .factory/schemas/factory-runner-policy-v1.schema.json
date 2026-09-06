@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-runner-policy/v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "namespace", "classes"],
+  "properties": {
+    "schema": {"const": "factory-runner-policy/v3"},
+    "namespace": {"const": "factory-runner-receipt"},
+    "classes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/class"}}
+  },
+  "$defs": {
+    "id": {"type":"string","pattern":"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"},
+    "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "pin": {"type":"object","additionalProperties":false,"required":["path","sha256","device","inode","status"],"properties":{"path":{"type":"string","pattern":"^/"},"sha256":{"$ref":"#/$defs/sha256"},"device":{"type":"integer","minimum":0},"inode":{"type":"integer","minimum":1},"status":{"const":"enrolled"}}},
+    "resource": {"type":"object","additionalProperties":false,"required":["devices","dbus","collectors","dedicated_host"],"properties":{"devices":{"type":"array","uniqueItems":true,"items":{"type":"object","additionalProperties":false,"required":["path","access"],"properties":{"path":{"type":"string","pattern":"^/dev/"},"access":{"enum":["r","rw"]}}}},"dbus":{"oneOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["bus","address","destination","calls"],"properties":{"bus":{"enum":["system","session"]},"address":{"type":"string","minLength":1},"destination":{"type":"string","minLength":1},"calls":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}}}}]},"collectors":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","argv"],"properties":{"id":{"$ref":"#/$defs/id"},"argv":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}}}},"dedicated_host":{"type":"boolean"}}},
+    "class": {"type":"object","additionalProperties":false,"required":["name","uid","account","workspace_root","allowed_capabilities","broker_helper","probe_authority","probe_authority_sha256","probe_authority_status","signer_key","signer_principal_file","nonce_ledger","systemd_run","systemctl","cgroup_root","approved_groups","executable_pins","resources"],"properties":{"name":{"$ref":"#/$defs/id"},"uid":{"type":"integer","minimum":1},"account":{"$ref":"#/$defs/id"},"workspace_root":{"type":"string","pattern":"^/"},"allowed_capabilities":{"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"broker_helper":{"const":"/usr/local/libexec/factory-runner-broker"},"probe_authority":{"type":"string","pattern":"^/"},"probe_authority_sha256":{"$ref":"#/$defs/sha256"},"probe_authority_status":{"const":"enrolled"},"signer_key":{"type":"string","pattern":"^/"},"signer_principal_file":{"type":"string","pattern":"^/"},"nonce_ledger":{"type":"string","pattern":"^/"},"systemd_run":{"type":"string","pattern":"^/"},"systemctl":{"type":"string","pattern":"^/"},"cgroup_root":{"type":"string","pattern":"^/"},"approved_groups":{"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"executable_pins":{"type":"object","minProperties":1,"maxProperties":64,"additionalProperties":{"$ref":"#/$defs/pin"}},"resources":{"type":"object","additionalProperties":{"$ref":"#/$defs/resource"}}}}
+  }
+}

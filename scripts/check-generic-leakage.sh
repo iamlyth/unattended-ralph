@@ -33,6 +33,8 @@ terms = [
     r"controller[-_ ]?box", r"inputplumber", r"org\.shadowblip", r"wayfinder",
     r"CBX_[A-Z_]*", r"controller-box-vm", r"remote-project-gate",
     r"systemd-user", r"kernel-uinput", r"installed-package",
+    r"physical-controller", r"target-consumer", r"controller-production-routing",
+    r"gpu-compositor", r"installed-licensed-diagram", r"licensed-diagram",
     r"\bsdl2?\b", r"\buinput\b", r"test_packaging",
 ]
 print("|".join(terms))
@@ -57,7 +59,7 @@ while IFS= read -r tracked; do
             continue
             ;;
     esac
-    if grep -qE "$PATTERN" "$tracked" 2>/dev/null; then
+    if grep -qiE "$PATTERN" "$tracked" 2>/dev/null; then
         if printf '%s\n' "${ALLOWED[@]}" | grep -qxF "$tracked"; then
             continue
         fi
@@ -75,6 +77,28 @@ for product_path in 'src/' 'packaging/' 'data/' 'CMakeLists.txt' 'config.h.in'; 
         failed=1
     fi
 done
+
+# No production credential/evidence material may ship with the template.
+while IFS= read -r tracked; do
+    base=${tracked##*/}
+    case "$tracked" in
+        .factory/tests/fixtures/*|tests/*|scripts/check-generic-leakage.sh) continue ;;
+    esac
+    if printf '%s\n' "${ALLOWED[@]}" | grep -qxF "$tracked"; then
+        continue
+    fi
+    if [[ $base =~ ^(id_(rsa|ed25519)|authorized_keys|.*\.(pem|key|p12|pfx))$ ]] \
+       || grep -qE -- '-----BEGIN (OPENSSH |RSA |EC )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}' "$tracked" 2>/dev/null; then
+        echo "check-generic-leakage: credential/key material in tracked file: $tracked" >&2
+        failed=1
+    fi
+done < <(git ls-files)
+
+# Runtime evidence is never enrolled source material.
+if git ls-files | grep -qE '^\.factory-state/|(^|/)(manifest\.sig|runner-evidence\.json)$'; then
+    echo "check-generic-leakage: tracked runtime credential/evidence material" >&2
+    failed=1
+fi
 
 [[ $failed -eq 0 ]] || {
     echo "check-generic-leakage: generic boilerplate leaked product content; neutralize or allowlist exactly" >&2

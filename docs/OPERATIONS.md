@@ -491,22 +491,51 @@ runner and validates exact-commit evidence:
 ./scripts/check-factory-runner-evidence.py
 ```
 
-Runner evidence is signed by a root-owned signer on the disposable runner VM:
-the unprivileged forced-command endpoint never signs, and after the exact
-archive/tree/environment/verifier/probes all pass, the root signer re-validates
-every manifest field (clean pass only, supported capabilities, bound digests,
-no caller-supplied signer identity), rebuilds the canonical signed manifest
-itself, and returns the detached signature plus aggregate signer metadata.
-`.factory/signer-trust.json` carries only public keys; the private signing key
-is root-owned mode 0600 on the runner and never leaves it. The detached
-signature (`manifest.sig`) and aggregate signer metadata are validated with
-`ssh-keygen -Y verify`; rotation is fail-closed (removed keys are rejected).
-Until a signer is provisioned (`enabled = true`), unsigned legacy/local
-manifests are rejected and runner-evidenced capabilities stay unevidenced.
+Runner provisioning is external and begins from an independently authenticated
+source manifest. The operator generates the deterministic exact-tree manifest,
+signs it offline, then invokes the minimal root bootstrap; the checkout itself
+is never privileged authority:
 
-Required capabilities in `.factory/config.toml` must be both declared and
-evidenced before an independent audit may pass. Runner provisioning remains
-outside the repository.
+```bash
+python3 scripts/generate-runner-install-manifest.py --source "$PWD" \
+  --revision HEAD --output "$SECURE_STAGE/source-manifest.json"
+sudo scripts/factory-runner-root-bootstrap install \
+  --manifest "$SECURE_STAGE/source-manifest.json" \
+  --signature "$SECURE_STAGE/source-manifest.sig" \
+  --allowed-signers "$SECURE_STAGE/install-signers" \
+  --archive "$SECURE_STAGE/source.tar" -- \
+  --policy "$SECURE_STAGE/runner-policy.json" \
+  --transport-manifest "$SECURE_STAGE/transport.json" \
+  --ssh-launcher-manifest "$SECURE_STAGE/ssh-launcher.json" \
+  --key account-a="$SECURE_STAGE/account-a.pub"
+```
+
+Repeat `--key account=FILE` exactly once for every class/account in the external
+policy; list length is configurable. The bootstrap verifies detached install
+trust, commit/tree/blob membership and the complete archive before parsing or
+running the installer. Installation stages a new generation, writes a recovery
+journal, verifies every file, installs no-follow mode-restricted
+`authorized_keys` with exact `restrict,command=...`, atomically cuts over, and
+rolls back after any failed verification. Run the same installer with `verify`
+to check the complete installed generation.
+
+`/etc/factory-runner/runner-policy.json` and its versioned probe authority are
+root-owned and external. They define arbitrary class/capability sets, exact
+executable pins, immutable probe IDs/argv/artifacts, an external pinned semantic
+analyzer registry, and optional devices, exact D-Bus proxy calls, fact
+collectors, and dedicated-host constraints. Defaults deny all resources. The
+repository fixture authority is harmless stdlib-only methodology and never
+production evidence.
+
+The unprivileged ForcedCommand has no parser or signer surface. A root broker
+issues one-use bounded nonces and alone constructs signing requests. The signer
+requires its private broker descriptor token, reloads class policy, reconstructs
+the v3 receipt, and signs no caller-selected bytes. Client publication retains
+all staging descriptors and uses Linux atomic no-replace under the exact
+campaign/readiness namespace. Both issuance trust and current trust must contain
+the class principal/key, making revocation fail closed. Until external policy,
+authority, transport, keys, trust and capabilities are enrolled, production
+readiness remains blocked and declarations count as no evidence.
 
 ## Evidence and verifier authority (Task 12)
 

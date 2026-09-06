@@ -133,6 +133,26 @@ payloads that only the next round's fresh planner may convert into plan
 tasks; no receipt, result file, event stream, or memory participates in task
 selection.
 
+## Adopt the external runner authority
+
+The boilerplate enrolls no production runner, signer, key, capability, or
+host resource. Its neutral readiness policy therefore blocks production by
+default. An adopter supplies, reviews, signs, and root-installs an external
+`factory-runner-policy/v3` plus a versioned `factory-probe-authority/v1`.
+Classes and capabilities have no fixed names or count. Each capability binds
+an immutable probe, a pinned semantic-analyzer ID, exact artifacts, executable
+pins, and optional default-deny device, D-Bus-proxy, host-fact, and dedicated-
+host declarations. `.factory/tests/fixtures/runner-authority/` is harmless
+stdlib test material and is never production authority or evidence.
+
+Receipts use `factory-runner-receipt/v3`, aggregates use
+`factory-runner-aggregate/v4`, and retained artifacts use
+`factory-runner-artifacts/v1`. Evidence is scoped by campaign and readiness
+nonce and remains invalid without exact commit/tree/archive/environment,
+policy, contracts, authority, trust, and current-revocation bindings.
+Provisioning examples and the authenticated bootstrap are documented in
+`docs/OPERATIONS.md`.
+
 ## Verify the boilerplate
 
 ```bash

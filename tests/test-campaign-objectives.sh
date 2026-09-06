@@ -91,7 +91,7 @@ CONTRACTS
   "objectives": [
     {"key": "runner-capability", "label": "runner", "receipt_categories": ["runner-evidence", "project-verify"]},
     {"key": "visual-installed", "label": "visual", "receipt_categories": ["installed-visual", "visual-render"]},
-    {"key": "real-system", "label": "real", "receipt_categories": ["real-system-service", "target-consumer"]}
+    {"key": "real-system", "label": "real", "receipt_categories": ["real-system-service", "external-observer"]}
   ]
 }
 OBJECTIVES
@@ -104,7 +104,7 @@ OBJECTIVES
     {"name": "installed-visual", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/probe-visual.sh"]]},
     {"name": "visual-render", "tier": "installed", "allow_manifest": false, "argv": [["./scripts/probe-visual.sh"]]},
     {"name": "real-system-service", "tier": "real_system", "allow_manifest": true, "argv": [["./scripts/probe-system.sh"]]},
-    {"name": "target-consumer", "tier": "real_system", "allow_manifest": true, "argv": [["./scripts/probe-system.sh"]]}
+    {"name": "external-observer", "tier": "real_system", "allow_manifest": true, "argv": [["./scripts/probe-system.sh"]]}
   ]
 }
 POLICY
@@ -303,7 +303,7 @@ expect_rc "$tmp/blessed" 3 "$head" 1 "round 3 replay of round 1 suite"
 
 # A complete real-system suite (round-bound receipts) passes round 3.
 receipt "$tmp/blessed" 3 real-system-service 0 ./scripts/probe-system.sh
-receipt "$tmp/blessed" 3 target-consumer 0 ./scripts/probe-system.sh
+receipt "$tmp/blessed" 3 external-observer 0 ./scripts/probe-system.sh
 cat > "$tmp/blessed/.factory/artifacts/campaign-audit.md" <<'REPORT'
 ---
 result: pass
@@ -312,7 +312,7 @@ result: pass
 ## Evidence reviewed
 - Service: docs/SPEC.md §2
 - Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/real-system-service.json]
-- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/target-consumer.json]
+- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/external-observer.json]
 
 ## Findings
 None.
@@ -328,7 +328,7 @@ result: findings
 # Campaign Audit
 ## Evidence reviewed
 - Executable evidence: ./scripts/probe.sh BLOCKED no real system service available
-- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/target-consumer.json]
+- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/external-observer.json]
 
 ## Findings
 - Hardware unavailable
@@ -428,7 +428,7 @@ result: pass
 pass
 REPORT
 mint_state "$tmp/blessed" 1
-expect_rc "$tmp/blessed" 1 "$head" 0 "signed aggregate manifest for a manifest-allowed category"
+expect_rc "$tmp/blessed" 1 "$head" 1 "legacy unnamespaced aggregate is rejected"
 
 # Manifest matching is exact capability evidence, never a path-substring
 # proxy: the real-system-service manifest's path carries the runner-evidence
@@ -451,7 +451,7 @@ expect_rc "$tmp/blessed" 1 "$head" 1 "path-substring manifest is not capability 
 # A signed, fully bound real-system manifest DOES satisfy the manifest-allowed
 # real-system categories: the real-system-service manifest's recorded
 # capabilities (system-gate, whose contract probe argv equals the allowlisted
-# probe-system.sh) cover real-system-service AND target-consumer exactly.
+# probe-system.sh) cover real-system-service AND external-observer exactly.
 cat > "$tmp/blessed/.factory/artifacts/campaign-audit.md" <<REPORT
 ---
 result: pass
@@ -463,7 +463,7 @@ result: pass
 pass
 REPORT
 mint_state "$tmp/blessed" 3
-expect_rc "$tmp/blessed" 3 "$head" 0 "signed manifest covers the real-system manifest-allowed categories"
+expect_rc "$tmp/blessed" 3 "$head" 1 "legacy real-system manifest lacks v3 namespace bindings"
 
 # A signed, fully bound manifest whose capabilities evidence a NON-manifest
 # category cannot cover it: verify-gate's contract probe argv matches the
@@ -487,7 +487,7 @@ expect_rc "$tmp/blessed" 1 "$head" 1 "signed manifest cannot cover a non-manifes
 python3 - "$tmp/blessed" <<'PY'
 import json, sys
 root = sys.argv[1]
-path = root + "/.factory-state/audit-receipts/target-consumer.json"
+path = root + "/.factory-state/audit-receipts/external-observer.json"
 data = json.load(open(path))
 data["coordinator_nonce"] = "b" * 64
 open(path, "w").write(json.dumps(data))
@@ -499,7 +499,7 @@ result: pass
 # Campaign Audit
 ## Evidence reviewed
 - Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/real-system-service.json]
-- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/target-consumer.json]
+- Executable evidence: ./scripts/probe-system.sh PASS [receipt: .factory-state/audit-receipts/external-observer.json]
 
 pass
 REPORT

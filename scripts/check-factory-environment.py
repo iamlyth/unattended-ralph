@@ -16,7 +16,7 @@ FORBIDDEN_KEYS = {
 }
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 CAP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-RUNNER_WORKDIR_RE = re.compile(r"^/srv/dev-runner/workspaces/[a-z0-9][a-z0-9._-]*$")
+RUNNER_WORKDIR_RE = re.compile(r"^/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+$")
 
 
 def fail(message: str) -> None:
@@ -109,15 +109,15 @@ def validate(path: Path, require_empty: bool) -> None:
             or not RUNNER_WORKDIR_RE.fullmatch(workdir)
             or ".." in PurePosixPath(workdir).parts
         ):
-            fail(f"runners[{index}].working_directory must be a direct project path under /srv/dev-runner/workspaces")
+            fail(f"runners[{index}].working_directory must be a canonical absolute non-root path")
         capabilities = string_list(runner["capabilities"], f"runners[{index}].capabilities")
         argv = string_list(runner["verify_argv"], f"runners[{index}].verify_argv")
         if not capabilities or len(capabilities) != len(set(capabilities)) or not all(CAP_RE.fullmatch(item) for item in capabilities):
             fail(f"runners[{index}] requires unique valid capabilities")
         sensitive_flags = {"-i", "--identity-file", "--password", "--private-key", "--token", "--secret", "--user", "-l", "--header", "-H"}
-        if argv != ["./scripts/verify-boilerplate.sh"]:
-            fail(f"runners[{index}].verify_argv must be the approved project verifier argv")
-        if any(any(ord(char) < 32 for char in item) for item in argv):
+        if len(argv) > 64 or len(argv[0]) > 256 or argv[0].startswith("/") or ".." in PurePosixPath(argv[0]).parts:
+            fail(f"runners[{index}].verify_argv must name a bounded repository-relative verifier")
+        if any(any(ord(char) < 32 for char in item) or len(item.encode()) > 512 for item in argv):
             fail(f"runners[{index}].verify_argv must be control-character-free")
         if any(
             item.lower() in sensitive_flags

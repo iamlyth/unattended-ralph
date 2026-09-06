@@ -1788,13 +1788,15 @@ class CaseAdversarialSuite(_AdversarialBase):
                 root=root, check=False,
             )
 
-        # -- runner receipts: genuine exact-commit signed receipts accepted --
+        # -- legacy runner receipts are not v3 campaign-scoped evidence -------
+        # This fixture intentionally constructs the retired v1 shape. Even a
+        # correctly signed local fixture must be rejected: tests never claim
+        # live runner evidence or bypass v3 campaign/readiness enrollment.
         manifest_path = rebuild_runner_evidence()
         manifest_ref = manifest_path.relative_to(root).as_posix()
         genuine = runner_check(manifest_ref, head)
-        self.assertEqual(genuine.returncode, 0,
-                         "a genuine exact-commit signed runner receipt must "
-                         f"pass the strict runner-evidence helper: {genuine.stderr[-1000:]}")
+        self.assertNotEqual(genuine.returncode, 0,
+                            "legacy unnamespaced fixture evidence must fail")
         # Tamper negatives through the same real validator: unsigned,
         # fabricated-signature, stale-commit, and byte-tampered manifests all
         # fail closed; the state is rebuilt (fresh signature) after each.
@@ -1857,8 +1859,6 @@ class CaseAdversarialSuite(_AdversarialBase):
             "# Audit\n\n## Evidence reviewed\n"
             f"- Executable evidence: `{str(TRUE_EXECUTABLE)}` PASS "
             "[receipt: .factory-state/audit-receipts/adversarial.gate.json]\n"
-            f"- Executable evidence: `./scripts/verify-boilerplate.sh` PASS "
-            f"[manifest: {manifest_ref}]\n"
         )
         audit.write_text(audit_body, encoding="utf-8")
         checked = run(

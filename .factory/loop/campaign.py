@@ -2269,6 +2269,9 @@ class Campaign:
             **sanitized_gate_environment(),
             "FACTORY_VERIFIER_ROOT": str(self._root),
         }
+        if self._config.runner_command:
+            environment["FACTORY_CAMPAIGN_ID"] = self._config.campaign_id
+            environment["FACTORY_READINESS_NONCE"] = self._runner_readiness_nonce()
         if self._config.state_namespace:
             evidence_rel = (
                 f"{self._config.state_namespace}/installed-functional-evidence.env"
@@ -3273,6 +3276,16 @@ class Campaign:
             "diagnostic": diagnostic,
         })
 
+    def _runner_readiness_nonce(self) -> str:
+        """Stable recovery scope, fresh across campaign/acceptance authority."""
+        if self._config.role_driver is not None and not self._config.accepted_commit:
+            return plan_sha256(self._config.campaign_id.encode() + b"\0fixture")
+        policy = self._git.blob_at(self._config.accepted_commit, readiness_module.POLICY_PATH)
+        return plan_sha256(
+            self._config.campaign_id.encode() + b"\0"
+            + self._config.accepted_commit.encode() + b"\0" + policy
+        )
+
     def _spawn_runner_authority(
         self, held: evidence_module.HeldVerifier, tail: Sequence[str],
         timeout: float,
@@ -3295,9 +3308,13 @@ class Campaign:
         if self._held_runner_checker is None:
             return -1, ""
         try:
+            tail = ["--expected-commit", head]
+            if self._config.role_driver is None:
+                tail += ["--expected-campaign-id", self._config.campaign_id,
+                         "--expected-readiness-nonce", self._runner_readiness_nonce()]
+            tail.append("--print-digest")
             result = self._spawn_runner_authority(
-                self._held_runner_checker,
-                ("--expected-commit", head, "--print-digest"),
+                self._held_runner_checker, tuple(tail),
                 min(self._config.gate_timeout, self._config.runner_timeout),
             )
         except (lock_module.RootLockTimeoutError, CampaignBindingError):

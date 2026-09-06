@@ -1667,9 +1667,20 @@ elevated by prose.
   round-zero readiness policy/schema, fixed gate adapters, exact accepted and
   descendant bindings, optional external human authority, `factory-state/v2`
   migration, readiness-only terminal, and campaign-only one-use role launch
-  authorization. The neutral boilerplate remains deliberately blocked with no
-  enrolled production authority and no product hardware assumptions. The
-  canonical specification remains unchanged. Its §10 mandatory per-invocation
+  authorization. It also audits the generic runner parity port: receipt v3,
+  aggregate v4 and artifact v1 schemas; arbitrary class/capability cardinality;
+  campaign/readiness/acquisition namespaces; issuance/current trust and
+  revocation; exact commit/tree/archive/environment/contracts/policy/authority
+  bindings; root-held artifact publication; external immutable probe/analyzer
+  registry; default-deny resource descriptors; broker-only signing; bounded
+  one-use nonces and systemd containment; authenticated exact-tree bootstrap;
+  transactional generation install/verify/recovery/rollback; configurable
+  no-follow ForcedCommand key mappings; external SSH launcher enrollment; and
+  campaign archive inclusion of generic runner evidence. The repository ships
+  only a harmless stdlib fixture authority and no production enrollment.
+  The neutral boilerplate remains deliberately blocked with no enrolled
+  production authority and no product hardware assumptions. The canonical
+  specification remains unchanged. Its §10 mandatory per-invocation
   Ollama check/wait contract conflicts with
   the newer no-quota-policy launch surface; that mismatch is an explicit
   acceptance blocker and must not be reclassified as verified without human
@@ -1688,6 +1699,10 @@ elevated by prose.
   redaction (69), installed (14), plan-parser (17), and 27-case adversarial
   suites; `scripts/verify-boilerplate.sh` then passed end-to-end with generic
   leakage, docs sync, migration, evidence, installed, smoke, credential,
-  process, and residual-cleanliness checks. This is implementation evidence,
-  not final-audit acceptance and does not resolve FACT-020 or the §10 mismatch.
+  process, and residual-cleanliness checks. The later generic runner parity
+  implementation adds rootless policy/authority/artifact/client/bootstrap/
+  installer/signer/archive adversarial fixtures and the complete boilerplate
+  gate, but these remain implementation methodology rather than live runner
+  evidence. This is implementation evidence, not final-audit acceptance and
+  does not resolve FACT-020 or the canonical §10 quota-policy mismatch.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.

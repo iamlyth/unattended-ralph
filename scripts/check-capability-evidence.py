@@ -4,22 +4,25 @@
 A capability is evidenced only when all of these hold:
 - the capability is declared in `.factory/environment.toml`;
 - a tracked contract exists (see `check-capability-contracts.py`);
-- the commit-bound runner aggregate `.factory-state/runner-evidence.json`
-  lists the capability as evidenced (probe passed and verifier exit 0);
+- the canonical strong runner validator accepts the exact aggregate,
+  detached signatures, manifest/log digests, commit/tree/environment/archive/
+  verifier bindings, and complete declared-runner coverage;
+- that strongly validated aggregate lists the capability as evidenced;
 - the receipt logs do not contradict the contract: a must-not-skip token or a
   deny-simulated marker inside the contract's probe scope means the probe was
   skipped or simulated and the capability is unevidenced.
 
 Missing contract, missing receipt, or a skip never auto-reclassifies a row.
-The strong aggregate binding is enforced separately by
-`scripts/check-factory-runner-evidence.py`; this checker adds the
-contract-level probe/skip guards over the accepted aggregate.
+This checker invokes the canonical strong validator itself before inspecting
+contract probe logs; callers cannot accidentally accept the aggregate-only
+shape by omitting a separate gate.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -28,7 +31,7 @@ from pathlib import Path
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+NAME = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 MAX_LOG_SCAN = 32 * 1024 * 1024
 
 
@@ -59,6 +62,7 @@ def load_script_module(name: str, path: Path):
 
 
 _PINNED_GIT_CACHE: dict[str, object] = {}
+_STRONG_EVIDENCE_CACHE: dict[tuple[str, str, str, str], tuple[str, set[str], dict]] = {}
 
 
 def load_pinned_git(root: Path):
@@ -107,7 +111,7 @@ def contract_for(root: Path, capability: str) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse {path}: {exc}")
-    if not isinstance(data, dict) or data.get("schema") != "ralph-capability-contract/v1":
+    if not isinstance(data, dict) or data.get("schema") not in {"ralph-capability-contract/v1","ralph-capability-contract/v2"}:
         fail(f"contract file schema is invalid: {path}")
     contracts = data.get("capabilities", [])
     if not isinstance(contracts, list):
@@ -118,16 +122,59 @@ def contract_for(root: Path, capability: str) -> dict:
     fail(f"no tracked contract for declared capability {capability} (unevidenced)")
 
 
-def aggregate_evidence(root: Path) -> tuple[set[str], list[Path]]:
-    aggregate = root / ".factory-state/runner-evidence.json"
-    if aggregate.is_symlink() or not aggregate.is_file():
-        fail(f"runner evidence aggregate is missing: {aggregate}")
+def strong_runner_evidence(root: Path) -> tuple[str, set[str], dict]:
+    """Run the canonical full runner validator for this exact repository."""
+    campaign_id = os.environ.get("FACTORY_CAMPAIGN_ID", "")
+    readiness_nonce = os.environ.get("FACTORY_READINESS_NONCE", "")
+    head = git_head(root)
+    key = (str(root.resolve()), campaign_id, readiness_nonce, head)
+    if key in _STRONG_EVIDENCE_CACHE:
+        return _STRONG_EVIDENCE_CACHE[key]
+    checker_path = root / "scripts/check-factory-runner-evidence.py"
     try:
-        data = json.loads(aggregate.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        fail(f"invalid runner evidence aggregate {aggregate}: {exc}")
-    if not isinstance(data, dict) or data.get("schema") != "factory-runner-aggregate/v1":
+        checker = load_script_module("factory_runner_evidence", checker_path)
+        if Path(checker.ROOT).resolve() != root.resolve():
+            fail("strong runner checker resolved a foreign repository root")
+        digest, capabilities, aggregate = checker.validate(
+            head,
+            expected_campaign_id=campaign_id,
+            expected_readiness_nonce=readiness_nonce,
+            include_view=True,
+        )
+    except SystemExit as exc:
+        detail = str(exc) or "validation failed"
+        fail(f"strong runner evidence rejected: {detail}")
+    except Exception as exc:
+        fail(f"strong runner evidence checker is unavailable: {exc}")
+    if (
+        not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or not isinstance(capabilities, list)
+        or not all(isinstance(item, str) and NAME.fullmatch(item) for item in capabilities)
+        or not isinstance(aggregate,dict) or aggregate.get("schema")!="factory-runner-aggregate/v4"
+    ):
+        fail("strong runner checker returned an invalid validation result")
+    result = digest, set(capabilities), aggregate
+    _STRONG_EVIDENCE_CACHE[key] = result
+    return result
+
+
+def aggregate_evidence(root: Path) -> tuple[set[str], dict[str, list[tuple[str, Path]]]]:
+    """Read only the canonical v4 aggregate in the explicit readiness namespace."""
+    strong_digest, strong_capabilities, data = strong_runner_evidence(root)
+    campaign_id = os.environ.get("FACTORY_CAMPAIGN_ID", "")
+    readiness_nonce = os.environ.get("FACTORY_READINESS_NONCE", "")
+    if not NAME.fullmatch(campaign_id) or not re.fullmatch(r"[0-9a-f]{64}", readiness_nonce):
+        fail("explicit campaign/readiness namespace is required")
+    aggregate = (root / ".factory-state" / "runner-evidence" /
+                 campaign_id / readiness_nonce / "aggregate.json")
+    # `data` is the immutable classification view returned by the strong
+    # validator.  Do not reopen aggregate by pathname after validation.
+    if (not isinstance(data, dict)
+            or set(data) != {"schema", "campaign_id", "readiness_nonce", "commit", "tree", "environment_blob", "runners"}
+            or data.get("schema") != "factory-runner-aggregate/v4"):
         fail(f"runner evidence aggregate schema is invalid: {aggregate}")
+    if data.get("campaign_id") != campaign_id or data.get("readiness_nonce") != readiness_nonce:
+        fail("runner evidence aggregate campaign/readiness binding is stale or replayed")
     head = git_head(root)
     if data.get("commit") != head:
         fail(f"runner evidence aggregate is not bound to HEAD {head[:12]} (stale receipts are unevidenced)")
@@ -135,7 +182,7 @@ def aggregate_evidence(root: Path) -> tuple[set[str], list[Path]]:
     if not isinstance(records, list):
         fail("runner evidence aggregate has no runners array")
     evidenced: set[str] = set()
-    manifests: list[Path] = []
+    manifests: dict[str, list[tuple[str, Path]]] = {}
     for record in records:
         if not isinstance(record, dict):
             fail("runner aggregate record is invalid")
@@ -152,7 +199,10 @@ def aggregate_evidence(root: Path) -> tuple[set[str], list[Path]]:
             if not path.is_relative_to(root.resolve()):
                 fail(f"runner manifest path escapes the repository: {relative}")
             if path.is_file() and not path.is_symlink():
-                manifests.append(path)
+                for capability in capabilities:
+                    manifests.setdefault(capability, []).append((str(record.get("name", "")), path))
+    if evidenced != strong_capabilities:
+        fail("aggregate capabilities differ from the strongly validated runner set")
     return evidenced, manifests
 
 
@@ -173,16 +223,19 @@ def git_head(root: Path) -> str:
 def probe_scope(lines: list[str], marker: str) -> tuple[list[str], bool]:
     """Return the contract's probe scope and whether the marker was seen.
 
-    With a marker, the scope is the log text after the marker line to EOF; the
-    marker must be present (must-execute). Without a marker the scope is the
-    whole log.
+    A marker is an exact capability delimiter.  Scope ends at the next
+    capability delimiter, so output from a later gate/probe can never satisfy
+    or poison this capability's contract.
     """
     if not marker:
         return lines, True
-    for index, line in enumerate(lines):
-        if marker in line:
-            return lines[index + 1:], True
-    return [], False
+    delimiter = re.compile(r"^--- [a-z0-9][a-z0-9._-]* capability contract(?: \(candidate\))? ---$")
+    matches = [index for index, line in enumerate(lines) if line == marker]
+    if len(matches) != 1:
+        return [], False
+    start = matches[0] + 1
+    end = next((index for index in range(start, len(lines)) if delimiter.fullmatch(lines[index])), len(lines))
+    return lines[start:end], True
 
 
 def scan_tokens(scope: list[str], tokens: list[str]) -> list[str]:
@@ -196,14 +249,42 @@ def scan_tokens(scope: list[str], tokens: list[str]) -> list[str]:
     return sorted(hits)
 
 
+def validate_structured_artifacts(manifest_path: Path, manifest: dict, contract: dict, capability: str) -> None:
+    requirements=contract.get("artifact_requirements", {"required":[],"files":{}})
+    required=requirements.get("required",[]); files=requirements.get("files",{})
+    descriptors={item.get("path"):item for item in manifest.get("artifacts",[]) if isinstance(item,dict)}
+    expected={f"{capability}/{name}" for name in required}
+    if not expected.issubset(descriptors): fail(f"receipt for {capability} omits required signed artifacts")
+    for name,media in files.items():
+        path=f"{capability}/{name}"
+        if path in descriptors and descriptors[path].get("media_type") != media:
+            fail(f"receipt for {capability} has wrong artifact media type: {name}")
+    artifact_dir=manifest_path.parent/"artifacts"/capability
+    def load(name):
+        path=artifact_dir/name
+        try: return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
+        except (OSError,UnicodeError,json.JSONDecodeError) as exc: fail(f"invalid structured artifact {name}: {exc}")
+    # Product semantics are intentionally not interpreted here. The immutable
+    # root authority's pinned semantic analyzer accepted these exact signed
+    # bytes before the signer could run; this checker verifies descriptors,
+    # digests, class/probe IDs, and declared artifact requirements only.
+
+
 def verify_capability(root: Path, capability: str) -> None:
     declared = declared_capabilities(root)
     if capability not in declared:
         fail(f"capability {capability} is not declared in .factory/environment.toml")
     contract = contract_for(root, capability)
-    evidenced, manifests = aggregate_evidence(root)
+    evidenced, manifests_by_capability = aggregate_evidence(root)
     if capability not in evidenced:
         fail(f"capability {capability} has no accepted runner receipt (unevidenced)")
+    manifests = manifests_by_capability.get(capability, [])
+    runner_class = contract.get("runner_class")
+    if runner_class is not None and (
+        not isinstance(runner_class, str) or not manifests
+        or any(name != runner_class for name, _path in manifests)
+    ):
+        fail(f"capability {capability} is evidenced by the wrong runner principal/class")
     if contract.get("must_execute") is not True:
         fail(f"contract for {capability} must set must_execute=true")
     marker = contract.get("probe_marker", "")
@@ -214,7 +295,11 @@ def verify_capability(root: Path, capability: str) -> None:
     if not manifests:
         fail(f"capability {capability} has no receipt logs to check (unevidenced)")
     marker_seen_any = False
-    for manifest_path in manifests:
+    required_output = contract.get("probe_stdout_contains", [])
+    if not isinstance(required_output, list) or not all(isinstance(item, str) and item for item in required_output):
+        fail(f"contract for {capability} has malformed required output markers")
+    required_seen: set[str] = set()
+    for _runner_name, manifest_path in manifests:
         try:
             manifest_data = json.loads(
                 manifest_path.read_text(encoding="utf-8"),
@@ -222,10 +307,17 @@ def verify_capability(root: Path, capability: str) -> None:
             )
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             fail(f"invalid runner manifest {manifest_path}: {exc}")
-        if not isinstance(manifest_data, dict) or manifest_data.get("schema") != "factory-runner-receipt/v1":
+        if not isinstance(manifest_data, dict) or manifest_data.get("schema") != "factory-runner-receipt/v3":
             fail(f"runner manifest schema is invalid: {manifest_path}")
-        if manifest_data.get("result") != "pass" or manifest_data.get("exit_code") != 0:
-            fail(f"runner manifest does not prove a clean pass: {manifest_path}")
+        authority_probe=contract.get('authority_probe',{})
+        if (manifest_data.get("result") != "pass" or manifest_data.get("exit_code") != 0
+                or authority_probe.get('authority_sha256')!=manifest_data.get('authority_sha256')
+                or authority_probe.get('probe_id')!=f"factory-root-probe:{runner_class}:{capability}:v1"
+                or authority_probe.get('must_execute') is not True
+                or authority_probe.get('must_not_skip') is not True
+                or authority_probe.get('deny_simulation') is not True):
+            fail(f"runner manifest does not bind the executed root authority probe: {manifest_path}")
+        validate_structured_artifacts(manifest_path, manifest_data, contract, capability)
         manifest_dir = manifest_path.parent
         for log_name in ("stdout.log", "stderr.log"):
             log_path = manifest_dir / log_name
@@ -240,6 +332,10 @@ def verify_capability(root: Path, capability: str) -> None:
             # unmarked log of a marked contract contributes no scope.
             if marker and not marker_seen:
                 continue
+            if log_name == "stdout.log":
+                for required in required_output:
+                    if any(required in line for line in scope):
+                        required_seen.add(required)
             skipped = scan_tokens(scope, skip_tokens)
             if skipped:
                 fail(f"receipt for {capability} shows a skipped probe ({skipped}); unevidenced")
@@ -248,6 +344,9 @@ def verify_capability(root: Path, capability: str) -> None:
                 fail(f"receipt for {capability} shows simulated/denied markers ({denied}); unevidenced")
     if marker and not marker_seen_any:
         fail(f"receipt for {capability} does not show probe marker {marker!r} (must-execute)")
+    missing_output = sorted(set(required_output) - required_seen)
+    if missing_output:
+        fail(f"receipt for {capability} omits required probe results {missing_output} (partial/substituted evidence)")
 
 
 def main() -> int:

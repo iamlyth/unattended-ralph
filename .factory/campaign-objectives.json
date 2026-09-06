@@ -17,8 +17,8 @@
     {
       "key": "real-system",
       "label": "Real system/service falsification",
-      "receipt_categories": ["real-system-service", "target-consumer"],
-      "rationale": "Challenge whether a real system service and a real target consumer were exercised through the production path."
+      "receipt_categories": ["real-system-service", "external-observer"],
+      "rationale": "Challenge whether an adopter-declared real system service and independent external observer were exercised through the production path."
     },
     {
       "key": "package-namespace",

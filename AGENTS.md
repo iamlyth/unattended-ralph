@@ -1,5 +1,4 @@
 # Factory Operational Guide
-
 Progress/evidence live in `.factory/artifacts/implementation-plan.md`.
 ## Sources of truth
 
@@ -12,12 +11,10 @@ Progress/evidence live in `.factory/artifacts/implementation-plan.md`.
   the human promotes to `main`. No worktrees; never edit the committed spec.
 
 ## Build
-
 This boilerplate has no product build; the factory control plane is
 stdlib-only Python under `.factory/loop/`; the gates below verify it.
 
 ## Immediate validation
-
 ```bash
 ./scripts/verify-boilerplate.sh              # complete generic factory gate
 ./scripts/check-docs-sync.sh                 # documentation sync gate
@@ -26,8 +23,9 @@ python3 .factory/tests/test-factory-plan-parser.py
 python3 .factory/tests/test-factory-selector.py
 python3 .factory/tests/test-factory-state.py
 python3 .factory/tests/test-factory-readiness.py
-./scripts/run-factory-runners.py             # exact-commit runner gate
-./scripts/check-factory-runner-evidence.py   # (needs provisioning)
+./tests/test-factory-runner.sh               # rootless runner/adversarial fixtures
+./scripts/run-factory-runners.py             # campaign-scoped external acquisition only
+./scripts/check-factory-runner-evidence.py   # needs explicit campaign/readiness namespace
 ```
 
 Run gates serially. Do not dismiss an unrelated failure as pre-existing:
@@ -57,8 +55,10 @@ A campaign always terminates with one of six outcomes: `success`, `findings`, `b
 - Production acceptance uses the real fresh-process launch, Landlock
   confinement, state, pinned-Git, receipt, and gate paths; synthetic seams
   are hidden test fixtures only, never acceptance evidence.
-- A runner declaration is not evidence; accept only exact-commit runner
-  receipts validated by the runner evidence checker. Findings reach the
+- A runner declaration is not evidence; accept only v3 signed exact-commit
+  receipts from an externally enrolled root authority, validated under the
+  exact campaign/readiness namespace. The shipped fixture is never evidence.
+  Findings reach the
   next developer only through a planner revision of the canonical plan.
 - No placeholders, stubs, weakened assertions, unexplained skips, or
   test-only bypasses. Golden updates explicit and reviewed; docs record why.

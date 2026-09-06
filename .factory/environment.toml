@@ -15,5 +15,5 @@ schema_version = 1
 # transport = "ssh"
 # ssh_config_alias = "configured-outside-the-repository"
 # working_directory = "/path/on/runner"
-# capabilities = ["controller-input", "gpu", "installed-functional"]
-# verify_argv = ["./scripts/verify-boilerplate.sh"]
+# capabilities = ["example-real-system-capability"]
+# verify_argv = ["./scripts/verify-project.sh"]

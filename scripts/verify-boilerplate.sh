@@ -123,7 +123,17 @@ required = [
     'scripts/ralph-audit.sh', 'scripts/ralph-campaign.sh',
     'scripts/ralph-verifier-migrate.sh', '.factory/verifier-acceptance.json',
     'scripts/run-factory-runners.py', 'scripts/check-factory-runner-evidence.py',
-    'scripts/factory-runner-server.py', 'scripts/factory_runner_policy.py',
+    'scripts/factory-runner-server.py', 'scripts/factory-runner-broker.py',
+    'scripts/factory-runner-signer.py', 'scripts/factory_runner_policy.py',
+    'scripts/factory_runner_authority.py', 'scripts/factory_runner_artifacts.py',
+    'scripts/factory-runner-root-bootstrap', 'scripts/install-factory-runner-v2.sh',
+    'scripts/generate-runner-install-manifest.py', 'scripts/build-runner-probe-authority.py',
+    'scripts/archive-factory-campaign.py',
+    '.factory/runner-policy-enrollment.json',
+    '.factory/schemas/factory-runner-policy-v1.schema.json',
+    '.factory/schemas/factory-runner-receipt-v3.schema.json',
+    '.factory/schemas/factory-runner-aggregate-v4.schema.json',
+    '.factory/schemas/factory-runner-artifacts-v1.schema.json',
     'scripts/pi2-secure-exec.py',
     'scripts/pi-cli-shims/ralph',
     'tests/test-factory-environment.sh', 'tests/test-factory-runner.sh',
@@ -452,6 +462,13 @@ PY
 ./tests/test-installed-functional-evidence.sh "$PROJECT_ROOT"
 ./tests/test-factory-environment.sh
 ./tests/test-factory-runner.sh
+python3 ./tests/test-runner-authority.py
+python3 ./tests/test-runner-artifacts.py
+python3 ./tests/test-runner-client-security.py
+python3 ./tests/test-runner-install-bootstrap.py
+python3 ./tests/test-runner-installer-security.py
+python3 ./tests/test-broker-security.py
+python3 ./tests/test-campaign-archive.py
 ./tests/test-campaign-audit.sh
 ./tests/test-ralph-campaign.sh
 ./tests/test-ralph-campaign-state.py

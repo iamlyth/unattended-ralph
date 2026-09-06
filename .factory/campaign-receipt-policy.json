@@ -39,7 +39,7 @@
       "argv": [["./scripts/check-factory-environment.py"]]
     },
     {
-      "name": "target-consumer",
+      "name": "external-observer",
       "tier": "real_system",
       "allow_manifest": false,
       "argv": [["./scripts/check-factory-environment.py"]]

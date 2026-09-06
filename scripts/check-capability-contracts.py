@@ -7,8 +7,8 @@ probed. Rules:
   must have exactly one contract, otherwise it is unevidenced;
 - a contract for a capability that is not declared claims an unavailable
   capability and is rejected;
-- contracts define probe argv, must-execute, must-not-skip markers, and
-  deny-simulated markers; probe argv must be executable by name or a
+- contracts define probe argv, must-execute, meaningful nonempty must-not-skip
+  markers, and deny-simulated markers; probe argv must be executable by name or a
   repository-relative tracked path.
 """
 
@@ -61,6 +61,27 @@ def no_duplicate_keys(pairs: list) -> dict:
     return result
 
 
+def runner_names(environment_path: Path) -> list[str]:
+    """Return the declared runner names from the environment declaration."""
+    if environment_path.is_symlink() or not environment_path.is_file():
+        fail(f"environment declaration must be a regular tracked file: {environment_path}")
+    try:
+        data = tomllib.loads(environment_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        fail(f"cannot parse {environment_path}: {exc}")
+    names: list[str] = []
+    for entry in data.get("runners", []):
+        if not isinstance(entry, dict):
+            fail("runners entries must be tables")
+        name = entry.get("name")
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            fail("runner name must be a lowercase runner class name")
+        names.append(name)
+    if len(names) != len(set(names)):
+        fail("runner names must be unique")
+    return names
+
+
 def declared_capabilities(environment_path: Path) -> list[str]:
     if environment_path.is_symlink() or not environment_path.is_file():
         fail(f"environment declaration must be a regular tracked file: {environment_path}")
@@ -79,6 +100,31 @@ def declared_capabilities(environment_path: Path) -> list[str]:
     return capabilities
 
 
+def required_capabilities(config_path: Path) -> list[str]:
+    """Return the campaign required-capabilities list from ``config.toml``.
+
+    The required-capabilities validation is fail-closed: a missing
+    ``config.toml``, a missing ``[campaign]`` table, or a missing/
+    malformed ``required_capabilities`` array is rejected so a drifted or
+    deleted config can never silently waive a required capability.
+    """
+    if config_path.is_symlink() or not config_path.is_file():
+        fail(f"config must be a regular tracked file: {config_path}")
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        fail(f"cannot parse {config_path}: {exc}")
+    campaign = data.get("campaign")
+    if not isinstance(campaign, dict):
+        fail("config.toml must declare a [campaign] table")
+    required = campaign.get("required_capabilities")
+    if not isinstance(required, list) or not all(
+        isinstance(item, str) and item for item in required
+    ):
+        fail("[campaign].required_capabilities must be an array of non-empty strings")
+    return required
+
+
 def load_contracts(path: Path) -> list[dict]:
     if path.is_symlink() or not path.is_file():
         fail(f"capability-contracts must be a regular tracked file: {path}")
@@ -86,8 +132,8 @@ def load_contracts(path: Path) -> list[dict]:
         data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse {path}: {exc}")
-    if not isinstance(data, dict) or data.get("schema") != "ralph-capability-contract/v1":
-        fail("contract file schema must be ralph-capability-contract/v1")
+    if not isinstance(data, dict) or data.get("schema") not in {"ralph-capability-contract/v1","ralph-capability-contract/v2"}:
+        fail("contract file schema must be ralph-capability-contract/v1 or v2")
     contracts = data.get("capabilities", [])
     if not isinstance(contracts, list):
         fail("contracts must be an array")
@@ -95,10 +141,11 @@ def load_contracts(path: Path) -> list[dict]:
 
 
 def validate_contract(contract: dict, index: int) -> tuple[str, str]:
-    required = {
-        "name", "probe_argv", "probe_marker", "must_execute", "must_not_skip", "deny_simulated_markers",
-    }
-    optional = {"status", "probe_stage", "probe_stdout_contains", "probe_is_verify_run", "runner_class"}
+    v2="authority_probe" in contract
+    required = ({"name", "candidate_probe_argv", "probe_marker", "must_execute", "must_not_skip",
+                 "deny_simulated_markers", "runner_class", "authority_probe"} if v2 else
+                {"name", "probe_argv", "probe_marker", "must_execute", "must_not_skip", "deny_simulated_markers"})
+    optional = {"status", "probe_stage", "probe_stdout_contains", "probe_is_verify_run", "artifact_requirements", "runner_class"}
     if not isinstance(contract, dict):
         fail(f"contracts[{index}] must be an object")
     if not required.issubset(set(contract)) or not set(contract).issubset(required | optional):
@@ -109,30 +156,25 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
     status = contract.get("status", "declared")
     if status not in ("declared", "candidate"):
         fail(f"contracts[{index}].status must be declared or candidate")
-    argv = contract["probe_argv"]
-    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
-        fail(f"contracts[{index}].probe_argv must be a non-empty array of strings")
-    if any(any(ord(char) < 32 for char in item) for item in argv):
-        fail(f"contracts[{index}].probe_argv must be control-character-free")
+    # Candidate argv is informational source-fixture routing only. Execution is
+    # authorized exclusively by the externally enrolled root descriptor below.
+    argv = contract["candidate_probe_argv" if v2 else "probe_argv"]
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item and not any(ord(ch)<32 for ch in item) for item in argv):
+        fail(f"contracts[{index}] probe argv must be a non-empty control-free string array")
     fixture_tokens = [item for item in argv if is_fixture_option_token(item)]
     if fixture_tokens:
-        fail(
-            f"contracts[{index}].probe_argv carries a fixture/simulation option "
-            f"token {fixture_tokens!r}; a committed probe can never run in fixture mode"
-        )
-    probe0 = argv[0]
-    if "/" in probe0:
-        relative = Path(probe0)
-        if relative.is_absolute():
-            if ".." in relative.parts or relative.parts[1] not in {"bin", "usr"}:
-                fail(f"contracts[{index}].probe_argv must be a bare command name, a scripts/tests path, or a /bin|/usr/bin binary")
-        else:
-            if ".." in relative.parts or len(relative.parts) != 2 or relative.parts[0] not in {"scripts", "tests"}:
-                fail(f"contracts[{index}].probe_argv must start with a bare command name or a scripts/tests path")
-            if not (ROOT / probe0).is_file():
-                fail(f"contracts[{index}].probe_argv names a missing tracked script: {probe0}")
-    elif not BARE_NAME.fullmatch(probe0):
-        fail(f"contracts[{index}].probe_argv[0] is not a bare command name: {probe0}")
+        fail(f"contracts[{index}].candidate_probe_argv carries fixture option {fixture_tokens!r}")
+    if v2:
+        authority=contract["authority_probe"]
+        afields={"probe_id","descriptor_sha256","authority_sha256","expected_semantics","must_execute","must_not_skip","deny_simulation"}
+        if (not isinstance(authority,dict) or set(authority)!=afields
+                or authority.get("probe_id")!=f"factory-root-probe:{contract['runner_class']}:{name}:v1"
+                or not re.fullmatch(r"[0-9a-f]{64}",str(authority.get("descriptor_sha256","")))
+                or not re.fullmatch(r"[0-9a-f]{64}",str(authority.get("authority_sha256","")))
+                or authority.get("expected_semantics")!="capability-specific-root-authority"
+                or authority.get("must_execute") is not True or authority.get("must_not_skip") is not True
+                or authority.get("deny_simulation") is not True):
+            fail(f"contracts[{index}].authority_probe is invalid")
     marker = contract["probe_marker"]
     if not isinstance(marker, str):
         fail(f"contracts[{index}].probe_marker must be a string")
@@ -143,6 +185,14 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
         fail(f"contracts[{index}].probe_stage must be env or post")
     if contract.get("probe_is_verify_run") not in (None, True, False):
         fail(f"contracts[{index}].probe_is_verify_run must be a boolean")
+    artifact_requirements = contract.get("artifact_requirements", {"required": [], "files": {}})
+    if (not isinstance(artifact_requirements, dict) or set(artifact_requirements) != {"required", "files"}
+            or not isinstance(artifact_requirements["required"], list)
+            or not isinstance(artifact_requirements["files"], dict)
+            or not set(artifact_requirements["required"]).issubset(artifact_requirements["files"])
+            or not all(isinstance(k,str) and k and "/" not in k and isinstance(v,str) and v
+                       for k,v in artifact_requirements["files"].items())):
+        fail(f"contracts[{index}].artifact_requirements is invalid")
     runner_class = contract.get("runner_class")
     if runner_class is not None and (
         not isinstance(runner_class, str) or not NAME.fullmatch(runner_class)
@@ -155,8 +205,9 @@ def validate_contract(contract: dict, index: int) -> tuple[str, str]:
         fail(f"contracts[{index}].must_execute must be true")
     for field in ("must_not_skip", "deny_simulated_markers"):
         markers = contract[field]
-        if not isinstance(markers, list) or not all(isinstance(item, str) and TOKEN.fullmatch(item) and item for item in markers):
-            fail(f"contracts[{index}].{field} must be an array of non-empty tokens")
+        if (not isinstance(markers, list) or not markers
+                or not all(isinstance(item, str) and TOKEN.fullmatch(item) and item for item in markers)):
+            fail(f"contracts[{index}].{field} must be a non-empty array of non-empty tokens")
     return name, status
 
 
@@ -164,10 +215,24 @@ def main() -> int:
     contracts_path = ROOT / ".factory/capability-contracts.json"
     declared = sorted(set(declared_capabilities(ROOT / ".factory/environment.toml")))
     contracts = load_contracts(contracts_path)
+    authority_doc=None; authority_digest=None
+    authority_path=ROOT/"deploy/factory-runner-authority-v1/authority.json"
+    if any('authority_probe' in c for c in contracts):
+        try:
+            authority_raw=authority_path.read_bytes(); authority_doc=json.loads(authority_raw,object_pairs_hook=no_duplicate_keys)
+        except (OSError,UnicodeError,json.JSONDecodeError) as exc:
+            fail(f"cannot read external root authority enrollment request: {exc}")
+        authority_digest=__import__('hashlib').sha256(authority_raw).hexdigest()
     named: list[str] = []
     declared_named: list[str] = []
     for index, contract in enumerate(contracts):
         name, status = validate_contract(contract, index)
+        if 'authority_probe' in contract:
+            ap=contract['authority_probe']; cls=contract['runner_class']
+            try: descriptor=authority_doc['classes'][cls]['capabilities'][name]
+            except (KeyError,TypeError): fail(f"contracts[{index}] has no matching external root authority descriptor")
+            if (ap['authority_sha256']!=authority_digest or ap['probe_id']!=descriptor.get('probe_id') or ap['descriptor_sha256']!=descriptor.get('descriptor_sha256')):
+                fail(f"contracts[{index}] external root authority binding is stale")
         named.append(name)
         if status == "declared":
             declared_named.append(name)
@@ -187,6 +252,38 @@ def main() -> int:
     for name in candidates:
         if name in declared:
             fail(f"capability {name} is declared but its contract is still candidate")
+    # A declared contract's runner_class must name a runner that is actually
+    # declared in .factory/environment.toml: a declared contract bound to an
+    # undeclared runner class claims a capability against a runner the factory
+    # cannot execute, which is unevidenced and rejected.
+    runners = runner_names(ROOT / ".factory/environment.toml")
+    runner_set = set(runners)
+    undeclared_class = sorted(
+        {
+            contract["runner_class"]
+            for contract in contracts
+            if contract.get("status", "declared") == "declared"
+            and contract.get("runner_class")
+            and contract["runner_class"] not in runner_set
+        }
+    )
+    if undeclared_class:
+        fail(
+            f"declared contracts bind to runner classes not declared in "
+            f"environment.toml: {undeclared_class}"
+        )
+    # Every capability required by the campaign must be provided by at least
+    # one declared runner; a required capability that no declared runner
+    # provides can never be evidenced and is rejected rather than silently
+    # waived by a drifted or deleted config.
+    required = required_capabilities(ROOT / ".factory/config.toml")
+    provided = set(declared)
+    missing_required = sorted(set(required) - provided)
+    if missing_required:
+        fail(
+            f"required capabilities have no declared runner providing them: "
+            f"{missing_required}"
+        )
     classes = sorted(
         {
             contract.get("runner_class")
@@ -196,7 +293,7 @@ def main() -> int:
     )
     print(
         f"capability-contracts: valid ({len(named)} contracts, {len(declared)} declared capabilities, "
-        f"{len(candidates)} candidates, runner classes {classes})"
+        f"{len(candidates)} candidates, runner classes {classes}, declared runners {runners})"
     )
     return 0
 

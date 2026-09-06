@@ -451,24 +451,32 @@ bounded logs are written beneath `.factory-state/runner-evidence/` and validated
 by `scripts/check-factory-runner-evidence.py`. A failed transport, tree binding,
 probe, verifier, cleanup receipt, signer, or evidence digest stops the campaign.
 
-Runner receipts are signed by a root-owned signer on the disposable runner VM
-(`scripts/factory-runner-signer.py`, installed root-owned and reached only
-through a narrow sudoers rule). The unprivileged forced-command endpoint never
-signs: after the exact archive/tree/environment/verifier/probes all pass, the
-root signer re-validates every manifest field (clean pass only, capability set
-exactly equal to the runner class allowlist, bound digests, no caller-supplied
-signer identity), rebuilds the canonical signed manifest itself, and returns
-the detached signature plus aggregate signer metadata. The runner protocol is
-class-based: `/etc/factory-runner/runner-policy.json` (root-owned, out-of-tree,
-validated by `scripts/factory_runner_policy.py`) binds the executing UID to
-exactly one class with its workspace root, approved verifier argv, capability
-allowlist, and root-owned signer key/principal; neither the endpoint nor the
-signer hardcodes product names, verifier paths, capability names, workspace
-roots, or the receipt namespace. The private signing key is root-owned mode
-0600 on the runner, unavailable to the runner accounts, and is never printed
-or copied into Git; this repository carries only the public keys and trust
-policy in `.factory/signer-trust.json`. Signer rotation is fail-closed: a
-receipt signed by a key that is no longer in the trust store is rejected.
+Runner receipts use the generic v3 trust boundary. A restrictive SSH
+`ForcedCommand` reaches an unprivileged parser-free trampoline, which can call
+only the root broker. The broker issues a bounded, expiring, one-use nonce;
+constructs the candidate from the exact clean Git archive; and obtains every
+probe, semantic analyzer, executable identity, and resource declaration from a
+versioned root-owned external authority. Candidate contracts, checkers, probes,
+and analyzers are never executed as authority. Unknown analyzer or resource
+IDs fail closed.
+
+Each gate and capability receives immutable candidate source plus separate
+bounded home/build/output storage under systemd PID, mount, cgroup, process,
+output, and deadline controls. Devices, exact D-Bus proxy calls, host fact
+collectors, and dedicated-host requirements are optional per-capability and
+default denied. There are no built-in product services or devices. Artifact
+bytes are opened once, copied into root-held descriptors, semantically checked
+there, and are the same bytes described, signed, and published. Publication is
+dirfd-anchored, atomic, and no-replace.
+
+The signer is not an oracle: it requires a broker-only one-shot descriptor
+token, independently reloads `factory-runner-policy/v3`, reconstructs
+`factory-runner-receipt/v3`, and signs only an exact clean pass. The aggregate
+is `factory-runner-aggregate/v4`; retained artifacts are
+`factory-runner-artifacts/v1`. Issuance trust and current trust are both checked,
+so revocation is immediate and fail-closed. Class/capability lists are bounded
+but otherwise arbitrary. The generic repository contains no production keys,
+credentials, enrollment, capability, or evidence.
 
 `.factory/config.toml` lists product-specific capabilities required for a clean audit.
 Only capabilities covered by accepted exact-commit evidence count; all others
@@ -1066,10 +1074,10 @@ certification oracle:
   unit/simulated/private-integration/installed evidence to
   `real_system`/`human`. A clean review only falsifies nothing; it confirms
   nothing about real system behavior.
-- Captures and review reports do **not** replace compositor, physical,
-  target-consumer, or human evidence. A screenshot is not a compositor
+- Captures and review reports do **not** replace adopter-required physical,
+  external-observer, or human evidence. A screenshot is not a compositor
   observation, a framebuffer grab is not a physical display, a synthetic
-  producer is not the target consumer, and no machine report substitutes for
+  producer is not an independently enrolled observer, and no machine report substitutes for
   a human judgement call.
 - Machine-generated baselines cannot self-certify goldens: a baseline is not
   independent ground truth, and human/golden acceptance remains out-of-band
