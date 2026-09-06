@@ -12,6 +12,7 @@ cp "$PROJECT_ROOT/scripts/ralph-campaign.sh" \
    "$PROJECT_ROOT/scripts/check-factory-environment.py" \
    "$PROJECT_ROOT/scripts/run-factory-runners.py" \
    "$PROJECT_ROOT/scripts/check-factory-runner-evidence.py" \
+   "$PROJECT_ROOT/scripts/factory_runner_artifacts.py" \
    "$PROJECT_ROOT/scripts/factory-lock.sh" \
    "$PROJECT_ROOT/scripts/factory-lock-exec.py" \
    "$PROJECT_ROOT/scripts/factory_lock.py" \
@@ -52,6 +53,13 @@ for helper in check-factory-environment.py run-factory-runners.py check-factory-
 #!/usr/bin/env bash
 set -euo pipefail
 ./scripts/assert-no-factory-lock.py
+export FACTORY_CAMPAIGN_ID=legacy-fixture FACTORY_READINESS_NONCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+if [[ "\$0" == *run-factory-runners.py ]]; then
+  rm -rf .factory-state/runner-evidence/legacy-fixture
+fi
+if [[ "\$0" == *check-factory-runner-evidence.py ]]; then
+  exec python3 "\$0.real" --expected-campaign-id "\$FACTORY_CAMPAIGN_ID" --expected-readiness-nonce "\$FACTORY_READINESS_NONCE" "\$@"
+fi
 exec python3 "\$0.real" "\$@"
 EOF
 done
@@ -76,6 +84,8 @@ cat > "$tmp/.factory/config.toml" <<'EOF'
 spec = "docs/SPEC.md"
 plan = ".factory/artifacts/implementation-plan.md"
 development_branch = "develop"
+[campaign]
+required_capabilities = []
 [verification]
 campaign_command = ["./scripts/verify-project.sh"]
 [git]
