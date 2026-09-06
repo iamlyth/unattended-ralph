@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Installed-copy production campaign entrypoint.  The package alias points
+# only at this external prefix, so campaign.py can prove its executing install
+# manifest/commit before any model role launches.
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+[[ -f "$root/.factory/loop/campaign.py" ]] || {
+    echo "factory-campaign: installed campaign control plane is missing: $root" >&2
+    exit 1
+}
+runtime=${FACTORY_INSTALL_RUNTIME:-${TMPDIR:-/tmp}}
+alias_dir=$(mktemp -d "${runtime%/}/factory-campaign-alias.XXXXXX") || {
+    echo "factory-campaign: cannot create installed package alias" >&2
+    exit 1
+}
+cleanup() { rm -rf -- "$alias_dir"; }
+trap cleanup EXIT INT TERM HUP
+ln -s -- "$root/.factory" "$alias_dir/factory"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$alias_dir" \
+    python3 -m factory.loop.campaign "$@"

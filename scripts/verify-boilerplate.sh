@@ -179,6 +179,7 @@ required = [
     '.factory/tests/test-factory-confinement-order.sh',
     '.factory/loop/installer.py',
     '.factory/loop/pi2_backend.py',
+    '.factory/bin/factory-campaign',
     '.factory/bin/factory-launch',
     '.factory/tests/test-factory-installed.py',
     '.factory/tests/test-factory-installed.sh',
