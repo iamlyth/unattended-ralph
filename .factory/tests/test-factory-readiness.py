@@ -39,6 +39,15 @@ class ReadinessPolicyTests(unittest.TestCase):
         for mutation in (records[:1], records+[{"class":"class-c","capabilities":[],"result":"pass"}]):
             with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(aggregate(mutation),policy,accepted_commit=commit,tree=tree,environment_blob=env)
 
+    def test_generic_fixture_policy_passes_all_fixed_adapters(self):
+        policy=readiness.validate_policy(self.policy())
+        gates={gate:{"ran":True,"exit":0,"digest":hashlib.sha256(gate.encode()).hexdigest()} for gate in policy["conformance_gate_ids"]+policy["core_gate_ids"]}
+        status,results=readiness.evaluate(policy,aggregate_sha256="a"*64,gate_results=gates,human_sha256="b"*64)
+        self.assertEqual(status,"complete")
+        self.assertEqual(set(results),{"aggregate","human","conformance-planning","boilerplate-verification"})
+        gates["boilerplate-verification"]["exit"]=1
+        self.assertEqual(readiness.evaluate(policy,aggregate_sha256="a"*64,gate_results=gates,human_sha256="b"*64)[0],"findings")
+
     def test_result_rejects_forged_cache_cross_campaign_and_zero_digest(self):
         bindings=readiness.readiness_bindings(accepted_commit="a"*40,accepted_tree="b"*40,current_commit="a"*40,current_tree="b"*40,config_sha256="1"*64,environment_sha256="2"*64,specification_sha256="3"*64,plan_sha256="4"*64,contracts_sha256="5"*64,policy_sha256="6"*64,trust_sha256="7"*64,install_manifest_sha256="8"*64)
         value=readiness.result_document(campaign_id="fixture",nonce="9"*64,status="complete",bindings=bindings,results={"aggregate":"a"*64,"core":"b"*64})

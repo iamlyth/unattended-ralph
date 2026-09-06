@@ -206,6 +206,33 @@ def readiness_bindings(*, accepted_commit:str, accepted_tree:str, current_commit
     return result
 
 
+def evaluate(policy: Mapping[str, object], *, aggregate_sha256: str, gate_results: Mapping[str, Mapping[str, object]], human_sha256: str) -> tuple[str, dict[str, str]]:
+    """Classify canonical adapter outputs without accepting caller commands.
+
+    An adapter result is exactly ``{"ran": bool, "exit": int, "digest":
+    sha256}``. Missing/not-run adapters are infrastructure failures, nonzero
+    validated gates are findings, and a missing required human authority is a
+    human block. This interface is independent of runner class names.
+    """
+    validate_policy(dict(policy))
+    if policy["production_authority"]["enrolled"] is not True:  # type: ignore[index]
+        return "human_block", {"aggregate": ZERO, "human": ZERO}
+    if not SHA256.fullmatch(aggregate_sha256):
+        return "infrastructure_failure", {"aggregate": ZERO, "human": ZERO}
+    results={"aggregate":aggregate_sha256,"human":human_sha256}
+    required=tuple(policy["conformance_gate_ids"])+tuple(policy["core_gate_ids"])  # type: ignore[arg-type]
+    for gate in required:
+        item=gate_results.get(gate)
+        if not isinstance(item,Mapping) or set(item)!={"ran","exit","digest"} or item.get("ran") is not True or type(item.get("exit")) is not int or not SHA256.fullmatch(str(item.get("digest",""))):
+            return "infrastructure_failure", results
+        results[gate]=str(item["digest"])
+        if item["exit"] != 0: return "findings", results
+    if policy.get("human_approval") is not None and (not SHA256.fullmatch(human_sha256) or human_sha256==ZERO):
+        return "human_block", results
+    if not SHA256.fullmatch(human_sha256): return "infrastructure_failure", results
+    return "complete", results
+
+
 def result_document(*,campaign_id:str,nonce:str,status:str,bindings:Mapping[str,str],results:Mapping[str,str]) -> dict:
     outcomes={"complete":"pass","findings":"findings","human_block":"blocked","infrastructure_failure":"infrastructure_failure"}
     if not IDENT.fullmatch(campaign_id) or not SHA256.fullmatch(nonce) or status not in outcomes: raise ReadinessError("readiness result identity/status is invalid")
