@@ -1,8 +1,6 @@
 # Factory Operational Guide
 
-Progress/evidence live in `.factory/artifacts/implementation-plan.md`; the
-legacy crash handoff is excluded from model context.
-
+Progress/evidence live in `.factory/artifacts/implementation-plan.md`.
 ## Sources of truth
 
 - Canonical specification: `docs/FACTORY-LOOP-SPEC.md` (`.factory/config.toml` `[project].spec`); `docs/SPEC.md` is the adopting placeholder, never planned.
