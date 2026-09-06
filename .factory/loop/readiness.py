@@ -174,7 +174,14 @@ def gate_argv(gate_id: str) -> tuple[str,...]:
 
 
 def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_commit: str, tree: str, environment_blob: str, campaign_id: str = "", readiness_nonce: str = "") -> str:
-    """Canonical aggregate-v4 class/capability interface."""
+    """Canonical aggregate-v4 name/capability interface.
+
+    The aggregate is exactly ``factory-runner-aggregate/v4``: every runner
+    record carries a canonical ``name`` (never ``class``) and there is no
+    ``result`` field to fall back on — presence in the aggregate is the only
+    pass signal.  The campaign/readiness binding and the exact required class
+    set are enforced with no legacy fallback.
+    """
     fields={"schema","campaign_id","readiness_nonce","commit","tree","environment_blob","runners"}
     if not isinstance(value,dict) or set(value)!=fields or value.get("schema")!="factory-runner-aggregate/v4":
         raise ReadinessFindings("runner aggregate schema is invalid")
@@ -186,9 +193,8 @@ def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_c
     actual={}
     for record in records:
         if not isinstance(record,dict): raise ReadinessFindings("runner aggregate record is malformed")
-        runner_class=record.get("class",record.get("name")); caps=record.get("capabilities")
-        if not isinstance(runner_class,str) or not IDENT.fullmatch(runner_class) or runner_class in actual or not isinstance(caps,list) or len(caps)!=len(set(caps)) or any(not isinstance(c,str) or not IDENT.fullmatch(c) for c in caps): raise ReadinessFindings("runner aggregate class/capabilities are ambiguous")
-        if record.get("result","pass") != "pass": raise ReadinessFindings(f"runner class {runner_class} did not pass")
+        runner_class=record.get("name"); caps=record.get("capabilities")
+        if not isinstance(runner_class,str) or not IDENT.fullmatch(runner_class) or runner_class in actual or not isinstance(caps,list) or len(caps)!=len(set(caps)) or any(not isinstance(c,str) or not IDENT.fullmatch(c) for c in caps): raise ReadinessFindings("runner aggregate name/capabilities are ambiguous")
         actual[runner_class]=set(caps)
     expected={item["id"]:set(item["capabilities"]) for item in policy["required_runner_classes"]} # type: ignore[index]
     if set(actual)!=set(expected): raise ReadinessFindings("runner aggregate does not cover the exact required class set")
@@ -196,7 +202,7 @@ def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_c
         if actual[name] != caps: raise ReadinessFindings(f"runner class {name} capability set differs from policy")
     covered=set().union(*actual.values()) if actual else set()
     if not set(policy["required_capabilities"]).issubset(covered): raise ReadinessFindings("required capabilities are not covered")
-    normalized={"schema":"factory-runner-aggregate/canonical-v1","commit":accepted_commit,"tree":tree,"environment_blob":environment_blob,"runners":[{"class":n,"capabilities":sorted(actual[n])} for n in sorted(actual)]}
+    normalized={"schema":"factory-runner-aggregate/canonical-v1","commit":accepted_commit,"tree":tree,"environment_blob":environment_blob,"runners":[{"name":n,"capabilities":sorted(actual[n])} for n in sorted(actual)]}
     return digest(normalized)
 
 

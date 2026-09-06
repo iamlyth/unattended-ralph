@@ -27,12 +27,18 @@ control-state authority.
 
 ## Control-state authority (STATE-01)
 
-The trusted control plane keeps exactly one mutable lifecycle file,
-`.factory-state/factory-loop.json`. Canonical STATE-01 is documented by
-`factory-state/v1`; the active `factory-state/v2` format is the explicitly
-mapped EXT-STATE-V2-01 readiness/pre-round extension and is not claimed to be
-the exact §11 field set. It adds the registry binding, result chain, and cursor. The cursor is written before execution, so a crash
-can never cause a possibly side-effecting hook to run twice. It is the only mutable lifecycle
+The trusted control plane keeps exactly one root canonical mutable lifecycle
+file, `.factory-state/factory-loop.json`, under schema `factory-state/v1` with
+exactly the §11 field set. `factory-state/v2` is the legacy pre-migration
+format accepted only by the offline migration helper; it is never produced by
+the trusted harness. The pre-round hook and round-zero readiness extension
+data are coordinator-owned and live in strict campaign-bound sidecars
+(`.factory-state/pre-round-hooks.json` `factory-pre-round-hook-state/v1` and
+`.factory-state/readiness.json` `factory-readiness-state/v1`), never as
+fields, phases, or outcomes in canonical state. The pre-round sidecar adds the
+registry binding, result chain, and cursor. The cursor is written before
+execution, so a crash can never cause a possibly side-effecting hook to run
+twice. It is the only mutable lifecycle
 file; the append-only `.factory-state/state-digest-ledger.jsonl` records
 evidence only and is never orchestration state. All writes are atomic,
 no-follow, mode-0600, and ownership/mode/link-count/(dev, inode) checked via
@@ -124,6 +130,17 @@ order-independent. Accepted runner/human evidence remains bound to the accepted
 commit; later role heads must be descendants, while policy-selected current
 product gates rerun against the descendant. Cached readiness JSON is recovery
 data only.
+
+Readiness is a coordinator-owned round-zero concern, not a canonical phase or
+outcome: it runs *before* canonical state initialization, so canonical
+`current_phase` is never `readiness` and `current_round` starts at 1 per §11.
+Its binding/cursor/status and the five separate result digests live in the
+strict `factory-readiness-state/v1` sidecar (`.factory-state/readiness.json`),
+never in canonical state. A readiness-only campaign publishes the separate
+`factory-readiness-result/v2` result and never initializes canonical state.
+The runner aggregate is exactly `factory-runner-aggregate/v4`: every runner
+record carries a canonical `name` (never `class`) and there is no `result`
+field to fall back on — presence in the aggregate is the only pass signal.
 
 Only the Campaign, while holding the exclusive root-descriptor lock, may mint
 a real-provider role authorization. Each mint is fresh and one-use and binds
@@ -954,7 +971,7 @@ terminate normally.
 ## Recovery
 
 Recovery is derived from Git, the canonical plan, the single
-`factory-state/v2` file, and process liveness — never from model prose or
+`factory-state/v1` file, and process liveness — never from model prose or
 runtime ledgers. Confirm no role process is alive, then re-run the same
 campaign command; `state.py recover` deterministically restores a torn write
 or removes validated orphaned writer artifacts:
@@ -1018,6 +1035,6 @@ Every implementation plan ends with **Final documentation and specification audi
 - **missing plan draft on resume**: `state.py recover` restores a torn write or removes validated orphaned writer markers; never restore an old completed plan as the active draft.
 - **`lifecycle marker is missing` from `state.py show`**: no campaign has initialized `.factory-state/factory-loop.json` on this tree; start or resume a campaign before expecting lifecycle state.
 - **`specification changed after planning`**: commit the revised canonical specification and start a new campaign from a clean tree.
-- **`factory-state/v2` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
+- **`factory-state/v1` tamper/transition error**: inspect `.factory-state/factory-loop.json` ownership/mode and the digest ledger; the state file is the single authority.
 - **quota wait appears idle**: the usage guard prints each usage poll; lower the polling interval temporarily for diagnostics.
 - **cookie expired**: refresh the external operator store (`$OLLAMA_USAGE_ENV_FILE`, else `$XDG_CONFIG_HOME/unattended-ralph/ollama-usage-env`) with `source .factory/tools/update-ollama-cookies.sh`.

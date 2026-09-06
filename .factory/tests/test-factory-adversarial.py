@@ -746,16 +746,17 @@ class CaseAdversarialSuite(_AdversarialBase):
         state_dir = ws.root / STATE_DIR
         self.assertTrue(state_dir.is_dir())
         names = sorted(p.name for p in state_dir.iterdir())
-        # The one trusted lifecycle surface: control state, the append-only
-        # digest ledger, and the published campaign result.  The transient
-        # phase-result handoff files (phase-result.json / audit-result.json)
-        # are consumed and removed by the campaign authority after each phase
-        # — they are the orchestrator's own transient handoff channel, never
-        # product state — so a finished campaign carries exactly the three
-        # persistent surfaces.  No runtime task ledger, memory store, event
-        # stream, or scratchpad.
+        # The one trusted lifecycle surface: canonical control state, the
+        # append-only digest ledger, the published campaign result, and the
+        # coordinator-owned pre-round hook sidecar (never a canonical state
+        # field).  The transient phase-result handoff files
+        # (phase-result.json / audit-result.json) are consumed and removed by
+        # the campaign authority after each phase — they are the
+        # orchestrator's own transient handoff channel, never product state —
+        # so a finished campaign carries exactly these persistent surfaces.
+        # No runtime task ledger, memory store, event stream, or scratchpad.
         expected = {"factory-loop.json", "state-digest-ledger.jsonl",
-                    "campaign-result-campaign.json"}
+                    "campaign-result-campaign.json", "pre-round-hooks.json"}
         self.assertEqual(set(names), expected, f"unexpected .factory-state entries: {names}")
         # The transient result files were consumed, never left behind.
         self.assertFalse((state_dir / "phase-result.json").exists())

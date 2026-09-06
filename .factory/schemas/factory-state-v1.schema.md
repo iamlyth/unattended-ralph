@@ -8,19 +8,32 @@ ignored `.factory-state/` namespace; the document here is the committed schema
 for exactly what that file may contain and how the trusted harness may
 transition it.
 
+The canonical state carries *exactly* the §11 field set of section 2 — the
+seventeen fields below. Pre-round hook and round-zero readiness extension data
+are campaign-bound, coordinator-owned bookkeeping that MUST NOT appear as
+fields, phases, or outcomes in canonical state; they live in two strict
+sidecar documents under the ignored `.factory-state/` namespace, each with its
+own committed schema (`.factory/schemas/factory-pre-round-hook-state-v1.schema.md`
+and `.factory/schemas/factory-readiness-state-v1.schema.md`), implemented by
+`.factory/loop/sidecars.py`. Readiness runs *before* canonical state
+initialization, so canonical `current_phase` is never `readiness` and
+`current_round` starts at 1 per §11.
+
 ## 1. Contract
 
 - The file is a single JSON object carrying **exactly** the §11 field set of
   section 2 — no wall-clock timestamp, model prose, task description, memory,
-  evidence claim, or copy of the plan is accepted. Parsing rejects both extra
-  and missing fields. A pre-hook 17-field `factory-state/v1` is recognized only
-  as a deterministic migration input with a zero configuration digest; it can
-  never satisfy a real campaign's expected exact-commit hook binding.
+  evidence claim, copy of the plan, readiness binding, or pre-round hook
+  cursor is accepted. Parsing rejects both extra and missing fields. A legacy
+  `factory-state/v2` document is accepted only by the explicit offline
+  migration helper (`.factory/loop/state.py` `migrate_offline_state`), which
+  strips the extension fields into the strict sidecars; production loading
+  never synthesizes a readiness or pre-round authority at the old version.
 - Every parse re-validates every structural invariant; a model that fails any
   invariant is a tamper (`StateTamperError`) and never reaches a transition,
   a digest, or a write.
 - All file I/O is atomic, no-follow, and ownership/mode/link-count checked
-  through the established dirfd authority `.factory/tools/factory_state_io.py`
+  through the established dirfd authority `.factory/loop/factory_state_io.py`
   (`state_dir`/`read_bytes`/`atomic_write_json`). The file is published
   through a mode-0600 temporary inode and `linkat`, so a raced pathname is
   never silently replaced, and every open re-validates the recorded
@@ -30,12 +43,13 @@ transition it.
   orchestration state) and re-validated after the phase; any same-UID
   semantic mutation not produced by the trusted transition fails closed.
 - The state file is the *only* mutable lifecycle file; the ledger is
-  append-only evidence.
+  append-only evidence, and the readiness/pre-round sidecars are evidence of
+  coordinator-owned extension bookkeeping only.
 
 ## 2. Field set
 
-The object carries exactly these twenty-two keys (`FIELD_NAMES`), each
-exactly once, with the §11 type and invariant:
+The object carries exactly these seventeen keys (`FIELD_NAMES`), each exactly
+once, with the §11 type and invariant:
 
 | Field | Type / invariant | Mutable by |
 |-------|------------------|------------|
@@ -50,11 +64,6 @@ exactly once, with the §11 type and invariant:
 | `plan_digest` | 64-character lowercase SHA-256 hex; binds a completed planning phase (see §2.1 for its derivation) | rebind only on `planning -> implementation` |
 | `role_prompt_digests` | non-empty JSON object mapping each role name to a 64-hex SHA-256 digest | write-once |
 | `audit_objectives_digest` | 64-character lowercase SHA-256 hex | write-once |
-| `pre_round_hook_configuration_digest` | 64-character lowercase SHA-256 over the exact ordered registry, fixed implementation blobs, and bound commit | write-once |
-| `pre_round_hook_commit` | 40-character exact campaign-start commit from which every registry/implementation blob is descriptor-anchored | write-once |
-| `pre_round_hook_results_digest` | 64-character lowercase SHA-256 digest chain over canonical typed per-round results; initialized to zero | only `complete_pre_round_hooks` |
-| `pre_round_hook_started_round` | non-negative monotonic round cursor written before hook execution | only `begin_pre_round_hooks` |
-| `pre_round_hook_completed_round` | non-negative monotonic cursor, never above started; later phases require completion for the current round | only `complete_pre_round_hooks` |
 | `phase_base_commit` | 40-character lowercase Git object ID; binds a completed planning phase | rebind only on `planning -> implementation` |
 | `selected_task_id` | positive integer or `null`; present only during `implementation` with `attempt_number >= 1` | only `begin_attempt` |
 | `attempt_number` | non-negative integer; monotonic within the current task, reset to zero only on a trusted task/phase transition | only `begin_attempt` / phase transitions |
@@ -65,11 +74,10 @@ exactly once, with the §11 type and invariant:
 ### 2.1 Write-once bindings
 
 `schema`, `repository_identity`, `branch`, `campaign_id`, `rounds_requested`,
-`specification_digest`, `role_prompt_digests`, `audit_objectives_digest`, and
-`pre_round_hook_configuration_digest` and `pre_round_hook_commit` are bound by `init_state` and can never change on a
-transition. `plan_digest` and `phase_base_commit` bind a completed planning
-round and are write-once until the next trusted `planning -> implementation`
-transition.
+`specification_digest`, `role_prompt_digests`, and `audit_objectives_digest`
+are bound by `init_state` and can never change on a transition. `plan_digest`
+and `phase_base_commit` bind a completed planning round and are write-once
+until the next trusted `planning -> implementation` transition.
 
 `plan_digest` (Task 19 S8) is the SHA-256 of the exact bytes of the committed
 `factory-plan/v1` plan document — the canonical
@@ -213,7 +221,7 @@ afterwards:
     matches an earlier (superseded) ledger entry — fails closed with the
     quarantine preserved. A present-but-zero-byte ledger is ambiguous torn
     evidence of an interrupted first append and likewise blocks the restore
-    (hardening L4) rather than being silently treated as “no evidence”;
+    (hardening L4) rather than being silently treated as "no evidence";
   - after linking the quarantine into the canonical name, re-validates the
     canonical state in place (tolerating the transient two-link window)
     *before* deleting the quarantine, so a raced, substituted, or forged

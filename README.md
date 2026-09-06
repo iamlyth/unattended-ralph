@@ -12,9 +12,13 @@ campaigns are finite with exact terminal outcomes.
 > **Current path:** The hidden Python control plane under `.factory/loop/`
 > implements the [Factory Loop Specification](docs/FACTORY-LOOP-SPEC.md).
 > Legacy orchestration namespaces and launchers are not part of this checkout
-> or installed surface. `factory-state/v1` describes canonical STATE-01;
-> `factory-state/v2` is the explicitly mapped EXT-STATE-V2-01 readiness and
-> pre-round extension, not the exact §11 field set.
+> or installed surface. `factory-state/v1` is the one root canonical STATE-01
+> state with exactly the §11 field set; `factory-state/v2` is the legacy
+> pre-migration format accepted only by the offline migration helper. The
+> readiness and pre-round extension data lives in strict campaign-bound
+> sidecars (`factory-pre-round-hook-state/v1`,
+> `factory-readiness-state/v1`), never as fields, phases, or outcomes in
+> canonical state.
 
 `docs/SPEC.md` remains the adopting-product placeholder and is never planned
 against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
@@ -51,10 +55,16 @@ against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
   `.factory/pre-round-hooks.json` registry exactly once in declared order.
   The registry accepts only fixed internal implementations and initially
   contains the mandatory `branch_guard`; it cannot carry commands or argv.
-- Exactly one minimal mutable control-state file
-  `.factory-state/factory-loop.json` (the explicit `factory-state/v2`
-  extension, ignored) carries readiness and pre-round bindings in addition to
-  the canonical state-v1 baseline. Extension requirements and truth are in
+- Exactly one root canonical mutable control-state file
+  `.factory-state/factory-loop.json` (schema `factory-state/v1`, the exact
+  §11 field set). Round-zero readiness and pre-round hook extension data are
+  coordinator-owned and live in strict campaign-bound sidecars
+  (`.factory-state/readiness.json` `factory-readiness-state/v1` and
+  `.factory-state/pre-round-hooks.json`
+  `factory-pre-round-hook-state/v1`), never as fields, phases, or outcomes in
+  canonical state. Readiness is not a phase or outcome; a readiness-only
+  campaign publishes the separate `factory-readiness-result/v2` result and
+  never initializes canonical state. Extension requirements and truth are in
   `.factory/extension-requirements.json` and
   `.factory/artifacts/extension-conformance.json`.
 - Tests, documentation, machine evidence, and an independent audit are

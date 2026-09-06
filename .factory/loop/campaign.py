@@ -91,6 +91,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import workspace_confinement as confinement_authority
     from . import redaction as output_redaction
     from . import readiness as readiness_module
+    from . import sidecars as sidecars_module
     from . import usage as usage_module
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
@@ -107,6 +108,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
     import readiness as readiness_module  # type: ignore[no-redef]
+    import sidecars as sidecars_module  # type: ignore[no-redef]
     import usage as usage_module  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
@@ -2346,10 +2348,6 @@ class Campaign:
                 expected_specification_digest=self._config.specification_digest,
                 expected_audit_objectives_digest=self._config.audit_objectives_digest,
                 expected_role_prompt_digests=dict(self._config.role_prompt_digests),
-                expected_pre_round_hook_configuration_digest=(
-                    self._config.pre_round_hook_configuration_digest
-                ),
-                expected_pre_round_hook_commit=self._config.pre_round_hook_commit,
             )
             return self._reconcile_head(state)
         state = state_module.init_state(
@@ -2360,12 +2358,18 @@ class Campaign:
             plan_digest=self._config.plan_digest,
             role_prompt_digests=dict(self._config.role_prompt_digests),
             audit_objectives_digest=self._config.audit_objectives_digest,
-            pre_round_hook_configuration_digest=(
-                self._config.pre_round_hook_configuration_digest
-            ),
-            pre_round_hook_commit=self._config.pre_round_hook_commit,
             phase_base_commit=self._config.phase_base_commit,
             branch=self._config.branch,
+        )
+        # Publish the coordinator-owned pre-round hook sidecar (never a
+        # canonical state field) bound to this campaign.
+        sidecars_module.write_pre_round(
+            self._root,
+            sidecars_module.empty_pre_round_hooks(
+                campaign_id=self._config.campaign_id,
+                configuration_digest=self._config.pre_round_hook_configuration_digest,
+                commit=self._config.pre_round_hook_commit,
+            ),
         )
         return state, None
 
@@ -3768,14 +3772,18 @@ class Campaign:
     ) -> Tuple[state_module.FactoryState, Optional[_Step]]:
         """Run the exact ordered registry once before this round's planner.
 
-        The start cursor is durably written before execution.  A restart that
-        observes an uncompleted start is ambiguous and terminates as an
-        infrastructure failure; it never repeats a possibly side-effecting
-        hook.  Completed results are chained into the sole control state.
+        The start cursor is durably written to the coordinator-owned pre-round
+        hook sidecar (never a canonical state field) before execution.  A
+        restart that observes an uncompleted start is ambiguous and terminates
+        as an infrastructure failure; it never repeats a possibly
+        side-effecting hook.  Completed results are chained into the sidecar.
         """
-        if state.pre_round_hook_completed_round == state.current_round:
+        sidecar = sidecars_module.read_pre_round(
+            self._root, expected_campaign_id=self._config.campaign_id
+        )
+        if sidecar.completed_round == state.current_round:
             return state, None
-        if state.pre_round_hook_started_round == state.current_round:
+        if sidecar.started_round == state.current_round:
             state2 = state_module.advance(state, "infrastructure_failure")
             state_module.write_state(self._root, state2)
             record = self._record(
@@ -3784,8 +3792,10 @@ class Campaign:
             )
             return state2, _Step(record, state=state2, terminal="infrastructure_failure")
 
-        claimed = state_module.begin_pre_round_hooks(state)
-        state_module.write_state(self._root, claimed)
+        claimed = sidecars_module.begin_pre_round_hooks(
+            sidecar, current_round=state.current_round
+        )
+        sidecars_module.write_pre_round(self._root, claimed)
         head = self._git.head()
         dirty_before = tuple(self._git.role_dirty_paths())
 
@@ -3828,25 +3838,27 @@ class Campaign:
             postcondition_outcome=postcondition,
         )
         chained = pre_round_module.chain_result_digest(
-            claimed.pre_round_hook_results_digest, payload
+            claimed.results_digest, payload
         )
-        completed = state_module.complete_pre_round_hooks(claimed, chained)
+        completed = sidecars_module.complete_pre_round_hooks(
+            claimed, chained, current_round=state.current_round
+        )
         if not success:
             # One atomic publication binds both the failed typed result and
-            # terminal outcome.  Until it lands, persisted state remains an
+            # terminal outcome.  Until it lands, the sidecar remains an
             # ambiguous started round and recovery refuses to rerun it.
-            terminal = state_module.advance(completed, "infrastructure_failure")
+            terminal = state_module.advance(state, "infrastructure_failure")
             state_module.write_state(self._root, terminal)
             record = self._record(
-                completed, 1, "infrastructure_failure",
+                state, 1, "infrastructure_failure",
                 "a mandatory pre-round hook failed; the planner was not launched",
                 result_digest=hashlib.sha256(payload).hexdigest(),
             )
             return terminal, _Step(
                 record, state=terminal, terminal="infrastructure_failure"
             )
-        state_module.write_state(self._root, completed)
-        return completed, None
+        sidecars_module.write_pre_round(self._root, completed)
+        return state, None
 
     def _step_planning(self, state: state_module.FactoryState) -> _Step:
         state, hook_terminal = self._run_pre_round_hooks(state)
@@ -4549,18 +4561,98 @@ class Campaign:
     # -- round-zero readiness -------------------------------------------------
 
     def _run_readiness(self) -> str:
-        """Run the complete fixed readiness registry before any planning role."""
+        """Run the complete fixed readiness registry before any planning role.
+
+        Round-zero readiness is a coordinator-owned sidecar concern: the
+        attempt/cursor/status and every bound result digest are published to
+        the strict ``factory-readiness-state/v1`` sidecar (never a canonical
+        state phase or outcome).  A readiness-only campaign additionally
+        publishes the separate ``factory-readiness-result/v2`` document.
+        """
         accepted = self._config.accepted_commit
         current = self._git.head()
         policy_raw = self._git.blob_at(accepted, readiness_module.POLICY_PATH)
         policy, _policy_sha = readiness_module.load_policy(self._root, policy_raw)
-        if policy["production_authority"]["enrolled"] is not True:
-            return "human_block"
+        required = policy["production_authority"]["enrolled"] is True
         nonce = self._runner_readiness_nonce()
         tree = self._git.text(["show", "-s", "--format=%T", accepted]).strip()
         environment_blob = self._git.text(
             ["rev-parse", f"{accepted}:.factory/environment.toml"]
         ).strip()
+        # The production install manifest is a readiness binding; read it once
+        # up front so the strict sidecar binding never changes mid-campaign.
+        try:
+            manifest_raw, _ = evidence_module.secure_read_bytes(
+                Path(self._config.install_manifest), maximum=INSTALL_MANIFEST_MAX,
+                what="production install manifest",
+            )
+        except (OSError, evidence_module.VerifierBindingError):
+            manifest_raw = None
+        # Read or initialize the strict campaign-bound readiness sidecar.
+        try:
+            sidecar = sidecars_module.read_readiness(
+                self._root, expected_campaign_id=self._config.campaign_id)
+        except sidecars_module.SidecarError:
+            sidecar = None
+        if sidecar is None:
+            readiness = {
+                "required": required, "nonce": nonce, "attempt": 0, "cursor": 0,
+                "status": "pending" if required else "not_required",
+                "accepted_commit": accepted, "tree": tree,
+                "environment_blob": environment_blob,
+                "specification_sha256": self._config.specification_digest,
+                "plan_sha256": self._config.plan_digest,
+                "conformance_sha256": "0" * 64,
+                "policy_sha256": plan_sha256(policy_raw),
+                "contracts_sha256": plan_sha256(
+                    self._git.blob_at(accepted, ".factory/capability-contracts.json")),
+                "install_manifest_sha256": (
+                    plan_sha256(manifest_raw) if manifest_raw is not None else "0" * 64),
+                "command_authority_sha256": "0" * 64,
+                "human_authority_sha256": "0" * 64,
+                "trust_authority_sha256": "0" * 64,
+                "aggregate_sha256": "0" * 64,
+                "capability_result_sha256": "0" * 64,
+                "core_result_sha256": "0" * 64,
+                "conformance_result_sha256": "0" * 64,
+                "human_result_sha256": "0" * 64,
+                "result_sha256": "0" * 64,
+                "terminal_outcome": "pending" if required else "not_required",
+            }
+            sidecar = sidecars_module.ReadinessState(
+                schema=sidecars_module.READINESS_SCHEMA,
+                campaign_id=self._config.campaign_id,
+                readiness=readiness,
+            )
+        else:
+            readiness = dict(sidecar.readiness)
+            # Re-bind the immutable campaign binding; a mismatch fails closed.
+            readiness.update({
+                "required": required, "nonce": nonce,
+                "accepted_commit": accepted, "tree": tree,
+                "environment_blob": environment_blob,
+                "specification_sha256": self._config.specification_digest,
+                "plan_sha256": self._config.plan_digest,
+                "policy_sha256": plan_sha256(policy_raw),
+                "contracts_sha256": plan_sha256(
+                    self._git.blob_at(accepted, ".factory/capability-contracts.json")),
+                "install_manifest_sha256": (
+                    plan_sha256(manifest_raw) if manifest_raw is not None else "0" * 64),
+            })
+
+        def publish() -> None:
+            nonlocal sidecar
+            sidecar = sidecars_module.update_readiness(sidecar, readiness)
+            sidecars_module.write_readiness(self._root, sidecar)
+
+        if not required:
+            readiness.update({"status": "not_required",
+                              "terminal_outcome": "not_required"})
+            publish()
+            return "human_block"
+        readiness.update({"status": "pending", "cursor": 1,
+                          "terminal_outcome": "pending"})
+        publish()
         aggregate_path = (self._root / ".factory-state" / "runner-evidence" /
                           self._config.campaign_id / nonce / "aggregate.json")
         gate_results: Dict[str, Dict[str, object]] = {}
@@ -4582,6 +4674,9 @@ class Campaign:
                             self._remaining_time("readiness runner aggregate")),
             )
             if runner.returncode != 0:
+                readiness.update({"status": "findings", "cursor": 2,
+                                  "terminal_outcome": "findings"})
+                publish()
                 return "findings"
             aggregate_raw, _ = evidence_module.secure_read_bytes(
                 aggregate_path, maximum=4 * 1024 * 1024,
@@ -4609,7 +4704,13 @@ class Campaign:
                 }
         except (OSError, ValueError, evidence_module.VerifierBindingError,
                 readiness_module.ReadinessError, lock_module.RootLockError):
+            readiness.update({"status": "infrastructure_failure", "cursor": 2,
+                              "terminal_outcome": "infrastructure_failure"})
+            publish()
             return "infrastructure_failure"
+        readiness.update({"status": "acquiring", "cursor": 3,
+                          "terminal_outcome": "pending"})
+        publish()
         # Human approval is deliberately validated separately from machine
         # gates.  A required but unavailable authority remains blocked.
         human_digest = readiness_module.digest({"required": False})
@@ -4627,18 +4728,25 @@ class Campaign:
                     blob_at=self._git.blob_at,
                 )
             except readiness_module.HumanAuthorityBlocked:
+                readiness.update({"status": "human_blocked", "cursor": 4,
+                                  "terminal_outcome": "blocked"})
+                publish()
                 return "human_block"
             except readiness_module.ReadinessError:
+                readiness.update({"status": "infrastructure_failure", "cursor": 4,
+                                  "terminal_outcome": "infrastructure_failure"})
+                publish()
                 return "infrastructure_failure"
         status, result_digests = readiness_module.evaluate(
             policy, aggregate_sha256=aggregate_digest,
             gate_results=gate_results, human_sha256=human_digest,
         )
         if status == "complete":
-            manifest_raw, _ = evidence_module.secure_read_bytes(
-                Path(self._config.install_manifest), maximum=INSTALL_MANIFEST_MAX,
-                what="production install manifest",
-            )
+            if manifest_raw is None:
+                readiness.update({"status": "infrastructure_failure", "cursor": 5,
+                                  "terminal_outcome": "infrastructure_failure"})
+                publish()
+                return "infrastructure_failure"
             current_tree=self._git.text(["show","-s","--format=%T",current]).strip()
             bindings=readiness_module.readiness_bindings(
                 accepted_commit=accepted, accepted_tree=tree,
@@ -4656,6 +4764,26 @@ class Campaign:
                 campaign_id=self._config.campaign_id, nonce=nonce,
                 status=status, bindings=bindings, results=result_digests,
             )
+            readiness.update({
+                "status": "complete", "cursor": 6,
+                "aggregate_sha256": result_digests["aggregate"],
+                "capability_result_sha256": result_digests.get(
+                    "capability-evidence", result_digests["aggregate"]),
+                "core_result_sha256": result_digests.get(
+                    "boilerplate-verification", result_digests["aggregate"]),
+                "conformance_result_sha256": result_digests.get(
+                    "conformance-implementation", result_digests["aggregate"]),
+                "human_result_sha256": result_digests["human"],
+                "result_sha256": readiness_module.digest(self._readiness_document),
+                "terminal_outcome": "pass",
+            })
+            publish()
+        else:
+            outcome = {"findings": "findings", "human_block": "blocked",
+                       "infrastructure_failure": "infrastructure_failure"}[status]
+            readiness.update({"status": status, "cursor": 5,
+                              "terminal_outcome": outcome})
+            publish()
         return status
 
     def _readiness_terminal(self, status: str) -> CampaignResult:

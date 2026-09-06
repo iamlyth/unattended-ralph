@@ -16,8 +16,8 @@
     {
       "id": "EXT-STATE-V2-01",
       "classification": "partial",
-      "artifacts": [".factory/loop/state.py", ".factory/schemas/factory-state-v2.schema.md"],
-      "reason": "This extension is not represented as the exact canonical section 11 state field set."
+      "artifacts": [".factory/loop/state.py", ".factory/loop/sidecars.py", ".factory/schemas/factory-state-v1.schema.md", ".factory/schemas/factory-state-v2.schema.md", ".factory/schemas/factory-pre-round-hook-state-v1.schema.md", ".factory/schemas/factory-readiness-state-v1.schema.md"],
+      "reason": "factory-state/v2 is the legacy pre-migration format accepted only by the offline migration helper; canonical factory-state/v1 is the exact section 11 field set, and the readiness/pre-round extension data lives in strict campaign-bound sidecars (factory-pre-round-hook-state/v1, factory-readiness-state/v1), never in canonical state."
     },
     {
       "id": "EXT-RUNNER-V4-01",

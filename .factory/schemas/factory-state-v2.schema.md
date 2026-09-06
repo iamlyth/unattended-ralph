@@ -1,21 +1,32 @@
-# `factory-state/v2` control-state schema
+# `factory-state/v2` control-state schema (legacy migration input)
 
-Status: committed contract (normative for STATE-01, `docs/FACTORY-LOOP-SPEC.md`
-§11/§17). The single mutable control-state authority is the JSON document
-`.factory-state/factory-loop.json`, implemented by the trusted control-plane
-module `.factory/loop/state.py`. The runtime file lives outside Git under the
-ignored `.factory-state/` namespace; the document here is the committed schema
-for exactly what that file may contain and how the trusted harness may
-transition it.
+Status: **legacy pre-migration format only.** This document records the former
+`factory-state/v2` extension format that carried the pre-round hook and
+round-zero readiness fields inline in the control-state file. It is no longer
+the canonical STATE-01 contract and is never produced by the trusted harness.
+The canonical mutable control-state authority is now `factory-state/v1`
+(`.factory/schemas/factory-state-v1.schema.md`) with exactly the §11 field
+set; the pre-round hook and readiness extension data live in strict
+campaign-bound sidecars (`factory-pre-round-hook-state/v1` and
+`factory-readiness-state/v1`, `.factory/loop/sidecars.py`), never as fields,
+phases, or outcomes in canonical state.
+
+A legacy `factory-state/v2` document is accepted **only** as a deterministic
+migration input by the explicit offline helper
+(`.factory/loop/state.py` `migrate_offline_state`), which strips the extension
+fields into the strict sidecars and returns the canonical `factory-state/v1`
+§11 field set. Production loading never calls this helper and never
+synthesizes a readiness or pre-round authority at the old version; a legacy v2
+document can never satisfy a real campaign's expected exact-commit hook
+binding.
 
 ## 1. Contract
 
-- The file is a single JSON object carrying **exactly** the §11 field set of
-  section 2 — no wall-clock timestamp, model prose, task description, memory,
-  evidence claim, or copy of the plan is accepted. Parsing rejects both extra
-  and missing fields. Runtime parsing performs no synthesis. Legacy
-  `factory-state/v1` input is accepted only by the explicit offline/fixture
-  migration helper and can never migrate into production readiness.
+- The file is a single JSON object carrying the former §11 field set plus the
+  inline pre-round hook and readiness extension fields of section 2. Runtime
+  parsing performs no synthesis. Legacy `factory-state/v2` input is accepted
+  only by the explicit offline/fixture migration helper and can never migrate
+  into production readiness.
 - Every parse re-validates every structural invariant; a model that fails any
   invariant is a tamper (`StateTamperError`) and never reaches a transition,
   a digest, or a write.
@@ -32,10 +43,12 @@ transition it.
 - The state file is the *only* mutable lifecycle file; the ledger is
   append-only evidence.
 
-## 2. Field set
+## 2. Field set (legacy)
 
-The object carries exactly these twenty-three keys (`FIELD_NAMES`), each
-exactly once, with the §11 type and invariant:
+The legacy object carried exactly these twenty-three keys, each exactly once,
+with the former §11 type and invariant. This is the historical pre-migration
+field set; the canonical `factory-state/v1` field set is the seventeen §11
+fields of `.factory/schemas/factory-state-v1.schema.md`.
 
 | Field | Type / invariant | Mutable by |
 |-------|------------------|------------|

@@ -37,7 +37,7 @@ tracks task status and verification evidence.
 - Exactly one primary worker may edit, stage, or commit repository files; Git history and commit operations run in the trusted orchestrator, never in model tools.
 - Tests, documentation, machine evidence, and an independent audit are completion gates.
 - Before each round's planner, the trusted campaign executes the exact committed `.factory/pre-round-hooks.json` registry once in order. Its strict schema admits only fixed internal implementations and initially contains mandatory `branch_guard`; no command, argv, quota, or cookie surface is accepted.
-- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` uses the explicit EXT-STATE-V2-01 extension. State-v1 remains canonical STATE-01; v2 is not represented as the exact §11 field set.
+- Exactly one root canonical mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v1`, the exact §11 field set). Round-zero readiness and pre-round hook extension data are coordinator-owned and live in strict campaign-bound sidecars (`.factory-state/readiness.json` `factory-readiness-state/v1` and `.factory-state/pre-round-hooks.json` `factory-pre-round-hook-state/v1`), never as fields, phases, or outcomes in canonical state. `factory-state/v2` is the legacy pre-migration format accepted only by the offline migration helper.
 - You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used.
@@ -349,6 +349,14 @@ accepted-commit/current-product invalidation scopes. Gate IDs resolve through a
 fixed internal adapter registry; arbitrary commands are not admitted. The
 boilerplate default enrolls no production authority, so it explicitly reports
 `blocked` before external execution and imposes no product hardware.
+
+Readiness is a coordinator-owned round-zero concern, not a canonical phase or
+outcome: it runs *before* canonical state initialization, so canonical
+`current_phase` is never `readiness` and `current_round` starts at 1 per §11.
+Its binding/cursor/status and the five separate result digests live in the
+strict `factory-readiness-state/v1` sidecar (`.factory-state/readiness.json`),
+never in canonical state. A readiness-only campaign publishes the separate
+`factory-readiness-result/v2` result and never initializes canonical state.
 
 All readiness inputs are exact commit/tree/config/environment/specification/
 plan/contracts/policy/trust/install bindings. Evidence remains attached to its

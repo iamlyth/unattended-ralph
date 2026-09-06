@@ -17,7 +17,7 @@ The migration derives exactly the authorities the new control plane accepts:
   ``.factory-state/`` namespace (receipts, manifests, results — enumerated
   with strict stat metadata only, never credential content);
 * the external blockers recorded in ``.factory/artifacts/blocked-facts.json``;
-* the existing ``factory-state/v2`` control state when present (the single
+* the existing ``factory-state/v1`` control state when present (the single
   minimal mutable authority; the migration never creates a second one).
 
 The migration surface reports, with **metadata only**, the legacy artifacts
@@ -53,7 +53,7 @@ unsafe marker.  That residual is documented in ``docs/OPERATIONS.md`` and is
 accepted for the Task 16 adversarial pass, not silently relied on.
 
 ``migrate`` (the operator translation step): derives the identical snapshot and
-publishes the incremental evidence authority plus the initial ``factory-state/v2``
+publishes the incremental evidence authority plus the initial ``factory-state/v1``
 control state through the trusted no-replace authority
 (``state.init_state``), which refuses to overwrite an existing control-state
 file or a prior campaign's digest ledger — so the migration can never create a
@@ -294,7 +294,7 @@ class MigrationSnapshot:
     The snapshot is a pure function of the repository Git state plus the
     committed plan/sidecars: plan bindings and digest, head commit, dirty
     work (preserved, enumerated never reset), evidence artifact metadata,
-    structured external blockers, the existing ``factory-state/v2`` state
+    structured external blockers, the existing ``factory-state/v1`` state
     (never created by the migration), and the presence-only legacy surface.
     No wall-clock timestamp and no model/Ralph-derived prose exists in the
     snapshot; the no-import contract fields are explicit and machine
@@ -1006,7 +1006,7 @@ def _read_blockers(
 
 
 def _control_state(root: Path):
-    """``(state_dict_or_None, error_or_None)`` of ``factory-state/v2``.
+    """``(state_dict_or_None, error_or_None)`` of ``factory-state/v1``.
 
     The state file is read through the trusted state authority (no-follow,
     identity/mode checks) and *never written* by the migration.  A tampered
@@ -1049,7 +1049,7 @@ def derive_migration_snapshot(
 
     The derivation is strictly read-only: the repository, the plan, the
     dirty worktree, the evidence artifacts, the blocker sidecar, and the
-    ``factory-state/v2`` file is read; nothing is written and nothing is
+    ``factory-state/v1`` file is read; nothing is written and nothing is
     reset.  The legacy Ralph/context-summary/credential surfaces are
     detected with ``lstat`` metadata only and are never imported.
     """
@@ -1112,7 +1112,7 @@ def migrate_control_state(
     branch: Optional[str] = None,
     plan_path: str = DEFAULT_PLAN_PATH,
 ) -> None:
-    """Operator command: translate the derived snapshot into ``factory-state/v2``.
+    """Operator command: translate the derived snapshot into ``factory-state/v1``.
 
     The initial state is written only through the trusted no-replace
     authority (``state.init_state``), which refuses to overwrite an existing
@@ -1177,10 +1177,22 @@ def migrate_control_state(
         plan_digest=snapshot.plan_digest,
         role_prompt_digests=prompt_digests,
         audit_objectives_digest=audit_digest,
-        pre_round_hook_configuration_digest=hook_digest,
-        pre_round_hook_commit=snapshot.head_commit,
         phase_base_commit=snapshot.head_commit,
         branch=branch,
+    )
+    # Publish the coordinator-owned pre-round hook sidecar (never a canonical
+    # state field) bound to this campaign.
+    try:
+        from . import sidecars as sidecars_module
+    except ImportError:
+        import sidecars as sidecars_module  # type: ignore[no-redef]
+    sidecars_module.write_pre_round(
+        root,
+        sidecars_module.empty_pre_round_hooks(
+            campaign_id=campaign_id,
+            configuration_digest=hook_digest,
+            commit=snapshot.head_commit,
+        ),
     )
     # Evidence of the completed translation: the same deterministic snapshot
     # that was derived read-only is published as the migration report.  The
@@ -1237,7 +1249,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     p_migrate = sub.add_parser(
-        "migrate", help="translate the snapshot into the factory-state/v2 file"
+        "migrate", help="translate the snapshot into the factory-state/v1 file"
     )
     p_migrate.add_argument("--campaign-id", default=DEFAULT_CAMPAIGN_ID)
     p_migrate.add_argument("--rounds", type=int, required=True)

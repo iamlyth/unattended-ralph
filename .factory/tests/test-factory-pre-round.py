@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / ".factory" / "loop"))
 
 import campaign as campaign_module  # noqa: E402
 import pre_round  # noqa: E402
+import sidecars  # noqa: E402
 import state  # noqa: E402
 
 SHA = "a" * 64
@@ -171,45 +172,61 @@ class RegistryTest(unittest.TestCase):
 
 class StateCursorTest(unittest.TestCase):
     def initial(self):
-        return state.FactoryState(
+        return sidecars.empty_pre_round_hooks(
+            campaign_id="campaign", configuration_digest=SHA, commit=COMMIT,
+        )
+
+    def test_legacy_state_is_diagnostic_only_and_cannot_match_binding(self) -> None:
+        # Canonical factory-state/v1 never carries pre-round hook or readiness
+        # fields; they live only in the strict sidecar.
+        canonical = state.FactoryState(
             schema=state.SCHEMA_NAME, repository_identity="1:2", branch="develop",
             campaign_id="campaign", rounds_requested=5, current_round=1,
             current_phase="planning", specification_digest=SHA, plan_digest=SHA,
             role_prompt_digests={"planner": SHA}, audit_objectives_digest=SHA,
-            pre_round_hook_configuration_digest=SHA,
-            pre_round_hook_commit=COMMIT,
-            pre_round_hook_results_digest="0" * 64,
-            pre_round_hook_started_round=0, pre_round_hook_completed_round=0,
             phase_base_commit=COMMIT, selected_task_id=None, attempt_number=0,
             phase_started_at_monotonic=1, attempt_started_at_monotonic=0,
             last_outcome=None,
         )
-
-    def test_legacy_state_is_diagnostic_only_and_cannot_match_binding(self) -> None:
-        legacy = self.initial().to_dict()
+        canonical_dict = canonical.to_dict()
+        self.assertNotIn("pre_round_hook_configuration_digest", canonical_dict)
+        self.assertNotIn("readiness", canonical_dict)
+        # A legacy v2 document carrying the extension fields cannot be parsed
+        # as canonical v1 state.
+        legacy = dict(canonical_dict)
         legacy["schema"] = state.LEGACY_SCHEMA_NAME
-        for key in (
-            "pre_round_hook_configuration_digest", "pre_round_hook_commit",
-            "pre_round_hook_results_digest",
-            "pre_round_hook_started_round", "pre_round_hook_completed_round",
-            "readiness",
-        ):
-            legacy.pop(key)
+        legacy["pre_round_hook_configuration_digest"] = SHA
+        legacy["pre_round_hook_commit"] = COMMIT
+        legacy["pre_round_hook_results_digest"] = "0" * 64
+        legacy["pre_round_hook_started_round"] = 0
+        legacy["pre_round_hook_completed_round"] = 0
+        legacy["readiness"] = sidecars.empty_readiness()
         with self.assertRaises(state.StateTamperError):
             state.parse_state(legacy)
-        migrated = state.parse_state(state.migrate_offline_state(legacy))
-        self.assertEqual(migrated.pre_round_hook_configuration_digest, "0" * 64)
-        self.assertNotEqual(migrated.pre_round_hook_configuration_digest, SHA)
+        migrated = state.migrate_offline_state(legacy)
+        self.assertEqual(migrated["schema"], state.SCHEMA_NAME)
+        self.assertNotIn("pre_round_hook_configuration_digest", migrated)
+        self.assertNotIn("readiness", migrated)
+        self.assertIn("pre_round_hooks", migrated["_sidecars"])
+        self.assertIn("readiness", migrated["_sidecars"])
+        # The migrated canonical document parses as exact §11 state.
+        canonical_migrated = state.parse_state(
+            {k: v for k, v in migrated.items() if k != "_sidecars"}
+        )
+        self.assertEqual(canonical_migrated.current_round, 1)
+        self.assertEqual(canonical_migrated.current_phase, "planning")
 
     def test_write_ahead_cursor_prevents_duplicate_execution(self) -> None:
-        claimed = state.begin_pre_round_hooks(self.initial())
-        self.assertEqual(claimed.pre_round_hook_started_round, 1)
-        with self.assertRaises(state.StateTransitionError):
-            state.begin_pre_round_hooks(claimed)
-        completed = state.complete_pre_round_hooks(claimed, "d" * 64)
-        self.assertEqual(completed.pre_round_hook_completed_round, 1)
-        with self.assertRaises(state.StateTransitionError):
-            state.begin_pre_round_hooks(completed)
+        claimed = sidecars.begin_pre_round_hooks(self.initial(), current_round=1)
+        self.assertEqual(claimed.started_round, 1)
+        with self.assertRaises(sidecars.SidecarTransitionError):
+            sidecars.begin_pre_round_hooks(claimed, current_round=1)
+        completed = sidecars.complete_pre_round_hooks(
+            claimed, "d" * 64, current_round=1
+        )
+        self.assertEqual(completed.completed_round, 1)
+        with self.assertRaises(sidecars.SidecarTransitionError):
+            sidecars.begin_pre_round_hooks(completed, current_round=1)
 
 
 if __name__ == "__main__":

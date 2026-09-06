@@ -49,12 +49,15 @@ Non-goals:
   (`.factory/schemas/factory-plan-v1.requirements.json`); and the plan
   lifecycle status must be consistent with the task statuses (Task 2,
   Task 18).
-- Exactly one minimal mutable control-state file
+- Exactly one root canonical mutable control-state file
   `.factory-state/factory-loop.json` uses the explicitly versioned
-  `factory-state/v2` extension. Canonical STATE-01 remains the state-v1
-  baseline; EXT-STATE-V2-01 maps the additional readiness and pre-round
-  bindings and does not claim they are the exact §11 field set. Append-only
-  evidence artifacts are never orchestration state.
+  `factory-state/v1` schema with exactly the §11 field set. `factory-state/v2`
+  is the legacy pre-migration format accepted only by the offline migration
+  helper; the readiness and pre-round extension data lives in strict
+  campaign-bound sidecars (`factory-pre-round-hook-state/v1`,
+  `factory-readiness-state/v1`), never as fields, phases, or outcomes in
+  canonical state. Append-only evidence artifacts are never orchestration
+  state.
 - The exact committed `.factory/pre-round-hooks.json` registry runs once in
   order before each round planner. It accepts fixed internal implementations
   only, initially mandatory `branch_guard`, with no command/argv or model-facing
@@ -1668,7 +1671,10 @@ elevated by prose.
   gates, and residual cleanup. It additionally covers the generic mandatory
   round-zero readiness policy/schema, fixed gate adapters, exact accepted and
   descendant bindings, detached-signature external human authority,
-  EXT-STATE-V2-01 migration, readiness-only terminal, and campaign-lock-bound
+  EXT-STATE-V2-01 migration (legacy v2 to canonical v1 plus the strict
+  readiness/pre-round sidecars), readiness-only terminal (separate
+  `factory-readiness-result/v2`, never a canonical phase or outcome), and
+  campaign-lock-bound
   FD-secret-backed durable one-use role launch authorization. It also audits the generic runner parity port: receipt v3,
   aggregate v4 and artifact v1 schemas; arbitrary class/capability cardinality;
   campaign/readiness/acquisition namespaces; issuance/current trust and

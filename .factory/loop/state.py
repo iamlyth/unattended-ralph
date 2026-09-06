@@ -120,8 +120,8 @@ import sys
 import time
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
-SCHEMA_NAME = "factory-state/v2"
-LEGACY_SCHEMA_NAME = "factory-state/v1"
+SCHEMA_NAME = "factory-state/v1"
+LEGACY_SCHEMA_NAME = "factory-state/v2"
 STATE_FILE_NAME = "factory-loop.json"
 DIGEST_LEDGER_NAME = "state-digest-ledger.jsonl"
 
@@ -131,8 +131,10 @@ STATE_FILE_MAX = 16 * 1024
 LEDGER_MAX = 1024 * 1024
 
 # §11 phases: the four lifecycle phases and the terminal campaign states of
-# the §11 transition table.
-PHASES = ("readiness", "planning", "implementation", "verification", "audit")
+# the §11 transition table.  Round-zero readiness is a coordinator-owned
+# sidecar concern that runs before canonical state initialization; it is never
+# a canonical phase.
+PHASES = ("planning", "implementation", "verification", "audit")
 TERMINAL_PHASES = (
     "success", "findings", "blocked", "failed", "interrupted",
     "infrastructure_failure",
@@ -155,10 +157,6 @@ OUTCOMES = (
 # ``advance``; they are listed here only for documentation and for the
 # machine-readable table probe.
 TRANSITIONS: Dict[Tuple[str, str], str] = {
-    ("readiness", "pass"): "planning",
-    ("readiness", "findings"): "findings",
-    ("readiness", "blocked"): "blocked",
-    ("readiness", "infrastructure_failure"): "infrastructure_failure",
     ("planning", "planned"): "implementation",
     ("planning", "failed"): "failed",
     ("planning", "interrupted"): "interrupted",
@@ -202,7 +200,6 @@ RETRY_OUTCOMES: Dict[str, Tuple[str, ...]] = {
 # ``last_outcome`` outside the owning phase's set is a forged phase/outcome
 # combination and fails closed.
 PHASE_OUTCOMES: Dict[str, frozenset] = {
-    "readiness": frozenset({"pass"}),
     "planning": frozenset({"interrupted", "pass", "findings", "blocked"}),
     "implementation": frozenset(
         {"planned", "task_progress", "task_failed", "interrupted"}
@@ -217,18 +214,19 @@ PHASE_OUTCOMES: Dict[str, frozenset] = {
 BINDING_FIELDS = (
     "schema", "repository_identity", "branch", "campaign_id",
     "rounds_requested", "specification_digest", "role_prompt_digests",
-    "audit_objectives_digest", "pre_round_hook_configuration_digest",
-    "pre_round_hook_commit",
+    "audit_objectives_digest",
 )
+# The exact §11 field set (FACTORY-LOOP-SPEC §11): no wall-clock timestamp,
+# model prose, task description, memory, evidence claim, or copy of the plan
+# is accepted.  Pre-round hook and readiness extension data live in strict
+# sidecars (``.factory/loop/sidecars.py``), never in canonical state.
 FIELD_NAMES: Tuple[str, ...] = (
     "schema", "repository_identity", "branch", "campaign_id",
     "rounds_requested", "current_round", "current_phase",
     "specification_digest", "plan_digest", "role_prompt_digests",
-    "audit_objectives_digest", "pre_round_hook_configuration_digest",
-    "pre_round_hook_commit", "pre_round_hook_results_digest", "pre_round_hook_started_round",
-    "pre_round_hook_completed_round", "phase_base_commit", "selected_task_id",
+    "audit_objectives_digest", "phase_base_commit", "selected_task_id",
     "attempt_number", "phase_started_at_monotonic",
-    "attempt_started_at_monotonic", "last_outcome", "readiness",
+    "attempt_started_at_monotonic", "last_outcome",
 )
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -244,76 +242,6 @@ TEMP_ORPHAN_RE = re.compile(rf"^\.{re.escape(STATE_FILE_NAME)}\.[0-9a-f]{{32}}$"
 QUARANTINE_ORPHAN_RE = re.compile(
     rf"^\.{re.escape(STATE_FILE_NAME)}\.quarantine-[0-9a-f]{{32}}$"
 )
-
-READINESS_FIELDS = (
-    "required", "nonce", "attempt", "cursor", "status", "accepted_commit",
-    "tree", "environment_blob", "specification_sha256", "plan_sha256",
-    "conformance_sha256", "policy_sha256", "contracts_sha256",
-    "install_manifest_sha256", "command_authority_sha256",
-    "human_authority_sha256", "trust_authority_sha256",
-    "aggregate_sha256", "capability_result_sha256", "core_result_sha256",
-    "conformance_result_sha256", "human_result_sha256", "result_sha256", "terminal_outcome",
-)
-
-
-def empty_readiness(*, required: bool = False) -> Dict[str, object]:
-    """Canonical non-authorizing readiness binding for legacy/non-production state."""
-    return {
-        "required": required, "nonce": "0" * 64, "attempt": 0, "cursor": 0,
-        "status": "pending" if required else "not_required",
-        "accepted_commit": "0" * 40, "tree": "0" * 40,
-        "environment_blob": "0" * 40,
-        **{name: "0" * 64 for name in READINESS_FIELDS if name.endswith("_sha256")},
-        "terminal_outcome": "pending" if required else "not_required",
-    }
-
-
-def _validate_readiness(value: object, *, required: bool) -> None:
-    if not isinstance(value, Mapping) or set(value) != set(READINESS_FIELDS):
-        raise StateTamperError("`readiness` must contain exactly the readiness binding fields")
-    if type(value.get("required")) is not bool or bool(value["required"]) != required:
-        raise StateTamperError("readiness required binding is inconsistent")
-    if type(value.get("attempt")) is not int or int(value["attempt"]) < 0:
-        raise StateTamperError("readiness attempt must be non-negative")
-    if type(value.get("cursor")) is not int or not 0 <= int(value["cursor"]) <= 6:
-        raise StateTamperError("readiness cursor is invalid")
-    if value.get("status") not in {"not_required", "pending", "acquiring", "complete", "findings", "human_blocked", "infrastructure_failure"}:
-        raise StateTamperError("readiness status is invalid")
-    if value.get("terminal_outcome") not in {"not_required", "pending", "pass", "findings", "blocked", "infrastructure_failure"}:
-        raise StateTamperError("readiness terminal outcome is invalid")
-    for name in ("accepted_commit", "tree", "environment_blob"):
-        if not isinstance(value.get(name), str) or not SHA40_RE.fullmatch(str(value[name])):
-            raise StateTamperError(f"readiness {name} must be exact SHA-1")
-    if not isinstance(value.get("nonce"), str) or not SHA256_RE.fullmatch(str(value["nonce"])):
-        raise StateTamperError("readiness nonce must be SHA-256")
-    for name in READINESS_FIELDS:
-        if name.endswith("_sha256") and (not isinstance(value.get(name), str) or not SHA256_RE.fullmatch(str(value[name]))):
-            raise StateTamperError(f"readiness {name} must be SHA-256")
-    if required and value["nonce"] == "0" * 64:
-        raise StateTamperError("required readiness must have a campaign nonce")
-    if value["status"] == "complete":
-        required_digests = (
-            "aggregate_sha256", "capability_result_sha256", "core_result_sha256",
-            "conformance_result_sha256", "human_result_sha256", "result_sha256",
-        )
-        if value["terminal_outcome"] != "pass" or value["cursor"] != 6 or any(value[name] == "0" * 64 for name in required_digests):
-            raise StateTamperError("completed readiness lacks every nonzero bound result")
-
-
-def update_readiness(state: "FactoryState", readiness: Mapping[str, object]) -> "FactoryState":
-    """Durably advance the trusted round-zero readiness cursor."""
-    state.validate()
-    if state.current_phase != "readiness":
-        raise StateTransitionError("readiness updates are accepted only at round zero")
-    previous = state.readiness
-    if int(readiness.get("attempt", -1)) < int(previous["attempt"]) or int(readiness.get("cursor", -1)) < int(previous["cursor"]):
-        raise StateTransitionError("readiness attempt/cursor may not rewind")
-    for name in ("required", "nonce", "accepted_commit", "tree", "environment_blob", "specification_sha256", "plan_sha256", "conformance_sha256", "policy_sha256", "contracts_sha256", "install_manifest_sha256", "command_authority_sha256", "human_authority_sha256", "trust_authority_sha256"):
-        if readiness.get(name) != previous.get(name):
-            raise StateBindingError(f"readiness binding `{name}` may not change")
-    result = replace(state, readiness=dict(readiness))
-    result.validate()
-    return result
 
 # Deterministic internal race hooks (Task 19 hardening): module-private,
 # one-shot, and unreachable from the trusted CLI.  Production never sets
@@ -507,18 +435,12 @@ class FactoryState:
     plan_digest: str
     role_prompt_digests: Mapping[str, str]
     audit_objectives_digest: str
-    pre_round_hook_configuration_digest: str
-    pre_round_hook_commit: str
-    pre_round_hook_results_digest: str
-    pre_round_hook_started_round: int
-    pre_round_hook_completed_round: int
     phase_base_commit: str
     selected_task_id: Optional[int]
     attempt_number: int
     phase_started_at_monotonic: int
     attempt_started_at_monotonic: int
     last_outcome: Optional[str]
-    readiness: Mapping[str, object] = field(default_factory=empty_readiness)
 
     def to_dict(self) -> Dict[str, object]:
         """Deterministic JSON-ready dict (role digests sorted by role)."""
@@ -534,18 +456,12 @@ class FactoryState:
             "plan_digest": self.plan_digest,
             "role_prompt_digests": dict(sorted(self.role_prompt_digests.items())),
             "audit_objectives_digest": self.audit_objectives_digest,
-            "pre_round_hook_configuration_digest": self.pre_round_hook_configuration_digest,
-            "pre_round_hook_commit": self.pre_round_hook_commit,
-            "pre_round_hook_results_digest": self.pre_round_hook_results_digest,
-            "pre_round_hook_started_round": self.pre_round_hook_started_round,
-            "pre_round_hook_completed_round": self.pre_round_hook_completed_round,
             "phase_base_commit": self.phase_base_commit,
             "selected_task_id": self.selected_task_id,
             "attempt_number": self.attempt_number,
             "phase_started_at_monotonic": self.phase_started_at_monotonic,
             "attempt_started_at_monotonic": self.attempt_started_at_monotonic,
             "last_outcome": self.last_outcome,
-            "readiness": dict(self.readiness),
         }
 
     def validate(self) -> None:
@@ -613,13 +529,11 @@ def _validate_state(state: FactoryState) -> None:
         raise StateTamperError(
             "`current_round` may not exceed `rounds_requested`"
         )
-    if state.current_round == 0 and state.current_phase != "readiness" and not (
-        state.current_phase in TERMINAL_PHASES and bool(state.readiness.get("required"))
-    ):
-        raise StateTamperError("round zero is reserved for readiness or its terminal outcome")
-    if state.current_phase == "readiness" and state.current_round != 0:
-        raise StateTamperError("readiness must be phase round zero")
-    _validate_readiness(state.readiness, required=(state.current_phase == "readiness" or bool(state.readiness.get("required"))))
+    if state.current_round == 0:
+        raise StateTamperError(
+            "`current_round` is 1-based per §11; round zero is reserved for "
+            "the coordinator-owned readiness sidecar, never canonical state"
+        )
     if state.current_phase not in PHASE_VALUES:
         raise StateTamperError(
             "`current_phase` must be one of "
@@ -630,8 +544,6 @@ def _validate_state(state: FactoryState) -> None:
         ("specification_digest", state.specification_digest),
         ("plan_digest", state.plan_digest),
         ("audit_objectives_digest", state.audit_objectives_digest),
-        ("pre_round_hook_configuration_digest", state.pre_round_hook_configuration_digest),
-        ("pre_round_hook_results_digest", state.pre_round_hook_results_digest),
     ):
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise StateTamperError(
@@ -655,30 +567,6 @@ def _validate_state(state: FactoryState) -> None:
                 "`role_prompt_digests` must map each role to a 64-character "
                 "SHA-256 hex digest"
             )
-    if not isinstance(state.pre_round_hook_commit, str) or not SHA40_RE.fullmatch(
-        state.pre_round_hook_commit
-    ):
-        raise StateTamperError("`pre_round_hook_commit` must be a 40-character Git commit")
-    for name, value in (
-        ("pre_round_hook_started_round", state.pre_round_hook_started_round),
-        ("pre_round_hook_completed_round", state.pre_round_hook_completed_round),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise StateTamperError(f"`{name}` must be a non-negative integer")
-    if state.pre_round_hook_completed_round > state.pre_round_hook_started_round:
-        raise StateTamperError("a pre-round hook completion cannot precede its start")
-    if state.pre_round_hook_started_round > state.current_round:
-        raise StateTamperError("pre-round hook cursor cannot exceed the current round")
-    if state.pre_round_hook_started_round - state.pre_round_hook_completed_round > 1:
-        raise StateTamperError("pre-round hook cursor may have at most one ambiguous round")
-    if (
-        state.pre_round_hook_configuration_digest != "0" * 64
-        and state.current_phase not in ("planning", "infrastructure_failure") and (
-            state.pre_round_hook_completed_round < state.current_round
-            or state.pre_round_hook_started_round != state.pre_round_hook_completed_round
-        )
-    ):
-        raise StateTamperError("every phase after planning requires completed hooks for its round")
     if (
         not isinstance(state.phase_base_commit, str)
         or not SHA40_RE.fullmatch(state.phase_base_commit)
@@ -763,9 +651,9 @@ def _validate_state(state: FactoryState) -> None:
             f"got {state.last_outcome!r}"
         )
     if state.last_outcome is None:
-        if state.current_phase not in ("readiness", "planning"):
+        if state.current_phase != "planning":
             raise StateTamperError(
-                "`last_outcome` may be null only during the planning/readiness phase, "
+                "`last_outcome` may be null only during the planning phase, "
                 f"not {state.current_phase!r}"
             )
     else:
@@ -779,42 +667,45 @@ def _validate_state(state: FactoryState) -> None:
             )
 
 
-def migrate_offline_state(data: object, *, readiness_required: bool = False) -> Dict[str, object]:
-    """Explicitly migrate a legacy v1 document for fixture/offline tooling only.
+def migrate_offline_state(data: object) -> Dict[str, object]:
+    """Explicitly migrate a legacy ``factory-state/v2`` document for offline
+    tooling only.
 
-    Production loading never calls this helper.  A legacy document cannot be
-    upgraded into production readiness: callers requesting readiness are
-    rejected and must start a fresh campaign with a new nonce.
+    Production loading never calls this helper.  A legacy v2 document carries
+    the pre-round hook and readiness extension fields; the migration strips
+    them into the strict sidecars (``.factory/loop/sidecars.py``) and returns
+    the canonical ``factory-state/v1`` §11 field set.  The sidecar payloads
+    are returned under the ``_sidecars`` key for the caller to publish; they
+    are never canonical state fields.
     """
-    if readiness_required:
-        raise StateTamperError("legacy state cannot migrate into production readiness")
     if not isinstance(data, dict) or data.get("schema") != LEGACY_SCHEMA_NAME:
-        raise StateTamperError("offline migration requires an exact factory-state/v1 document")
+        raise StateTamperError("offline migration requires an exact factory-state/v2 document")
     migrated = dict(data)
     migrated["schema"] = SCHEMA_NAME
-    if "readiness" not in migrated:
-        migrated["readiness"] = empty_readiness()
-    legacy_hook_fields = {
+    # Strip the coordinator-owned extension fields into sidecar payloads.
+    readiness = migrated.pop("readiness", None)
+    hook_fields = {
         "pre_round_hook_configuration_digest", "pre_round_hook_commit",
         "pre_round_hook_results_digest", "pre_round_hook_started_round",
         "pre_round_hook_completed_round",
     }
-    present = legacy_hook_fields.intersection(migrated)
-    if present and present != legacy_hook_fields:
+    present = hook_fields.intersection(migrated)
+    if present and present != hook_fields:
         raise StateTamperError("pre-round hook state fields must be present as one complete set")
-    if not present:
-        current_round = migrated.get("current_round", 0)
-        completed = current_round if type(current_round) is int and current_round > 0 else 0
-        if migrated.get("current_phase") == "planning" and migrated.get("last_outcome") in ("pass", "findings", "blocked") and completed > 0:
-            completed -= 1
-        migrated.update({
-            "pre_round_hook_configuration_digest": "0" * 64,
-            "pre_round_hook_commit": "0" * 40,
-            "pre_round_hook_results_digest": "0" * 64,
-            "pre_round_hook_started_round": completed,
-            "pre_round_hook_completed_round": completed,
-        })
+    hook_state = {name: migrated.pop(name) for name in hook_fields if name in migrated}
+    # A legacy v2 document may carry a round-zero readiness phase; canonical
+    # state is 1-based and never has a readiness phase.
+    if migrated.get("current_round") == 0 or migrated.get("current_phase") == "readiness":
+        migrated["current_round"] = 1
+        migrated["current_phase"] = "planning"
+        migrated["last_outcome"] = None
     parse_state(migrated)
+    sidecars: Dict[str, object] = {}
+    if readiness is not None:
+        sidecars["readiness"] = readiness
+    if hook_state:
+        sidecars["pre_round_hooks"] = hook_state
+    migrated["_sidecars"] = sidecars
     return migrated
 
 
@@ -862,17 +753,6 @@ def parse_state(data: object) -> FactoryState:
         audit_objectives_digest=_expect_str(
             data, "audit_objectives_digest", pattern=SHA256_RE
         ),
-        pre_round_hook_configuration_digest=_expect_str(
-            data, "pre_round_hook_configuration_digest", pattern=SHA256_RE
-        ),
-        pre_round_hook_commit=_expect_str(
-            data, "pre_round_hook_commit", pattern=SHA40_RE
-        ),
-        pre_round_hook_results_digest=_expect_str(
-            data, "pre_round_hook_results_digest", pattern=SHA256_RE
-        ),
-        pre_round_hook_started_round=_expect_int(data, "pre_round_hook_started_round"),
-        pre_round_hook_completed_round=_expect_int(data, "pre_round_hook_completed_round"),
         phase_base_commit=_expect_str(
             data, "phase_base_commit", pattern=SHA40_RE
         ),
@@ -885,7 +765,6 @@ def parse_state(data: object) -> FactoryState:
             data, "attempt_started_at_monotonic"
         ),
         last_outcome=data.get("last_outcome"),
-        readiness=dict(data.get("readiness", {})) if isinstance(data.get("readiness"), dict) else data.get("readiness"),
     )
     _validate_state(state)
     return state
@@ -940,10 +819,6 @@ def advance(
     always internally consistent.
     """
     state.validate()
-    if state.current_phase == "readiness":
-        expected_status = {"pass": "complete", "findings": "findings", "blocked": "human_blocked", "infrastructure_failure": "infrastructure_failure"}.get(outcome)
-        if expected_status is None or state.readiness.get("status") != expected_status or state.readiness.get("terminal_outcome") != outcome or state.readiness.get("result_sha256") == "0" * 64:
-            raise StateTransitionError("readiness transition requires a published exact-bound terminal result")
     if state.current_phase in TERMINAL_PHASES:
         raise StateTransitionError(
             f"a terminal {state.current_phase!r} state accepts no transition"
@@ -1001,7 +876,6 @@ def advance(
             "epoch marker is rejected as tamper)"
         )
     next_round = (
-        1 if state.current_phase == "readiness" and target == "planning" else
         state.current_round + 1
         if state.current_phase == "audit" and target == "planning"
         else state.current_round
@@ -1087,55 +961,6 @@ def begin_attempt(
     return result
 
 
-def begin_pre_round_hooks(state: FactoryState) -> FactoryState:
-    """Durably claim this round before any hook side effect can occur.
-
-    Recovery never re-executes an ambiguous claimed round.  A caller that
-    observes ``started == current_round > completed`` must terminate the
-    campaign for operator review.
-    """
-    state.validate()
-    if state.current_phase != "planning":
-        raise StateTransitionError("pre-round hooks start only in planning")
-    if state.pre_round_hook_completed_round == state.current_round:
-        raise StateTransitionError("pre-round hooks already completed this round")
-    expected_previous = state.current_round - 1
-    if (
-        state.pre_round_hook_started_round != expected_previous
-        or state.pre_round_hook_completed_round != expected_previous
-    ):
-        raise StateTransitionError("pre-round hook cursor is ambiguous or rewound")
-    result = _checked_replace(
-        state, pre_round_hook_started_round=state.current_round
-    )
-    result.validate()
-    return result
-
-
-def complete_pre_round_hooks(
-    state: FactoryState, chained_result_digest: str
-) -> FactoryState:
-    """Bind the canonical ordered result chain before the planner starts."""
-    state.validate()
-    if state.current_phase != "planning":
-        raise StateTransitionError("pre-round hooks complete only in planning")
-    if state.pre_round_hook_started_round != state.current_round:
-        raise StateTransitionError("pre-round hooks were not claimed for this round")
-    if state.pre_round_hook_completed_round != state.current_round - 1:
-        raise StateTransitionError("pre-round hook completion cursor is not monotonic")
-    if not isinstance(chained_result_digest, str) or not SHA256_RE.fullmatch(
-        chained_result_digest
-    ):
-        raise StateTamperError("pre-round result chain must be a SHA-256 digest")
-    result = _checked_replace(
-        state,
-        pre_round_hook_results_digest=chained_result_digest,
-        pre_round_hook_completed_round=state.current_round,
-    )
-    result.validate()
-    return result
-
-
 def state_digest(state: FactoryState) -> str:
     """Deterministic SHA-256 of the canonical JSON encoding of the model.
 
@@ -1177,10 +1002,6 @@ def init_state(
     role_prompt_digests: Mapping[str, str],
     audit_objectives_digest: str,
     phase_base_commit: str,
-    pre_round_hook_configuration_digest: str = "0" * 64,
-    pre_round_hook_commit: str = "0" * 40,
-    readiness_required: bool = False,
-    readiness_binding: Optional[Mapping[str, object]] = None,
     branch: Optional[str] = None,
     now: Optional[int] = None,
     identity: Optional[str] = None,
@@ -1190,7 +1011,9 @@ def init_state(
     Binds the write-once campaign fields and writes the file atomically
     through the established no-follow I/O.  Refuses to overwrite an existing
     control-state file: a campaign never silently clobbers prior lifecycle
-    state.
+    state.  Round-zero readiness runs *before* this call and is recorded in
+    the coordinator-owned readiness sidecar (``.factory/loop/sidecars.py``);
+    canonical state always starts at round 1 planning per §11.
     """
     root = _as_root(root)
     if branch is None:
@@ -1209,7 +1032,6 @@ def init_state(
         ("specification_digest", specification_digest),
         ("plan_digest", plan_digest),
         ("audit_objectives_digest", audit_objectives_digest),
-        ("pre_round_hook_configuration_digest", pre_round_hook_configuration_digest),
     ):
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise StateTamperError(
@@ -1250,24 +1072,18 @@ def init_state(
         branch=branch,
         campaign_id=campaign_id,
         rounds_requested=rounds_requested,
-        current_round=0 if readiness_required else 1,
-        current_phase="readiness" if readiness_required else "planning",
+        current_round=1,
+        current_phase="planning",
         specification_digest=specification_digest,
         plan_digest=plan_digest,
         role_prompt_digests=dict(role_prompt_digests),
         audit_objectives_digest=audit_objectives_digest,
-        pre_round_hook_configuration_digest=pre_round_hook_configuration_digest,
-        pre_round_hook_commit=pre_round_hook_commit,
-        pre_round_hook_results_digest="0" * 64,
-        pre_round_hook_started_round=(1 if pre_round_hook_configuration_digest == "0" * 64 else 0),
-        pre_round_hook_completed_round=(1 if pre_round_hook_configuration_digest == "0" * 64 else 0),
         phase_base_commit=phase_base_commit,
         selected_task_id=None,
         attempt_number=0,
         phase_started_at_monotonic=now,
         attempt_started_at_monotonic=0,
         last_outcome=None,
-        readiness=(dict(readiness_binding) if readiness_binding is not None else empty_readiness(required=readiness_required)),
     )
     state.validate()
     # Deterministic crash-window/orphan recovery first (Task 19 S2): a torn
@@ -1706,9 +1522,6 @@ def load_state(
     expected_plan_digest: Optional[str] = None,
     expected_audit_objectives_digest: Optional[str] = None,
     expected_role_prompt_digests: Optional[Mapping[str, str]] = None,
-    expected_pre_round_hook_configuration_digest: Optional[str] = None,
-    expected_pre_round_hook_commit: Optional[str] = None,
-    expected_readiness_required: Optional[bool] = None,
     _expected_uid: Optional[int] = None,
 ) -> FactoryState:
     """Securely reopen, validate, and bind the control-state file.
@@ -1747,15 +1560,6 @@ def load_state(
     _expect_binding(state, "plan_digest", expected_plan_digest)
     _expect_binding(state, "audit_objectives_digest", expected_audit_objectives_digest)
     _expect_binding(state, "role_prompt_digests", expected_role_prompt_digests)
-    _expect_binding(
-        state, "pre_round_hook_configuration_digest",
-        expected_pre_round_hook_configuration_digest,
-    )
-    _expect_binding(state, "pre_round_hook_commit", expected_pre_round_hook_commit)
-    if expected_readiness_required is not None and state.readiness.get("required") is not expected_readiness_required:
-        raise StateBindingError(
-            "state readiness applicability differs from the immutable expected production policy"
-        )
     return state
 
 

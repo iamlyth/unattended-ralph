@@ -11,7 +11,7 @@
     },
     {
       "id": "EXT-STATE-V2-01",
-      "summary": "factory-state/v2 is an explicitly versioned extension of canonical STATE-01; its additional readiness and pre-round fields are not claimed to be the exact section 11 field set."
+      "summary": "factory-state/v2 is the legacy pre-migration format; canonical factory-state/v1 is the exact section 11 field set, and the readiness/pre-round extension data lives in strict campaign-bound sidecars (factory-pre-round-hook-state/v1, factory-readiness-state/v1), never in canonical state."
     },
     {
       "id": "EXT-RUNNER-V4-01",

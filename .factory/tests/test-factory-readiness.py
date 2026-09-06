@@ -6,6 +6,8 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/".factory/loop"))
 import readiness
 import campaign
+import sidecars
+
 
 class ReadinessPolicyTests(unittest.TestCase):
     def policy(self):
@@ -40,6 +42,27 @@ class ReadinessPolicyTests(unittest.TestCase):
         self.assertEqual(first,second)
         for mutation in (records[:1], records+[record("class-c",[])]):
             with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(aggregate(mutation),policy,**kwargs)
+
+    def test_aggregate_requires_name_and_ignores_class_result_fallback(self):
+        policy=readiness.validate_policy(self.policy()); commit="a"*40; tree="b"*40; env="c"*40
+        def record(name,caps,**extra):
+            base={"name":name,"manifest":f".factory-state/runner-evidence/{name}/manifest.json","manifest_sha256":"d"*64,"capabilities":caps,"artifact_manifest_sha256":"e"*64,"artifact_count":0,"artifact_bytes":0,"signer":{"principal":name,"key_sha256":"f"*64,"algorithm":"ssh-ed25519","signature_sha256":"1"*64}}
+            base.update(extra); return base
+        def aggregate(items): return {"schema":"factory-runner-aggregate/v4","campaign_id":"fixture","readiness_nonce":"9"*64,"commit":commit,"tree":tree,"environment_blob":env,"runners":items}
+        kwargs={"accepted_commit":commit,"tree":tree,"environment_blob":env,"campaign_id":"fixture","readiness_nonce":"9"*64}
+        # ``class`` is never a substitute for the exact v4 ``name`` field.
+        class_only=aggregate([record("class-a",["cap-a"]),record("class-b",["cap-b","cap-c"])])
+        for item in class_only["runners"]:
+            item["class"]=item.pop("name")
+        with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(class_only,policy,**kwargs)
+        # ``result`` is not a pass signal: presence in the aggregate is the
+        # only authority, so a ``result: fail`` record is still accepted.
+        with_result=aggregate([record("class-a",["cap-a"],result="fail"),record("class-b",["cap-b","cap-c"],result="fail")])
+        self.assertRegex(readiness.validate_aggregate(with_result,policy,**kwargs),r"^[0-9a-f]{64}$")
+        # A record that omits ``name`` entirely fails closed.
+        no_name=aggregate([record("class-a",["cap-a"]),record("class-b",["cap-b","cap-c"])])
+        no_name["runners"][0].pop("name")
+        with self.assertRaises(readiness.ReadinessFindings): readiness.validate_aggregate(no_name,policy,**kwargs)
 
     def test_generic_fixture_policy_passes_all_fixed_adapters(self):
         policy=readiness.validate_policy(self.policy())
@@ -109,5 +132,45 @@ class ReadinessPolicyTests(unittest.TestCase):
         ready.validate()
         with self.assertRaises(campaign.CampaignResultError):
             campaign.CampaignResult("fake",1,0,"success","pass","a"*40,()).validate()
+
+    def test_readiness_sidecar_roundtrip_and_binding_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            base=sidecars.empty_readiness(required=True)
+            base.update({"nonce":"9"*64,"accepted_commit":"a"*40,"tree":"b"*40,"environment_blob":"c"*40,"specification_sha256":"1"*64,"plan_sha256":"2"*64,"policy_sha256":"3"*64,"contracts_sha256":"4"*64,"install_manifest_sha256":"5"*64})
+            state=sidecars.ReadinessState(schema=sidecars.READINESS_SCHEMA,campaign_id="fixture",readiness=base)
+            sidecars.write_readiness(root,state)
+            loaded=sidecars.read_readiness(root,expected_campaign_id="fixture")
+            self.assertEqual(loaded.readiness["nonce"],"9"*64)
+            self.assertEqual(loaded.readiness["status"],"pending")
+            # Advancing cursor/status is allowed.
+            advanced=dict(loaded.readiness); advanced.update({"cursor":1,"status":"acquiring"})
+            updated=sidecars.update_readiness(loaded,advanced)
+            self.assertEqual(updated.readiness["cursor"],1)
+            # A binding field may never change.
+            forged=dict(advanced); forged["nonce"]="8"*64
+            with self.assertRaises(sidecars.SidecarBindingError): sidecars.update_readiness(updated,forged)
+            # A rewound cursor fails closed.
+            rewound=dict(advanced); rewound["cursor"]=0
+            with self.assertRaises(sidecars.SidecarTransitionError): sidecars.update_readiness(updated,rewound)
+            # A cross-campaign read fails closed.
+            with self.assertRaises(sidecars.SidecarBindingError): sidecars.read_readiness(root,expected_campaign_id="other")
+
+    def test_readiness_sidecar_complete_requires_all_result_digests(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            base=sidecars.empty_readiness(required=True)
+            base.update({"nonce":"9"*64,"accepted_commit":"a"*40,"tree":"b"*40,"environment_blob":"c"*40,"specification_sha256":"1"*64,"plan_sha256":"2"*64,"policy_sha256":"3"*64,"contracts_sha256":"4"*64,"install_manifest_sha256":"5"*64})
+            state=sidecars.ReadinessState(schema=sidecars.READINESS_SCHEMA,campaign_id="fixture",readiness=base)
+            sidecars.write_readiness(root,state)
+            loaded=sidecars.read_readiness(root,expected_campaign_id="fixture")
+            complete=dict(loaded.readiness)
+            complete.update({"status":"complete","cursor":6,"terminal_outcome":"pass","aggregate_sha256":"a"*64,"capability_result_sha256":"b"*64,"core_result_sha256":"c"*64,"conformance_result_sha256":"d"*64,"human_result_sha256":"e"*64,"result_sha256":"f"*64})
+            done=sidecars.update_readiness(loaded,complete)
+            sidecars.write_readiness(root,done)
+            self.assertEqual(sidecars.read_readiness(root,expected_campaign_id="fixture").readiness["status"],"complete")
+            # A complete sidecar missing a result digest is rejected on write.
+            partial=dict(complete); partial["result_sha256"]="0"*64
+            with self.assertRaises(sidecars.SidecarError): sidecars.write_readiness(root,sidecars.ReadinessState(schema=sidecars.READINESS_SCHEMA,campaign_id="fixture",readiness=partial))
 
 if __name__=="__main__": unittest.main(verbosity=2)

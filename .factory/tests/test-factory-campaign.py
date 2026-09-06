@@ -73,6 +73,7 @@ import campaign as campaign_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
 import pre_round as pre_round_module  # noqa: E402
+import sidecars as sidecars_module  # noqa: E402
 import state as state_module  # noqa: E402
 
 GIT = gitutil.GIT_EXECUTABLE
@@ -936,8 +937,10 @@ class CampaignRecovery(_CampaignBase):
         ), self.assertRaisesRegex(RuntimeError, "publication crash"):
             campaign_module.Campaign(config).run()
         claimed = ws.load_state()
-        self.assertEqual(claimed.pre_round_hook_started_round, 1)
-        self.assertEqual(claimed.pre_round_hook_completed_round, 0)
+        sidecar = sidecars_module.read_pre_round(
+            ws.root, expected_campaign_id="campaign")
+        self.assertEqual(sidecar.started_round, 1)
+        self.assertEqual(sidecar.completed_round, 0)
         recovered = campaign_module.Campaign(config).run()
         self.assertEqual(recovered.terminal_phase, "infrastructure_failure")
         self.assertNotIn("planned", [r.outcome for r in recovered.phase_history])
@@ -1019,9 +1022,11 @@ class EmptyWorkAndFindings(_CampaignBase):
             [1, 2, 3, 4, 5],
         )
         state = ws.load_state()
-        self.assertEqual(state.pre_round_hook_started_round, 5)
-        self.assertEqual(state.pre_round_hook_completed_round, 5)
-        self.assertNotEqual(state.pre_round_hook_results_digest, "0" * 64)
+        sidecar = sidecars_module.read_pre_round(
+            ws.root, expected_campaign_id="campaign")
+        self.assertEqual(sidecar.started_round, 5)
+        self.assertEqual(sidecar.completed_round, 5)
+        self.assertNotEqual(sidecar.results_digest, "0" * 64)
 
     def test_five_round_hook_order_and_execution_count_are_exact(self) -> None:
         ws = self.make(SUCCESS_SCENARIO, rounds=5)
@@ -1610,6 +1615,7 @@ class LifecycleAndCli(_CampaignBase):
         self.assertEqual(names, [
             "campaign-result-campaign.json",
             "factory-loop.json",
+            "pre-round-hooks.json",
             "state-digest-ledger.jsonl",
         ])
 
