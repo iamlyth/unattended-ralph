@@ -1563,7 +1563,8 @@ class CaseAdversarialSuite(_AdversarialBase):
             inspect.signature(launch_module.authorize_launch).parameters,
         )
         self.assertFalse(hasattr(launch_module, "usage_guard"))
-        authority = launch_module.authorize_launch(
+        with self.assertRaises(launch_module.InvocationError) as denied:
+            launch_module.authorize_launch(
                 binding,
                 role_prompt=(ws.root / ".factory" / "prompts" /
                              "planner.md").read_bytes(),
@@ -1571,7 +1572,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                 spec=(ws.root / "docs" / "SPEC.md").read_bytes(),
                 plan=(ws.root / PLAN_REL).read_bytes(),
             )
-        self.assertIsInstance(authority, launch_module.LaunchAuthority)
+        self.assertIn("campaign-only", str(denied.exception))
         registry = json.loads((ws.root / ".factory/pre-round-hooks.json").read_text())
         enabled = {item["id"]: item["enabled"] for item in registry["hooks"]}
         self.assertEqual(enabled, {"branch-guard": True})

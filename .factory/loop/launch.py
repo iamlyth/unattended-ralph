@@ -3985,12 +3985,12 @@ def _canonical_ollama_settings_url(guard: object) -> str:
     return CANONICAL_OLLAMA_SETTINGS_URL
 
 
-class _CampaignOnlyAuthorization:
+class _RoleAuthorization:
     """One-use exact-invocation mint held only by the locked campaign."""
     __slots__ = ("descriptor_sha256", "campaign_id", "used", "_marker")
 
     def __init__(self, binding: "InvocationBinding", campaign_id: str, marker: object) -> None:
-        if marker is not _CAMPAIGN_AUTHORIZATION_SECRET:
+        if marker is not _ROLE_AUTHORIZATION_SECRET:
             raise InvocationError("campaign authorization mint is private")
         fields = dict(binding.__dict__)
         fields["backend"] = str(fields["backend"])
@@ -4004,20 +4004,20 @@ class _CampaignOnlyAuthorization:
         self._marker = marker
 
     def consume(self, binding: "InvocationBinding") -> None:
-        if self.used or self._marker is not _CAMPAIGN_AUTHORIZATION_SECRET:
+        if self.used or self._marker is not _ROLE_AUTHORIZATION_SECRET:
             raise InvocationError("campaign authorization was replayed")
-        candidate = _CampaignOnlyAuthorization(binding, self.campaign_id, self._marker)
+        candidate = _RoleAuthorization(binding, self.campaign_id, self._marker)
         if candidate.descriptor_sha256 != self.descriptor_sha256:
             raise InvocationError("campaign authorization descriptor binding differs")
         self.used = True
 
 
-_CAMPAIGN_AUTHORIZATION_SECRET = object()
+_ROLE_AUTHORIZATION_SECRET = object()
 
 
-def _mint_campaign_authorization(binding: "InvocationBinding", campaign_id: str) -> _CampaignOnlyAuthorization:
-    """Private campaign bridge; public launch surfaces never call this."""
-    return _CampaignOnlyAuthorization(binding, campaign_id, _CAMPAIGN_AUTHORIZATION_SECRET)
+def _mint_role_authorization(binding: "InvocationBinding", campaign_id: str) -> _RoleAuthorization:
+    """Private locked-coordinator bridge; public launch surfaces never call this."""
+    return _RoleAuthorization(binding, campaign_id, _ROLE_AUTHORIZATION_SECRET)
 
 
 def authorize_launch(
@@ -4072,7 +4072,7 @@ def authorize_launch(
     """
     verify_invocation(binding)
     if binding.provider.lower() != "synthetic":
-        if not isinstance(_campaign_authorization, _CampaignOnlyAuthorization):
+        if not isinstance(_campaign_authorization, _RoleAuthorization):
             raise InvocationError(
                 "real-provider authorization is campaign-only; standalone/programmatic launch is synthetic-only"
             )

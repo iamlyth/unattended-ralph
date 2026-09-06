@@ -2003,7 +2003,7 @@ def launch_role_attempt(
         )
         launch_module.verify_invocation(binding)
         campaign_authorization = (
-            launch_module._mint_campaign_authorization(binding, config.campaign_id)
+            launch_module._mint_role_authorization(binding, config.campaign_id)
             if _campaign_authorization is not None else None
         )
         authority = launch_module.authorize_launch(
