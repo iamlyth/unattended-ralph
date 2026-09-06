@@ -13,7 +13,9 @@ transition it.
 - The file is a single JSON object carrying **exactly** the §11 field set of
   section 2 — no wall-clock timestamp, model prose, task description, memory,
   evidence claim, or copy of the plan is accepted. Parsing rejects both extra
-  and missing fields.
+  and missing fields. A pre-hook 17-field `factory-state/v1` is recognized only
+  as a deterministic migration input with a zero configuration digest; it can
+  never satisfy a real campaign's expected exact-commit hook binding.
 - Every parse re-validates every structural invariant; a model that fails any
   invariant is a tamper (`StateTamperError`) and never reaches a transition,
   a digest, or a write.
@@ -32,7 +34,7 @@ transition it.
 
 ## 2. Field set
 
-The object carries exactly these seventeen keys (`FIELD_NAMES`), each
+The object carries exactly these twenty-two keys (`FIELD_NAMES`), each
 exactly once, with the §11 type and invariant:
 
 | Field | Type / invariant | Mutable by |
@@ -48,6 +50,11 @@ exactly once, with the §11 type and invariant:
 | `plan_digest` | 64-character lowercase SHA-256 hex; binds a completed planning phase (see §2.1 for its derivation) | rebind only on `planning -> implementation` |
 | `role_prompt_digests` | non-empty JSON object mapping each role name to a 64-hex SHA-256 digest | write-once |
 | `audit_objectives_digest` | 64-character lowercase SHA-256 hex | write-once |
+| `pre_round_hook_configuration_digest` | 64-character lowercase SHA-256 over the exact ordered registry, fixed implementation blobs, and bound commit | write-once |
+| `pre_round_hook_commit` | 40-character exact campaign-start commit from which every registry/implementation blob is descriptor-anchored | write-once |
+| `pre_round_hook_results_digest` | 64-character lowercase SHA-256 digest chain over canonical typed per-round results; initialized to zero | only `complete_pre_round_hooks` |
+| `pre_round_hook_started_round` | non-negative monotonic round cursor written before hook execution | only `begin_pre_round_hooks` |
+| `pre_round_hook_completed_round` | non-negative monotonic cursor, never above started; later phases require completion for the current round | only `complete_pre_round_hooks` |
 | `phase_base_commit` | 40-character lowercase Git object ID; binds a completed planning phase | rebind only on `planning -> implementation` |
 | `selected_task_id` | positive integer or `null`; present only during `implementation` with `attempt_number >= 1` | only `begin_attempt` |
 | `attempt_number` | non-negative integer; monotonic within the current task, reset to zero only on a trusted task/phase transition | only `begin_attempt` / phase transitions |
@@ -58,8 +65,8 @@ exactly once, with the §11 type and invariant:
 ### 2.1 Write-once bindings
 
 `schema`, `repository_identity`, `branch`, `campaign_id`, `rounds_requested`,
-`specification_digest`, `role_prompt_digests`, and
-`audit_objectives_digest` are bound by `init_state` and can never change on a
+`specification_digest`, `role_prompt_digests`, `audit_objectives_digest`, and
+`pre_round_hook_configuration_digest` and `pre_round_hook_commit` are bound by `init_state` and can never change on a
 transition. `plan_digest` and `phase_base_commit` bind a completed planning
 round and are write-once until the next trusted `planning -> implementation`
 transition.
@@ -90,6 +97,7 @@ phase; a *terminal* target accepts no further transition:
 planning       planned         -> implementation
 planning       failed          -> failed            (terminal)
 planning       interrupted     -> interrupted       (terminal)
+planning       infrastructure_failure -> infrastructure_failure (terminal)
 implementation task_completed  -> verification
 implementation work_exhausted  -> verification
 implementation blocked         -> verification

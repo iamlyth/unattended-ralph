@@ -1,0 +1,11 @@
+{
+  "schema": "factory-pre-round-hooks/v1",
+  "hooks": [
+    {
+      "id": "branch-guard",
+      "implementation": "branch_guard",
+      "enabled": true,
+      "mandatory": true
+    }
+  ]
+}

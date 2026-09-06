@@ -1159,6 +1159,16 @@ def migrate_control_state(
             root, audit_blob, AUDIT_OBJECTIVES_MAX, "audit-objectives registry"
         )
     ).hexdigest()
+    try:
+        from . import campaign as campaign_module
+    except ImportError:
+        import campaign as campaign_module  # type: ignore[no-redef]
+    registry, implementation_digests, hook_digest = (
+        campaign_module._derive_pre_round_binding(
+            root, bound_commit=snapshot.head_commit
+        )
+    )
+    del registry, implementation_digests
     state_module.init_state(
         root,
         campaign_id=campaign_id,
@@ -1167,6 +1177,8 @@ def migrate_control_state(
         plan_digest=snapshot.plan_digest,
         role_prompt_digests=prompt_digests,
         audit_objectives_digest=audit_digest,
+        pre_round_hook_configuration_digest=hook_digest,
+        pre_round_hook_commit=snapshot.head_commit,
         phase_base_commit=snapshot.head_commit,
         branch=branch,
     )

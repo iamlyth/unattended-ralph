@@ -107,7 +107,7 @@
     },
     {
       "case": 13,
-      "title": "Ollama --check and --wait run before every model invocation and quota-guard errors prevent launch",
+      "title": "Ordered pre-round hooks run once before each planner; Ollama policy is configured and absent from per-model launch",
       "requirement_ids": [
         "QUOTA-01"
       ],

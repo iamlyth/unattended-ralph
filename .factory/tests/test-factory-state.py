@@ -210,6 +210,7 @@ ADVANCE_EDGES = {
     ("planning", "planned"): "implementation",
     ("planning", "failed"): "failed",
     ("planning", "interrupted"): "interrupted",
+    ("planning", "infrastructure_failure"): "infrastructure_failure",
     ("implementation", "task_completed"): "verification",
     ("implementation", "work_exhausted"): "verification",
     ("implementation", "blocked"): "verification",
@@ -225,7 +226,7 @@ ADVANCE_EDGES = {
     ("audit", "infrastructure_failure"): "infrastructure_failure",
 }
 ALLOWED_ADVANCE_OUTCOMES = {
-    "planning": ("planned", "failed", "interrupted"),
+    "planning": ("planned", "failed", "interrupted", "infrastructure_failure"),
     "implementation": (
         "task_completed", "work_exhausted", "blocked", "task_failed",
         "interrupted",
@@ -367,7 +368,7 @@ class FixtureCorpusTest(StateConformanceCase):
             with self.subTest(fixture=name):
                 data = json.loads(self.fixture(name).read_text("utf-8"))
                 state = parse_state(data)
-                self.assertEqual(state.to_dict(), data)
+                self.assertEqual(parse_state(state.to_dict()), state)
 
     def test_every_tamper_fixture_fails_closed(self) -> None:
         for name, fragment in TAMPER_FIXTURES.items():
@@ -405,13 +406,17 @@ class FieldSetTest(StateConformanceCase):
                 "schema", "repository_identity", "branch", "campaign_id",
                 "rounds_requested", "current_round", "current_phase",
                 "specification_digest", "plan_digest", "role_prompt_digests",
-                "audit_objectives_digest", "phase_base_commit",
+                "audit_objectives_digest",
+                "pre_round_hook_configuration_digest",
+                "pre_round_hook_commit", "pre_round_hook_results_digest",
+                "pre_round_hook_started_round",
+                "pre_round_hook_completed_round", "phase_base_commit",
                 "selected_task_id", "attempt_number",
                 "phase_started_at_monotonic", "attempt_started_at_monotonic",
                 "last_outcome",
             ),
         )
-        self.assertEqual(len(FIELD_NAMES), 17)
+        self.assertEqual(len(FIELD_NAMES), 22)
 
     def test_extra_field_is_rejected(self) -> None:
         data = json.loads(self.fixture("state-field-extra.json").read_text("utf-8"))
@@ -1096,7 +1101,7 @@ class SecureIoTamperTest(StateConformanceCase):
         self._assert_private(state_file)
         self.assertEqual(load_state(root), state)
         data["repository_identity"] = state.repository_identity
-        self.assertEqual(state.to_dict(), data)
+        self.assertEqual(state.to_dict(), parse_state(data).to_dict())
 
     def test_state_file_is_the_only_mutable_lifecycle_file(self) -> None:
         root = self.new_repo()
@@ -1583,14 +1588,14 @@ class IndependentFixtureTest(StateConformanceCase):
                 if "phase_base_commit" in data:
                     kwargs["phase_base_commit"] = data["phase_base_commit"]
                 result = advance(state, data["outcome"], **kwargs)
+                migrated_expected = parse_state(data["expected"]).to_dict()
                 self.assertEqual(
-                    result.to_dict(), data["expected"],
+                    result.to_dict(), migrated_expected,
                     f"{name}: advance did not produce the hand-authored state",
                 )
-                # The hand-authored expected state is itself a valid state.
-                self.assertEqual(
-                    parse_state(data["expected"]).to_dict(), data["expected"]
-                )
+                # The hand-authored legacy expected state migrates to a valid
+                # hook-bound state without changing lifecycle semantics.
+                self.assertEqual(parse_state(migrated_expected).to_dict(), migrated_expected)
 
     def test_digest_fixtures_cover_three_lifecycle_shapes(self) -> None:
         self.assertEqual(len(DIGEST_FIXTURES), 3)

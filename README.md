@@ -44,10 +44,14 @@ against; this cycle plans `docs/FACTORY-LOOP-SPEC.md` only.
 - Exactly one repository writer: an exclusive `flock` on the already-open
   canonical Git top-level directory descriptor. Git history, staging, and
   commits run only in the trusted orchestrator, never through model tools.
+- Before each round's planner, the trusted campaign runs the committed
+  `.factory/pre-round-hooks.json` registry exactly once in declared order.
+  The registry accepts only fixed internal implementations and initially
+  contains the mandatory `branch_guard`; it cannot carry commands or argv.
 - Exactly one minimal mutable control-state file
   `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored)
-  carries only the §11 lifecycle fields and enforces the §11 transition
-  table.
+  also carries the exact hook configuration/commit binding, ordered result
+  digest chain, and durable start/completion cursor.
 - Tests, documentation, machine evidence, and an independent audit are
   completion gates. A campaign always terminates with one of six outcomes:
   `success`, `findings`, `blocked`, `failed`, `infrastructure_failure`,
@@ -85,7 +89,6 @@ python3 .factory/loop/campaign.py --root "$PWD" run \
 Inspect the lifecycle:
 
 ```bash
-python3 .factory/loop/campaign.py --root "$PWD" show
 python3 .factory/loop/state.py --root "$PWD" show
 ```
 

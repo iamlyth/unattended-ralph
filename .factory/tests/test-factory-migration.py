@@ -53,6 +53,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import stat
 import subprocess
@@ -218,6 +219,7 @@ class FixtureRepo:
         (root / ".factory" / "artifacts").mkdir(parents=True)
         (root / ".factory" / "prompts").mkdir(parents=True)
         (root / ".factory" / "audit-objectives").mkdir(parents=True)
+        (root / ".factory" / "loop").mkdir(parents=True)
         (root / ".factory-state").mkdir(mode=0o700)
         # The evidence namespace and the legacy credential store are ignored
         # in the fixture exactly as in production; only committed authority
@@ -232,6 +234,15 @@ class FixtureRepo:
         for role in ("planner", "developer", "tester", "auditor"):
             (root / ".factory" / "prompts" / f"{role}.md").write_text(
                 f"# {role} fixture prompt\n"
+            )
+        shutil.copy2(
+            ROOT / ".factory" / "pre-round-hooks.json",
+            root / ".factory" / "pre-round-hooks.json",
+        )
+        for module in ("pre_round.py", "campaign.py", "state.py", "lock.py", "gitutil.py"):
+            shutil.copy2(
+                ROOT / ".factory" / "loop" / module,
+                root / ".factory" / "loop" / module,
             )
         (root / ".factory" / "audit-objectives" / "registry.json").write_text(
             json.dumps(

@@ -572,6 +572,35 @@ class RootLock:
             raise RootLockUnsafeError("live branch was not resolved")
         return self._branch
 
+    def validate_live_branch(
+        self, expected: str, *, timeout: Optional[float] = _git.GIT_TIMEOUT,
+    ) -> str:
+        """Re-read the named branch through the held descriptor authority.
+
+        The caller may shorten the default bound to the remaining campaign
+        deadline; an unbounded branch hook is never permitted.
+        """
+        self._require_locked()
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or timeout <= 0
+            or timeout != timeout
+            or timeout == float("inf")
+        ):
+            raise RootLockUnsafeError("live branch timeout must be finite and positive")
+        result = self._git_run(
+            ["rev-parse", "--abbrev-ref", "HEAD"], timeout=float(timeout)
+        )
+        if result.returncode != 0:
+            raise RootLockUnsafeError("cannot revalidate the live Git branch")
+        branch = result.stdout.strip()
+        if not branch or branch == "HEAD" or branch != expected:
+            raise RootLockBindingError(
+                f"live branch {branch!r} does not match required branch {expected!r}"
+            )
+        return branch
+
     def lock_metadata(self, *, fd: bool = True) -> Dict[str, str]:
         """The trusted holder's lock-metadata environment (stripped in children)."""
         return lock_environment(

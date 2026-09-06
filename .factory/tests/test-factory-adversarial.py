@@ -1479,7 +1479,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         state_file.write_bytes(original)
         os.chmod(state_file, 0o600)
 
-    # -- case 13: Ollama --check/--wait gate every invocation ----------------
+    # -- case 13: Ollama decision belongs only to the pre-round registry -----
 
     def test_case_13_ollama_check_wait_before_invocation(self) -> None:
         # The guard exit table (real CLI, fresh subprocesses) is the
@@ -1509,10 +1509,10 @@ class CaseAdversarialSuite(_AdversarialBase):
             input_bytes=SYNTH_COOKIE.encode(),
         )
         self.assertEqual(waited.returncode, usage_module.EXIT_ALLOWED, waited.stderr)
-        # The guard is wired into the launch authority before any model
-        # invocation: an ollama-provider launch fails closed while the quota
-        # blocks (the synthetic Task 8 proof is the committed private seam,
-        # never acceptance evidence).
+        # Per-model authorization must not expose a quota-driver API or call
+        # the retired launch gate.  The committed registry owns the policy and
+        # currently records the Ollama hook as disabled without affecting the
+        # enabled branch hook.
         ws = self.make(SUCCESS_SCENARIO)
         backend = ws.root / "backend-ollama.py"
         backend.write_text("#!/usr/bin/env python3\nprint('ok')\n",
@@ -1532,11 +1532,14 @@ class CaseAdversarialSuite(_AdversarialBase):
             allowed_tools=("read", "bash"),
         )
         proof = confinement._mint_synthetic_proof(binding)
-        cookie = self.tmp / "cookie.txt"
-        cookie.write_text(SYNTH_COOKIE, encoding="utf-8")
-        os.chmod(cookie, 0o600)
-        with self.assertRaises(launch_module.InvocationError) as caught:
-            launch_module.authorize_launch(
+        import inspect
+        parameters = inspect.signature(launch_module.authorize_launch).parameters
+        self.assertFalse(any("usage_guard" in name or "cookie" in name
+                             for name in parameters))
+        with unittest.mock.patch.object(
+            launch_module.usage_guard, "require_quota"
+        ) as quota:
+            authority = launch_module.authorize_launch(
                 binding,
                 role_prompt=(ws.root / ".factory" / "prompts" /
                              "planner.md").read_bytes(),
@@ -1544,27 +1547,15 @@ class CaseAdversarialSuite(_AdversarialBase):
                 spec=(ws.root / "docs" / "SPEC.md").read_bytes(),
                 plan=(ws.root / PLAN_REL).read_bytes(),
                 _confinement_proof=proof,
-                _usage_guard_html_file=str(VISIBLE_FIXTURES /
-                                           "usage-blocked.html"),
-                usage_guard_cookie_file=str(cookie),
-                usage_guard_max_polls=1,
-                usage_guard_poll_interval=0,
             )
-        self.assertIn("ollama usage guard", str(caught.exception))
-        # The same launch proceeds when the guard allows (the guard is a real
-        # pre-invocation gate, not a stub).
-        authority = launch_module.authorize_launch(
-            binding,
-            role_prompt=(ws.root / ".factory" / "prompts" /
-                         "planner.md").read_bytes(),
-            agents=(ws.root / "AGENTS.md").read_bytes(),
-            spec=(ws.root / "docs" / "SPEC.md").read_bytes(),
-            plan=(ws.root / PLAN_REL).read_bytes(),
-            _confinement_proof=proof,
-            _usage_guard_html_file=str(VISIBLE_FIXTURES / "usage-ok.html"),
-            usage_guard_cookie_file=str(cookie),
-        )
+        quota.assert_not_called()
         self.assertIsInstance(authority, launch_module.LaunchAuthority)
+        registry = json.loads((ws.root / ".factory/pre-round-hooks.json").read_text())
+        self.assertEqual(
+            [(item["implementation"], item["enabled"], item["mandatory"])
+             for item in registry["hooks"]],
+            [("branch_guard", True, True)],
+        )
 
     # -- case 14: credential tool-call blocking and redaction stay active ----
 

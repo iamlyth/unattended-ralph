@@ -29,10 +29,10 @@ control-state authority.
 
 The trusted control plane keeps exactly one mutable lifecycle file,
 `.factory-state/factory-loop.json` (schema `factory-state/v1`), carrying only
-the §11 fields: schema, repository identity, branch, campaign id, round
-budget/counters, current phase, spec/plan/prompt-set digests, phase base
-commit, selected task id, attempt counter, monotonic phase/attempt start
-markers, and a trusted `last_outcome` enum. It is the only mutable lifecycle
+the §11 lifecycle fields plus the exact pre-round registry configuration
+and commit binding, ordered result digest chain, and monotonic hook
+start/completion cursor. The cursor is written before execution, so a crash
+can never cause a possibly side-effecting hook to run twice. It is the only mutable lifecycle
 file; the append-only `.factory-state/state-digest-ledger.jsonl` records
 evidence only and is never orchestration state. All writes are atomic,
 no-follow, mode-0600, and ownership/mode/link-count/(dev, inode) checked via
@@ -113,6 +113,15 @@ Git calls and gates have finite timeouts. Pre-existing dirty work, unexpected
 renames/copies/gitlinks, unsafe path references, stale plan bases, and
 ambiguous crash state fail closed rather than being reset or overwritten.
 
+Before each round's planner, the campaign runs the exact committed
+`.factory/pre-round-hooks.json` registry once in array order. The strict schema
+accepts no argv, command, environment, optional-failure policy, or model-facing
+quota/cookie input; the initial registry contains only mandatory
+`branch_guard`. Its implementation digest binds the committed campaign, state,
+lock, and pinned-Git authorities. The durable write-ahead cursor prevents a
+planner retry from rerunning hooks, while an interrupted started hook fails
+finitely as `infrastructure_failure` before any model launch.
+
 The implementation phase deterministically selects the first runnable task
 from the canonical plan and binds the developer to that exact committed task
 section. Auditor launches bind the deterministic objective selected from the
@@ -133,7 +142,7 @@ per-phase contracts are
 ```bash
 .factory/loop/campaign.py --root ROOT run --campaign-id ID --rounds 5 \
   --branch boilerplate-develop
-.factory/loop/campaign.py --root ROOT show
+.factory/loop/state.py --root ROOT show
 ```
 
 `--role-driver` and scenario/result-file options are deterministic hidden-suite
@@ -397,7 +406,7 @@ python3 .factory/loop/campaign.py --root "$PWD" run \
   --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
   --branch boilerplate-develop --provider ollama --model <model> \
   --backend <absolute-model-backend>
-python3 .factory/loop/campaign.py --root "$PWD" show
+python3 .factory/loop/state.py --root "$PWD" show
 ```
 
 Each mandatory round starts a fresh specification plan at a new Git base, runs
@@ -679,8 +688,10 @@ exact binding bytes, and the real installed suite runs end-to-end.
 The retained `scripts/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
 and §10 decision table are now enforced by the hidden standard-library guard
 ``.factory/loop/usage.py`` (with its fetch child ``.factory/loop/usage_fetch.py``)
-run before every model invocation. Exit codes: 0 allowed, 1 quota threshold,
-2 fatal (missing/expired cookies or unparseable settings), 3 transient. A
+retained for direct operator diagnostics but not configured as a campaign hook
+and not exposed by launch authorization. Exit codes: 0 allowed, 1 quota
+threshold, 2 fatal (missing/expired cookies or unparseable settings), 3
+transient. A
 single check emits the machine-readable ``ollama-usage/v1`` status object
 (schema ``.factory/schemas/ollama-usage-v1.schema.json``) with only the
 redacted fields ``session_percent``, ``weekly_percent``,

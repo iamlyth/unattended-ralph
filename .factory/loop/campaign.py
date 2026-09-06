@@ -57,8 +57,8 @@ fixture role seam used by the hidden campaign suite: a repository-committed
 executable that acts as a scenario-driven model for synthetic fixture
 repos.  It is never evidence of real model acceptance or real confinement;
 production launches always go through the launch authority
-(:func:`launch_role_attempt`), which retains the §10 Ollama guard and the
-Task 8 real Landlock confinement.
+(:func:`launch_role_attempt`), which retains Task 8 real Landlock confinement;
+ordered campaign pre-round hooks own launch-independent policy.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import gitutil
     from . import lock as lock_module
     from . import plan_parser
+    from . import pre_round as pre_round_module
     from . import selector as selector_module
     from . import state as state_module
     from . import launch as launch_module
@@ -94,6 +95,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import gitutil  # type: ignore[no-redef]
     import lock as lock_module  # type: ignore[no-redef]
     import plan_parser  # type: ignore[no-redef]
+    import pre_round as pre_round_module  # type: ignore[no-redef]
     import selector as selector_module  # type: ignore[no-redef]
     import state as state_module  # type: ignore[no-redef]
     import launch as launch_module  # type: ignore[no-redef]
@@ -121,7 +123,7 @@ TERMINAL_PHASES = (
 # (``infrastructure_failure``) — which are persisted in the authoritative
 # control state through dedicated §11 terminal edges (Task 9 review B1), so
 # the campaign never re-executes them.
-PLANNING_OUTCOMES = ("planned", "failed", "interrupted")
+PLANNING_OUTCOMES = ("planned", "failed", "interrupted", "infrastructure_failure")
 IMPLEMENTATION_OUTCOMES = (
     "task_completed", "task_progress", "task_failed",
     "interrupted", "work_exhausted", "blocked",
@@ -447,6 +449,10 @@ class CampaignConfig:
     role_prompt_digests: Mapping[str, str]
     prompt_set_digest: str
     audit_objectives_digest: str
+    pre_round_registry: pre_round_module.Registry
+    pre_round_implementation_digests: Mapping[str, str]
+    pre_round_hook_configuration_digest: str
+    pre_round_hook_commit: str
     provider: str = "synthetic"
     model: str = "fixture-model"
     backend: str = ""
@@ -462,12 +468,6 @@ class CampaignConfig:
     gate_timeout: float = DEFAULT_GATE_TIMEOUT
     runtime_limit: float = launch_module.DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = launch_module.DEFAULT_INACTIVITY_LIMIT
-    usage_guard_cookie_file: Optional[str] = None
-    usage_guard_cookie_stdin: bool = False
-    usage_guard_settings_url: Optional[str] = None
-    usage_guard_poll_interval: Optional[int] = None
-    usage_guard_max_wait: Optional[int] = None
-    usage_guard_max_polls: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Fail closed at construction: an invalid campaign contract can never
@@ -527,11 +527,26 @@ class CampaignConfig:
             ("plan_digest", self.plan_digest),
             ("audit_objectives_digest", self.audit_objectives_digest),
             ("prompt_set_digest", self.prompt_set_digest),
+            ("pre_round_hook_configuration_digest", self.pre_round_hook_configuration_digest),
         ):
             if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
                 raise CampaignConfigError(
                     f"`{name}` must be a 64-hex SHA-256 digest"
                 )
+        if not isinstance(self.pre_round_registry, pre_round_module.Registry):
+            raise CampaignConfigError("pre-round registry must be parsed by the trusted authority")
+        try:
+            derived_hook_digest = pre_round_module.configuration_digest(
+                self.pre_round_registry,
+                self.pre_round_implementation_digests,
+                bound_commit=self.pre_round_hook_commit,
+            )
+        except pre_round_module.PreRoundError as exc:
+            raise CampaignConfigError(f"invalid pre-round hook binding: {exc}") from exc
+        if derived_hook_digest != self.pre_round_hook_configuration_digest:
+            raise CampaignConfigError("pre-round hook configuration digest mismatch")
+        if not SHA40_RE.fullmatch(self.pre_round_hook_commit):
+            raise CampaignConfigError("pre-round hook commit must be exact SHA-1")
         if (
             not isinstance(self.role_prompt_digests, Mapping)
             or not self.role_prompt_digests
@@ -552,7 +567,7 @@ class CampaignConfig:
         if provider not in ("ollama", "synthetic"):
             raise CampaignConfigError(
                 "provider must be `ollama` or `synthetic`; an unknown provider "
-                "fails closed and can never bypass the per-policy guard"
+                "fails closed and can never bypass the fixed provider policy"
             )
         if provider == "ollama" and self.role_driver is not None:
             raise CampaignConfigError(
@@ -1541,9 +1556,9 @@ def read_phase_result(
 # ---------------------------------------------------------------------------
 
 
-def _blob_at(root: Path, relpath: str) -> bytes:
+def _blob_at(root: Path, relpath: str, *, revision: str = "HEAD") -> bytes:
     result = gitutil.git_run(
-        ["-C", str(root), "rev-parse", f"HEAD:{relpath}"],
+        ["-C", str(root), "rev-parse", f"{revision}:{relpath}"],
         timeout=GIT_TIMEOUT,
     )
     if result.returncode != 0:
@@ -1557,6 +1572,41 @@ def _blob_at(root: Path, relpath: str) -> bytes:
     if len(raw.stdout) > PLAN_BLOB_MAX:
         raise CampaignError(f"blob {relpath!r} is oversized")
     return raw.stdout
+
+
+def _derive_pre_round_binding(
+    root: Path,
+    *,
+    bound_commit: str,
+    git: Optional["TrustedGit"] = None,
+) -> Tuple[pre_round_module.Registry, Mapping[str, str], str]:
+    """Derive one single-commit registry binding, descriptor-anchored when locked."""
+    if not SHA40_RE.fullmatch(bound_commit):
+        raise CampaignBindingError("pre-round binding requires an exact commit")
+    def blob(relpath: str) -> bytes:
+        if git is not None:
+            return git.blob_at(bound_commit, relpath)
+        return _blob_at(root, relpath, revision=bound_commit)
+    registry = pre_round_module.parse_registry(
+        blob(".factory/pre-round-hooks.json")
+    )
+    source = blob(".factory/loop/pre_round.py")
+    available = {
+        "branch_guard": plan_sha256(
+            source + b"\x00" + blob(".factory/loop/campaign.py")
+            + b"\x00" + blob(".factory/loop/state.py")
+            + b"\x00" + blob(".factory/loop/lock.py")
+            + b"\x00" + blob(".factory/loop/gitutil.py")
+        ),
+    }
+    names = {hook.implementation for hook in registry.hooks}
+    implementation_digests = {
+        name: available[name] for name in available if name in names
+    }
+    digest = pre_round_module.configuration_digest(
+        registry, implementation_digests, bound_commit=bound_commit
+    )
+    return registry, implementation_digests, digest
 
 
 def _live_head(root: Path) -> str:
@@ -1612,8 +1662,8 @@ def launch_role_attempt(
     (role prompt, operational policy, spec, plan, and the developer task
     excerpt / auditor objective), binds the digests, and mints the
     unforgeable verified-committed token (:func:`launch.authorize_launch`),
-    which runs the §10 Ollama guard for guard-gated providers and the Task 8
-    real Landlock confinement.
+    which applies the Task 8 real Landlock confinement.  Quota policy is a
+    campaign pre-round hook and is never re-run by per-model authorization.
 
     Task 9 review B2: the developer's task bytes are re-derived from the
     committed plan blob at ``head`` (:func:`launch.derive_task_excerpt`) and
@@ -1734,12 +1784,6 @@ def launch_role_attempt(
             plan=plan_blob,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
-            usage_guard_cookie_file=config.usage_guard_cookie_file,
-            usage_guard_cookie_stdin=config.usage_guard_cookie_stdin,
-            usage_guard_settings_url=config.usage_guard_settings_url,
-            usage_guard_poll_interval=config.usage_guard_poll_interval,
-            usage_guard_max_wait=config.usage_guard_max_wait,
-            usage_guard_max_polls=config.usage_guard_max_polls,
             findings=findings_payload,
             _confinement_proof=_confinement_proof,
             _confinement_spec=_confinement_spec,
@@ -1857,8 +1901,40 @@ class Campaign:
             spec=spec,
             plan=plan,
         )
-        self._git = TrustedGit(self._lock, self._config.plan_path)
-        self._bind_held_authorities()
+        try:
+            self._git = TrustedGit(self._lock, self._config.plan_path)
+            # Programmatic callers are not a registry authority. Re-read and
+            # re-derive every hook binding from the locked exact commit before
+            # state initialization or any hook/planner execution.
+            try:
+                live_head = self._git.head()
+                bound_commit = self._config.pre_round_hook_commit
+                if not self._git.is_ancestor(bound_commit, live_head):
+                    raise CampaignBindingError(
+                        "pre-round hook commit is not an ancestor of live HEAD"
+                    )
+                registry, implementation_digests, digest = _derive_pre_round_binding(
+                    self._root, bound_commit=bound_commit, git=self._git
+                )
+            except pre_round_module.PreRoundError as exc:
+                raise CampaignBindingError(
+                    f"cannot bind pre-round registry: {exc}"
+                ) from exc
+            if (
+                registry != self._config.pre_round_registry
+                or dict(implementation_digests)
+                != dict(self._config.pre_round_implementation_digests)
+                or digest != self._config.pre_round_hook_configuration_digest
+            ):
+                raise CampaignBindingError(
+                    "caller pre-round registry differs from the locked exact commit"
+                )
+            self._bind_held_authorities()
+        except BaseException:
+            self._lock.release()
+            self._lock = None
+            self._git = None
+            raise
 
     def _bind_held_authorities(self) -> None:
         """Bind the driver and acceptance gate to their committed descriptors.
@@ -1957,6 +2033,10 @@ class Campaign:
                 expected_specification_digest=self._config.specification_digest,
                 expected_audit_objectives_digest=self._config.audit_objectives_digest,
                 expected_role_prompt_digests=dict(self._config.role_prompt_digests),
+                expected_pre_round_hook_configuration_digest=(
+                    self._config.pre_round_hook_configuration_digest
+                ),
+                expected_pre_round_hook_commit=self._config.pre_round_hook_commit,
             )
             return self._reconcile_head(state)
         state = state_module.init_state(
@@ -1967,6 +2047,10 @@ class Campaign:
             plan_digest=self._config.plan_digest,
             role_prompt_digests=dict(self._config.role_prompt_digests),
             audit_objectives_digest=self._config.audit_objectives_digest,
+            pre_round_hook_configuration_digest=(
+                self._config.pre_round_hook_configuration_digest
+            ),
+            pre_round_hook_commit=self._config.pre_round_hook_commit,
             phase_base_commit=self._config.phase_base_commit,
             branch=self._config.branch,
         )
@@ -3013,7 +3097,92 @@ class Campaign:
             return self._step_audit(state)
         raise CampaignPhaseError(f"unknown live phase {phase!r}")
 
+    def _run_pre_round_hooks(
+        self, state: state_module.FactoryState
+    ) -> Tuple[state_module.FactoryState, Optional[_Step]]:
+        """Run the exact ordered registry once before this round's planner.
+
+        The start cursor is durably written before execution.  A restart that
+        observes an uncompleted start is ambiguous and terminates as an
+        infrastructure failure; it never repeats a possibly side-effecting
+        hook.  Completed results are chained into the sole control state.
+        """
+        if state.pre_round_hook_completed_round == state.current_round:
+            return state, None
+        if state.pre_round_hook_started_round == state.current_round:
+            state2 = state_module.advance(state, "infrastructure_failure")
+            state_module.write_state(self._root, state2)
+            record = self._record(
+                state, 1, "infrastructure_failure",
+                "pre-round hook execution was interrupted after its durable start; refusing to rerun",
+            )
+            return state2, _Step(record, state=state2, terminal="infrastructure_failure")
+
+        claimed = state_module.begin_pre_round_hooks(state)
+        state_module.write_state(self._root, claimed)
+        head = self._git.head()
+        dirty_before = tuple(self._git.role_dirty_paths())
+
+        def execute(hook: pre_round_module.Hook) -> None:
+            if hook.implementation == "branch_guard":
+                try:
+                    self._lock.validate_live_branch(
+                        self._config.branch,
+                        timeout=gitutil.GIT_TIMEOUT,
+                    )
+                except lock_module.RootLockError as exc:
+                    raise pre_round_module.PreRoundError(
+                        "descriptor-anchored branch guard failed"
+                    ) from exc
+                return
+            raise pre_round_module.PreRoundError(
+                f"unknown fixed hook implementation {hook.implementation!r}"
+            )
+
+        results, success = pre_round_module.run_hooks(
+            self._config.pre_round_registry,
+            implementation_digests=self._config.pre_round_implementation_digests,
+            execute=execute,
+        )
+        postcondition = "pass"
+        if self._git.head() != head or tuple(self._git.role_dirty_paths()) != dirty_before:
+            success = False
+            postcondition = "failed"
+        payload = pre_round_module.result_bytes(
+            campaign_id=self._config.campaign_id,
+            round_number=state.current_round,
+            commit=head,
+            configuration_digest_value=(
+                self._config.pre_round_hook_configuration_digest
+            ),
+            results=results,
+            postcondition_outcome=postcondition,
+        )
+        chained = pre_round_module.chain_result_digest(
+            claimed.pre_round_hook_results_digest, payload
+        )
+        completed = state_module.complete_pre_round_hooks(claimed, chained)
+        if not success:
+            # One atomic publication binds both the failed typed result and
+            # terminal outcome.  Until it lands, persisted state remains an
+            # ambiguous started round and recovery refuses to rerun it.
+            terminal = state_module.advance(completed, "infrastructure_failure")
+            state_module.write_state(self._root, terminal)
+            record = self._record(
+                completed, 1, "infrastructure_failure",
+                "a mandatory pre-round hook failed; the planner was not launched",
+                result_digest=hashlib.sha256(payload).hexdigest(),
+            )
+            return terminal, _Step(
+                record, state=terminal, terminal="infrastructure_failure"
+            )
+        state_module.write_state(self._root, completed)
+        return completed, None
+
     def _step_planning(self, state: state_module.FactoryState) -> _Step:
+        state, hook_terminal = self._run_pre_round_hooks(state)
+        if hook_terminal is not None:
+            return hook_terminal
         seq = self._planning_attempts_used
         tag = self._begin_untrusted(state, seq)
         head = self._git.head()
@@ -3106,7 +3275,11 @@ class Campaign:
             state_module.write_state(self._root, state2)
             return _Step(self._record(state, attempt, "failed", detail), state=state2)
         self._planning_attempts_used = attempt
-        return _Step(self._record(state, attempt, "failed", detail), retry=True)
+        return _Step(
+            self._record(state, attempt, "failed", detail),
+            state=state,
+            retry=True,
+        )
 
     def _step_implementation(self, state: state_module.FactoryState) -> _Step:
         head = self._git.head()
@@ -3699,6 +3872,9 @@ def derive_campaign_config(
         prompt_set.update(_blob(root, f".factory/prompts/{role}.md"))
         prompt_set.update(b"\x00")
     audit_digest = plan_sha256(_blob(root, ".factory/audit-objectives/registry.json"))
+    registry, implementation_digests, hook_configuration_digest = (
+        _derive_pre_round_binding(root, bound_commit=head)
+    )
     return CampaignConfig(
         root=root,
         campaign_id=campaign_id,
@@ -3716,6 +3892,10 @@ def derive_campaign_config(
         role_prompt_digests=prompt_digests,
         prompt_set_digest=prompt_set.hexdigest(),
         audit_objectives_digest=audit_digest,
+        pre_round_registry=registry,
+        pre_round_implementation_digests=implementation_digests,
+        pre_round_hook_configuration_digest=hook_configuration_digest,
+        pre_round_hook_commit=head,
         provider=provider,
         model=model,
         backend=backend,
@@ -3747,8 +3927,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="factory-campaign",
         description=(
-            "Trusted phase/campaign orchestrator (FACTORY-LOOP-SPEC §13/§14/§15; "
-            "Task 9). Never invoked by a model role."
+            "Trusted finite campaign orchestrator with exact-commit ordered "
+            "pre-round hooks before every planner (FACTORY-LOOP-SPEC §11-§15). "
+            "No Ollama quota hook is configured or executed. Never invoked by "
+            "a model role."
         ),
     )
     parser.add_argument(
@@ -3759,7 +3941,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="run the campaign to a §14 terminal")
+    p_run = sub.add_parser(
+        "run", help="run ordered pre-round hooks and phases to a §14 terminal"
+    )
     p_run.add_argument("--campaign-id", required=True)
     p_run.add_argument("--rounds", type=int, required=True)
     p_run.add_argument("--branch", required=True)
@@ -3806,9 +3990,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_run.add_argument("--role-timeout", type=float, default=DEFAULT_ROLE_TIMEOUT)
     p_run.add_argument("--gate-timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
 
-    p_show = sub.add_parser("show", help="print the current control state and result")
-    p_show.add_argument("--campaign-id", default=None)
-
     args = parser.parse_args(argv)
     root = Path(args.root)
     if args.command == "run":
@@ -3848,14 +4029,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_ERROR
         print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
         return TERMINAL_EXIT_CODES[result.terminal_phase]
-    # show
-    try:
-        state = state_module.load_state(root)
-        print(json.dumps(state.to_dict(), sort_keys=True, separators=(",", ":")))
-    except (state_module.StateError, OSError) as exc:
-        print(f"factory-campaign: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-    return EXIT_SUCCESS
+    raise AssertionError("argparse accepted an unknown campaign command")
 
 
 def _evidence_smoke_preflight(root: Path, args) -> None:

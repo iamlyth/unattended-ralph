@@ -940,6 +940,10 @@ class InstalledTierSuite(unittest.TestCase):
             ROOT / ".factory/audit-objectives/registry.json",
             ws / ".factory/audit-objectives/registry.json",
         )
+        shutil.copy2(
+            ROOT / ".factory/pre-round-hooks.json",
+            ws / ".factory/pre-round-hooks.json",
+        )
         for role in ("planner", "developer", "tester", "auditor"):
             (ws / ".factory/prompts" / f"{role}.md").write_text(
                 f"# {role} fixture role prompt\n", encoding="utf-8")

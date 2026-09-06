@@ -171,6 +171,9 @@ required = [
     '.factory/tests/test-factory-migration.py',
     '.factory/tests/test-factory-migration.sh',
     '.factory/tests/adversarial-manifest.json',
+    '.factory/pre-round-hooks.json',
+    '.factory/loop/pre_round.py',
+    '.factory/tests/test-factory-pre-round.py',
     '.factory/tests/test-factory-adversarial.py',
     '.factory/tests/test-factory-adversarial.sh',
     '.factory/loop/installer.py',
@@ -384,6 +387,7 @@ grep -q 'check-spec-provided.sh' scripts/plan-scope-guard.sh
 ./.factory/tests/test-factory-installed.sh
 ./.factory/tests/test-factory-generic-evidence.sh
 ./.factory/tests/test-factory-migration.sh
+python3 .factory/tests/test-factory-pre-round.py
 ./.factory/tests/test-factory-adversarial.sh
 ./.factory/tests/test-factory-smoke.sh
 # Machine visual-audit scaffold invariants: the generic scaffold is disabled by

@@ -43,7 +43,6 @@ python3 .factory/loop/campaign.py --root "$PWD" run \
   --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
   --branch boilerplate-develop --provider ollama --model <model> \
   --backend <absolute-model-backend>
-python3 .factory/loop/campaign.py --root "$PWD" show
 python3 .factory/loop/state.py --root "$PWD" show
 python3 .factory/loop/migration.py --root "$PWD" status  # Ralph migration
 ```

@@ -980,7 +980,7 @@ def _work(args, cwd, check=True):
 
 
 class LaunchIntegrationTests(_Base):
-    """The guard is part of the launch authority for ``ollama`` providers."""
+    """Per-model launch is confinement-only; quota belongs to pre-round hooks."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1051,44 +1051,31 @@ class LaunchIntegrationTests(_Base):
         return confinement._mint_synthetic_proof(binding, **kwargs)
 
     def test_ollama_provider_ok_proceeds(self) -> None:
-        """An ollama launch proceeds only behind a synthetic confinement proof.
+        """Ollama authorization applies confinement but never quota policy."""
+        binding = self._binding("ollama")
+        with mock.patch.object(launch.usage_guard, "require_quota") as quota:
+            authority = self._authorize(
+                binding, _confinement_proof=self._proof(binding)
+            )
+        quota.assert_not_called()
+        self.assertIsInstance(authority, launch.LaunchAuthority)
 
-        The private synthetic proof is required (the Task 8 production
-        authority is unavailable), and the guard runs against the committed
-        fixture through the hidden ``_usage_guard_html_file`` seam — the
-        production API/CLI surface has no ``html-file`` option.
-        """
-        cookie = self.make_cookie_file()
+    def test_ollama_provider_blocked_fixture_is_not_launch_policy(self) -> None:
+        binding = self._binding("ollama")
         authority = self._authorize(
-            self._binding("ollama"),
-            _confinement_proof=self._proof(self._binding("ollama")),
-            _usage_guard_html_file=str(VISIBLE_FIXTURES / "usage-ok.html"),
-            usage_guard_cookie_file=str(cookie),
+            binding, _confinement_proof=self._proof(binding)
         )
         self.assertIsInstance(authority, launch.LaunchAuthority)
 
-    def test_ollama_provider_blocked_fails_closed(self) -> None:
-        cookie = self.make_cookie_file()
-        with self.assertRaises(launch.InvocationError) as caught:
-            self._authorize(
-                self._binding("ollama"),
-                _confinement_proof=self._proof(self._binding("ollama")),
-                _usage_guard_html_file=str(VISIBLE_FIXTURES / "usage-blocked.html"),
-                usage_guard_cookie_file=str(cookie),
-                usage_guard_max_polls=1,
-                usage_guard_poll_interval=0,
-            )
-        self.assertIn("ollama usage guard", str(caught.exception))
-
-    def test_ollama_provider_fatal_fails_closed(self) -> None:
-        cookie = self.make_cookie_file()
-        with self.assertRaises(launch.InvocationError):
-            self._authorize(
-                self._binding("ollama"),
-                _confinement_proof=self._proof(self._binding("ollama")),
-                _usage_guard_html_file=str(VISIBLE_FIXTURES / "login.html"),
-                usage_guard_cookie_file=str(cookie),
-            )
+    def test_per_model_usage_driver_parameters_are_absent(self) -> None:
+        parameters = inspect.signature(launch.authorize_launch).parameters
+        for name in (
+            "usage_guard_cookie_file", "usage_guard_cookie_stdin",
+            "usage_guard_settings_url", "usage_guard_poll_interval",
+            "usage_guard_max_wait", "usage_guard_max_polls",
+            "_usage_guard_html_file", "_usage_guard_allow_loopback",
+        ):
+            self.assertNotIn(name, parameters)
 
     def test_non_ollama_provider_never_runs_the_guard(self) -> None:
         binding = self._binding("synthetic")
@@ -1097,19 +1084,13 @@ class LaunchIntegrationTests(_Base):
         )
         self.assertIsInstance(authority, launch.LaunchAuthority)
 
-    def test_guard_cannot_be_bypassed_for_ollama(self) -> None:
-        # No cookie store and a network settings URL: the guard must fail
-        # closed (fatal missing-cookie, before any fetch) even though the
-        # caller asked for a completely open invocation.  The ambient
-        # environment is scrubbed so no real credential can ever satisfy
-        # the guard inside this test.
+    def test_missing_cookie_is_not_consulted_by_authorization(self) -> None:
+        binding = self._binding("ollama")
         with _scrubbed_ollama_env():
-            with self.assertRaises(launch.InvocationError):
-                self._authorize(
-                    self._binding("ollama"),
-                    _confinement_proof=self._proof(self._binding("ollama")),
-                    usage_guard_settings_url="http://127.0.0.1:1/",
-                )
+            authority = self._authorize(
+                binding, _confinement_proof=self._proof(binding)
+            )
+        self.assertIsInstance(authority, launch.LaunchAuthority)
 
     def test_production_launch_rejects_loopback_settings_before_fetch(self) -> None:
         """A production launch rejects http:// loopback settings before any fetch.
@@ -1122,13 +1103,11 @@ class LaunchIntegrationTests(_Base):
         server = _ScriptedServer([(200, b"unreachable")], hold=True)
         self.addCleanup(server.close)
         with _scrubbed_ollama_env():
-            with self.assertRaises(launch.InvocationError) as caught:
+            with self.assertRaises(TypeError):
                 self._authorize(
                     self._binding("ollama"),
-                    _confinement_proof=self._proof(self._binding("ollama")),
                     usage_guard_settings_url=f"http://127.0.0.1:{server.port}/",
                 )
-        self.assertIn("loopback", str(caught.exception))
         self.assertFalse(
             server.request_seen.is_set(),
             "a production launch fetched despite rejecting loopback settings",
@@ -1142,13 +1121,11 @@ class LaunchIntegrationTests(_Base):
         seam enables a transport the ordinary production launch rejects, so it
         is gated on a proof exactly like the Task 8 authority.
         """
-        with self.assertRaises(launch.InvocationError) as caught:
+        with self.assertRaises(TypeError):
             self._authorize(
                 self._binding("ollama"),
                 _usage_guard_allow_loopback=True,
-                usage_guard_settings_url="http://127.0.0.1:1/",
             )
-        self.assertIn("confinement proof", str(caught.exception))
 
     def test_loopback_seam_with_synthetic_proof_proceeds(self) -> None:
         """With a valid synthetic proof the hidden suite can use loopback.
@@ -1158,23 +1135,15 @@ class LaunchIntegrationTests(_Base):
         guard fetches the committed fixture page from a loopback server and
         the authority is minted.
         """
-        server = _ScriptedServer(
-            [(200, (VISIBLE_FIXTURES / "usage-ok.html").read_bytes())],
-            hold=False,
-        )
-        self.addCleanup(server.close)
-        authority = self._authorize(
-            self._binding("ollama"),
-            _confinement_proof=self._proof(self._binding("ollama")),
-            _usage_guard_allow_loopback=True,
-            usage_guard_settings_url=f"http://127.0.0.1:{server.port}/",
-            usage_guard_cookie_file=str(self.make_cookie_file()),
-        )
-        self.assertIsInstance(authority, launch.LaunchAuthority)
+        with self.assertRaises(TypeError):
+            self._authorize(
+                self._binding("ollama"),
+                _usage_guard_allow_loopback=True,
+            )
 
 
 # ---------------------------------------------------------------------------
-# Strict known-provider registry and per-policy gating (obligation 5)
+# Strict known-provider registry and fixed launch policy
 # ---------------------------------------------------------------------------
 
 class ProviderRegistryTests(_Base):
@@ -1215,8 +1184,8 @@ class ProviderRegistryTests(_Base):
             )
             self.assertIsNone(launch.verify_invocation(binding))
 
-    def test_ollama_is_the_only_guard_required_provider(self) -> None:
-        self.assertEqual(launch.PROVIDER_GUARD_REQUIRED, frozenset({"ollama"}))
+    def test_no_provider_has_per_model_quota_policy(self) -> None:
+        self.assertFalse(hasattr(launch, "PROVIDER_GUARD_REQUIRED"))
         self.assertIn("ollama", launch.SUPPORTED_PROVIDERS)
         self.assertIn("synthetic", launch.SUPPORTED_PROVIDERS)
 
@@ -1886,12 +1855,11 @@ class CatchAllNoTracebackTests(_Base):
 # ---------------------------------------------------------------------------
 
 class ProductionSurfaceTests(_Base):
-    def test_authorize_launch_public_surface_has_no_html_file(self) -> None:
+    def test_authorize_launch_has_no_quota_or_cookie_surface(self) -> None:
         parameters = inspect.signature(launch.authorize_launch).parameters
-        self.assertNotIn("usage_guard_html_file", parameters)
-        # The hidden suite reaches the fixture path only through the private
-        # seam, exactly like the private confinement-proof seam.
-        self.assertIn("_usage_guard_html_file", parameters)
+        self.assertFalse(any(
+            "usage_guard" in name or "cookie" in name for name in parameters
+        ))
 
     def test_launch_cli_help_has_no_html_file(self) -> None:
         out = io.StringIO()
@@ -1902,7 +1870,8 @@ class ProductionSurfaceTests(_Base):
         self.assertEqual(caught.exception.code, 0)
         help_text = out.getvalue()
         self.assertNotIn("--usage-guard-html-file", help_text)
-        self.assertIn("--usage-guard-cookie-file", help_text)
+        self.assertNotIn("--usage-guard-cookie-file", help_text)
+        self.assertNotIn("--usage-guard-max-wait", help_text)
 
     def test_guard_cli_html_file_is_diagnostics_only(self) -> None:
         """The *guard* CLI keeps its diagnostics fixture, the launch surface does not."""

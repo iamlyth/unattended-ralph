@@ -1563,28 +1563,13 @@ class ProductionLaunchConfinementTests(_Base):
             )
         self.assertIn("sanitized home", str(caught.exception))
 
-    def test_ollama_guard_runs_behind_real_proof(self) -> None:
-        """An ollama launch proceeds only behind a *real* proof + guard pass."""
-        cookie = self.diag / "cookie.txt"
-        # Write exact bytes without a trailing newline: a LF (0x0A) is a
-        # control byte and must be rejected by the production guard, so the
-        # fixture must not smuggle one in via write_text's newline translation.
-        cookie.write_bytes(b"n=v")
-        os.chmod(cookie, 0o600)
+    def test_ollama_authorization_never_runs_quota(self) -> None:
+        """Ollama still requires a real proof but launch runs no quota policy."""
         binding = self.binding(role="planner", provider="ollama")
-        authority = self._authorize(
-            binding,
-            _usage_guard_html_file=str(
-                ROOT / "tests" / "fixtures" / "usage-ok.html"
-            ),
-            usage_guard_cookie_file=str(cookie),
-        )
+        with mock.patch.object(launch.usage_guard, "require_quota") as quota:
+            authority = self._authorize(binding)
+        quota.assert_not_called()
         self.assertFalse(authority._confinement_proof.synthetic)
-        self.assertEqual(
-            {c.to_tuple() for c in authority._confinement_proof.credential_channels},
-            {("cookie_file", str(cookie)),
-             ("env_store", usage._default_env_file())},
-        )
 
     def test_ollama_without_real_confinement_fails_closed(self) -> None:
         """A caller cannot claim a spec without its real proof (fail closed)."""
@@ -1720,20 +1705,7 @@ class ProductionLaunchConfinementTests(_Base):
         for provider in ("synthetic", "ollama"):
             with self.subTest(provider=provider):
                 binding = self.binding(role="planner", provider=provider)
-                cookie: Optional[Path] = None
-                if provider == "ollama":
-                    cookie = self.diag / "cookie.txt"
-                    cookie.write_bytes(b"n=v")
-                    os.chmod(cookie, 0o600)
-                    authority = self._authorize(
-                        binding,
-                        _usage_guard_html_file=str(
-                            ROOT / "tests" / "fixtures" / "usage-ok.html"
-                        ),
-                        usage_guard_cookie_file=str(cookie),
-                    )
-                else:
-                    authority = self._authorize(binding)
+                authority = self._authorize(binding)
                 self.assertIsInstance(authority, launch.LaunchAuthority)
                 proof = authority._confinement_proof
                 self.assertIsNotNone(
@@ -1748,7 +1720,6 @@ class ProductionLaunchConfinementTests(_Base):
                 wc.validate_proof(
                     proof, binding,
                     confinement_spec=authority._confinement_spec,
-                    cookie_file=str(cookie) if cookie is not None else None,
                 )
 
     def test_authorize_failure_cleans_four_private_dirs(self) -> None:

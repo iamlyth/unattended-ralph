@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Source this script to refresh the project-local Ollama Cloud credentials.
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 # Task 15 migration: the operator store lives OUTSIDE the model workspace —
 # $OLLAMA_USAGE_ENV_FILE when set, otherwise $XDG_CONFIG_HOME/
 # unattended-ralph/ollama-usage-env or ~/.config/unattended-ralph/
@@ -16,8 +14,9 @@ else
     ENV_FILE="${HOME:-}/.config/unattended-ralph/ollama-usage-env"
 fi
 
-if [[ -e "$PROJECT_ROOT/.ollama-usage-env" || -L "$PROJECT_ROOT/.ollama-usage-env" ]]; then
-    echo "update-ollama-cookies: DEPRECATED legacy store $PROJECT_ROOT/.ollama-usage-env;" >&2
+LEGACY_STORE="$PWD/.ollama-usage-env"
+if [[ -e "$LEGACY_STORE" || -L "$LEGACY_STORE" ]]; then
+    echo "update-ollama-cookies: DEPRECATED legacy store $LEGACY_STORE;" >&2
     echo "update-ollama-cookies: credentials now live in the operator store outside the workspace" >&2
     echo "update-ollama-cookies: (migrate it; the legacy store is never sourced as an authority)" >&2
 fi

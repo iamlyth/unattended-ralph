@@ -36,7 +36,8 @@ tracks task status and verification evidence.
 - Four static roles — planner, developer, tester, auditor — are the complete role set; parallel model launches are forbidden. Each runs from a static digest-bound prompt: `.factory/prompts/planner.md`, `.factory/prompts/developer.md`, `.factory/prompts/tester.md`, `.factory/prompts/auditor.md`.
 - Exactly one primary worker may edit, stage, or commit repository files; Git history and commit operations run in the trusted orchestrator, never in model tools.
 - Tests, documentation, machine evidence, and an independent audit are completion gates.
-- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored) carries only the §11 fields and enforces the §11 transition table.
+- Before each round's planner, the trusted campaign executes the exact committed `.factory/pre-round-hooks.json` registry once in order. Its strict schema admits only fixed internal implementations and initially contains mandatory `branch_guard`; no command, argv, quota, or cookie surface is accepted.
+- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v1`, ignored) carries the lifecycle fields plus the exact hook configuration/commit binding, ordered result digest chain, and durable start/completion cursor.
 - You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used.
@@ -305,7 +306,7 @@ python3 .factory/loop/selector.py select .factory/artifacts/implementation-plan.
 The implementation phase is the same finite campaign (`.factory/loop/campaign.py run`): each attempt launches the developer as a fresh confined process through `python -m factory.loop.launch launch` with the exact selected task excerpt (bytes re-derived from the committed plan and digest-matched), then the trusted campaign validates the result against plan state and Git. Each iteration:
 
 1. validates branch, plan freshness, and the single control-state file;
-2. runs the Ollama usage guard and waits for quota when necessary;
+2. relies on the round's already-completed ordered pre-round hook sequence (planner retries never rerun it);
 3. deterministically selects one ready task (`.factory/loop/selector.py`);
 4. implements and tests exactly that task with one writer;
 5. updates the plan and (legacy) crash handoff;
@@ -348,7 +349,7 @@ python3 .factory/loop/campaign.py --root "$PWD" run \
   --campaign-id primary-YYYYMMDD-HHMMSS --rounds 3 \
   --branch boilerplate-develop --provider ollama --model <model> \
   --backend <absolute-model-backend>
-python3 .factory/loop/campaign.py --root "$PWD" show
+python3 .factory/loop/state.py --root "$PWD" show
 ```
 
 Campaigns are headless and unattended; there is no TUI. Each mandatory round
@@ -455,9 +456,10 @@ only for policy checks (`mutating_workers = 1`, `integration_workers = 1`,
 
 ### Guard contract
 
-Quota enforcement is implemented by the hidden standard-library guard
+Quota diagnostics remain implemented by the hidden standard-library guard
 `.factory/loop/usage.py` (with its fetch child `.factory/loop/usage_fetch.py`),
-run before every model invocation; a single check emits the machine-readable
+but Task 32 deliberately configures no quota hook and launch authorization has
+no quota/cookie parameters. A direct operator check emits the machine-readable
 `ollama-usage/v1` status object with only redacted fields. The retained shell
 guard `scripts/ollama-usage-guard.sh` keeps its `--check`/`--wait` exit
 contract (0 allowed, 1 quota threshold, 2 fatal, 3 transient) for supervisors
@@ -488,13 +490,15 @@ source scripts/update-ollama-cookies.sh
 
 ## Quota waiting
 
-Every iteration invokes:
+The initial ordered registry does not run quota policy. An operator may invoke
+the retained diagnostic directly, outside campaign/model launch authority:
 
 ```bash
 ./scripts/ollama-usage-guard.sh --wait
 ```
 
-When session or weekly utilization reaches the configured threshold, the hook remains alive and polls until usage resets below it. Transient network errors are retried. Expired cookies stop with an actionable error rather than waiting forever.
+It polls until usage resets below threshold; this command is not an automatic
+per-model or pre-round campaign hook.
 
 Useful settings in `.ollama-usage-env`:
 
@@ -504,8 +508,7 @@ OLLAMA_WAIT_INTERVAL_SECONDS=300
 OLLAMA_WAIT_MAX_SECONDS=0  # unlimited
 ```
 
-If the backend reaches quota during an already-running request, the launch
-path checks quota, waits, and retries without inventing a new attempt.
+The launch path does not check, wait, or retry quota policy.
 
 ## Clean stop
 

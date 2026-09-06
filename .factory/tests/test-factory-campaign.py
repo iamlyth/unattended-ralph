@@ -71,6 +71,7 @@ import audit_objectives as audit_objectives_module  # noqa: E402
 import campaign as campaign_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
+import pre_round as pre_round_module  # noqa: E402
 import state as state_module  # noqa: E402
 
 GIT = gitutil.GIT_EXECUTABLE
@@ -202,6 +203,7 @@ class FixtureWorkspace:
             ".factory/prompts",
             ".factory/audit-objectives",
             ".factory/artifacts",
+            ".factory/loop",
             ".factory/tests/fixtures",
             "fixture/templates",
             "src",
@@ -225,6 +227,15 @@ class FixtureWorkspace:
         shutil.copy2(
             ROOT / ".factory" / "audit-objectives" / "registry.json",
             ws / ".factory" / "audit-objectives" / "registry.json",
+        )
+        for module in ("pre_round.py", "campaign.py", "state.py", "lock.py", "gitutil.py"):
+            shutil.copy2(
+                ROOT / ".factory" / "loop" / module,
+                ws / ".factory" / "loop" / module,
+            )
+        shutil.copy2(
+            ROOT / ".factory" / "pre-round-hooks.json",
+            ws / ".factory" / "pre-round-hooks.json",
         )
         _git(ws, "init", "-q", "-b", BRANCH)
         _git(ws, "config", "user.email", "fixture@test")
@@ -255,7 +266,7 @@ class FixtureWorkspace:
         # rounds already completed (a real planner revises the plan from the
         # committed plan state), so a multi-round campaign works through
         # every runnable task instead of re-selecting completed work.
-        for round_no in (1, 2, 3):
+        for round_no in range(1, self.rounds + 1):
             revised = [
                 {
                     **t,
@@ -265,6 +276,11 @@ class FixtureWorkspace:
                 }
                 for t in TASK_SPECS
             ]
+            if round_no > len(TASK_SPECS):
+                revised[-1] = {
+                    **revised[-1], "status": "blocked",
+                    "blocked_on": "synthetic-five-round-extension",
+                }
             gen_plan(ws, common, f"fixture/templates/planner-{round_no}.md",
                      revised)
         complete = [{**dict(t), "status": "complete"} for t in TASK_SPECS]
@@ -758,6 +774,53 @@ class CampaignRecovery(_CampaignBase):
         outcomes = [r.outcome for r in result.phase_history]
         self.assertIn("task_completed", outcomes)
 
+    def test_failed_hook_crash_before_atomic_terminal_never_runs_planner(self) -> None:
+        ws = self.make(SUCCESS_SCENARIO)
+        config = ws.derive_config()
+        real_write = state_module.write_state
+
+        def crash_before_terminal(root, candidate):
+            if candidate.current_phase == "infrastructure_failure":
+                raise RuntimeError("synthetic terminal publication crash")
+            return real_write(root, candidate)
+
+        with unittest.mock.patch.object(
+            campaign_module.lock_module.RootLock, "validate_live_branch",
+            side_effect=campaign_module.lock_module.RootLockError(
+                "synthetic branch failure"
+            ),
+        ), unittest.mock.patch.object(
+            state_module, "write_state", side_effect=crash_before_terminal
+        ), self.assertRaisesRegex(RuntimeError, "publication crash"):
+            campaign_module.Campaign(config).run()
+        claimed = ws.load_state()
+        self.assertEqual(claimed.pre_round_hook_started_round, 1)
+        self.assertEqual(claimed.pre_round_hook_completed_round, 0)
+        recovered = campaign_module.Campaign(config).run()
+        self.assertEqual(recovered.terminal_phase, "infrastructure_failure")
+        self.assertNotIn("planned", [r.outcome for r in recovered.phase_history])
+
+    def test_programmatic_forged_empty_hook_registry_fails_under_lock(self) -> None:
+        ws = self.make(SUCCESS_SCENARIO)
+        config = ws.derive_config()
+        forged = pre_round_module.Registry((), "0" * 64)
+        forged_digest = pre_round_module.configuration_digest(
+            forged, {}, bound_commit=config.phase_base_commit
+        )
+        forged_config = dataclasses.replace(
+            config,
+            pre_round_registry=forged,
+            pre_round_implementation_digests={},
+            pre_round_hook_configuration_digest=forged_digest,
+        )
+        with self.assertRaisesRegex(
+            campaign_module.CampaignBindingError,
+            "differs from the locked exact commit",
+        ):
+            campaign_module.Campaign(forged_config).run()
+        # Binding failure released the sole writer lock; the exact config can run.
+        self.assertEqual(campaign_module.Campaign(config).run().terminal_phase, "success")
+
     def test_ambiguous_recovery_fails_closed(self) -> None:
         # A HEAD advanced past the phase base with a foreign commit during
         # planning fails closed instead of guessing.
@@ -803,6 +866,66 @@ class EmptyWorkAndFindings(_CampaignBase):
             (3, "verification", "pass"),
             (3, "audit", "pass"),
         ])
+
+    def test_five_round_campaign_runs_one_pre_round_sequence_per_round(self) -> None:
+        ws = self.make(SUCCESS_SCENARIO, rounds=5)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["rounds_completed"], 5)
+        self.assertEqual(
+            [r["round"] for r in data["phase_history"] if r["phase"] == "planning"],
+            [1, 2, 3, 4, 5],
+        )
+        state = ws.load_state()
+        self.assertEqual(state.pre_round_hook_started_round, 5)
+        self.assertEqual(state.pre_round_hook_completed_round, 5)
+        self.assertNotEqual(state.pre_round_hook_results_digest, "0" * 64)
+
+    def test_five_round_hook_order_and_execution_count_are_exact(self) -> None:
+        ws = self.make(SUCCESS_SCENARIO, rounds=5)
+        observed = []
+        original = pre_round_module.run_hooks
+
+        def track(registry, *, implementation_digests, execute):
+            executed = []
+            def tracked_execute(hook):
+                executed.append(hook.hook_id)
+                return execute(hook)
+            outcome = original(
+                registry,
+                implementation_digests=implementation_digests,
+                execute=tracked_execute,
+            )
+            observed.append((tuple(h.hook_id for h in registry.hooks), tuple(executed)))
+            return outcome
+
+        with unittest.mock.patch.object(pre_round_module, "run_hooks", side_effect=track):
+            result = campaign_module.Campaign(ws.derive_config()).run()
+        self.assertEqual(result.terminal_phase, "success")
+        self.assertEqual(len(observed), 5)
+        self.assertTrue(all(
+            registry == ("branch-guard",)
+            and executed == ("branch-guard",)
+            for registry, executed in observed
+        ))
+
+    def test_planner_retries_do_not_rerun_pre_round_hooks(self) -> None:
+        ws = self.make({
+            "planner": {"behavior": "no-change"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        }, planning_attempts=3)
+        calls = 0
+        original = pre_round_module.run_hooks
+        def track(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+        with unittest.mock.patch.object(pre_round_module, "run_hooks", side_effect=track):
+            result = campaign_module.Campaign(ws.derive_config()).run()
+        self.assertEqual(result.terminal_phase, "failed")
+        self.assertEqual(calls, 1)
 
     def test_findings_reach_next_round_via_revised_plan(self) -> None:
         # Round 1 verification+audit findings; round 2's planner revises the
@@ -1224,9 +1347,9 @@ class LifecycleAndCli(_CampaignBase):
 
     def test_terminal_state_refuses_to_rerun(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)
+        config = ws.derive_config()
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
-        config = ws.derive_config()
         with self.assertRaises(campaign_module.CampaignPhaseError):
             campaign_module.Campaign(config).run()
 
@@ -1275,20 +1398,19 @@ class LifecycleAndCli(_CampaignBase):
         self.assertEqual(result.returncode, 6)
         self.assertIn("fixture surface", result.stderr)
 
-    def test_cli_help_and_show(self) -> None:
+    def test_cli_help_omits_foreign_state_show(self) -> None:
         result = run(
             [sys.executable, str(LOOP / "campaign.py"), "--help"],
             root=ROOT, check=False)
         self.assertEqual(result.returncode, 0)
         self.assertIn("factory-campaign", result.stdout)
-        # show on a repository without control state fails closed.
-        empty = self.tmp / "empty"
-        empty.mkdir()
+        self.assertIn("{run}", result.stdout)
+        self.assertNotIn("\n    show ", result.stdout)
         result = run(
-            [sys.executable, str(LOOP / "campaign.py"),
-             "--root", str(empty), "show"],
+            [sys.executable, str(LOOP / "campaign.py"), "show"],
             root=ROOT, check=False)
-        self.assertEqual(result.returncode, 6)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice", result.stderr)
 
     def test_malformed_phase_result_fails_closed(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)
@@ -1508,6 +1630,7 @@ class ReviewHardening(_CampaignBase):
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "crash"},
         })
+        config = ws.derive_config()
         rc, data = ws.run_cli()
         self.assertEqual(rc, 4)
         self.assertEqual(data["terminal_phase"], "interrupted")
@@ -1517,7 +1640,7 @@ class ReviewHardening(_CampaignBase):
         self.assertEqual(state.current_round, 1)
         head_before = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
         with self.assertRaises(campaign_module.CampaignPhaseError) as cm:
-            campaign_module.Campaign(ws.derive_config()).run()
+            campaign_module.Campaign(config).run()
         self.assertIn("already terminal", str(cm.exception))
         # The refused rerun creates no commit and never re-executes the audit.
         self.assertEqual(
@@ -1535,6 +1658,7 @@ class ReviewHardening(_CampaignBase):
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "dirty"},
         })
+        config = ws.derive_config()
         rc, data = ws.run_cli()
         self.assertEqual(rc, 5)
         self.assertEqual(data["terminal_phase"], "infrastructure_failure")
@@ -1543,7 +1667,7 @@ class ReviewHardening(_CampaignBase):
         self.assertEqual(state.last_outcome, "infrastructure_failure")
         self.assertEqual(state.current_round, 1)
         with self.assertRaises(campaign_module.CampaignPhaseError) as cm:
-            campaign_module.Campaign(ws.derive_config()).run()
+            campaign_module.Campaign(config).run()
         self.assertIn("already terminal", str(cm.exception))
 
     # -- B2: production (non-driver) launch re-derives exact bytes -----------
@@ -1739,7 +1863,7 @@ class ReviewHardening(_CampaignBase):
         # closed at implementation selection/recovery instead of selecting a
         # task from a stale plan.
         ws = self.make(SUCCESS_SCENARIO)
-        self._crash_at_plan(
+        config = self._crash_at_plan(
             ws,
             lambda state: (
                 state.current_phase == "verification"
@@ -1757,7 +1881,7 @@ class ReviewHardening(_CampaignBase):
         _git(ws.root, "add", PLAN_REL)
         _git(ws.root, "commit", "-qm", "tampered stale plan")
         with self.assertRaises(campaign_module.CampaignRecoveryError) as cm:
-            campaign_module.Campaign(ws.derive_config()).run()
+            campaign_module.Campaign(config).run()
         self.assertIn("stale", str(cm.exception))
 
     def test_selector_call_uses_the_authoritative_base_binding(self) -> None:

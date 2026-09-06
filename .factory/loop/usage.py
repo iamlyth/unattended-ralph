@@ -3,9 +3,10 @@
 
 This module is the hardened, standard-library implementation of the retained
 ``scripts/ollama-usage-guard.sh`` ``--check``/``--wait`` contract
-(FACTORY-LOOP-SPEC §10).  It is the guard the control plane runs before
-every model invocation (wired into :mod:`factory.loop.launch` via
-:func:`require_quota`), and it satisfies QUOTA-02:
+(FACTORY-LOOP-SPEC §10).  It is the fixed implementation used only when the
+campaign's ordered pre-round Ollama hook is enabled (the committed registry
+currently disables it); per-model launch never calls it. It satisfies
+QUOTA-02:
 
 * **Credentials never appear in child argv.**  The settings fetch runs in a
   dedicated fetch child (``factory.loop.usage_fetch``) whose argv is fully
@@ -994,7 +995,7 @@ def wait(credentials: Credentials) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The §10 decision table (wired into the launch authority)
+# The §10 decision table (used by the configured pre-round hook)
 # ---------------------------------------------------------------------------
 
 def require_quota(

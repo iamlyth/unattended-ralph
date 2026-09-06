@@ -157,6 +157,7 @@ TRANSITIONS: Dict[Tuple[str, str], str] = {
     ("planning", "planned"): "implementation",
     ("planning", "failed"): "failed",
     ("planning", "interrupted"): "interrupted",
+    ("planning", "infrastructure_failure"): "infrastructure_failure",
     ("implementation", "task_completed"): "verification",
     ("implementation", "work_exhausted"): "verification",
     ("implementation", "blocked"): "verification",
@@ -210,13 +211,16 @@ PHASE_OUTCOMES: Dict[str, frozenset] = {
 BINDING_FIELDS = (
     "schema", "repository_identity", "branch", "campaign_id",
     "rounds_requested", "specification_digest", "role_prompt_digests",
-    "audit_objectives_digest",
+    "audit_objectives_digest", "pre_round_hook_configuration_digest",
+    "pre_round_hook_commit",
 )
 FIELD_NAMES: Tuple[str, ...] = (
     "schema", "repository_identity", "branch", "campaign_id",
     "rounds_requested", "current_round", "current_phase",
     "specification_digest", "plan_digest", "role_prompt_digests",
-    "audit_objectives_digest", "phase_base_commit", "selected_task_id",
+    "audit_objectives_digest", "pre_round_hook_configuration_digest",
+    "pre_round_hook_commit", "pre_round_hook_results_digest", "pre_round_hook_started_round",
+    "pre_round_hook_completed_round", "phase_base_commit", "selected_task_id",
     "attempt_number", "phase_started_at_monotonic",
     "attempt_started_at_monotonic", "last_outcome",
 )
@@ -429,6 +433,11 @@ class FactoryState:
     plan_digest: str
     role_prompt_digests: Mapping[str, str]
     audit_objectives_digest: str
+    pre_round_hook_configuration_digest: str
+    pre_round_hook_commit: str
+    pre_round_hook_results_digest: str
+    pre_round_hook_started_round: int
+    pre_round_hook_completed_round: int
     phase_base_commit: str
     selected_task_id: Optional[int]
     attempt_number: int
@@ -450,6 +459,11 @@ class FactoryState:
             "plan_digest": self.plan_digest,
             "role_prompt_digests": dict(sorted(self.role_prompt_digests.items())),
             "audit_objectives_digest": self.audit_objectives_digest,
+            "pre_round_hook_configuration_digest": self.pre_round_hook_configuration_digest,
+            "pre_round_hook_commit": self.pre_round_hook_commit,
+            "pre_round_hook_results_digest": self.pre_round_hook_results_digest,
+            "pre_round_hook_started_round": self.pre_round_hook_started_round,
+            "pre_round_hook_completed_round": self.pre_round_hook_completed_round,
             "phase_base_commit": self.phase_base_commit,
             "selected_task_id": self.selected_task_id,
             "attempt_number": self.attempt_number,
@@ -533,6 +547,8 @@ def _validate_state(state: FactoryState) -> None:
         ("specification_digest", state.specification_digest),
         ("plan_digest", state.plan_digest),
         ("audit_objectives_digest", state.audit_objectives_digest),
+        ("pre_round_hook_configuration_digest", state.pre_round_hook_configuration_digest),
+        ("pre_round_hook_results_digest", state.pre_round_hook_results_digest),
     ):
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise StateTamperError(
@@ -556,6 +572,30 @@ def _validate_state(state: FactoryState) -> None:
                 "`role_prompt_digests` must map each role to a 64-character "
                 "SHA-256 hex digest"
             )
+    if not isinstance(state.pre_round_hook_commit, str) or not SHA40_RE.fullmatch(
+        state.pre_round_hook_commit
+    ):
+        raise StateTamperError("`pre_round_hook_commit` must be a 40-character Git commit")
+    for name, value in (
+        ("pre_round_hook_started_round", state.pre_round_hook_started_round),
+        ("pre_round_hook_completed_round", state.pre_round_hook_completed_round),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise StateTamperError(f"`{name}` must be a non-negative integer")
+    if state.pre_round_hook_completed_round > state.pre_round_hook_started_round:
+        raise StateTamperError("a pre-round hook completion cannot precede its start")
+    if state.pre_round_hook_started_round > state.current_round:
+        raise StateTamperError("pre-round hook cursor cannot exceed the current round")
+    if state.pre_round_hook_started_round - state.pre_round_hook_completed_round > 1:
+        raise StateTamperError("pre-round hook cursor may have at most one ambiguous round")
+    if (
+        state.pre_round_hook_configuration_digest != "0" * 64
+        and state.current_phase not in ("planning", "infrastructure_failure") and (
+            state.pre_round_hook_completed_round < state.current_round
+            or state.pre_round_hook_started_round != state.pre_round_hook_completed_round
+        )
+    ):
+        raise StateTamperError("every phase after planning requires completed hooks for its round")
     if (
         not isinstance(state.phase_base_commit, str)
         or not SHA40_RE.fullmatch(state.phase_base_commit)
@@ -666,6 +706,37 @@ def parse_state(data: object) -> FactoryState:
     """
     if not isinstance(data, dict):
         raise StateTamperError("control state must be a JSON object")
+    # Migration compatibility for pre-hook factory-state/v1 documents.  The
+    # zero configuration digest can never match a real campaign's expected
+    # exact-commit hook binding, so campaign recovery fails closed; pure state
+    # tooling can still diagnose and migrate the old document deterministically.
+    legacy_hook_fields = {
+        "pre_round_hook_configuration_digest",
+        "pre_round_hook_commit",
+        "pre_round_hook_results_digest",
+        "pre_round_hook_started_round",
+        "pre_round_hook_completed_round",
+    }
+    present_legacy = legacy_hook_fields.intersection(data)
+    if not present_legacy:
+        data = dict(data)
+        current_round = data.get("current_round", 0)
+        migrated_round = current_round if type(current_round) is int and current_round > 0 else 0
+        if (
+            data.get("current_phase") == "planning"
+            and data.get("last_outcome") in ("pass", "findings", "blocked")
+            and migrated_round > 0
+        ):
+            migrated_round -= 1
+        data.update({
+            "pre_round_hook_configuration_digest": "0" * 64,
+            "pre_round_hook_commit": "0" * 40,
+            "pre_round_hook_results_digest": "0" * 64,
+            "pre_round_hook_started_round": migrated_round,
+            "pre_round_hook_completed_round": migrated_round,
+        })
+    elif present_legacy != legacy_hook_fields:
+        raise StateTamperError("pre-round hook state fields must be present as one complete set")
     extra = sorted(set(data) - set(FIELD_NAMES))
     missing = sorted(set(FIELD_NAMES) - set(data))
     if extra or missing:
@@ -697,6 +768,17 @@ def parse_state(data: object) -> FactoryState:
         audit_objectives_digest=_expect_str(
             data, "audit_objectives_digest", pattern=SHA256_RE
         ),
+        pre_round_hook_configuration_digest=_expect_str(
+            data, "pre_round_hook_configuration_digest", pattern=SHA256_RE
+        ),
+        pre_round_hook_commit=_expect_str(
+            data, "pre_round_hook_commit", pattern=SHA40_RE
+        ),
+        pre_round_hook_results_digest=_expect_str(
+            data, "pre_round_hook_results_digest", pattern=SHA256_RE
+        ),
+        pre_round_hook_started_round=_expect_int(data, "pre_round_hook_started_round"),
+        pre_round_hook_completed_round=_expect_int(data, "pre_round_hook_completed_round"),
         phase_base_commit=_expect_str(
             data, "phase_base_commit", pattern=SHA40_RE
         ),
@@ -905,6 +987,55 @@ def begin_attempt(
     return result
 
 
+def begin_pre_round_hooks(state: FactoryState) -> FactoryState:
+    """Durably claim this round before any hook side effect can occur.
+
+    Recovery never re-executes an ambiguous claimed round.  A caller that
+    observes ``started == current_round > completed`` must terminate the
+    campaign for operator review.
+    """
+    state.validate()
+    if state.current_phase != "planning":
+        raise StateTransitionError("pre-round hooks start only in planning")
+    if state.pre_round_hook_completed_round == state.current_round:
+        raise StateTransitionError("pre-round hooks already completed this round")
+    expected_previous = state.current_round - 1
+    if (
+        state.pre_round_hook_started_round != expected_previous
+        or state.pre_round_hook_completed_round != expected_previous
+    ):
+        raise StateTransitionError("pre-round hook cursor is ambiguous or rewound")
+    result = _checked_replace(
+        state, pre_round_hook_started_round=state.current_round
+    )
+    result.validate()
+    return result
+
+
+def complete_pre_round_hooks(
+    state: FactoryState, chained_result_digest: str
+) -> FactoryState:
+    """Bind the canonical ordered result chain before the planner starts."""
+    state.validate()
+    if state.current_phase != "planning":
+        raise StateTransitionError("pre-round hooks complete only in planning")
+    if state.pre_round_hook_started_round != state.current_round:
+        raise StateTransitionError("pre-round hooks were not claimed for this round")
+    if state.pre_round_hook_completed_round != state.current_round - 1:
+        raise StateTransitionError("pre-round hook completion cursor is not monotonic")
+    if not isinstance(chained_result_digest, str) or not SHA256_RE.fullmatch(
+        chained_result_digest
+    ):
+        raise StateTamperError("pre-round result chain must be a SHA-256 digest")
+    result = _checked_replace(
+        state,
+        pre_round_hook_results_digest=chained_result_digest,
+        pre_round_hook_completed_round=state.current_round,
+    )
+    result.validate()
+    return result
+
+
 def state_digest(state: FactoryState) -> str:
     """Deterministic SHA-256 of the canonical JSON encoding of the model.
 
@@ -946,6 +1077,8 @@ def init_state(
     role_prompt_digests: Mapping[str, str],
     audit_objectives_digest: str,
     phase_base_commit: str,
+    pre_round_hook_configuration_digest: str = "0" * 64,
+    pre_round_hook_commit: str = "0" * 40,
     branch: Optional[str] = None,
     now: Optional[int] = None,
     identity: Optional[str] = None,
@@ -974,6 +1107,7 @@ def init_state(
         ("specification_digest", specification_digest),
         ("plan_digest", plan_digest),
         ("audit_objectives_digest", audit_objectives_digest),
+        ("pre_round_hook_configuration_digest", pre_round_hook_configuration_digest),
     ):
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise StateTamperError(
@@ -1020,6 +1154,11 @@ def init_state(
         plan_digest=plan_digest,
         role_prompt_digests=dict(role_prompt_digests),
         audit_objectives_digest=audit_objectives_digest,
+        pre_round_hook_configuration_digest=pre_round_hook_configuration_digest,
+        pre_round_hook_commit=pre_round_hook_commit,
+        pre_round_hook_results_digest="0" * 64,
+        pre_round_hook_started_round=(1 if pre_round_hook_configuration_digest == "0" * 64 else 0),
+        pre_round_hook_completed_round=(1 if pre_round_hook_configuration_digest == "0" * 64 else 0),
         phase_base_commit=phase_base_commit,
         selected_task_id=None,
         attempt_number=0,
@@ -1464,6 +1603,8 @@ def load_state(
     expected_plan_digest: Optional[str] = None,
     expected_audit_objectives_digest: Optional[str] = None,
     expected_role_prompt_digests: Optional[Mapping[str, str]] = None,
+    expected_pre_round_hook_configuration_digest: Optional[str] = None,
+    expected_pre_round_hook_commit: Optional[str] = None,
     _expected_uid: Optional[int] = None,
 ) -> FactoryState:
     """Securely reopen, validate, and bind the control-state file.
@@ -1502,6 +1643,11 @@ def load_state(
     _expect_binding(state, "plan_digest", expected_plan_digest)
     _expect_binding(state, "audit_objectives_digest", expected_audit_objectives_digest)
     _expect_binding(state, "role_prompt_digests", expected_role_prompt_digests)
+    _expect_binding(
+        state, "pre_round_hook_configuration_digest",
+        expected_pre_round_hook_configuration_digest,
+    )
+    _expect_binding(state, "pre_round_hook_commit", expected_pre_round_hook_commit)
     return state
 
 

@@ -50,9 +50,14 @@ Non-goals:
   lifecycle status must be consistent with the task statuses (Task 2,
   Task 18).
 - Exactly one minimal mutable control-state file
-  `.factory-state/factory-loop.json` (schema `factory-state/v1`) carries only
-  the §11 fields and enforces the §11 transition table; append-only evidence
-  artifacts are never orchestration state.
+  `.factory-state/factory-loop.json` (schema `factory-state/v1`) carries the
+  lifecycle fields plus Task-32's exact pre-round configuration/commit binding,
+  ordered result digest chain, and durable start/completion cursor; append-only
+  evidence artifacts are never orchestration state.
+- The exact committed `.factory/pre-round-hooks.json` registry runs once in
+  order before each round planner. It accepts fixed internal implementations
+  only, initially mandatory `branch_guard`, with no command/argv or model-facing
+  quota/cookie surface.
 - Locking is an exclusive `flock` on the canonical Git top-level directory
   descriptor (`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`); the descriptor and lock
   metadata are never inherited by model processes, and no second writer,
@@ -800,6 +805,11 @@ elevated by prose.
   request through the trusted path. The orchestrator's commit boundary
   preserves the Git commit guard so `--no-verify`, hook-path override,
   `GIT_CONFIG*`, worktrees, and amend/merge/rebase bypasses remain rejected.
+  Task 32 adds exact-commit ordered pre-round hooks: the configuration digest
+  binds registry bytes, accepted commit, and the branch implementation closure;
+  a write-ahead start/completion cursor gives exactly-once round ordering,
+  planner retries never rerun hooks, and ambiguous crash recovery or mandatory
+  failure terminates before model launch.
 - Acceptance criteria: fixture campaigns for each outcome and the success/
   blocked/findings/failed/interrupted combinations terminate within the
   configured bounds; no phase transition violates the state machine; all Git
@@ -812,8 +822,11 @@ elevated by prose.
   empty work reaches deterministic verification/audit, recovery fails closed,
   and exact task/objective bytes are bound on the production launch path.
 - Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
-- Evidence: `.factory/tests/test-factory-campaign.py` passes 66/66
-  warning-clean; state 129/129, lock 38/38, launch 76/76, confinement 72/72,
+- Evidence: `.factory/tests/test-factory-campaign.py` passes 73/73 including
+  five-round ordering, retries, digest/branch tamper, crash recovery, and
+  mandatory no-launch failure; `.factory/tests/test-factory-pre-round.py`
+  passes 10/10 strict registry/cursor checks; state 129/129, lock 38/38,
+  launch 77/77, confinement 72/72,
   usage 106/106 (one honest root-only ownership skip), selector 32/32, parser
   13/13, and hidden shell supervision pass. Independent adversarial review
   accepted the final checkpoint after remediation of persisted audit-abort

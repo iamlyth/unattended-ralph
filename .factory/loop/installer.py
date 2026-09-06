@@ -163,6 +163,23 @@ PENDING_ALLOWLIST: frozenset = frozenset({
     ".factory/loop/lock.py",
     ".factory/tests/test-factory-lock.py",
     ".factory/tests/test-factory-selector.py",
+    # Task-32 ordered pre-round hook authorities and synthetic coverage.
+    ".factory/pre-round-hooks.json",
+    ".factory/loop/pre_round.py",
+    ".factory/loop/launch.py",
+    ".factory/loop/migration.py",
+    ".factory/loop/state.py",
+    ".factory/schemas/factory-state-v1.schema.md",
+    ".factory/loop/usage.py",
+    ".factory/tests/adversarial-manifest.json",
+    ".factory/tests/test-factory-pre-round.py",
+    ".factory/tests/test-factory-migration.py",
+    ".factory/tests/test-factory-state.py",
+    ".factory/tests/test-factory-usage.py",
+    ".factory/tests/test-factory-confinement.py",
+    ".factory/tests/fixtures/state-digest-valid-initial.json",
+    ".factory/tests/fixtures/state-digest-valid-implementation.json",
+    ".factory/tests/fixtures/state-digest-valid-audit.json",
 })
 
 # Secret/credential-shaped path detection.  A path is never staged when
