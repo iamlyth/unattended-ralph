@@ -1389,6 +1389,201 @@ class ProviderRegistryTests(_Base):
             launch._persist_private_pi2_auth(private, operator_home=operator)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
 
+    def test_refresh_swap_after_dirfd_pin_stays_anchored_in_original(self) -> None:
+        """Swapping the operator `.pi/agent2` pathname after the directory
+        descriptor is pinned cannot redirect the credential refresh: the
+        replace is anchored to the pinned descriptor, so the bytes land only
+        in the displaced original home and never in the attacker-created
+        directory (High TOCTOU regression for ``_persist_private_pi2_auth``)."""
+        operator = self.tmp / "swap-operator"
+        target_dir = operator / ".pi" / "agent2"
+        target_dir.mkdir(parents=True, mode=0o700)
+        target = target_dir / "auth.json"
+        private = self.tmp / "swap-private"
+        source = private / ".pi" / "agent2" / "auth.json"
+        source.parent.mkdir(parents=True, mode=0o700)
+        now = int(time.time() * 1000)
+        document = {
+            "openai-codex": {
+                "type": "oauth", "access": "A" * 32,
+                "refresh": "R" * 32, "accountId": "account-123",
+                "expires": now + 3_600_000,
+            },
+            "ollama": {"type": "api_key", "key": "unchanged-provider"},
+        }
+
+        def publish(path: Path, doc: object) -> bytes:
+            raw = (json.dumps(doc, sort_keys=True) + "\n").encode()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            return raw
+
+        publish(target, document)
+        rotated = json.loads(json.dumps(document))
+        rotated["openai-codex"].update({
+            "access": "B" * 32, "refresh": "S" * 32,
+            "expires": now + 7_200_000,
+        })
+        refreshed = publish(source, rotated)
+        real_open = os.open
+        swapped = False
+
+        def staged_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if (dir_fd is not None and (flags & os.O_CREAT)
+                    and (flags & os.O_EXCL) and (flags & os.O_NOFOLLOW)
+                    and path.startswith(".auth-refresh-") and not swapped):
+                # The pinned agent-directory descriptor is already held;
+                # divert the pathname the attacker controls.
+                swapped = True
+                target_dir.rename(operator / ".pi" / "agent2.anchor")
+                attacker = operator / ".pi" / "agent2"
+                attacker.mkdir()
+                (attacker / "attacker-marker").write_text("owned")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with mock.patch("os.open", side_effect=staged_open):
+            self.assertTrue(
+                launch._persist_private_pi2_auth(
+                    private, operator_home=operator
+                )
+            )
+        self.assertTrue(swapped)
+        anchor = operator / ".pi" / "agent2.anchor"
+        published = anchor / "auth.json"
+        self.assertEqual(published.read_bytes(), refreshed)
+        self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o600)
+        self.assertEqual(published.stat().st_nlink, 1)
+        attacker = operator / ".pi" / "agent2"
+        self.assertFalse(attacker.joinpath("auth.json").exists())
+        self.assertEqual(
+            attacker.joinpath("attacker-marker").read_text(), "owned"
+        )
+        # No temp litter remains in the anchored directory.
+        self.assertEqual(list(anchor.glob(".auth-refresh-*")), [])
+
+    def test_refresh_temp_substitution_fails_closed(self) -> None:
+        """An attacker racing to plant a regular file, symlink, or hardlink
+        at the freshly generated temp name cannot divert the refresh: the
+        ``O_CREAT|O_EXCL|O_NOFOLLOW`` temp open fails closed (EEXIST), the
+        substituted entry is cleaned up, the operator credential stays
+        byte-exact, and symlink/hardlink victim inodes stay untouched."""
+        operator = self.tmp / "subst-operator"
+        target_dir = operator / ".pi" / "agent2"
+        target_dir.mkdir(parents=True, mode=0o700)
+        target = target_dir / "auth.json"
+        private = self.tmp / "subst-private"
+        source = private / ".pi" / "agent2" / "auth.json"
+        source.parent.mkdir(parents=True, mode=0o700)
+        now = int(time.time() * 1000)
+        document = {
+            "openai-codex": {
+                "type": "oauth", "access": "A" * 32,
+                "refresh": "R" * 32, "accountId": "account-123",
+                "expires": now + 3_600_000,
+            },
+            "ollama": {"type": "api_key", "key": "unchanged-provider"},
+        }
+
+        def publish(path: Path, doc: object) -> bytes:
+            raw = (json.dumps(doc, sort_keys=True) + "\n").encode()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            return raw
+
+        original_raw = publish(target, document)
+        rotated = json.loads(json.dumps(document))
+        rotated["openai-codex"].update({
+            "access": "B" * 32, "refresh": "S" * 32,
+            "expires": now + 7_200_000,
+        })
+        publish(source, rotated)
+        victim = self.tmp / "subst-victim"
+        victim.write_bytes(b"victim-bytes")
+        real_open = os.open
+        planted: dict = {}
+
+        def staged_open(path, flags, mode=0o777, *, dir_fd=None):
+            if (dir_fd is not None and (flags & os.O_CREAT)
+                    and (flags & os.O_EXCL) and (flags & os.O_NOFOLLOW)
+                    and path.startswith(".auth-refresh-")):
+                # Substitute something at the freshly generated temp name
+                # before the O_EXCL open lands.
+                planted["name"] = path
+                squat = target_dir / path
+                if planted["kind"] == "symlink":
+                    squat.symlink_to(victim)
+                elif planted["kind"] == "hardlink":
+                    os.link(victim, squat)
+                else:
+                    fdesc = real_open(
+                        path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+                        | os.O_CLOEXEC, 0o600, dir_fd=dir_fd
+                    )
+                    os.write(fdesc, b"attacker-bytes")
+                    os.close(fdesc)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        for kind in ("file", "symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                planted["kind"] = kind
+                with mock.patch("os.open", side_effect=staged_open):
+                    with self.assertRaises(launch.SupervisionError):
+                        launch._persist_private_pi2_auth(
+                            private, operator_home=operator
+                        )
+                # The substitution entry is gone, the operator credential
+                # was never replaced or diverted, and the victim inode is
+                # byte-exact; no refreshed bytes leaked anywhere.
+                self.assertFalse((target_dir / planted["name"]).exists())
+                self.assertEqual(target.read_bytes(), original_raw)
+                if kind in ("symlink", "hardlink"):
+                    self.assertEqual(victim.read_bytes(), b"victim-bytes")
+                self.assertEqual(list(target_dir.glob(".auth-refresh-*")), [])
+
+    def test_refresh_hardlinked_target_fails_closed_leaving_victim_unchanged(self) -> None:
+        """An operator ``auth.json`` that is a hardlink to a victim file is
+        rejected by the identity precondition (``nlink != 1``) before any
+        mutation, so the shared victim inode stays byte-exact."""
+        operator = self.tmp / "hardlink-operator"
+        target_dir = operator / ".pi" / "agent2"
+        target_dir.mkdir(parents=True, mode=0o700)
+        private = self.tmp / "hardlink-private"
+        source = private / ".pi" / "agent2" / "auth.json"
+        source.parent.mkdir(parents=True, mode=0o700)
+        now = int(time.time() * 1000)
+        document = {
+            "openai-codex": {
+                "type": "oauth", "access": "A" * 32,
+                "refresh": "R" * 32, "accountId": "account-123",
+                "expires": now + 3_600_000,
+            },
+            "ollama": {"type": "api_key", "key": "unchanged-provider"},
+        }
+
+        def publish(path: Path, doc: object) -> bytes:
+            raw = (json.dumps(doc, sort_keys=True) + "\n").encode()
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            return raw
+
+        victim = self.tmp / "hardlink-victim"
+        original_raw = publish(victim, document)
+        os.link(victim, target_dir / "auth.json")
+        rotated = json.loads(json.dumps(document))
+        rotated["openai-codex"].update({
+            "access": "B" * 32, "refresh": "S" * 32,
+            "expires": now + 7_200_000,
+        })
+        publish(source, rotated)
+        with self.assertRaises(launch.SupervisionError):
+            launch._persist_private_pi2_auth(private, operator_home=operator)
+        self.assertEqual(victim.read_bytes(), original_raw)
+        self.assertEqual(
+            stat.S_IMODE(victim.stat().st_mode), 0o600
+        )
+        self.assertEqual(list(target_dir.glob(".auth-refresh-*")), [])
+
     def test_committed_pi2_adapter_has_single_runtime_markers(self) -> None:
         source = (LOOP / "pi2_backend.py").read_bytes()
         self.assertEqual(source.count(b"@@FACTORY_PI2_NODE@@"), 1)

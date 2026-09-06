@@ -69,6 +69,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import selectors
 import shutil
 import signal
@@ -2635,6 +2636,18 @@ class LaunchSupervision:
         (:func:`_persist_private_pi2_auth`) can read and validate it.  The
         private home and every intermediate directory must be real
         directories (never symlinks).
+
+        Every directory component is pinned once: opened with
+        ``O_DIRECTORY|O_NOFOLLOW`` and fstat-bound (dev/ino/mode/uid) against
+        the lstat expectation taken just before the open, so a path swap in
+        the window is detected and fails closed.  From then on only relative
+        names anchored to the pinned agent-directory descriptor are used: a
+        unique ``O_CREAT|O_EXCL`` temp name, ``os.replace`` with
+        ``src_dir_fd``/``dst_dir_fd``, and ``os.unlink`` cleanup.  A swap
+        after pinning cannot redirect the bytes anywhere else: the rename
+        operates on the anchored directory, so the credential lands in the
+        verified original home or the publish fails closed — never in an
+        attacker-chosen directory.
         """
         if self._sanitized_home is None:
             raise SupervisionError(
@@ -2648,7 +2661,9 @@ class LaunchSupervision:
             raise SupervisionError(
                 f"cannot create the private Pi2 agent directory: {exc}"
             ) from exc
-        for path in (home, home / ".pi", agent_dir):
+        components = ((home, ""), (home / ".pi", ".pi"), (agent_dir, "agent2"))
+        expected = []
+        for path, _name in components:
             try:
                 info = os.lstat(path)
             except OSError as exc:
@@ -2659,19 +2674,50 @@ class LaunchSupervision:
                 raise SupervisionError(
                     "private Pi2 path is a symlink or not a directory"
                 )
-        target = agent_dir / "auth.json"
-        directory_fd = os.open(
-            str(agent_dir),
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
+            expected.append(info)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = -1
+        pi_fd = -1
+        agent_fd = -1
         temp_fd = -1
-        temp_path: Optional[Path] = None
+        temp_name: Optional[str] = None
         try:
-            temp_fd, temp_name = tempfile.mkstemp(
-                prefix=".auth-return-", dir=str(agent_dir)
+            open_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow | os.O_CLOEXEC
+            directory_fd = os.open(str(home), open_flags)
+            pi_fd = os.open(".pi", open_flags, dir_fd=directory_fd)
+            agent_fd = os.open("agent2", open_flags, dir_fd=pi_fd)
+            for fd, info in ((directory_fd, expected[0]), (pi_fd, expected[1]),
+                             (agent_fd, expected[2])):
+                pinned = os.fstat(fd)
+                if (pinned.st_dev != info.st_dev or pinned.st_ino != info.st_ino
+                        or pinned.st_uid != info.st_uid
+                        or stat.S_IMODE(pinned.st_mode)
+                        != stat.S_IMODE(info.st_mode)
+                        or not stat.S_ISDIR(pinned.st_mode)):
+                    raise OSError(
+                        "private Pi2 directory identity changed after verification"
+                    )
+            # Everything below is anchored to the pinned agent-directory
+            # descriptor: temporary creation, rename, and cleanup use only
+            # relative names with dir_fd=agent_fd, never pathnames.
+            temp_name = (
+                f".auth-return-{os.getpid()}.{threading.get_ident()}."
+                f"{secrets.token_hex(8)}"
             )
-            temp_path = Path(temp_name)
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+                | os.O_CLOEXEC,
+                0o600,
+                dir_fd=agent_fd,
+            )
             os.fchmod(temp_fd, 0o600)
+            temp_info = os.fstat(temp_fd)
+            if (temp_info.st_nlink != 1
+                    or stat.S_IMODE(temp_info.st_mode) != 0o600):
+                raise OSError(
+                    "credential-return temp target preconditions not met"
+                )
             view = memoryview(data)
             while view:
                 written = os.write(temp_fd, view)
@@ -2681,25 +2727,26 @@ class LaunchSupervision:
             os.fsync(temp_fd)
             os.close(temp_fd)
             temp_fd = -1
-            os.replace(temp_path, target)
-            temp_path = None
-            os.fsync(directory_fd)
+            os.replace(temp_name, "auth.json", src_dir_fd=agent_fd,
+                       dst_dir_fd=agent_fd)
+            temp_name = None
+            os.fsync(agent_fd)
         except OSError as exc:
             raise SupervisionError(
                 f"cannot publish the returned credential: {exc}"
             ) from exc
         finally:
-            if temp_fd >= 0:
+            if temp_name is not None and agent_fd >= 0:
                 try:
-                    os.close(temp_fd)
+                    os.unlink(temp_name, dir_fd=agent_fd)
                 except OSError:
                     pass
-            if temp_path is not None:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
-            os.close(directory_fd)
+            for fd in (temp_fd, agent_fd, pi_fd, directory_fd):
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
     # -- the run -----------------------------------------------------------------
 
@@ -3940,6 +3987,19 @@ def _persist_private_pi2_auth(
     the launch-private ``auth.json``; after the child is fully reaped, this
     trusted parent validates that file and atomically replaces the operator's
     existing mode-0600 store. No model/tool path can select either endpoint.
+
+    The operator ``agent2`` directory is pinned once: opened with
+    ``O_DIRECTORY|O_NOFOLLOW`` and fstat-bound (dev/ino/uid/mode) against the
+    lstat expectation taken just before the open, so a path swap in the window
+    is detected and fails closed.  From then on only relative names anchored
+    to that pinned directory descriptor are used: a unique
+    ``O_CREAT|O_EXCL|O_NOFOLLOW`` temp file (fstat-checked for
+    nlink/regular/uid/mode), a dirfd-relative nofollow re-validation of the
+    expected ``auth.json`` identity immediately before the replace, an
+    ``os.replace`` with ``src_dir_fd``/``dst_dir_fd``, and ``os.unlink``
+    cleanup.  A pathname swap after binding therefore cannot redirect the
+    credential anywhere: the bytes land in the verified original directory or
+    the refresh fails closed.
     """
     source = Path(sanitized_home) / ".pi" / "agent2" / "auth.json"
     target_dir = (operator_home or Path.home()) / ".pi" / "agent2"
@@ -4070,17 +4130,45 @@ def _persist_private_pi2_auth(
     directory_fd = os.open(
         target_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     )
-    temp_path = None
+    temp_name: Optional[str] = None
     temp_fd = -1
     try:
         anchored = os.fstat(directory_fd)
-        if (anchored.st_dev, anchored.st_ino) != (
-            target_dir_info.st_dev, target_dir_info.st_ino
+        if (
+            anchored.st_dev != target_dir_info.st_dev
+            or anchored.st_ino != target_dir_info.st_ino
+            or anchored.st_uid != uid
+            or stat.S_IMODE(anchored.st_mode)
+            != stat.S_IMODE(target_dir_info.st_mode)
+            or not stat.S_ISDIR(anchored.st_mode)
         ):
             raise SupervisionError("Pi2 operator auth directory identity changed")
-        temp_fd, temp_name = tempfile.mkstemp(prefix=".auth-refresh-", dir=target_dir)
-        temp_path = Path(temp_name)
+        # From here only relative names anchored to the pinned directory
+        # descriptor are used (temp creation, target re-validation, replace,
+        # and cleanup all pass dir_fd=directory_fd), so a pathname swap after
+        # binding cannot redirect the credential anywhere else.
+        temp_name = (
+            f".auth-refresh-{os.getpid()}.{threading.get_ident()}."
+            f"{secrets.token_hex(8)}"
+        )
+        temp_fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory_fd,
+        )
         os.fchmod(temp_fd, 0o600)
+        temp_info = os.fstat(temp_fd)
+        if (
+            temp_info.st_nlink != 1
+            or not stat.S_ISREG(temp_info.st_mode)
+            or temp_info.st_uid != uid
+            or stat.S_IMODE(temp_info.st_mode) != 0o600
+        ):
+            raise SupervisionError(
+                "Pi2 auth refresh temp target preconditions not met"
+            )
         view = memoryview(data)
         while view:
             written = os.write(temp_fd, view)
@@ -4090,13 +4178,25 @@ def _persist_private_pi2_auth(
         os.fsync(temp_fd)
         os.close(temp_fd)
         temp_fd = -1
-        before_replace = os.lstat(target)
-        if (before_replace.st_dev, before_replace.st_ino) != (
-            target_info.st_dev, target_info.st_ino
+        current_target = os.stat(
+            "auth.json", dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (
+            current_target.st_dev != target_info.st_dev
+            or current_target.st_ino != target_info.st_ino
+            or current_target.st_uid != uid
+            or current_target.st_nlink != 1
+            or stat.S_IMODE(current_target.st_mode) != 0o600
+            or not stat.S_ISREG(current_target.st_mode)
         ):
-            raise SupervisionError("Pi2 operator auth identity changed before replace")
-        os.replace(temp_path, target)
-        temp_path = None
+            raise SupervisionError(
+                "Pi2 operator auth identity changed before replace"
+            )
+        os.replace(
+            temp_name, "auth.json", src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        temp_name = None
         os.fsync(directory_fd)
         return True
     except OSError as exc:
@@ -4105,9 +4205,9 @@ def _persist_private_pi2_auth(
         data[:] = b"\x00" * len(data)
         if temp_fd >= 0:
             os.close(temp_fd)
-        if temp_path is not None:
+        if temp_name is not None:
             try:
-                os.unlink(temp_path)
+                os.unlink(temp_name, dir_fd=directory_fd)
             except OSError:
                 pass
         os.close(directory_fd)

@@ -2977,6 +2977,161 @@ os._exit(2)
         self.assertEqual(supervisor._credential_return_write_fd, -1)
         self.assertIsNone(supervisor._credential_return_thread)
 
+    # -- publish adversarial tests -------------------------------------------
+    # The publish path is hardened against an untrusted filesystem state
+    # between the operator home and ``.pi/agent2``: every directory component
+    # is pinned once with O_DIRECTORY|O_NOFOLLOW and fstat-bound to the lstat
+    # expectation taken just before the open; only dirfd-relative temp
+    # creation, rename, and cleanup are used afterwards, so pathname swaps
+    # cannot redirect the credential.
+
+    def test_publish_fails_closed_when_agent_dir_swapped_before_pin(self) -> None:
+        """A swap of the ``agent2`` path between the lstat expectation and the
+        pinned ``O_DIRECTORY|O_NOFOLLOW`` open is detected by the fstat
+        dev/ino/mode/uid bind and fails closed: neither the attacker directory
+        nor the displaced original receives the credential."""
+        home = self.tmp / "sanitized-home"
+        agent_dir = home / ".pi" / "agent2"
+        agent_dir.mkdir(parents=True)
+        supervisor = self._openai_supervisor()
+        supervisor._sanitized_home = home
+        returned = self._valid_document()
+        attacker = self.tmp / "attacker-agent-dir"
+        real_open = os.open
+        swapped = False
+
+        def staged_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if path == "agent2" and dir_fd is not None and not swapped:
+                swapped = True
+                agent_dir.rename(self.tmp / "agent2.original")
+                attacker.mkdir()
+                (attacker / "attacker-marker").write_text("owned")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with unittest.mock.patch("os.open", side_effect=staged_open):
+            with self.assertRaises(launch.SupervisionError):
+                supervisor._publish_credential_return_to_private_home(returned)
+        self.assertTrue(swapped)
+        # Bytes never reached the attacker directory or the displaced original.
+        self.assertFalse(attacker.joinpath("auth.json").exists())
+        self.assertFalse(
+            (self.tmp / "agent2.original" / "auth.json").exists()
+        )
+        self.assertEqual(attacker.joinpath("attacker-marker").read_text(), "owned")
+
+    def test_publish_swap_after_dirfd_pin_stays_anchored_in_original(self) -> None:
+        """Swapping the ``.pi/agent2`` pathname after the directory
+        descriptors are pinned cannot redirect the credential: the rename is
+        anchored to the pinned descriptor, so the bytes land only in the
+        displaced original home and never in the attacker-created directory."""
+        home = self.tmp / "sanitized-home"
+        agent_dir = home / ".pi" / "agent2"
+        agent_dir.mkdir(parents=True)
+        supervisor = self._openai_supervisor()
+        supervisor._sanitized_home = home
+        returned = self._valid_document()
+        real_open = os.open
+        swapped = False
+
+        def staged_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if (dir_fd is not None and (flags & os.O_CREAT)
+                    and (flags & os.O_EXCL)
+                    and path.startswith(".auth-return-") and not swapped):
+                # The pinned agent-directory descriptor is already held;
+                # divert the pathname the attacker controls.
+                swapped = True
+                agent_dir.rename(home / ".pi" / "agent2.anchor")
+                attacker = home / ".pi" / "agent2"
+                attacker.mkdir()
+                (attacker / "attacker-marker").write_text("owned")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with unittest.mock.patch("os.open", side_effect=staged_open):
+            supervisor._publish_credential_return_to_private_home(returned)
+        self.assertTrue(swapped)
+        anchor = home / ".pi" / "agent2.anchor"
+        published = anchor / "auth.json"
+        self.assertEqual(published.read_bytes(), returned)
+        self.assertEqual(published.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(published.stat().st_nlink, 1)
+        attacker = home / ".pi" / "agent2"
+        self.assertFalse(attacker.joinpath("auth.json").exists())
+        self.assertEqual(attacker.joinpath("attacker-marker").read_text(), "owned")
+        # No temp litter remains in the anchored directory.
+        self.assertEqual(list(anchor.glob(".auth-return-*")), [])
+
+    def test_publish_fails_closed_on_symlink_components(self) -> None:
+        """A symlinked ``agent2`` or ``.pi`` component fails closed before any
+        write and never resolves through the link."""
+        outsider = self.tmp / "outsider"
+        outsider.mkdir()
+        for component in ("agent2", ".pi"):
+            with self.subTest(component=component):
+                home = self.tmp / f"symlink-home-{component}"
+                home.mkdir()
+                if component == "agent2":
+                    (home / ".pi").mkdir()
+                    (home / ".pi" / "agent2").symlink_to(
+                        outsider, target_is_directory=True
+                    )
+                else:
+                    (home / ".pi").symlink_to(outsider, target_is_directory=True)
+                supervisor = self._openai_supervisor()
+                supervisor._sanitized_home = home
+                with self.assertRaises(launch.SupervisionError):
+                    supervisor._publish_credential_return_to_private_home(
+                        self._valid_document()
+                    )
+                self.assertFalse(outsider.joinpath("auth.json").exists())
+                self.assertFalse(
+                    (home / ".pi" / "agent2" / "auth.json").exists()
+                )
+
+    def test_publish_replaces_hardlinked_target_without_writing_through(self) -> None:
+        """A pre-existing ``auth.json`` hardlinked to a victim file is
+        atomically replaced by a fresh single-link mode-0600 file; the victim
+        inode is untouched and the temp precondition (nlink/mode) holds."""
+        home = self.tmp / "sanitized-home"
+        agent_dir = home / ".pi" / "agent2"
+        agent_dir.mkdir(parents=True)
+        victim = self.tmp / "victim-auth.json"
+        victim.write_bytes(b"victim-bytes")
+        os.link(victim, agent_dir / "auth.json")
+        supervisor = self._openai_supervisor()
+        supervisor._sanitized_home = home
+        returned = self._valid_document()
+        supervisor._publish_credential_return_to_private_home(returned)
+        published = agent_dir / "auth.json"
+        self.assertEqual(published.read_bytes(), returned)
+        self.assertEqual(published.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(published.stat().st_nlink, 1)
+        self.assertEqual(victim.read_bytes(), b"victim-bytes")
+        self.assertEqual(list(agent_dir.glob(".auth-return-*")), [])
+
+    def test_publish_fails_closed_when_component_is_not_a_directory(self) -> None:
+        """A regular file in the component chain fails the directory
+        precondition closed with no writes anywhere."""
+        for component in ("pi-file", "agent2-file"):
+            with self.subTest(component=component):
+                home = self.tmp / f"file-home-{component}"
+                if component == "pi-file":
+                    home.mkdir()
+                    (home / ".pi").write_bytes(b"not a directory")
+                else:
+                    (home / ".pi").mkdir(parents=True)
+                    (home / ".pi" / "agent2").write_bytes(b"not a directory")
+                supervisor = self._openai_supervisor()
+                supervisor._sanitized_home = home
+                with self.assertRaises(launch.SupervisionError):
+                    supervisor._publish_credential_return_to_private_home(
+                        self._valid_document()
+                    )
+                self.assertFalse(
+                    (home / ".pi" / "agent2" / "auth.json").exists()
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
