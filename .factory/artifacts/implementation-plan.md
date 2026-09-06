@@ -1705,4 +1705,11 @@ elevated by prose.
   gate, but these remain implementation methodology rather than live runner
   evidence. This is implementation evidence, not final-audit acceptance and
   does not resolve FACT-020 or the canonical §10 quota-policy mismatch.
+  Runner parity verification at `ba6fbdff295fe6347855bc3aba5f76cd327d714f`
+  passed `tests/test-factory-runner.sh`, installed harness, migration,
+  adversarial, readiness, 97-case campaign, generic leakage, documentation,
+  capability/conformance, audit-receipt, legacy campaign/recovery, and the full
+  `scripts/verify-boilerplate.sh` gate serially. The fixture authority remains
+  explicitly simulated and no production runner/model/campaign/deployment was
+  invoked or evidenced.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.

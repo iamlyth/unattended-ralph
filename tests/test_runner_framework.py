@@ -59,6 +59,10 @@ class RunnerFrameworkTests(unittest.TestCase):
    r=subprocess.run([sys.executable,str(ROOT/"scripts/generate-runner-install-manifest.py"),"--source",str(repo),"--output",str(repo/"m.json")],capture_output=True);self.assertNotEqual(r.returncode,0)
  def test_archive_adapter_namespaces_runner_evidence(self):
   text=(ROOT/"scripts/archive-factory-campaign.py").read_text();self.assertIn('runner-evidence/',text);self.assertIn('PurePosixPath',text)
+  archive=module("fixture_archive",ROOT/"scripts/archive-factory-campaign.py")
+  with tempfile.TemporaryDirectory() as td:
+   root=pathlib.Path(td);(root/"safe").write_text("x");(root/"link").symlink_to("safe")
+   with self.assertRaises(SystemExit):archive.inspect(root,os.getuid())
  def test_bounds_and_nonce_controls_are_present(self):
   broker=(ROOT/"scripts/factory-runner-broker.py").read_text()
   for token in ("NONCE_TTL","NONCE_OUTSTANDING","MAX_ARCHIVE","MAX_FILES","PrivatePIDs=yes","TasksMax=256","MemoryMax=2G","RuntimeMaxSec=1800","broker_auth_sha256"):self.assertIn(token,broker)
