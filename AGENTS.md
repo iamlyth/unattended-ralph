@@ -1,8 +1,7 @@
 # Factory Operational Guide
 
-Keep this file brief. Progress/evidence live in
-`.factory/artifacts/implementation-plan.md`; the crash handoff lives in
-`.ralph/agent/scratchpad.md` (legacy, excluded from model context).
+Progress/evidence live in `.factory/artifacts/implementation-plan.md`; the
+legacy crash handoff is excluded from model context.
 
 ## Sources of truth
 
