@@ -103,31 +103,94 @@ def argv(authority,items,product,artifacts,commit="",tree=""):
   if x.startswith("@/"):x=str(authority.path(x[2:]))
   out.append(x)
  return out
+def _limits():
+ resource.setrlimit(resource.RLIMIT_CORE,(0,0));resource.setrlimit(resource.RLIMIT_FSIZE,(MAX_LOG,MAX_LOG));resource.setrlimit(resource.RLIMIT_NOFILE,(128,128));resource.setrlimit(resource.RLIMIT_NPROC,(256,256))
 def bounded(cmd,env,cwd,limit):
- p=subprocess.Popen(cmd,cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True);out,err=p.communicate(timeout=limit)
+ """Spool output under kernel limits; always kill/reap the process group."""
+ with tempfile.TemporaryFile() as out_file,tempfile.TemporaryFile() as err_file:
+  p=subprocess.Popen(cmd,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=out_file,stderr=err_file,start_new_session=True,preexec_fn=_limits)
+  timed=False
+  try:p.wait(timeout=limit)
+  except subprocess.TimeoutExpired:timed=True
+  if timed:
+   try:os.killpg(p.pid,signal.SIGTERM)
+   except ProcessLookupError:pass
+   try:p.wait(timeout=2)
+   except subprocess.TimeoutExpired:
+    try:os.killpg(p.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    p.wait(timeout=5)
+  out_file.seek(0);err_file.seek(0);out=out_file.read(MAX_LOG+1);err=err_file.read(MAX_LOG+1)
+ if timed:raise BrokerError("operation deadline exceeded")
  if len(out)>MAX_LOG or len(err)>MAX_LOG:raise BrokerError("output limit exceeded")
- try:os.killpg(p.pid,signal.SIGKILL)
- except ProcessLookupError:pass
  if p.returncode:raise BrokerError("contained operation failed")
  return out,err
+def executable(entry,name):
+ try:pin=entry["executable_pins"][name]
+ except KeyError as e:raise BrokerError(f"missing executable enrollment: {name}") from e
+ path=Path(pin["path"]);fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ try:
+  i=os.fstat(fd);h=hashlib.sha256();off=0
+  while True:
+   b=os.pread(fd,65536,off)
+   if not b:break
+   h.update(b);off+=len(b)
+  if (i.st_dev,i.st_ino,h.hexdigest())!=(pin["device"],pin["inode"],pin["sha256"]):raise BrokerError(f"executable pin substitution: {name}")
+ finally:os.close(fd)
+ return str(path)
+
+class WritablePool:
+ """One root-mounted byte/inode-bounded tmpfs per operation."""
+ def __init__(self,entry,runroot,uid):
+  self.root=runroot/"writable";self.root.mkdir(mode=0o700);self.mount=executable(entry,"mount");self.umount=executable(entry,"umount");self.mounted=False
+  opts="size=768M,nr_inodes=65536,mode=0700,uid=0,gid=0,nosuid,nodev,noexec"
+  result=subprocess.run([self.mount,"-t","tmpfs","-o",opts,"factory-runner-writable",str(self.root)],capture_output=True,timeout=10)
+  if result.returncode:raise BrokerError("bounded writable tmpfs unavailable")
+  self.mounted=True
+  for name in ("home","build","output"):
+   p=self.root/name;p.mkdir(mode=0o700);os.chown(p,uid,uid)
+ def paths(self):return self.root/"home",self.root/"build",self.root/"output"
+ def close(self):
+  if self.mounted:
+   result=subprocess.run([self.umount,str(self.root)],capture_output=True,timeout=10)
+   if result.returncode:raise BrokerError("bounded writable tmpfs cleanup not proven")
+   self.mounted=False
+  self.root.rmdir()
+
 def resource_props(res):
  props=["PrivateDevices=yes"]
  if res["devices"]:
   props=["PrivateDevices=no","DevicePolicy=closed",*[f"DeviceAllow={x['path']} {x['access']}" for x in res["devices"]]]
  return props
-def run_operation(entry,authority,desc,name,source,runroot,resource):
- home=runroot/"home";build=runroot/"build";output=runroot/"output"
- for p in (home,build,output):p.mkdir(mode=0o700)
- if name!="gate": (output/name).mkdir(mode=0o700)
+def run_operation(entry,authority,desc,name,source,runroot,resource,uid):
+ pool=WritablePool(entry,runroot,uid);home,build,output=pool.paths()
+ if name!="gate": (output/name).mkdir(mode=0o700);os.chown(output/name,uid,uid)
  env={"HOME":"/run/factory/home","PATH":":".join(authority.document["trusted_path"]),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","FACTORY_PRODUCT_ROOT":"/run/factory/source","FACTORY_BUILD_ROOT":"/run/factory/build","FACTORY_RUNNER_ARTIFACT_DIR":f"/run/factory/output/{name}"}
- command=argv(authority,desc["argv"],Path("/run/factory/source"),Path("/run/factory/output"));systemd=entry["systemd_run"]
+ command=argv(authority,desc["argv"],Path("/run/factory/source"),Path("/run/factory/output"));systemd=executable(entry,"systemd-run");systemctl=executable(entry,"systemctl")
  props=["NoNewPrivileges=yes","CapabilityBoundingSet=","AmbientCapabilities=","ProtectSystem=strict","ProtectHome=yes","PrivateTmp=yes","PrivateMounts=yes","PrivatePIDs=yes","PrivateIPC=yes","ProtectKernelTunables=yes","ProtectKernelModules=yes","ProtectControlGroups=yes","RestrictSUIDSGID=yes","RestrictNamespaces=yes","IPAddressDeny=any","KillMode=control-group","TasksMax=256","MemoryMax=2G","RuntimeMaxSec=1800","TimeoutStopSec=10","LimitFSIZE=50331648",f"BindReadOnlyPaths={source}:/run/factory/source",f"BindReadOnlyPaths={authority.root}:{authority.root}",f"BindPaths={build}:/run/factory/build",f"BindPaths={home}:/run/factory/home",f"BindPaths={output}:/run/factory/output","WorkingDirectory=/run/factory/source",*resource_props(resource)]
- # D-Bus is default-deny. An adopter must enroll an exact proxy executable and
- # calls; the broker never grants the host bus directly.
- if resource["dbus"] is not None:raise BrokerError("D-Bus resource requires an externally installed proxy plugin; direct bus access is forbidden")
+ # D-Bus is default-deny. When declared, only an independently pinned proxy
+ # and the exact destination/member allowlist are exposed; never the host bus.
+ proxy=None;dbus=resource["dbus"]
+ if dbus is not None:
+  proxy_root=runroot/"dbus";proxy_root.mkdir(mode=0o700);socket=proxy_root/"bus.sock";proxy_exe=executable(entry,"dbus-proxy")
+  pargv=[proxy_exe,dbus["address"],str(socket),"--filter",*[f"--call={dbus['destination']}={member}" for member in dbus["calls"]]]
+  proxy=subprocess.Popen(pargv,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,preexec_fn=_limits)
+  deadline=time.monotonic()+5
+  while time.monotonic()<deadline and not socket.exists() and proxy.poll() is None:time.sleep(.02)
+  if not socket.exists() or proxy.poll() is not None:raise BrokerError("enrolled D-Bus proxy failed closed")
+  os.chown(socket,uid,uid);props.append(f"BindReadOnlyPaths={socket}:/run/factory/dbus.sock");env["DBUS_SYSTEM_BUS_ADDRESS" if dbus["bus"]=="system" else "DBUS_SESSION_BUS_ADDRESS"]="unix:path=/run/factory/dbus.sock"
  unit=f"factory-runner-{entry['name']}-{os.urandom(8).hex()}.service";cmd=[systemd,"--quiet","--wait","--pipe","--collect","--unit",unit,"--service-type=exec",f"--uid={entry['uid']}",*[f"--property={x}" for x in props],*[f"--setenv={k}={v}" for k,v in env.items()],*command]
- try:return bounded(cmd,{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"},Path("/"),1900)+(output,unit)
- finally:subprocess.run([entry["systemctl"],"stop",unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+ try:return bounded(cmd,{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"},Path("/"),1900)+(output,unit,pool)
+ except BaseException:
+  subprocess.run([systemctl,"stop",unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+  pool.close();raise
+ finally:
+  if proxy is not None:
+   try:os.killpg(proxy.pid,signal.SIGTERM);proxy.wait(timeout=3)
+   except (ProcessLookupError,subprocess.TimeoutExpired):
+    try:os.killpg(proxy.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    proxy.wait(timeout=3)
 def sign(evidence,entry):
  token=os.urandom(32);r,w=os.pipe();os.write(w,token);os.close(w);payload={"schema":"factory-runner-sign-request/v1","broker_auth_sha256":hashlib.sha256(token).hexdigest(),"manifest":evidence};env={"SUDO_UID":str(entry["uid"]),"PATH":"/usr/bin:/bin"}
  if os.environ.get("FACTORY_BROKER_TEST_MODE")=="1":env.update({"FACTORY_RUNNER_POLICY":os.environ["FACTORY_RUNNER_POLICY"],"FACTORY_SIGNER_TEST_MODE":"1"})
@@ -154,7 +217,7 @@ def main():
   authority=load_authority(Path(entry["probe_authority"]),entry["probe_authority_sha256"],fixture=os.environ.get("FACTORY_BROKER_TEST_MODE")=="1");contract=authority.class_contract(entry["name"])
   if sorted(contract["capabilities"])!=req["capabilities"]:raise BrokerError("authority/class capability mismatch")
   work=Path(tempfile.mkdtemp(prefix="request-",dir=entry["workspace_root"]));work.chmod(0o700);source=work/"source";source.mkdir();extract(raw,source)
-  git=entry["executable_pins"]["git"]["path"]
+  git=executable(entry,"git")
   env={"HOME":str(work),"PATH":"/usr/bin:/bin","GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null"}
   bounded([git,"init","-q"],env,source,120);bounded([git,"add","-f","--all"],env,source,120)
   tree=bounded([git,"write-tree"],env,source,120)[0].decode().strip();co=base64.b64decode(req["commit_object_b64"],validate=True);commit=bounded([git,"hash-object","-t","commit","-w","--stdin"],env,source,120)[0] if False else subprocess.run([git,"hash-object","-t","commit","-w","--stdin"],cwd=source,env=env,input=co,capture_output=True,check=True).stdout.decode().strip()
@@ -163,15 +226,22 @@ def main():
   for index,(name,desc) in enumerate([("gate",contract["gate"]),*sorted(contract["capabilities"].items())]):
    runroot=work/f"run-{index}";runroot.mkdir(mode=0o700);resource={"devices":[],"dbus":None,"collectors":[],"dedicated_host":False} if name=="gate" else entry["resources"][name]
    if resource["dedicated_host"] is not True and (resource["devices"] or resource["dbus"] or resource["collectors"]):raise BrokerError("privileged resources require dedicated_host=true")
-   out,err,output,unit=run_operation(entry,authority,desc,name,source,runroot,resource);allout+=out;allerr+=err
+   out,err,output,unit,pool=run_operation(entry,authority,desc,name,source,runroot,resource,uid);allout+=out;allerr+=err
    if name!="gate":
     d,p=collect(output,[name],{name:desc["artifacts"]},expected_uid=uid);h=hold(d,p,work);held.append(h);semantic=authority.analyzer(desc["semantic_id"]);cmd=argv(authority,semantic["argv"],Path("/noncandidate"),h.root,req["commit"],req["tree"]);bounded(cmd,{"PATH":":".join(authority.document["trusted_path"]),"LANG":"C.UTF-8"},Path("/"),180);descriptors+=d;payload+=h.payload
    for collector in resource["collectors"]:
-    outc,_=bounded(collector["argv"],{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"},Path("/"),30);observations.append({"capability":name,"collector":collector["id"],"sha256":hashlib.sha256(outc).hexdigest()})
+    pin_name=next((n for n,p in entry["executable_pins"].items() if p["path"]==collector["argv"][0]),None)
+    if pin_name is None:raise BrokerError("host collector executable is not enrolled")
+    collector_argv=[executable(entry,pin_name),*collector["argv"][1:]]
+    outc,_=bounded(collector_argv,{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"},Path("/"),30);observations.append({"capability":name,"collector":collector["id"],"sha256":hashlib.sha256(outc).hexdigest()})
+   pool.close();pool=None
    cleanup.append({"capability":name,"unit":unit,"clean":True});shutil.rmtree(runroot)
   descriptors.sort(key=lambda x:x["path"]);payload.sort(key=lambda x:x["path"]);total,dd=validate_descriptors(descriptors,req["capabilities"]);scope=hashlib.sha256(json.dumps({"campaign_id":req["campaign_id"],"readiness_nonce":req["readiness_nonce"],"runner":entry["name"],"commit":req["commit"],"nonce":req["nonce"],"artifact_manifest_sha256":dd},sort_keys=True,separators=(",",":")).encode()).hexdigest();pins={n:{k:p[k] for k in ("path","sha256","device","inode")} for n,p in sorted(entry["executable_pins"].items())};host={"executable_pins":pins,"resource_policy_sha256":hashlib.sha256(json.dumps(entry["resources"],sort_keys=True,separators=(",",":")).encode()).hexdigest(),"resource_observations":observations,"containment":{"systemd_scope":True,"private_mounts":True,"private_pids":True,"bounded_writable_tmpfs":True,"broker_only_signing":True},"cleanup_states":cleanup};e={"schema":"factory-runner-receipt/v3","host_authority":host,"result":"pass","runner":entry["name"],"commit":req["commit"],"tree":req["tree"],"environment_blob":req["environment_blob"],"archive_sha256":req["archive_sha256"],"campaign_id":req["campaign_id"],"readiness_nonce":req["readiness_nonce"],"nonce":req["nonce"],"authority_sha256":authority.digest,"capabilities":req["capabilities"],"exit_code":0,"timed_out":False,"started_at":started,"finished_at":int(time.time()),"cleanup":True,"stdout_sha256":hashlib.sha256(allout).hexdigest(),"stderr_sha256":hashlib.sha256(allerr).hexdigest(),"artifact_protocol":PROTOCOL,"artifact_limits":{"count":MAX_ARTIFACTS,"file_bytes":MAX_ARTIFACT_FILE,"aggregate_bytes":MAX_ARTIFACT_BYTES},"artifact_count":len(descriptors),"artifact_bytes":total,"artifact_manifest_sha256":dd,"artifact_scope_sha256":scope,"artifacts":descriptors};signed=sign(e,entry);emit({**e,"stdout_b64":base64.b64encode(allout).decode(),"stderr_b64":base64.b64encode(allerr).decode(),"artifact_payload":payload,**{k:signed[k] for k in ("manifest_b64","signature_b64","signer_principal","signer_key_sha256","signature_algorithm","namespace","signature_sha256")}});return 0
  except (BrokerError,PolicyError,AuthorityError,ArtifactError,OSError,ValueError,subprocess.SubprocessError,KeyError) as e:fail(str(e))
  finally:
+  if locals().get("pool"):
+   try:pool.close()
+   except Exception:pass
   for h in locals().get("held",[]):h.close()
   if "authority" in locals():authority.close()
   if "work" in locals():shutil.rmtree(work,ignore_errors=True)

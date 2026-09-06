@@ -41,7 +41,7 @@ def _resource(value: object,label: str)->dict:
  if not isinstance(devices,list) or len(devices)!=len({json.dumps(x,sort_keys=True) for x in devices}): raise PolicyError(f"{label}.devices is invalid")
  for item in devices:
   if not isinstance(item,dict) or set(item)!={"path","access"} or item["access"] not in {"r","rw"}: raise PolicyError(f"{label}.devices entry is invalid")
-  _path(item["path"],label+".devices.path")
+  if not _path(item["path"],label+".devices.path").startswith("/dev/"): raise PolicyError(f"{label}.devices path must be under /dev")
  dbus=value["dbus"]
  if dbus is not None:
   if not isinstance(dbus,dict) or set(dbus)!={"bus","address","destination","calls"} or dbus["bus"] not in {"system","session"}: raise PolicyError(f"{label}.dbus is invalid")
@@ -73,11 +73,18 @@ def validate_policy(data: object)->dict:
   for key in ("broker_helper","probe_authority","signer_key","signer_principal_file","nonce_ledger","systemd_run","systemctl","cgroup_root"): _path(e[key],label+"."+key)
   if e["broker_helper"]!="/usr/local/libexec/factory-runner-broker" or e["probe_authority_status"]!="enrolled" or not SHA256.fullmatch(str(e["probe_authority_sha256"])): raise PolicyError(f"{label} authority is not exactly enrolled")
   pins=e["executable_pins"]
-  if not isinstance(pins,dict) or not pins or len(pins)>64 or any(not NAME.fullmatch(str(k)) for k in pins): raise PolicyError(f"{label}.executable_pins is invalid")
+  required_pins={"git","ssh-keygen","systemd-run","systemctl","mount","umount"}
+  if (not isinstance(pins,dict) or not required_pins.issubset(pins) or len(pins)>64
+          or any(not NAME.fullmatch(str(k)) for k in pins)):
+   raise PolicyError(f"{label}.executable_pins is incomplete or invalid")
   for key,pin in pins.items(): _pin(pin,label+".executable_pins."+key)
   resources=e["resources"]
   if not isinstance(resources,dict) or set(resources)!=set(e["allowed_capabilities"]): raise PolicyError(f"{label}.resources must exactly cover capabilities")
-  for cap,res in resources.items(): _resource(res,label+".resources."+cap)
+  for cap,res in resources.items():
+   _resource(res,label+".resources."+cap)
+   if res["dbus"] is not None and "dbus-proxy" not in pins: raise PolicyError(f"{label}.{cap} D-Bus proxy lacks executable enrollment")
+   for collector in res["collectors"]:
+    if collector["argv"][0] not in {pin["path"] for pin in pins.values()}: raise PolicyError(f"{label}.{cap} collector executable is not pinned")
   names.add(name);uids.add(uid)
  return data
 

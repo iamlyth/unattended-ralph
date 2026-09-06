@@ -18,6 +18,18 @@ def protected(path):
  i=os.stat(path)
  fixture=os.environ.get("FACTORY_SIGNER_TEST_MODE")=="1";owner=os.getuid() if fixture else 0
  if not stat.S_ISREG(i.st_mode) or i.st_uid!=owner or i.st_nlink!=1 or stat.S_IMODE(i.st_mode)!=0o600:raise SignerError("signing state ownership/mode is unsafe")
+def pinned_executable(entry,name):
+ pin=entry["executable_pins"][name];path=Path(pin["path"]);fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ try:
+  i=os.fstat(fd);h=hashlib.sha256();off=0
+  while True:
+   b=os.pread(fd,65536,off)
+   if not b:break
+   h.update(b);off+=len(b)
+  if (i.st_dev,i.st_ino,h.hexdigest())!=(pin["device"],pin["inode"],pin["sha256"]):raise SignerError("signing executable differs from enrollment")
+ finally:os.close(fd)
+ return str(path)
+
 def validate(m,e):
  fields={"schema","host_authority","result","runner","commit","tree","environment_blob","archive_sha256","campaign_id","readiness_nonce","nonce","authority_sha256","capabilities","exit_code","timed_out","started_at","finished_at","cleanup","stdout_sha256","stderr_sha256","artifact_protocol","artifact_limits","artifact_count","artifact_bytes","artifact_manifest_sha256","artifact_scope_sha256","artifacts"}
  if not isinstance(m,dict) or set(m)!=fields or m.get("schema")!="factory-runner-receipt/v3" or m.get("result")!="pass":raise SignerError("manifest schema/fields are invalid")
@@ -49,10 +61,11 @@ def main():
   policy=load_policy();uid=int(os.environ["SUDO_UID"]);entry=class_for_uid(policy,uid);manifest=validate(req["manifest"],entry)
   key=Path(entry["signer_key"]);principal_path=Path(entry["signer_principal_file"]);protected(key);protected(principal_path);principal=principal_path.read_text().strip()
   if principal!=entry["name"]:raise SignerError("signer principal differs from class")
-  pub=subprocess.run([entry["executable_pins"]["ssh-keygen"]["path"],"-y","-f",str(key)],capture_output=True,text=True,timeout=30,check=True).stdout.strip().split()
+  ssh_keygen=pinned_executable(entry,"ssh-keygen")
+  pub=subprocess.run([ssh_keygen,"-y","-f",str(key)],capture_output=True,text=True,timeout=30,check=True).stdout.strip().split()
   public=" ".join(pub[:2]);key_digest=hashlib.sha256(public.encode()).hexdigest()
   signed={**manifest,"signer_principal":principal,"signer_key_sha256":key_digest,"namespace":policy["namespace"],"signature_algorithm":"ssh-ed25519"};canonical=(json.dumps(signed,sort_keys=True,indent=2)+"\n").encode()
-  proc=subprocess.run([entry["executable_pins"]["ssh-keygen"]["path"],"-Y","sign","-f",str(key),"-n",policy["namespace"]],input=canonical,capture_output=True,timeout=120,check=True);sig=proc.stdout
+  proc=subprocess.run([ssh_keygen,"-Y","sign","-f",str(key),"-n",policy["namespace"]],input=canonical,capture_output=True,timeout=120,check=True);sig=proc.stdout
   out={"schema":"factory-runner-sign-response/v1","result":"signed","manifest_b64":base64.b64encode(canonical).decode(),"signature_b64":base64.b64encode(sig).decode(),"signer_principal":principal,"signer_key_sha256":key_digest,"signature_algorithm":"ssh-ed25519","namespace":policy["namespace"],"signature_sha256":hashlib.sha256(sig).hexdigest()}
   print(json.dumps(out,sort_keys=True,separators=(",",":")));return 0
  except (SignerError,PolicyError,OSError,ValueError,subprocess.SubprocessError) as e:die(str(e))

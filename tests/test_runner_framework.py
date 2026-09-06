@@ -17,7 +17,7 @@ class RunnerFrameworkTests(unittest.TestCase):
  def pin(self,path="/usr/bin/true"):return {"path":path,"sha256":"a"*64,"device":1,"inode":2,"status":"enrolled"}
  def klass(self,n,uid):
   cap=f"cap-{n}"
-  return {"name":f"class-{n}","uid":uid,"account":f"account-{n}","workspace_root":f"/srv/factory-runner/{n}","allowed_capabilities":[cap],"broker_helper":"/usr/local/libexec/factory-runner-broker","probe_authority":f"/opt/factory-runner/authority/{n}","probe_authority_sha256":"b"*64,"probe_authority_status":"enrolled","signer_key":f"/etc/factory-runner/{n}.key","signer_principal_file":f"/etc/factory-runner/{n}.principal","nonce_ledger":f"/var/lib/factory-runner/{n}/nonces","systemd_run":"/usr/bin/systemd-run","systemctl":"/usr/bin/systemctl","cgroup_root":"/sys/fs/cgroup","approved_groups":[f"account-{n}"],"executable_pins":{"git":self.pin(),"ssh-keygen":self.pin("/usr/bin/ssh-keygen")},"resources":{cap:{"devices":[],"dbus":None,"collectors":[],"dedicated_host":False}}}
+  return {"name":f"class-{n}","uid":uid,"account":f"account-{n}","workspace_root":f"/srv/factory-runner/{n}","allowed_capabilities":[cap],"broker_helper":"/usr/local/libexec/factory-runner-broker","probe_authority":f"/opt/factory-runner/authority/{n}","probe_authority_sha256":"b"*64,"probe_authority_status":"enrolled","signer_key":f"/etc/factory-runner/{n}.key","signer_principal_file":f"/etc/factory-runner/{n}.principal","nonce_ledger":f"/var/lib/factory-runner/{n}/nonces","systemd_run":"/usr/bin/systemd-run","systemctl":"/usr/bin/systemctl","cgroup_root":"/sys/fs/cgroup","approved_groups":[f"account-{n}"],"executable_pins":{"git":self.pin(),"ssh-keygen":self.pin("/usr/bin/ssh-keygen"),"systemd-run":self.pin("/usr/bin/systemd-run"),"systemctl":self.pin("/usr/bin/systemctl"),"mount":self.pin("/usr/bin/mount"),"umount":self.pin("/usr/bin/umount")},"resources":{cap:{"devices":[],"dbus":None,"collectors":[],"dedicated_host":False}}}
  def test_arbitrary_class_counts_and_exact_resource_coverage(self):
   for count in (1,2,7,64):policy.validate_policy({"schema":policy.POLICY_SCHEMA,"namespace":"factory-runner-receipt","classes":[self.klass(str(i),1000+i) for i in range(count)]})
   bad={"schema":policy.POLICY_SCHEMA,"namespace":"factory-runner-receipt","classes":[self.klass("x",1001)]};bad["classes"][0]["resources"]={}
@@ -62,5 +62,17 @@ class RunnerFrameworkTests(unittest.TestCase):
  def test_bounds_and_nonce_controls_are_present(self):
   broker=(ROOT/"scripts/factory-runner-broker.py").read_text()
   for token in ("NONCE_TTL","NONCE_OUTSTANDING","MAX_ARCHIVE","MAX_FILES","PrivatePIDs=yes","TasksMax=256","MemoryMax=2G","RuntimeMaxSec=1800","broker_auth_sha256"):self.assertIn(token,broker)
+ def test_fork_setsid_output_disk_and_nonce_flood_controls(self):
+  text=(ROOT/"scripts/factory-runner-broker.py").read_text()
+  for token in ("KillMode=control-group","PrivatePIDs=yes","TasksMax=256","RLIMIT_FSIZE","RLIMIT_NPROC","nr_inodes=65536","size=768M","NONCE_OUTSTANDING=32"):self.assertIn(token,text)
+  broker=module("fixture_broker",ROOT/"scripts/factory-runner-broker.py")
+  with self.assertRaises(broker.BrokerError):broker.bounded([sys.executable,"-c","import sys;sys.stdout.write('x'*(5*1024*1024))"],{"PATH":"/usr/bin:/bin"},pathlib.Path("/"),10)
+ def test_pin_substitution_and_publication_race_controls(self):
+  broker=(ROOT/"scripts/factory-runner-broker.py").read_text();client=(ROOT/"scripts/run-factory-runners.py").read_text()
+  self.assertIn("executable pin substitution",broker);self.assertIn("os.O_NOFOLLOW",broker)
+  self.assertIn("renameat2",client);self.assertIn("publication collision",client);self.assertIn("hold_tree(staging)",client)
+ def test_authorized_keys_install_is_nofollow_and_configurable(self):
+  text=(ROOT/"scripts/install-factory-runner-v2.sh").read_text()
+  self.assertIn("Repeat",(ROOT/"docs/OPERATIONS.md").read_text());self.assertIn("os.O_NOFOLLOW",text);self.assertIn("set(keys)!=accounts",text);self.assertIn("transaction.json",text);self.assertIn("current-rollback",text)
 
 if __name__=="__main__":unittest.main(verbosity=2)
