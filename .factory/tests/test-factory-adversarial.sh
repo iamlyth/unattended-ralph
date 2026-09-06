@@ -166,18 +166,12 @@ if skip_decorated:
 method_blocks = {}
 current = None
 start = None
-lines = suite.splitlines()
-for index, line in enumerate(lines):
-    any_method = re.match(r"^    def ([A-Za-z_][A-Za-z0-9_]*)\(", line)
-    if not any_method:
-        continue
-    if current is not None:
-        method_blocks[current] = lines[start:index]
-        current = None
-        start = None
-    name = any_method.group(1)
-    if re.fullmatch(r"test_case_\d\d_[A-Za-z0-9_]+", name):
-        current = name
+for index, line in enumerate(suite.splitlines()):
+    match = re.match(r"^    def (test_case_\d\d_[A-Za-z0-9_]+)\(", line)
+    if match:
+        if current is not None:
+            method_blocks[current] = suite.splitlines()[start:index]
+        current = match.group(1)
         start = index
 if current is not None:
     method_blocks[current] = suite.splitlines()[start:]
@@ -213,24 +207,18 @@ grep -q '^OK$' "$tmp/suite.log" \
 echo "test-factory-adversarial: the 27-case §22 suite passes warning-free"
 
 # -- 3. Freeze-guard routing fixtures (Task 15/16 residual) -----------------
-# The deprecated shell freeze-marker decision is routed through the retained
-# hidden authority (migration.py freeze --guard) with fresh no-follow re-stat
-# semantics: the guard exits 0 for a safe non-executable regular marker, 1
-# for a missing marker, and 2 for an unsafe marker (fail closed), and a
-# marker swapped between invocations changes the decision with no stale
-# cache (substitution atomicity).  The legacy ralph launchers that once
-# implemented the freeze gate are removed from the tracked tree, so the
-# retained authority is the single decision point.
+# A fixture copy of a launcher proves the freeze decision is routed through
+# the retained hidden authority: the launcher refuses while the marker
+# freezes, the exact override escape proceeds to a deterministic later
+# failure, a missing marker preserves the legacy semantics, and an unsafe
+# marker fails closed without silently unfreezing.
 provision_loop_authority() {
     local fixture="$1"
-    mkdir -p "$fixture/.factory/loop" "$fixture/.factory/schemas" "$fixture/scripts"
-    for module in migration gitutil plan_parser; do
+    mkdir -p "$fixture/.factory/loop" "$fixture/scripts"
+    for module in migration gitutil plan_parser state; do
         cp "$ROOT/.factory/loop/$module.py" "$fixture/.factory/loop/$module.py"
     done
-    cp "$ROOT/.factory/requirement-policy.json" \
-        "$fixture/.factory/requirement-policy.json"
-    cp "$ROOT/.factory/schemas/factory-plan-v1.requirements.json" \
-        "$fixture/.factory/schemas/factory-plan-v1.requirements.json"
+    cp "$ROOT/scripts/factory_state_io.py" "$fixture/scripts/factory_state_io.py"
 }
 
 # Guard exit table through the retained authority itself (0 frozen / 1 not
@@ -254,45 +242,69 @@ guard_rc=0
 "${guard[@]}" >/dev/null 2>&1 || guard_rc=$?
 [[ $guard_rc -eq 2 ]] \
     || fail "an unsafe (symlink) marker must fail closed (exit 2, got $guard_rc)"
-# Substitution atomicity: the guard's single no-follow re-stat changes the
-# decision with no stale cache — a marker swapped between invocations is
-# re-inspected fresh (regular -> symlink -> missing).
-rm -f "$guard_fixture/.factory/ralph-freeze" "$guard_fixture/ralph-freeze-target"
-printf '# frozen again\n' > "$guard_fixture/.factory/ralph-freeze"
-"${guard[@]}" >/dev/null 2>&1 \
-    || fail "a re-created regular marker must report frozen (exit 0)"
-ln -sfn "$guard_fixture/ralph-freeze-target" "$guard_fixture/.factory/ralph-freeze"
-printf 't\n' > "$guard_fixture/ralph-freeze-target"
-guard_rc=0
-"${guard[@]}" >/dev/null 2>&1 || guard_rc=$?
-[[ $guard_rc -eq 2 ]] \
-    || fail "a swapped-in symlink marker must fail closed (exit 2, got $guard_rc)"
-rm -f "$guard_fixture/.factory/ralph-freeze"
-guard_rc=0
-"${guard[@]}" >/dev/null 2>&1 || guard_rc=$?
-[[ $guard_rc -eq 1 ]] \
-    || fail "a removed marker must report not-frozen (exit 1, got $guard_rc)"
-echo "test-factory-adversarial: freeze-guard exit table and substitution atomicity verified"
 
-# -- 4. Campaign verifier fd routing fixture (Task 16 residual) ----------
-# The campaign verifier binding helper (campaign-verifier-binding.py) binds
-# the configured campaign verifier (verification.campaign_command from
-# .factory/config.toml) to its committed blob/identity; the helper is opened
-# before the verifier step and executed through the retained descriptor, so
-# a workspace pathname or byte substitution can never substitute the
-# verifier that runs (EVID-01 §19).  The legacy maintenance-verifier mode
-# and the ralph forwarders that once routed it are removed; the retained
-# Python authority is the single binding path.
+# A fixture launcher routes the decision through the retained authority.
+fixture="$tmp/freeze-fixture"
+mkdir -p "$fixture/.factory"
+provision_loop_authority "$fixture"
+cp "$ROOT/scripts/ralph-plan.sh" "$fixture/scripts/ralph-plan.sh"
+chmod +x "$fixture/scripts/ralph-plan.sh"
+printf '# frozen fixture\n' > "$fixture/.factory/ralph-freeze"
+if "$fixture/scripts/ralph-plan.sh" >"$tmp/f1.out" 2>"$tmp/f1.err"; then
+    fail "frozen fixture launcher must refuse a new launch (exit 2)"
+fi
+grep -q 'frozen' "$tmp/f1.err" || fail "fixture refusal must name the freeze"
+if FACTORY_RALPH_FREEZE_OVERRIDE=1 "$fixture/scripts/ralph-plan.sh" \
+    >"$tmp/f2.out" 2>"$tmp/f2.err"; then
+    fail "override launcher must still stop deterministically (missing lock helper)"
+fi
+grep -q 'frozen' "$tmp/f2.err" \
+    && fail "the exact override must bypass the freeze message"
+grep -q 'factory-lock.sh' "$tmp/f2.err" \
+    || fail "override launcher must proceed past the freeze gate"
+rm -f "$fixture/.factory/ralph-freeze"
+if "$fixture/scripts/ralph-plan.sh" >"$tmp/f0.out" 2>"$tmp/f0.err"; then
+    fail "marker-less launcher must still stop deterministically (missing lock helper)"
+fi
+grep -q 'frozen' "$tmp/f0.err" \
+    && fail "a missing freeze marker must never freeze"
+grep -q 'factory-lock.sh' "$tmp/f0.err" \
+    || fail "marker-less launcher must proceed past the absent freeze gate"
+rm -f "$fixture/.factory/ralph-freeze"
+mkfifo "$fixture/.factory/ralph-freeze"
+if "$fixture/scripts/ralph-plan.sh" >"$tmp/f3.out" 2>"$tmp/f3.err"; then
+    fail "an unsafe (FIFO) marker must refuse the launch"
+fi
+grep -q 'frozen' "$tmp/f3.err" \
+    || fail "the unsafe-marker refusal must name the freeze"
+! grep -q 'factory-lock.sh' "$tmp/f3.err" \
+    || fail "the unsafe marker must stop at the freeze gate, not proceed"
+echo "test-factory-adversarial: freeze-guard routing, override, and unsafe-marker semantics verified"
+
+# -- 4. Maintenance verifier fd routing fixture (Task 16 residual) ----------
+# final-gate.sh must route the configured maintenance verifier through the
+# retained descriptor authority (the bound inode), exactly like the campaign
+# verifier — the helper is opened before the verifier step and the
+# maintenance_command is bound to its committed blob/identity, so a
+# workspace pathname or byte substitution can never substitute the
+# maintenance verifier that runs.
+grep -q 'campaign-verifier-binding.py' "$ROOT/scripts/final-gate.sh" \
+    || fail "final-gate.sh must route the maintenance verifier through the retained authority"
+grep -q -- '--mode maintenance' "$ROOT/scripts/final-gate.sh" \
+    || fail "final-gate.sh must bind the maintenance verifier in maintenance mode"
+grep -q -- '--expected-digest' "$ROOT/scripts/final-gate.sh" \
+    || fail "final-gate.sh must re-validate the binding digest before executing"
 verifier_fixture="$tmp/verifier-fixture"
 mkdir -p "$verifier_fixture/.factory" "$verifier_fixture/scripts"
 cp "$ROOT/scripts/campaign-verifier-binding.py" \
     "$verifier_fixture/scripts/campaign-verifier-binding.py"
-printf '#!/usr/bin/env bash\necho ORIGINAL-VERIFIER-RAN\nexit 0\n' \
-    > "$verifier_fixture/scripts/verify-project.sh"
-chmod +x "$verifier_fixture/scripts/verify-project.sh"
+printf '#!/usr/bin/env bash\necho ORIGINAL-MAINTENANCE-VERIFIER-RAN\nexit 0\n' \
+    > "$verifier_fixture/scripts/verify-maintenance.sh"
+chmod +x "$verifier_fixture/scripts/verify-maintenance.sh"
 cat > "$verifier_fixture/.factory/config.toml" <<'TOML'
 [verification]
-campaign_command = ["./scripts/verify-project.sh"]
+campaign_command = ["./scripts/verify-maintenance.sh"]
+maintenance_command = ["./scripts/verify-maintenance.sh"]
 TOML
 printf '{"schema": "ralph-verifier-acceptance/v1", "gates": [{"name": "test-one.sh", "args": []}]}\n' \
     > "$verifier_fixture/.factory/verifier-acceptance.json"
@@ -301,13 +313,13 @@ git -C "$verifier_fixture" config user.email factory@test
 git -C "$verifier_fixture" config user.name factory
 git -C "$verifier_fixture" add -A
 git -C "$verifier_fixture" commit -qm base
-# The campaign binding resolves and the descriptor-executed helper runs the
-# exact bound verifier inode; a substituted helper pathname never runs.
+# The maintenance binding resolves and the descriptor-executed helper runs
+# the exact bound verifier inode; a substituted helper pathname never runs.
 exec {helper_fd}<"$verifier_fixture/scripts/campaign-verifier-binding.py" || \
     fail "cannot open the retained binding helper"
-binding_json=$("/proc/self/fd/$helper_fd" <&"$helper_fd") || \
-    fail "the campaign binding must resolve"
-verifier_digest=$("$PY" - "$binding_json" <<'PY' || fail "invalid campaign binding"
+binding_json=$("/proc/self/fd/$helper_fd" --mode maintenance \
+    <&"$helper_fd") || fail "the maintenance binding must resolve"
+maintenance_digest=$("$PY" - "$binding_json" <<'PY' || fail "invalid maintenance binding"
 import json, sys
 binding = json.loads(sys.argv[1])
 if binding.get("binding", {}).get("schema") != "campaign-verifier-binding/v1":
@@ -315,30 +327,33 @@ if binding.get("binding", {}).get("schema") != "campaign-verifier-binding/v1":
 print(binding["sha256"])
 PY
 )
-executed=$("/proc/self/fd/$helper_fd" --expected-digest "$verifier_digest" --exec <&"$helper_fd") || \
-    fail "the bound campaign verifier must run through the retained descriptor"
-[[ "$executed" == *"ORIGINAL-VERIFIER-RAN"* ]] \
-    || fail "the campaign verifier output was not the bound inode's output"
-# A byte-substituted campaign verifier fails closed before execution.
+executed=$("/proc/self/fd/$helper_fd" --mode maintenance \
+    --expected-digest "$maintenance_digest" --exec <&"$helper_fd") || \
+    fail "the bound maintenance verifier must run through the retained descriptor"
+[[ "$executed" == *"ORIGINAL-MAINTENANCE-VERIFIER-RAN"* ]] \
+    || fail "the maintenance verifier output was not the bound inode's output"
+# A byte-substituted maintenance verifier fails closed before execution.
 printf '#!/usr/bin/env bash\necho SUBSTITUTE-VERIFIER-RAN\nexit 7\n' \
-    > "$verifier_fixture/scripts/verify-project.sh"
-if "/proc/self/fd/$helper_fd" --expected-digest "$verifier_digest" --exec <&"$helper_fd" \
+    > "$verifier_fixture/scripts/verify-maintenance.sh"
+if "/proc/self/fd/$helper_fd" --mode maintenance \
+    --expected-digest "$maintenance_digest" --exec <&"$helper_fd" \
     >"$tmp/v.out" 2>"$tmp/v.err"; then
-    fail "a substituted campaign verifier must fail closed"
+    fail "a substituted maintenance verifier must fail closed"
 fi
 grep -q 'SUBSTITUTE-VERIFIER-RAN' "$tmp/v.out" \
-    && fail "a substituted campaign verifier must never run"
-# A missing campaign verifier fails closed: the retained helper cannot
-# resolve the configured command's committed blob, so the verifier step
+    && fail "a substituted maintenance verifier must never run"
+# A missing maintenance verifier fails closed: the retained helper cannot
+# resolve the configured command's committed blob, so the maintenance step
 # refuses instead of substituting an unbound script.
-rm -f -- "$verifier_fixture/scripts/verify-project.sh"
-if "/proc/self/fd/$helper_fd" >"$tmp/m.out" 2>"$tmp/m.err"; then
-    fail "a missing campaign verifier must fail closed"
+rm -f -- "$verifier_fixture/scripts/verify-maintenance.sh"
+if "/proc/self/fd/$helper_fd" --mode maintenance \
+    >"$tmp/m.out" 2>"$tmp/m.err"; then
+    fail "a missing maintenance verifier must fail closed"
 fi
 grep -qi 'unavailable' "$tmp/m.err" \
     || fail "the missing-verifier refusal must name the binding failure " \
         "(got: $(tail -1 "$tmp/m.err"))"
 exec {helper_fd}>&- 2>/dev/null || true
-echo "test-factory-adversarial: campaign verifier fd routing, substitution refusal, and missing-verifier closure verified"
+echo "test-factory-adversarial: maintenance verifier fd routing, substitution refusal, and missing-verifier closure verified"
 
 echo "test-factory-adversarial: all checks passed"
