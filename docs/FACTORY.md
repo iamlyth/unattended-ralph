@@ -37,7 +37,7 @@ tracks task status and verification evidence.
 - Exactly one primary worker may edit, stage, or commit repository files; Git history and commit operations run in the trusted orchestrator, never in model tools.
 - Tests, documentation, machine evidence, and an independent audit are completion gates.
 - Before each round's planner, the trusted campaign executes the exact committed `.factory/pre-round-hooks.json` registry once in order. Its strict schema admits only fixed internal implementations and initially contains mandatory `branch_guard`; no command, argv, quota, or cookie surface is accepted.
-- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` (schema `factory-state/v2`, ignored) carries the lifecycle fields plus the exact hook configuration/commit binding, ordered result digest chain, and durable start/completion cursor.
+- Exactly one minimal mutable control-state file `.factory-state/factory-loop.json` uses the explicit EXT-STATE-V2-01 extension. State-v1 remains canonical STATE-01; v2 is not represented as the exact §11 field set.
 - You review the configured development branch and manually promote it to `main`.
 
 No Git worktrees are used.
@@ -508,14 +508,14 @@ only for policy checks (`mutating_workers = 1`, `integration_workers = 1`,
 
 ### Guard contract
 
-Quota diagnostics remain implemented by the hidden standard-library guard
-`.factory/loop/usage.py` (with its fetch child `.factory/loop/usage_fetch.py`),
-but Task 32 deliberately configures no quota hook and launch authorization has
-no quota/cookie parameters. A direct operator check emits the machine-readable
-`ollama-usage/v1` status object with only redacted fields. The retained shell
-guard `.factory/tools/ollama-usage-guard.sh` keeps its `--check`/`--wait` exit
-contract (0 allowed, 1 quota threshold, 2 fatal, 3 transient) for supervisors
-and compatibility; both guards agree on the §10 decision table. Cookie bytes
+The hidden standard-library guard `.factory/loop/usage.py` (and fetch child
+`.factory/loop/usage_fetch.py`) implements the fixed §10 contract. Immediately
+before every model invocation the Campaign runs `--check`; exit 1 or 3 runs a
+campaign-deadline-bounded `--wait` followed by one final `--check`. Only final
+exit 0 launches a model. Fatal, undocumented, wait, final-check, or signal
+failure launches zero models and reaches a finite non-success. The visible
+`scripts/ollama-usage-guard.sh` is only the canonical compatibility forwarder;
+no quota/cookie parameter or credential enters the model surface. Cookie bytes
 reach the fetch child only on a private stdin pipe and the workspace
 `.ollama-usage-env` store is metadata-detected only, never a credential
 authority.
@@ -526,7 +526,9 @@ The session and weekly percentages are below `OLLAMA_THRESHOLD`; the model invoc
 
 ### Waiting
 
-At or above the threshold, the guard sleeps for `OLLAMA_WAIT_INTERVAL_SECONDS` and checks again. A zero `OLLAMA_WAIT_MAX_SECONDS` means unlimited waiting. SIGINT/SIGTERM still stop the process.
+At or above the threshold, the guard sleeps for `OLLAMA_WAIT_INTERVAL_SECONDS`
+and checks again, always capped by the campaign's remaining deadline and poll
+bound. SIGINT, SIGTERM, and SIGHUP stop and reap the wait path.
 
 ### Transient failure
 

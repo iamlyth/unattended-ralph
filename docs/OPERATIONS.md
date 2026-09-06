@@ -28,15 +28,15 @@ control-state authority.
 ## Control-state authority (STATE-01)
 
 The trusted control plane keeps exactly one mutable lifecycle file,
-`.factory-state/factory-loop.json` (schema `factory-state/v2`), carrying only
-the §11 lifecycle fields plus the exact pre-round registry configuration
-and commit binding, ordered result digest chain, and monotonic hook
-start/completion cursor. The cursor is written before execution, so a crash
+`.factory-state/factory-loop.json`. Canonical STATE-01 is documented by
+`factory-state/v1`; the active `factory-state/v2` format is the explicitly
+mapped EXT-STATE-V2-01 readiness/pre-round extension and is not claimed to be
+the exact §11 field set. It adds the registry binding, result chain, and cursor. The cursor is written before execution, so a crash
 can never cause a possibly side-effecting hook to run twice. It is the only mutable lifecycle
 file; the append-only `.factory-state/state-digest-ledger.jsonl` records
 evidence only and is never orchestration state. All writes are atomic,
 no-follow, mode-0600, and ownership/mode/link-count/(dev, inode) checked via
-`.factory/tools/factory_state_io.py`; loading re-validates the recorded repository
+`.factory/loop/factory_state_io.py`; loading re-validates the recorded repository
 identity against the canonical root descriptor and any expected campaign
 binding, so a forged, moved, symlinked, oversized, wrong-owner, or wrong-mode
 file fails closed. The §11 transition table is enforced edge for edge,
@@ -109,8 +109,12 @@ Round zero is mandatory for every real provider. The strict committed
 IDs from the internal adapter registry; command strings and argv are not policy
 syntax. It also defines accepted-commit versus current-product invalidation and
 an optional project-adapted external human trust/checklist/capture contract.
+Human approval bytes must be canonical JSON and carry a bounded detached
+`ssh-ed25519` signature verified by `ssh-keygen -Y verify` against the exact
+root-owned external trust path, principal, namespace, issuance time, and
+current non-revocation state; a digest-shaped field is never approval.
 The generic policy intentionally enrolls no production authority and therefore
-returns `human_block`/`blocked` before any runner, gate, or model executes. It
+returns the schema-valid `blocked` terminal before any runner, gate, or model executes. It
 never infers hardware requirements.
 
 Readiness binds the exact accepted commit/tree, current commit/tree, config,
@@ -124,7 +128,8 @@ data only.
 Only the Campaign, while holding the exclusive root-descriptor lock, may mint
 a real-provider role authorization. Each mint is fresh and one-use and binds
 campaign/readiness nonces, phase, role, task, attempt, prompt, tools,
-provider/model/backend/runtime, and current plus accepted commit/tree. Replay,
+provider/model/backend/runtime, role and prompt digests, and current plus
+accepted commit/tree. Replay,
 restart, cross-campaign, phase, task, commit, or tree substitution fails closed.
 Standalone and programmatic launch are synthetic-only. `--readiness-only`
 terminates as `readiness_complete`; campaign `success` additionally requires
@@ -759,11 +764,11 @@ exact binding bytes, and the real installed suite runs end-to-end.
 
 ### Guard contract and schema reference (QUOTA-01, QUOTA-02)
 
-The retained `.factory/tools/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
+The canonical `scripts/ollama-usage-guard.sh` ``--check``/``--wait`` exit table
 and §10 decision table are now enforced by the hidden standard-library guard
 ``.factory/loop/usage.py`` (with its fetch child ``.factory/loop/usage_fetch.py``)
-retained for direct operator diagnostics but not configured as a campaign hook
-and not exposed by launch authorization. Exit codes: 0 allowed, 1 quota
+runs in the trusted Campaign parent immediately before every invocation and is
+not exposed by launch authorization. Exit codes: 0 allowed, 1 quota
 threshold, 2 fatal (missing/expired cookies or unparseable settings), 3
 transient. A
 single check emits the machine-readable ``ollama-usage/v1`` status object

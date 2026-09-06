@@ -2133,6 +2133,7 @@ class Campaign:
         # actually ran and classified findings/blocked.
         self._records: List[PhaseRecord] = []
         self._launch_store: Optional[readiness_module.AuthorizationStore] = None
+        self._readiness_document: Optional[Dict[str, object]] = None
 
     # -- acquisition ------------------------------------------------------------
 
@@ -2792,14 +2793,21 @@ class Campaign:
             "attempt": attempt,
             "round": state.current_round,
             "prompt_set_digest": bounded.prompt_set_digest,
+            "role_prompt_digest": bounded.role_prompt_digests[role],
             "tools": list(launch_module.DEFAULT_ALLOWED_TOOLS[role]),
             "provider": bounded.provider,
             "model": bounded.model,
+            "backend": str(Path(bounded.backend).absolute()),
             "runtime": runtime_budget,
             "current_commit": head,
             "accepted_commit": bounded.accepted_commit,
             "current_tree": self._git.text(["show", "-s", "--format=%T", head]).strip(),
+            "accepted_tree": self._git.text(["show", "-s", "--format=%T", bounded.accepted_commit]).strip(),
             "plan_digest": plan_sha256(plan_blob),
+            "task_excerpt_digest": (
+                plan_sha256(launch_module.task_excerpt_bytes(plan_blob, task_id))
+                if role == "developer" else ""
+            ),
         }
         token = self._launch_store.mint(claims)
         return launch_role_attempt(
@@ -4605,12 +4613,49 @@ class Campaign:
         # Human approval is deliberately validated separately from machine
         # gates.  A required but unavailable authority remains blocked.
         human_digest = readiness_module.digest({"required": False})
-        if policy.get("human_approval") is not None:
-            return "human_block"
-        status, _ = readiness_module.evaluate(
+        human = policy.get("human_approval")
+        if human is not None:
+            try:
+                approval = readiness_module.read_dirfd_file(
+                    self._root, human["approval_path"], maximum=256*1024)
+                signature = readiness_module.read_dirfd_file(
+                    self._root, human["signature_path"], maximum=64*1024)
+                trust = readiness_module.read_external_trust(human["trust_path"])
+                human_digest = readiness_module.validate_human_authority(
+                    policy, approval, trust, signature_raw=signature,
+                    accepted_commit=accepted, accepted_tree=tree,
+                    blob_at=self._git.blob_at,
+                )
+            except readiness_module.HumanAuthorityBlocked:
+                return "human_block"
+            except readiness_module.ReadinessError:
+                return "infrastructure_failure"
+        status, result_digests = readiness_module.evaluate(
             policy, aggregate_sha256=aggregate_digest,
             gate_results=gate_results, human_sha256=human_digest,
         )
+        if status == "complete":
+            manifest_raw, _ = evidence_module.secure_read_bytes(
+                Path(self._config.install_manifest), maximum=INSTALL_MANIFEST_MAX,
+                what="production install manifest",
+            )
+            current_tree=self._git.text(["show","-s","--format=%T",current]).strip()
+            bindings=readiness_module.readiness_bindings(
+                accepted_commit=accepted, accepted_tree=tree,
+                current_commit=current, current_tree=current_tree,
+                config_sha256=plan_sha256(self._git.blob_at(accepted,".factory/config.toml")),
+                environment_sha256=plan_sha256(self._git.blob_at(accepted,".factory/environment.toml")),
+                specification_sha256=self._config.specification_digest,
+                plan_sha256=self._config.plan_digest,
+                contracts_sha256=plan_sha256(self._git.blob_at(accepted,".factory/capability-contracts.json")),
+                policy_sha256=plan_sha256(policy_raw),
+                trust_sha256=human_digest,
+                install_manifest_sha256=plan_sha256(manifest_raw),
+            )
+            self._readiness_document=readiness_module.result_document(
+                campaign_id=self._config.campaign_id, nonce=nonce,
+                status=status, bindings=bindings, results=result_digests,
+            )
         return status
 
     def _readiness_terminal(self, status: str) -> CampaignResult:
@@ -4627,6 +4672,9 @@ class Campaign:
             phase_history=(),
         )
         result.validate(); validate_campaign_result(result)
+        if self._readiness_document is not None:
+            state_module.atomic_write_json(
+                self._root, "readiness-result.json", self._readiness_document)
         self._publish_result(result)
         return result
 
@@ -4662,10 +4710,14 @@ class Campaign:
                 readiness_status = self._run_readiness()
                 if readiness_status != "complete" or self._config.readiness_only:
                     return self._readiness_terminal(readiness_status)
-                self._launch_store = readiness_module.open_locked_authorization_store(
+                if self._readiness_document is None:
+                    raise CampaignPhaseError("complete readiness document was not published")
+                state_module.atomic_write_json(
+                    self._root, "readiness-result.json", self._readiness_document)
+                self._launch_store = readiness_module._open_locked_authorization_store(
                     self._root, self._config.state_namespace,
                     self._config.campaign_id, self._runner_readiness_nonce(),
-                    self._lock.fd,
+                    self._lock.fd, self._readiness_document,
                 )
             state, recovered = self._load_or_init_state()
             history: List[PhaseRecord] = []

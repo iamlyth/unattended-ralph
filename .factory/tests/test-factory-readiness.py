@@ -14,7 +14,7 @@ class ReadinessPolicyTests(unittest.TestCase):
           "production_authority":{"enrolled":True,"reason":"fixture authority"},
           "required_runner_classes":[{"id":"class-a","capabilities":["cap-a"]},{"id":"class-b","capabilities":["cap-b","cap-c"]}],
           "required_capabilities":["cap-a","cap-c"],
-          "conformance_gate_ids":["conformance-planning"],"core_gate_ids":["boilerplate-verification"],
+          "conformance_gate_ids":["conformance-planning","conformance-implementation"],"core_gate_ids":["boilerplate-verification"],
           "human_approval":None,
           "invalidation":{"accepted_commit":["runner-aggregate","capability-evidence","conformance-planning"],"current_product":["boilerplate-verification"],"paths":{"boilerplate-verification":["src"]}}
         }
@@ -46,7 +46,7 @@ class ReadinessPolicyTests(unittest.TestCase):
         gates={gate:{"ran":True,"exit":0,"digest":hashlib.sha256(gate.encode()).hexdigest()} for gate in policy["conformance_gate_ids"]+policy["core_gate_ids"]}
         status,results=readiness.evaluate(policy,aggregate_sha256="a"*64,gate_results=gates,human_sha256="b"*64)
         self.assertEqual(status,"complete")
-        self.assertEqual(set(results),{"aggregate","human","conformance-planning","boilerplate-verification"})
+        self.assertEqual(set(results),{"aggregate","human","conformance-planning","conformance-implementation","boilerplate-verification"})
         gates["boilerplate-verification"]["exit"]=1
         self.assertEqual(readiness.evaluate(policy,aggregate_sha256="a"*64,gate_results=gates,human_sha256="b"*64)[0],"findings")
 
@@ -60,9 +60,26 @@ class ReadinessPolicyTests(unittest.TestCase):
         with self.assertRaises(readiness.ReadinessError): readiness.result_document(campaign_id="fixture",nonce="9"*64,status="complete",bindings=bindings,results={"aggregate":"0"*64})
 
     def test_missing_required_human_authority_blocks(self):
-        policy=self.policy(); policy["human_approval"]={"required":True,"approval_schema":"project-approval-v1","approval_path":".factory/approval.json","signature_path":".factory/approval.sig","signature_namespace":"project-approval","trust_scope":"project-review","checklist":["reviewed"],"captures":[]}
+        policy=self.policy(); policy["human_approval"]={"required":True,"approval_schema":"project-approval-v1","approval_path":".factory/approval.json","signature_path":".factory/approval.sig","signature_namespace":"project-approval","trust_scope":"project-review","trust_path":"/etc/factory/human-trust.json","checklist":["reviewed"],"captures":[]}
         policy=readiness.validate_policy(policy)
         with self.assertRaises(readiness.HumanAuthorityBlocked): readiness.validate_human_authority(policy,None,None,accepted_commit="a"*40,accepted_tree="b"*40,blob_at=lambda c,p:b"")
+
+    def test_human_approval_requires_detached_signature_and_current_trust(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory=Path(td); key=directory/"id"; approval_path=directory/"approval.json"
+            subprocess.run(["ssh-keygen","-q","-t","ed25519","-N","","-f",str(key)],check=True)
+            issued=1700000000
+            approval={"schema":"project-approval-v1","status":"approved","commit":"a"*40,"tree":"b"*40,"checklist":["reviewed"],"captures":[],"reviewer":"reviewer-1","issued_at":issued}
+            raw=readiness.canonical_bytes(approval);approval_path.write_bytes(raw)
+            subprocess.run(["ssh-keygen","-Y","sign","-f",str(key),"-n","project-approval",str(approval_path)],check=True,stdout=subprocess.DEVNULL)
+            signature=(directory/"approval.json.sig").read_bytes();public=(directory/"id.pub").read_text().strip()
+            trust=readiness.canonical_bytes({"schema":"factory-human-trust/v2","status":"active","scope":"project-review","namespace":"project-approval","keys":[{"principal":"reviewer-1","public_key":public,"issued_at":issued-1,"revoked_at":None}]})
+            policy=self.policy();policy["human_approval"]={"required":True,"approval_schema":"project-approval-v1","approval_path":".factory/approval.json","signature_path":".factory/approval.sig","signature_namespace":"project-approval","trust_scope":"project-review","trust_path":"/etc/factory/human-trust.json","checklist":["reviewed"],"captures":[]};policy=readiness.validate_policy(policy)
+            value=readiness.validate_human_authority(policy,raw,trust,signature_raw=signature,accepted_commit="a"*40,accepted_tree="b"*40,blob_at=lambda c,p:b"",now=issued+1)
+            self.assertRegex(value,r"^[0-9a-f]{64}$")
+            revoked=json.loads(trust);revoked["keys"][0]["revoked_at"]=issued+1
+            with self.assertRaises(readiness.HumanAuthorityBlocked):readiness.validate_human_authority(policy,raw,readiness.canonical_bytes(revoked),signature_raw=signature,accepted_commit="a"*40,accepted_tree="b"*40,blob_at=lambda c,p:b"",now=issued+2)
+            with self.assertRaises(readiness.HumanAuthorityBlocked):readiness.validate_human_authority(policy,raw+b" ",trust,signature_raw=signature,accepted_commit="a"*40,accepted_tree="b"*40,blob_at=lambda c,p:b"",now=issued+1)
 
     def test_public_import_cannot_mint_authorization_store(self):
         with tempfile.TemporaryDirectory() as td:
@@ -70,7 +87,7 @@ class ReadinessPolicyTests(unittest.TestCase):
             fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
             try:
                 with self.assertRaises(readiness.AuthorizationError):
-                    readiness.AuthorizationStore(root,"state/campaign","fixture","a"*64,fd,object())
+                    readiness.AuthorizationStore(root,"state/campaign","fixture","a"*64,fd,{})
             finally: os.close(fd)
 
     def test_campaign_ids_and_nonces_are_canonical_lowercase(self):

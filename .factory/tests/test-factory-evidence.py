@@ -127,6 +127,7 @@ def _mkdir(path: Path, mode: int = 0o700) -> Path:
 
 
 def _write(path: Path, data: bytes | str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
     return path
 
@@ -235,7 +236,7 @@ class RepoFixture:
     def __init__(self, tmp: Path, name: str = "work") -> None:
         self.root = tmp / name
         self.root.mkdir(parents=True)
-        for rel in ("scripts", ".factory"):
+        for rel in (".factory", ".factory/tools"):
             (self.root / rel).mkdir(parents=True, exist_ok=True)
         _write(self.root / ".factory" / "me", "fixture marker\n")
         _git(self.root, "init", "-q", "-b", "develop")
@@ -387,7 +388,7 @@ class ManifestFixture:
     def __init__(self, root: Path) -> None:
         self.root = root
         _mkdir(self.root)
-        for rel in ("scripts", "docs", ".factory"):
+        for rel in ("docs", ".factory", ".factory/tools"):
             (self.root / rel).mkdir(parents=True, exist_ok=True)
         _mkdir(self.root / STATE_DIR)
         self.trust = {
@@ -1798,7 +1799,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         marker = self.tmp / "fake-invoked"
         root = _mkdir(self.tmp / "coordinator-ws")
         for rel in (".factory/artifacts", ".ralph/agent",
-                    ".factory-state", "scripts"):
+                    ".factory-state", ".factory/tools"):
             _mkdir(root / rel)
         _write(root / ".factory/artifacts/implementation-plan.md",
                "# fixture plan\n")
@@ -1860,7 +1861,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         fake_bin = self._fake_bin()
         marker = self.tmp / "fake-invoked"
         root = _mkdir(self.tmp / "audit-validator-ws")
-        for rel in (".factory/artifacts", "scripts"):
+        for rel in (".factory/artifacts", ".factory/tools"):
             _mkdir(root / rel)
         _write(root / ".factory/artifacts/implementation-plan.md",
                "[fixture-plan]\n")
@@ -1909,7 +1910,7 @@ class PinnedExecutableBoundaryTests(unittest.TestCase):
         deterministically at the digest match; the hostile env must produce
         byte-identical output and never invoke the fake binaries."""
         root = _mkdir(self.tmp / "audit-validator-complete-ws")
-        for rel in (".factory/artifacts", ".factory-state", "scripts"):
+        for rel in (".factory/artifacts", ".factory-state", ".factory/tools"):
             _mkdir(root / rel)
         _write(root / ".factory/artifacts/implementation-plan.md",
                "[fixture-plan]\n")
@@ -2599,12 +2600,8 @@ class CampaignVerifierIntegrationTests(unittest.TestCase):
         config = dataclasses.replace(
             ws.derive_config(),
             verification_command=("./src/missing-verify.sh",))
-        result = campaign_module.Campaign(config).run()
-        self.assertEqual(result.terminal_phase, "infrastructure_failure")
-        self.assertEqual(self._exit_code(result), 5)
-        # No verification record reached a pass outcome.
-        self.assertFalse(any(r.phase == "verification" and r.outcome == "pass"
-                             for r in result.phase_history))
+        with self.assertRaises(campaign_module.CampaignBindingError):
+            campaign_module.Campaign(config).run()
 
 
 if __name__ == "__main__":

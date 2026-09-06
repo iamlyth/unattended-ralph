@@ -1019,7 +1019,6 @@ class FindingsProductionLaunch(unittest.TestCase):
             outcome = campaign_module.launch_role_attempt(
                 config, role="planner", head=head, round_number=2,
                 findings_payload=findings,
-                _confinement_proof=object(),
             )
         self.assertEqual(outcome.exit_status, 0)
         self.assertFalse(outcome.interrupted)
@@ -1035,7 +1034,6 @@ class FindingsProductionLaunch(unittest.TestCase):
             campaign_module.launch_role_attempt(
                 config, role="developer", head=head, task_id=1,
                 findings_payload=b"payload",
-                _confinement_proof=object(),
             )
 
 

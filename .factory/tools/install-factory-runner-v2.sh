@@ -29,7 +29,8 @@ def read(path,maximum=128*1024*1024,root=False):
   return os.read(fd,i.st_size+1)
  finally:os.close(fd)
 def canonical(path):return json.loads(read(path))
-m=json.loads(read(manifest,root=True));policy=json.loads(read(policy_path,root=True));transport=json.loads(read(transport_path,root=True));launcher=json.loads(read(launcher_path,root=True))
+manifest_raw=read(manifest,root=True);policy_raw=read(policy_path,root=True);transport_raw=read(transport_path,root=True);launcher_raw=read(launcher_path,root=True)
+m=json.loads(manifest_raw);policy=json.loads(policy_raw);transport=json.loads(transport_raw);launcher=json.loads(launcher_raw)
 if m.get('schema')!='factory-runner-install-manifest/v2':die('install manifest schema invalid')
 if policy.get('schema')!='factory-runner-policy/v3' or set(policy)!={'schema','namespace','classes'} or not 1<=len(policy['classes'])<=64:die('policy schema/classes invalid')
 if transport.get('schema')!='factory-runner-transport/v1' or set(transport)!={'schema','classes'}:die('transport manifest invalid')
@@ -69,7 +70,7 @@ def verify_generation():
  if json.loads(read('/etc/factory-runner/runner-policy.json'))!=policy:die('installed policy differs')
  for name,c in classes.items():
   account=c['account'];home=pathlib.Path(pwd.getpwnam(account).pw_dir);ak=home/'.ssh/authorized_keys';raw=read(ak,65536).decode()
-  key=read(keys[account],65536).decode().strip();forced=f'restrict,command="/usr/local/libexec/factory-runner-server" {key}'
+  key=read(keys[account],65536,root=True).decode().strip();forced=f'restrict,command="/usr/local/libexec/factory-runner-server" {key}'
   if raw!=forced+'\n':die('authorized_keys does not contain exact restrictive ForcedCommand')
  if json.loads(read('/etc/factory-runner/client/ssh-launcher.json'))!=launcher:die('launcher manifest differs')
 if verb=='verify':verify_generation();print('runner-installer: installed generation verified');raise SystemExit(0)
@@ -78,13 +79,27 @@ state.mkdir(mode=0o700,parents=True,exist_ok=True);generations.mkdir(mode=0o755,
 journal=state/'transaction.json'
 if journal.exists():
  j=json.loads(read(journal));old=j.get('old')
- if old and pathlib.Path(old).is_dir():
+ for item in reversed(j.get('replaced',[])):
+  dest=pathlib.Path(item['dest']);backup=pathlib.Path(item['backup']) if item['backup'] else None
+  if dest.exists() or dest.is_symlink():
+   if dest.is_dir() and not dest.is_symlink():shutil.rmtree(dest)
+   else:dest.unlink()
+  if backup is not None and (backup.exists() or backup.is_symlink()):os.replace(backup,dest)
+ if old and pathlib.Path(old).is_dir() and not current.exists():
   tmp=current.with_name('.current-recover');tmp.unlink(missing_ok=True);tmp.symlink_to(old);os.replace(tmp,current)
  journal.unlink()
 if target.exists():
  # Idempotent only for exact complete generation.
  verify_generation();print('runner-installer: generation already installed');raise SystemExit(0)
 stage=pathlib.Path(tempfile.mkdtemp(prefix='.generation-',dir=generations));old=str(current.resolve()) if current.is_symlink() else None
+backupdir=pathlib.Path(tempfile.mkdtemp(prefix='transaction-backup-',dir=state));replaced=[]
+def replace_transactional(temp,dest):
+ dest=pathlib.Path(dest);backup=backupdir/str(len(replaced))
+ if dest.exists() or dest.is_symlink():os.replace(dest,backup);replaced.append((dest,backup))
+ else:replaced.append((dest,None))
+ os.replace(temp,dest)
+ data={'old':old,'new':str(target),'replaced':[{'dest':str(d),'backup':str(b) if b else None} for d,b in replaced]}
+ jt=state/'.transaction.next';jt.unlink(missing_ok=True);fd=os.open(jt,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,(json.dumps(data,sort_keys=True)+'\n').encode());os.fsync(fd);os.close(fd);os.replace(jt,journal)
 try:
  (stage/'source').mkdir(mode=0o700)
  for rel,desc in m['files'].items():
@@ -92,34 +107,38 @@ try:
   if len(body)!=desc['size'] or hashlib.sha256(body).hexdigest()!=desc['sha256']:die('source differs from authenticated manifest')
   dest=stage/'source'/rel;dest.parent.mkdir(mode=0o700,parents=True,exist_ok=True);fd=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,desc['mode']);os.write(fd,body);os.fsync(fd);os.close(fd);os.chmod(dest,desc['mode'])
  os.rename(stage,target);stage=None
- jf=os.open(journal,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(jf,(json.dumps({'old':old,'new':str(target)},sort_keys=True)+'\n').encode());os.fsync(jf);os.close(jf)
+ jf=os.open(journal,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(jf,(json.dumps({'old':old,'new':str(target),'replaced':[]},sort_keys=True)+'\n').encode());os.fsync(jf);os.close(jf)
  # Install compatibility executables from immutable generation by copy; verify closes the loop.
  lib=pathlib.Path('/usr/local/libexec');lib.mkdir(parents=True,exist_ok=True)
  for srcname,destname in [('factory-runner-server.py','factory-runner-server'),('factory-runner-broker.py','factory-runner-broker'),('factory-runner-signer.py','factory-runner-signer')]:
-  src=target/'source/scripts'/srcname;tmp=lib/('.'+destname+'.new');tmp.unlink(missing_ok=True);shutil.copyfile(src,tmp);os.chmod(tmp,0o755);os.replace(tmp,lib/destname)
+  src=target/'source/.factory/tools'/srcname;tmp=lib/('.'+destname+'.new');tmp.unlink(missing_ok=True);shutil.copyfile(src,tmp);os.chmod(tmp,0o755);replace_transactional(tmp,lib/destname)
  bundle=lib/'factory-runner-v2.bundle';bt=lib/'.factory-runner-v2.bundle.new';shutil.rmtree(bt,ignore_errors=True);bt.mkdir(mode=0o755)
- for n in ('factory_runner_policy.py','factory_runner_authority.py','factory_runner_artifacts.py'):shutil.copyfile(target/'source/scripts'/n,bt/n);os.chmod(bt/n,0o644)
- if bundle.exists():shutil.rmtree(bundle)
- os.rename(bt,bundle)
+ for n in ('factory_runner_policy.py','factory_runner_authority.py','factory_runner_artifacts.py'):shutil.copyfile(target/'source/.factory/tools'/n,bt/n);os.chmod(bt/n,0o644)
+ replace_transactional(bt,bundle)
  etc=pathlib.Path('/etc/factory-runner');(etc/'client').mkdir(parents=True,exist_ok=True);(etc/'principals').mkdir(parents=True,exist_ok=True)
- for path,body,mode in [(etc/'runner-policy.json',read(policy_path),0o400),(etc/'transport-manifest.json',read(transport_path),0o400),(etc/'client/ssh-launcher.json',read(launcher_path),0o400)]:
-  tmp=path.with_name('.'+path.name+'.new');tmp.write_bytes(body);os.chmod(tmp,mode);os.replace(tmp,path)
+ for path,body,mode in [(etc/'runner-policy.json',policy_raw,0o400),(etc/'transport-manifest.json',transport_raw,0o400),(etc/'client/ssh-launcher.json',launcher_raw,0o400)]:
+  tmp=path.with_name('.'+path.name+'.new');tmp.write_bytes(body);os.chmod(tmp,mode);replace_transactional(tmp,path)
  sudo=pathlib.Path('/etc/sudoers.d/factory-runner-broker');sudo_body=('\n'.join(f'{c["account"]} ALL=(root) NOPASSWD: /usr/local/libexec/factory-runner-broker' for c in policy['classes'])+'\n').encode()
  sudo_stage=pathlib.Path(tempfile.mkstemp(prefix='factory-runner-sudoers-',dir='/etc/sudoers.d')[1]);sudo_stage.write_bytes(sudo_body);os.chmod(sudo_stage,0o440)
  checked=os.spawnv(os.P_WAIT,'/usr/sbin/visudo',['visudo','-cf',str(sudo_stage)])
  if checked!=0: sudo_stage.unlink(missing_ok=True);die('visudo rejected staged policy')
- os.replace(sudo_stage,sudo)
+ replace_transactional(sudo_stage,sudo)
  for c in policy['classes']:
   account=c['account'];home=pathlib.Path(pwd.getpwnam(account).pw_dir);ssh=home/'.ssh'
   if ssh.exists() and (ssh.is_symlink() or not ssh.is_dir()):die('unsafe .ssh path')
   ssh.mkdir(mode=0o700,exist_ok=True);os.chown(ssh,c['uid'],pwd.getpwnam(account).pw_gid);os.chmod(ssh,0o700)
   ak=ssh/'authorized_keys'
   if ak.exists() and (ak.is_symlink() or not ak.is_file()):die('unsafe authorized_keys path')
-  key=read(keys[account],65536).decode().strip();line=f'restrict,command="/usr/local/libexec/factory-runner-server" {key}\n';fd=os.open(ak,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600);os.write(fd,line.encode());os.fsync(fd);os.fchown(fd,c['uid'],pwd.getpwnam(account).pw_gid);os.close(fd)
- tmp=current.with_name('.current-new');tmp.unlink(missing_ok=True);tmp.symlink_to(target);os.replace(tmp,current);journal.unlink();verify_generation();print('runner-installer: transactional generation installed')
+  key=read(keys[account],65536,root=True).decode().strip();line=f'restrict,command="/usr/local/libexec/factory-runner-server" {key}\n';aktmp=ssh/'.authorized_keys.new';aktmp.unlink(missing_ok=True);fd=os.open(aktmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.write(fd,line.encode());os.fsync(fd);os.fchown(fd,c['uid'],pwd.getpwnam(account).pw_gid);os.close(fd);replace_transactional(aktmp,ak)
+ tmp=current.with_name('.current-new');tmp.unlink(missing_ok=True);tmp.symlink_to(target);replace_transactional(tmp,current);verify_generation();journal.unlink();shutil.rmtree(backupdir);print('runner-installer: transactional generation installed')
 except BaseException:
  if stage:shutil.rmtree(stage,ignore_errors=True)
- if old:
-  tmp=current.with_name('.current-rollback');tmp.unlink(missing_ok=True);tmp.symlink_to(old);os.replace(tmp,current)
+ for dest,backup in reversed(replaced):
+  if dest.exists() or dest.is_symlink():
+   if dest.is_dir() and not dest.is_symlink():shutil.rmtree(dest)
+   else:dest.unlink()
+  if backup is not None:os.replace(backup,dest)
+ shutil.rmtree(backupdir,ignore_errors=True)
+ if target.exists():shutil.rmtree(target,ignore_errors=True)
  raise
 PY

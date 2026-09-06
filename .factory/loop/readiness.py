@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import time
@@ -86,6 +88,26 @@ def read_dirfd_file(root: Path, relative: str, *, maximum: int = 4 * 1024 * 1024
     finally: os.close(fd)
 
 
+def read_external_trust(path_text: str, *, maximum: int = 256 * 1024) -> bytes:
+    """Read root-owned external trust through a no-follow component chain."""
+    path=Path(path_text)
+    if not path.is_absolute(): raise InfrastructureFailure("human trust path is not absolute")
+    current=Path("/")
+    for part in path.parts[1:]:
+        current/=part; info=os.stat(current,follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
+            raise InfrastructureFailure("human trust ancestry is not root-owned immutable")
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=0 or info.st_mode&0o022 or info.st_size>maximum:
+            raise InfrastructureFailure("human trust file is unsafe")
+        raw=os.read(fd,maximum+1)
+        if len(raw)>maximum: raise InfrastructureFailure("human trust file is oversized")
+        return raw
+    finally: os.close(fd)
+
+
 def _ident_list(value: object, label: str, *, nonempty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, list) or (nonempty and not value) or any(not isinstance(v, str) or not IDENT.fullmatch(v) for v in value) or len(value) != len(set(value)):
         raise ReadinessError(f"{label} must be a unique canonical identifier list")
@@ -112,14 +134,18 @@ def validate_policy(value: object) -> dict:
     gates = _ident_list(value["conformance_gate_ids"], "conformance gates", nonempty=True) + _ident_list(value["core_gate_ids"], "core gates", nonempty=True)
     unknown = set(gates) - set(GATE_REGISTRY)
     if unknown: raise ReadinessError(f"unknown fixed readiness gate adapter: {sorted(unknown)!r}")
+    if authority["enrolled"] is True and "conformance-implementation" not in gates:
+        raise ReadinessError("enrolled production readiness requires complete implementation conformance")
     human = value["human_approval"]
     if human is not None:
-        hfields={"required","approval_schema","approval_path","signature_path","signature_namespace","trust_scope","checklist","captures"}
+        hfields={"required","approval_schema","approval_path","signature_path","signature_namespace","trust_scope","trust_path","checklist","captures"}
         if not isinstance(human,dict) or set(human)!=hfields or human["required"] is not True:
             raise ReadinessError("human approval policy is malformed")
         for key in ("approval_schema","signature_namespace","trust_scope"):
             if not isinstance(human[key],str) or not IDENT.fullmatch(human[key]): raise ReadinessError(f"human {key} is invalid")
         _safe_relative(human["approval_path"],"human approval path"); _safe_relative(human["signature_path"],"human signature path")
+        if not isinstance(human["trust_path"],str) or not human["trust_path"].startswith("/") or ".." in PurePosixPath(human["trust_path"]).parts:
+            raise ReadinessError("human trust path must be a safe absolute external path")
         _ident_list(human["checklist"],"human checklist",nonempty=True)
         if not isinstance(human["captures"],list): raise ReadinessError("human captures must be an array")
         for capture in human["captures"]:
@@ -174,6 +200,32 @@ def validate_aggregate(value: object, policy: Mapping[str,object], *, accepted_c
     return digest(normalized)
 
 
+def _trusted_ssh_keygen() -> str:
+    candidates=["/usr/bin/ssh-keygen","/bin/ssh-keygen","/run/current-system/sw/bin/ssh-keygen"]
+    discovered=shutil.which("ssh-keygen")
+    if discovered: candidates.append(discovered)
+    for candidate in candidates:
+        resolved=os.path.realpath(candidate)
+        try:
+            try:
+                from . import gitutil as _gitutil
+            except ImportError:
+                import gitutil as _gitutil  # type: ignore[no-redef]
+            _gitutil.require_trusted_executable(resolved)
+            info=os.stat(resolved)
+            if resolved.startswith("/nix/store/"):
+                return resolved
+            current=Path("/")
+            for part in Path(resolved).parts[1:-1]:
+                current/=part; parent=os.stat(current,follow_symlinks=False)
+                if parent.st_uid!=0 or parent.st_mode&0o022: raise OSError("mutable ancestry")
+            if stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022 and info.st_mode&0o111:
+                return resolved
+        except (OSError, _gitutil.GitBoundaryError):
+            continue
+    raise HumanAuthorityBlocked("no immutable root-owned ssh-keygen is available")
+
+
 def validate_human_authority(policy: Mapping[str, object], approval_raw: bytes | None,
                              trust_raw: bytes | None, *, signature_raw: bytes | None = None,
                              accepted_commit: str, accepted_tree: str,
@@ -226,7 +278,7 @@ def validate_human_authority(policy: Mapping[str, object], approval_raw: bytes |
         os.write(allowed_fd,f"{reviewer} {public_key}\n".encode()); os.lseek(allowed_fd,0,0)
         os.write(sig_fd,signature_raw); os.lseek(sig_fd,0,0)
         verified=subprocess.run(
-            ["/usr/bin/ssh-keygen","-Y","verify","-f",f"/proc/self/fd/{allowed_fd}",
+            [_trusted_ssh_keygen(),"-Y","verify","-f",f"/proc/self/fd/{allowed_fd}",
              "-I",str(reviewer),"-n",str(human["signature_namespace"]),
              "-s",f"/proc/self/fd/{sig_fd}"], input=signed,
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
@@ -296,9 +348,6 @@ class CampaignPermit:
     marker: object
 
 
-_AUTH_STORE_MINT = object()
-
-
 class AuthorizationStore:
     """Campaign-lock-bound, FD-secret-backed, durable one-use launch records.
 
@@ -307,9 +356,13 @@ class AuthorizationStore:
     possessing Python objects or module globals.
     """
     def __init__(self, root:Path, namespace:str, campaign_id:str, nonce:str,
-                 lock_fd:int, marker:object):
-        if marker is not _AUTH_STORE_MINT:
-            raise AuthorizationError("authorization stores are minted only by the locked campaign")
+                 lock_fd:int, readiness_document: Mapping[str, object]):
+        if (not isinstance(readiness_document,Mapping)
+                or readiness_document.get("schema")!=RESULT_SCHEMA
+                or readiness_document.get("status")!="complete"
+                or readiness_document.get("campaign_id")!=campaign_id
+                or readiness_document.get("nonce")!=nonce):
+            raise AuthorizationError("complete exact-campaign readiness is required")
         if not IDENT.fullmatch(campaign_id) or not SHA256.fullmatch(nonce):
             raise AuthorizationError("authorization identity is invalid")
         root=Path(root).absolute(); root_info=os.stat(root,follow_symlinks=False)
@@ -325,6 +378,8 @@ class AuthorizationStore:
         self.dirfd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|getattr(os,"O_CLOEXEC",0))
         self.keyfd=os.memfd_create("factory-launch-key", os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
         os.write(self.keyfd,secrets.token_bytes(32)); os.lseek(self.keyfd,0,os.SEEK_SET)
+        fcntl.fcntl(self.keyfd,fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL)
         self.pid=os.getpid(); self.start=_proc_start(self.pid)
     def _key(self)->bytes:
         if self.keyfd<0: raise AuthorizationError("authorization store is closed")
@@ -361,10 +416,12 @@ class AuthorizationStore:
         except (OSError,ValueError) as exc: raise AuthorizationError(f"authorization record unavailable: {exc}") from exc
 
 
-def open_locked_authorization_store(root:Path, namespace:str, campaign_id:str,
-                                    nonce:str, lock_fd:int)->AuthorizationStore:
-    """Private coordinator mint requiring the already-held root descriptor."""
-    return AuthorizationStore(root,namespace,campaign_id,nonce,lock_fd,_AUTH_STORE_MINT)
+def _open_locked_authorization_store(root:Path, namespace:str, campaign_id:str,
+                                     nonce:str, lock_fd:int,
+                                     readiness_document:Mapping[str,object])->AuthorizationStore:
+    """Internal coordinator mint requiring lock plus complete readiness."""
+    return AuthorizationStore(root,namespace,campaign_id,nonce,lock_fd,
+                              readiness_document)
 
 
 def _proc_start(pid:int)->str:

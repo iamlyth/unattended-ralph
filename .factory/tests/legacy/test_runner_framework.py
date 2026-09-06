@@ -78,6 +78,6 @@ class RunnerFrameworkTests(unittest.TestCase):
   self.assertIn("renameat2",client);self.assertIn("publication collision",client);self.assertIn("hold_tree(staging)",client)
  def test_authorized_keys_install_is_nofollow_and_configurable(self):
   text=(ROOT/".factory/tools/install-factory-runner-v2.sh").read_text()
-  self.assertIn("Repeat",(ROOT/"docs/OPERATIONS.md").read_text());self.assertIn("os.O_NOFOLLOW",text);self.assertIn("set(keys)!=accounts",text);self.assertIn("transaction.json",text);self.assertIn("current-rollback",text);self.assertIn("generic policy validator",text);self.assertIn("visudo",text);self.assertIn("root=True",text)
+  self.assertIn("Repeat",(ROOT/"docs/OPERATIONS.md").read_text());self.assertIn("os.O_NOFOLLOW",text);self.assertIn("set(keys)!=accounts",text);self.assertIn("transaction.json",text);self.assertIn("replace_transactional",text);self.assertIn("transaction-backup",text);self.assertIn("generic policy validator",text);self.assertIn("visudo",text);self.assertIn("root=True",text)
 
 if __name__=="__main__":unittest.main(verbosity=2)
