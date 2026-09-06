@@ -15,7 +15,7 @@
 # commit-msg is the single consumption point, so the at-most-one final-handoff
 # guarantee holds across every hook-coverable commit path. Commit-creation
 # verbs with no hook coverage (cherry-pick, revert) and the patch/replay verbs
-# are refused by .factory/tools/pi-cli-shims/git and .factory/tools/pi-ralph-emit-extension.mjs
+# are refused by .factory/tools/pi-cli-shims/git and .factory/tools/pi-factory-guard-extension.mjs
 # at the model's command boundary; the harness only ever creates commits via
 # `git commit`. Idempotent and safe to run before every Ralph launch and at
 # verify time; --check reports whether the installed hooks match the tracked

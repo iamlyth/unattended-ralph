@@ -252,7 +252,7 @@ STAGED_WRAPPER_NAME = "pi2-secure-exec.py"
 STAGED_BACKEND_NAME = "backend"
 STAGED_GUARD_EXTENSION_NAME = "pi-factory-guard-extension.mjs"
 STAGED_CREDENTIAL_GUARD_NAME = "credential-guard.py"
-STAGED_GIT_SHIM_NAME = "git"
+STAGED_GIT_SHIM_NAME = "pi-cli-shims/git"
 STAGED_USAGE_GUARD_NAME = "usage.py"
 STAGED_USAGE_FETCH_NAME = "usage_fetch.py"
 CREDENTIAL_GUARD = ".factory/tools/credential-guard.py"
@@ -981,7 +981,22 @@ def child_environment(
             environment[key] = os.environ[key]
     if staged_path is not None:
         staged = Path(staged_path).absolute()
-        if not staged.is_dir() or (staged / STAGED_GIT_SHIM_NAME).is_symlink():
+        staged_shim = staged / STAGED_GIT_SHIM_NAME
+        # Validate the staged shim layout symlink-safely: the staging
+        # directory, every intermediate directory naming the shim, and the
+        # shim file itself must be real (never a symlink) so the extension's
+        # relative ``./pi-cli-shims/git`` resolution cannot be redirected to a
+        # caller-owned target.
+        if (
+            not staged.is_dir()
+            or not staged_shim.is_file()
+            or staged_shim.is_symlink()
+            or any(
+                part.is_symlink()
+                for part in staged_shim.parents
+                if part != staged and staged in part.parents
+            )
+        ):
             raise InvocationError(
                 "the sealed staged command PATH is missing its Git shim"
             )
@@ -3259,8 +3274,31 @@ def _stage_bytes(directory: Path, name: str, data: bytes) -> Path:
     arguments to an approved immutable interpreter, so a copied ELF or a
     caller-owned pathname can never become a broker-authorized exec target.
     The file's SHA-256 is re-checked immediately before interpreter launch.
+
+    ``name`` may carry subdirectories (e.g. ``pi-cli-shims/git``) so the
+    staged layout is deterministic and matches the extension's relative
+    resolution.  Each intermediate directory is created fresh as a private
+    mode-0700 directory and is never a symlink, so the staged shim's relative
+    path cannot be redirected to a caller-owned target.
     """
     path = directory / name
+    parent = path.parent
+    if parent != directory:
+        relative = parent.relative_to(directory)
+        current = directory
+        for part in relative.parts:
+            current = current / part
+            try:
+                os.mkdir(current, STAGED_DIR_MODE)
+            except FileExistsError:
+                if current.is_symlink() or not current.is_dir():
+                    raise LaunchError(
+                        f"the staged interpreter input directory {current} is a symlink or not a directory"
+                    ) from None
+            except OSError as exc:
+                raise LaunchError(
+                    f"cannot create the staged interpreter input directory {current}: {exc}"
+                ) from exc
     flags = (
         os.O_WRONLY | os.O_CREAT | os.O_EXCL
         | getattr(os, "O_NOFOLLOW", 0)

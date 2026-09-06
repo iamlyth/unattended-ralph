@@ -14,10 +14,10 @@
 # Policy: an ordinary checkpoint never commits scratchpad-only state. A commit
 # whose entire staged content is Ralph recovery metadata (everything under
 # `.ralph/`) manufactures fake Git progress and is rejected. The single trusted
-# exception is exactly one final-handoff commit per durable lifecycle cycle:
-# .factory/tools/git-commit-hook.sh --final-handoff writes a one-shot authorization
-# token (bound to the durable cycle ID and lifecycle mode) and the commit-msg
-# hook validates and consumes it at the boundary, so the exception cannot be
+# exception is exactly one final-handoff commit per durable lifecycle cycle: a
+# one-shot authorization token (bound to the durable cycle ID and lifecycle
+# mode) is written by the lifecycle checkpoint path and the commit-msg hook
+# validates and consumes it at the boundary, so the exception cannot be
 # replayed. Substantive commits (any staged path outside `.ralph/`) remain
 # allowed, including commits that also carry the scratchpad. All three hooks
 # enforce the same content policy; only commit-msg consumes the token, so
@@ -84,7 +84,7 @@ if [[ "$METADATA_BEYOND_SCRATCHPAD" == true ]]; then
     python3 - "$TOKEN_NAME" <<'PY' || true
 import sys
 from pathlib import Path
-sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+sys.path.insert(0, str((Path.cwd() / '.factory' / 'loop').resolve()))
 from factory_state_io import remove
 try:
     remove(Path.cwd(), sys.argv[1])
@@ -112,16 +112,15 @@ if [[ "$status" == R* || "$status" == C* ]]; then
 fi
 
 # Validate (and, at commit-msg, one-shot consume) the lifecycle authorization.
-# The token is written only by the trusted final-handoff flow after
-# allow-checkpoint-commit (at most one per durable cycle). The guard burns the
-# token whether or not it is valid, so a stale or forged attempt cannot be
+# The token is written only by the trusted final-handoff flow; the guard burns
+# the token whether or not it is valid, so a stale or forged attempt cannot be
 # replayed.
 if python3 - "$TOKEN_NAME" "${FACTORY_RALPH_CYCLE_ID:-}" "$HOOK" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str((Path.cwd() / 'scripts').resolve()))
+sys.path.insert(0, str((Path.cwd() / '.factory' / 'loop').resolve()))
 from factory_state_io import StateIOError, consume_json, read_json, remove
 
 name = sys.argv[1]

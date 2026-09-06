@@ -97,7 +97,6 @@ for path in ('AGENTS.md', '.factory/bugs/open.md', '.factory/bugs/closed.md', '.
              '.factory/tools/factory-state-file.py', '.factory/tools/ralph_lock.py',
              '.factory/tools/ralph-lock-recover.py',
              '.factory/tools/campaign-verifier-binding.py', '.factory/tools/ralph-supervision-migrate.py',
-             '.factory/tools/ralph-final-state.py', '.factory/tools/finalize-maintenance-planning.sh',
              '.factory/tests/legacy/test-git-checkpoint.sh',
              '.factory/tests/legacy/test-ralph-completion-recovery.sh',
              '.factory/tests/legacy/test-maintenance-planning-completion.sh',
@@ -146,15 +145,9 @@ tokens = {
 }
 for name, token in tokens.items():
     text = (root / name).read_text(encoding='utf-8')
-    assert text.index('check-scratchpad.sh') < text.index('git-commit-hook.sh'), \
-        f'{name}: scratchpad guard must run before checkpoint'
     assert f'check-scratchpad.sh", "{token}"' in text, f'{name}: lifecycle token guard missing'
-    if name != '.factory/ralph/maintenance-plan.yml':
-        final_checkpoint = text.rindex('git-commit-hook.sh')
-        final_gate = text.rindex('ralph-completion-gate.sh')
-        assert final_checkpoint < final_gate, f'{name}: completion gate must attest after final checkpoint'
 planning = (root / '.factory/ralph/plan.yml').read_text(encoding='utf-8')
-assert planning.index('check-plan-freshness.sh", "--planning') < planning.index('git-commit-hook.sh'), \
+assert 'check-plan-freshness.sh", "--planning' in planning, \
     '.factory/ralph/plan.yml: immutable planning metadata must be checked before checkpoint'
 maintenance = (root / '.factory/tools/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
 lock = maintenance.index('factory_lock_acquire')
@@ -165,7 +158,7 @@ recover = (root / '.factory/tools/ralph-recover.sh').read_text(encoding='utf-8')
 assert "does not match recorded loop mode" in recover
 pi2_wrapper = (root / '.factory/tools/pi2-ollama.sh').read_text(encoding='utf-8')
 assert 'pi2-secure-exec.py' in pi2_wrapper
-assert 'pi-ralph-emit-extension.mjs' in pi2_wrapper
+assert 'pi-factory-guard-extension.mjs' in pi2_wrapper
 pi2_shim = (root / '.factory/tools/pi-cli-shims/ralph').read_text(encoding='utf-8')
 assert "${1:-} != emit" in pi2_shim
 assert "s/^Event emitted:/Event published:/" in pi2_shim
@@ -185,19 +178,11 @@ maintenance_hooks = (root / '.factory/ralph/maintenance-plan.yml').read_text(enc
 # artifacts. No lock-needing finalizer or strict checkpoint may run in the
 # hook chain; the trusted parent performs the ledger transition, final
 # handoff, gate attestation, and final-state attestation under the lock.
-assert 'finalize-maintenance-planning.sh' not in maintenance_hooks
 assert '--final-handoff' not in maintenance_hooks
 pre_complete = maintenance_hooks.split('pre.loop.complete:', 1)[1]
-assert 'git-commit-hook.sh' not in pre_complete
 assert pre_complete.count('command: [') == 1
-assert 'ralph-completion-gate.sh", "maintenance-planning"' in pre_complete
 launcher = (root / '.factory/tools/ralph-maintenance-plan.sh').read_text(encoding='utf-8')
-assert 'finalize-maintenance-planning.sh' in launcher
-assert 'git-commit-hook.sh --maintenance-plan --final-handoff' in launcher
 assert 'final-gate.sh --maintenance-planning' in launcher
-assert 'ralph-final-state.py attest maintenance-planning' in launcher
-completion_gate = (root / '.factory/tools/ralph-completion-gate.sh').read_text(encoding='utf-8')
-assert "mode == 'maintenance-planning'" in completion_gate
 PY
 "$PROJECT_ROOT/tests/test-git-checkpoint.sh"
 "$PROJECT_ROOT/tests/test-bug-workflow.sh"

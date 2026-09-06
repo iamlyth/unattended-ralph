@@ -22,11 +22,15 @@ import { fileURLToPath } from "node:url";
 
 // Production stages this extension beside exact-commit credential-guard.py
 // and git-shim files. Relative resolution binds reads to those staged bytes.
-// Staged paths are never executable: a recognized direct Git command runs the
-// read-only shim as data through a separately resolved immutable Bash. Any
-// obfuscated/unqualified path that escapes text reduction cannot execute the
-// staged shim (no execute bit/Landlock right) or real Git (not broker-approved).
-const GIT_SHIM = fileURLToPath(new URL("./git", import.meta.url));
+// The Git shim lives at the deterministic ``./pi-cli-shims/git`` layout the
+// launch authority stages (a private mode-0700 ``pi-cli-shims`` directory
+// holding the exact-commit shim), so the extension and the launch agree on
+// one canonical relative path. Staged paths are never executable: a
+// recognized direct Git command runs the read-only shim as data through a
+// separately resolved immutable Bash. Any obfuscated/unqualified path that
+// escapes text reduction cannot execute the staged shim (no execute
+// bit/Landlock right) or real Git (not broker-approved).
+const GIT_SHIM = fileURLToPath(new URL("./pi-cli-shims/git", import.meta.url));
 const GIT_READ_ONLY_VERBS = new Set([
   "status", "diff", "diff-files", "diff-index", "diff-tree", "show", "log",
   "rev-parse", "ls-files", "ls-tree", "cat-file", "merge-base", "name-rev",

@@ -10,7 +10,7 @@ prompt_prefix="Please read and execute the task in "
 # This explicit extension runs inside Pi's jail and rewrites only a direct
 # `ralph emit` bash tool call to the repository shim. The real Ralph binary
 # remains the one resolved by the jail's trusted PATH.
-args=(--extension ./.factory/tools/pi-ralph-emit-extension.mjs "${args[@]}")
+args=(--extension ./.factory/tools/pi-factory-guard-extension.mjs "${args[@]}")
 
 launcher=(python3 "$SCRIPT_DIR/pi2-secure-exec.py")
 if (( ${#args[@]} > 0 )); then

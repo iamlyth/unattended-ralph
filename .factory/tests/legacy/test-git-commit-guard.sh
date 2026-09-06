@@ -15,15 +15,16 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/scripts/pi-cli-shims" "$tmp/.ralph/agent" "$tmp/.factory-state" "$tmp/sub"
-for name in git-commit-guard.sh install-git-commit-guard.sh git-commit-hook.sh \
-        check-scratchpad.sh ralph-final-state.py factory_state_io.py; do
-    cp "$PROJECT_ROOT/.factory/tools/$name" "$tmp/scripts/"
+mkdir -p "$tmp/.factory/tools/pi-cli-shims" "$tmp/.factory/loop" "$tmp/.ralph/agent" "$tmp/.factory-state" "$tmp/sub"
+for name in git-commit-guard.sh install-git-commit-guard.sh \
+        check-scratchpad.sh; do
+    cp "$PROJECT_ROOT/.factory/tools/$name" "$tmp/.factory/tools/"
 done
-cp "$PROJECT_ROOT/.factory/tools/pi-cli-shims/git" "$tmp/scripts/pi-cli-shims/git"
-chmod +x "$tmp/scripts/"*
+cp "$PROJECT_ROOT/.factory/tools/pi-cli-shims/git" "$tmp/.factory/tools/pi-cli-shims/git"
+cp "$PROJECT_ROOT/.factory/loop/factory_state_io.py" "$tmp/.factory/loop/"
+chmod +x "$tmp/.factory/tools/"*
 chmod 700 "$tmp/.factory-state"
-SHIM="$tmp/scripts/pi-cli-shims/git"
+SHIM="$tmp/.factory/tools/pi-cli-shims/git"
 CYCLE=$(printf 'a%.0s' {1..64})
 
 printf '.factory-state/\n.factory-lock\n__pycache__/\n.ralph/*\n!.ralph/agent/\n.ralph/agent/*\n!.ralph/agent/scratchpad.md\n' > "$tmp/.gitignore"
@@ -167,25 +168,29 @@ mapfile -t changed < <(git -C "$tmp" diff-tree --no-commit-id --name-only -r HEA
 
 # The trusted final-handoff path permits exactly one scratchpad-only commit,
 # authorized by the lifecycle cycle and consumed one-shot at the boundary.
+# The one-shot authorization is written by the lifecycle checkpoint path; the
+# guard consumes it at the boundary, so the test writes the token directly to
+# exercise the guard's own validation.
 printf '# Final handoff\n\n## Verification\n\n- Complete and token-free.\n' > "$tmp/.ralph/agent/scratchpad.md"
-payload=$(printf '{"loop":{"workspace":"%s","id":"checkpoint-test"},"iteration":{"current":"1"}}' "$tmp")
-(cd "$tmp" && FACTORY_RALPH_CYCLE_ID=$CYCLE printf '%s' "$payload" \
-    | FACTORY_RALPH_CYCLE_ID=$CYCLE ./.factory/tools/git-commit-hook.sh --final-handoff >/dev/null)
+python3 - "$tmp" "$CYCLE" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+(root / '.factory-state/final-handoff-authorization.json').write_text(json.dumps({
+    'schema': 'ralph-final-handoff/v1', 'mode': 'implementation',
+    'cycle_id': sys.argv[2], 'nonce': 'c' * 64,
+}) + '\n')
+PY
+git -C "$tmp" add -f .ralph/agent/scratchpad.md
+set +e
+(cd "$tmp" && FACTORY_RALPH_CYCLE_ID=$CYCLE git commit -m "final-handoff" >/dev/null 2>&1)
+final_rc=$?
+set -e
+[[ $final_rc -eq 0 ]]
 final_head=$(git -C "$tmp" rev-parse HEAD)
 [[ "$final_head" != "$source_head" ]]
 [[ ! -e "$tmp/.factory-state/final-handoff-authorization.json" ]]
 [[ -z $(git -C "$tmp" status --porcelain --untracked-files=normal) ]]
-
-# A second final handoff in the same cycle is rejected with no lingering token.
-printf '# Revised final handoff\n\n## Verification\n\n- Metadata churn.\n' > "$tmp/.ralph/agent/scratchpad.md"
-set +e
-(cd "$tmp" && FACTORY_RALPH_CYCLE_ID=$CYCLE printf '%s' "$payload" \
-    | FACTORY_RALPH_CYCLE_ID=$CYCLE ./.factory/tools/git-commit-hook.sh --final-handoff >/dev/null 2>&1)
-repeat_rc=$?
-set -e
-[[ $repeat_rc -eq 1 && $(git -C "$tmp" rev-parse HEAD) == "$final_head" ]]
-[[ ! -e "$tmp/.factory-state/final-handoff-authorization.json" ]]
-git -C "$tmp" restore -- .ralph/agent/scratchpad.md
 
 # A valid-schema token is one-shot: the first use is consumed at the boundary
 # and a subsequent scratchpad-only commit is rejected again.
@@ -295,21 +300,28 @@ set -e
 # The tool-call extension rewrites simple direct commit verbs to the shim and
 # blocks hook-bypass markers in any git-invoking command.
 if command -v node >/dev/null 2>&1; then
-    extension="$PROJECT_ROOT/.factory/tools/pi-ralph-emit-extension.mjs"
+    extension="$PROJECT_ROOT/.factory/tools/pi-factory-guard-extension.mjs"
     node - "$extension" <<'JS' || { echo 'test-git-commit-guard: extension git-boundary checks failed' >&2; exit 1; }
 const extension = process.argv[2];
 const module = await import(extension);
-const { rewriteGitCommitCommand } = module;
-const shim = "./.factory/tools/pi-cli-shims/git";
+const { rewriteGitCommitCommand, resolveGitShimPath, resolveTrustedBash } = module;
+// The rewrite runs the staged shim as data through the trusted immutable
+// Bash, so the command must begin with the resolved Bash + resolved shim
+// (never a stale relative prefix).
+const bash = resolveTrustedBash();
+if (bash === null) {
+    console.error('test-git-commit-guard: no trusted immutable Bash available');
+    process.exit(1);
+}
+const shim = resolveGitShimPath();
+const prefix = `${bash} ${shim}`;
 const checks = [
     ["git commit -m 'factory: refresh scratchpad handoff'",
-        (r) => r.matched && r.command.startsWith(shim) && !r.blocked],
+        (r) => r.matched && r.command.startsWith(prefix) && !r.blocked],
     ["cd /tmp/x && git commit -am done",
-        (r) => r.matched && r.command.includes(shim) && !r.blocked],
-    ["git -C /tmp/x commit -m done",
-        (r) => r.matched && r.command.startsWith(shim) && !r.blocked],
-    ["git add .ralph/agent/scratchpad.md && git commit -m x",
-        (r) => !r.matched && !r.blocked],
+        (r) => r.matched && r.command.includes(prefix) && !r.blocked],
+    ["git -C /tmp/x commit -m done", (r) => r.blocked],
+    ["git add .ralph/agent/scratchpad.md && git commit -m x", (r) => r.blocked],
     ["git commit --no-verify -m x", (r) => r.blocked],
     ["/usr/bin/git commit --no-verify -m x", (r) => r.blocked],
     ["git -c core.hooksPath=/dev/null commit -m x", (r) => r.blocked],
@@ -320,9 +332,11 @@ const checks = [
     ["git pull origin main", (r) => r.blocked],
     ["git am fix.patch", (r) => r.blocked],
     ["git commit -m 'revert the broken pull request'", (r) => r.matched && !r.blocked],
-    ["git status --short", (r) => !r.matched && !r.blocked],
-    ["git log --oneline -5", (r) => !r.matched && !r.blocked],
-    ["git add src/foo.c && git commit -m 'implement'", (r) => !r.matched && !r.blocked],
+    ["git status --short",
+        (r) => r.matched && r.command.includes(prefix) && !r.blocked],
+    ["git log --oneline -5",
+        (r) => r.matched && r.command.includes(prefix) && !r.blocked],
+    ["git add src/foo.c && git commit -m 'implement'", (r) => r.blocked],
 ];
 for (const [command, accept] of checks) {
     const result = rewriteGitCommitCommand(command);

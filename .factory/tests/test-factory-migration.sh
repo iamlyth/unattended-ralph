@@ -20,8 +20,7 @@
 #      optional legacy entry points that no new-path control step invokes;
 #   4. verifies the stale ``.factory/artifacts/context-summary.md`` mirror is
 #      absent and that ``verify-boilerplate.sh``/``final-gate.sh``/
-#      ``git-commit-hook.sh``/``ralph-run.sh`` never invoke the deprecated
-#      authorities;
+#      ``ralph-run.sh`` never invoke the deprecated authorities;
 #   5. verifies the shell credential guard resolves the external operator
 #      store and only *detects* the legacy workspace store with metadata-only
 #      checks (never sources, reads, or overwrites it);

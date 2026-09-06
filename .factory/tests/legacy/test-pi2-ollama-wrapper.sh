@@ -5,8 +5,6 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 WRAPPER="$PROJECT_ROOT/.factory/tools/pi2-ollama.sh"
 GUARD="$PROJECT_ROOT/.factory/tools/ollama-usage-guard.sh"
-SHIM="$PROJECT_ROOT/.factory/tools/pi-cli-shims/ralph"
-REAL_RALPH=$(command -v ralph || true)
 assert_absent() {
     local needle=$1 file=$2
     if grep -Fq "$needle" "$file"; then
@@ -21,24 +19,8 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/.ralph"
+mkdir -p "$tmp/bin"
 
-cat > "$tmp/bin/ralph" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ ${1:-} == emit ]]; then
-    topic=${2:?}
-    payload=${3:-}
-    printf '{"payload":"%s","topic":"%s","ts":"2026-08-15T00:00:00Z"}\n' \
-        "$payload" "$topic" >> "${RALPH_EVENTS_FILE:?}"
-    printf 'Event emitted: %s\n' "$topic"
-    exit "${FAKE_RALPH_RC:-0}"
-fi
-printf 'real Ralph command:'
-printf ' %s' "$@"
-printf '\n'
-exit "${FAKE_RALPH_RC:-0}"
-EOF
 cat > "$tmp/bin/pi2" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -49,7 +31,6 @@ fi
 case "${FAKE_MODE:-success}" in
     success)
         printf '%s\n' 'stdout before'
-        "${FAKE_SHIM:?}" emit factory.implement done
         printf '%s\n' 'stdout after'
         printf '%s\n' 'stderr remains untouched' >&2
         ;;
@@ -57,7 +38,8 @@ case "${FAKE_MODE:-success}" in
         printf '%s\n' 'Event emitted: factory.implement'
         ;;
     emit-failure)
-        FAKE_RALPH_RC=42 "${FAKE_SHIM:?}" emit factory.implement done
+        printf '%s\n' 'emit failed'
+        exit 42
         ;;
     backend-failure)
         printf '%s\n' 'backend failed' >&2
@@ -70,131 +52,50 @@ case "${FAKE_MODE:-success}" in
         printf '%s\n' "$$" > "${FAKE_CHILD_PID_FILE:?}"
         while :; do sleep 1; done
         ;;
-    raw-completion)
-        printf '%s\n' 'ordinary model text' 'LOOP_COMPLETE'
-        ;;
-    ralph-probe)
-        "${FAKE_SHIM:?}" emit factory.implement done
-        count=0
-        [[ ! -f ${FAKE_COUNTER_FILE:?} ]] || count=$(<"$FAKE_COUNTER_FILE")
-        count=$((count + 1))
-        printf '%s\n' "$count" > "$FAKE_COUNTER_FILE"
-        if (( count == 1 )); then sleep 6; fi
-        printf '%s\n' 'finished naturally'
-        ;;
     *) exit 99 ;;
 esac
 EOF
-chmod +x "$tmp/bin/ralph" "$tmp/bin/pi2"
+chmod +x "$tmp/bin/pi2"
 
 export PATH="$tmp/bin:$PATH"
-export FAKE_SHIM="$SHIM"
 export FAKE_ARGS_FILE="$tmp/args"
-export RALPH_EVENTS_FILE="$tmp/.ralph/events.jsonl"
-: > "$RALPH_EVENTS_FILE"
 cd "$tmp"
 
 stdout=$tmp/stdout
 stderr=$tmp/stderr
+
+# The wrapper is a pure passthrough: it stages the guard extension and execs
+# the backend, so backend stdout/stderr and status reach the caller unchanged.
 "$WRAPPER" --mode json >"$stdout" 2>"$stderr"
-assert_absent 'Event emitted:' "$stdout"
-grep -Fq 'Event published: factory.implement' "$stdout"
+grep -Fq 'stdout before' "$stdout"
+grep -Fq 'stdout after' "$stdout"
 grep -Fq 'stderr remains untouched' "$stderr"
-grep -Fq '"topic":"factory.implement"' "$RALPH_EVENTS_FILE"
 printf '%s\n' --provider ollama --model deepseek-v4-flash --extension \
-    ./.factory/tools/pi-ralph-emit-extension.mjs --mode json > "$tmp/expected-args"
+    ./.factory/tools/pi-factory-guard-extension.mjs --mode json > "$tmp/expected-args"
 cmp "$tmp/expected-args" "$tmp/args"
 
-# Only the trusted `ralph emit` command is changed. Identical arbitrary backend
-# output remains visible to Ralph's detector.
+# Identical arbitrary backend output passes through unchanged (no rewriting).
 FAKE_MODE=spoof "$WRAPPER" --mode json >"$stdout" 2>"$stderr"
 grep -Fq 'Event emitted: factory.implement' "$stdout"
-assert_absent 'Event published: factory.implement' "$stdout"
-"$SHIM" --version >"$stdout"
-grep -Fq 'real Ralph command: --version' "$stdout"
-# Direct shim invocation inspects the shell-expanded final argv, not merely the
-# original command text seen by the Pi extension.
-reserved_payload=LOOP_COMPLETE
-events_before=$(wc -l < "$RALPH_EVENTS_FILE")
-set +e
-"$SHIM" emit factory.implement "$reserved_payload" >"$stdout" 2>"$stderr"
-direct_reserved_rc=$?
-"$SHIM" emit MAINTENANCE_PLAN_COMPLETE 'done' >"$stdout" 2>"$stderr"
-direct_topic_rc=$?
-"$SHIM" emit factory.implement >"$stdout" 2>"$stderr"
-direct_missing_rc=$?
-"$SHIM" emit factory.implement one two >"$stdout" 2>"$stderr"
-direct_extra_rc=$?
-"$SHIM" emit test.work 'done' >"$stdout" 2>"$stderr"
-direct_unknown_rc=$?
-set -e
-[[ $direct_reserved_rc -eq 2 && $direct_topic_rc -eq 2 ]]
-[[ $direct_missing_rc -eq 2 && $direct_extra_rc -eq 2 && $direct_unknown_rc -eq 2 ]]
-[[ $(wc -l < "$RALPH_EVENTS_FILE") -eq $events_before ]]
+
+# The guard extension no longer rewrites or blocks `ralph emit`: the removed
+# export is absent and a direct `ralph emit` tool call is left untouched.
 guard_digest=$(sha256sum "$PROJECT_ROOT/.factory/tools/credential-guard.py" | awk '{print $1}')
-PI_RALPH_GUARD_DIGEST=$guard_digest \
-node --input-type=module - "$PROJECT_ROOT/.factory/tools/pi-ralph-emit-extension.mjs" <<'EOF'
+PI_FACTORY_GUARD_DIGEST=$guard_digest \
+node --input-type=module - "$PROJECT_ROOT/.factory/tools/pi-factory-guard-extension.mjs" <<'EOF'
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 const extension = await import(pathToFileURL(process.argv[2]));
-const { rewriteRalphEmitCommand } = extension;
+assert.equal(extension.rewriteRalphEmitCommand, undefined,
+  'removed rewriteRalphEmitCommand export must be absent');
 let toolHandler;
 extension.default({ on(name, handler) { if (name === 'tool_call') toolHandler = handler; } });
 assert.equal(typeof toolHandler, 'function');
 const directEvent = { toolName: 'bash', input: { command: 'ralph emit factory.implement done' } };
-toolHandler(directEvent);
-assert.equal(directEvent.input.command, './.factory/tools/pi-cli-shims/ralph emit factory.implement done');
-for (const command of [
-  'ralph emit LOOP_COMPLETE done',
-  'ralph emit factory.implement LOOP_COMPLETE',
-  'ralph emit factory.plan "shortcut PLAN_COMPLETE payload"',
-  'ralph emit factory.audit AUDIT_COMPLETE',
-  'ralph emit factory.maintenance.plan MAINTENANCE_PLAN_COMPLETE',
-  'ralph emit factory.maintenance.implement MAINTENANCE_COMPLETE',
-]) {
-  const tokenEvent = { toolName: 'bash', input: { command } };
-  assert.equal(toolHandler(tokenEvent).block, true, command);
-  const tokenResult = rewriteRalphEmitCommand(command);
-  assert.equal(tokenResult.reserved, true, command);
-  assert.equal(tokenResult.matched, false, command);
-}
-const unsafeEvent = { toolName: 'bash', input: { command: 'cd /tmp && ralph emit factory.implement done' } };
-assert.equal(toolHandler(unsafeEvent).block, true);
-let result = rewriteRalphEmitCommand('ralph emit factory.implement "done"');
-assert.equal(result.matched, true);
-assert.equal(result.unsafe, false);
-assert.equal(result.command, './.factory/tools/pi-cli-shims/ralph emit factory.implement "done"');
-for (const command of [
-  'ralph emit factory.implement',
-  'ralph emit factory.implement ""',
-  'ralph emit factory.implement one two',
-  'ralph emit test.work done',
-  'ralph emit factory.implement "$payload"',
-  'ralph emit factory.implement "${payload}"',
-  'PAYLOAD=done ralph emit factory.implement "$PAYLOAD"',
-  'cd /tmp && ralph emit factory.implement done',
-  'ralph emit factory.implement done; sleep 600',
-  'ralph emit factory.implement done | cat',
-  'ralph emit factory.implement done > /tmp/result',
-  'ralph emit factory.implement done # trailing command',
-  '(ralph emit factory.implement done)',
-  'echo "$(ralph emit factory.implement done)"',
-]) {
-  result = rewriteRalphEmitCommand(command);
-  assert.equal(result.matched, false, command);
-  assert.equal(result.unsafe, true, command);
-}
-result = rewriteRalphEmitCommand("ralph emit factory.implement 'payload; && > remains quoted'");
-assert.equal(result.matched, true);
-assert.equal(result.unsafe, false);
-for (const command of [
-  'printf "Event emitted: spoof\\n"',
-  "printf '%s' 'ralph emit factory.implement done'",
-]) {
-  result = rewriteRalphEmitCommand(command);
-  assert.equal(result.matched, false, command);
-  assert.equal(result.unsafe, false, command);
-}
+const directResult = toolHandler(directEvent);
+assert.equal(directResult, undefined, 'ralph emit must not be blocked');
+assert.equal(directEvent.input.command, 'ralph emit factory.implement done',
+  'ralph emit must not be rewritten');
 EOF
 
 prompt_file="$tmp/ralph prompt.md"
@@ -205,7 +106,7 @@ OLLAMA_PROVIDER=custom-provider OLLAMA_MODEL=custom-model \
     >"$stdout" 2>"$stderr"
 cmp "$prompt_file" "$tmp/stdin"
 printf '%s\n' --provider custom-provider --model custom-model --extension \
-    ./.factory/tools/pi-ralph-emit-extension.mjs --mode json > "$tmp/expected-args"
+    ./.factory/tools/pi-factory-guard-extension.mjs --mode json > "$tmp/expected-args"
 cmp "$tmp/expected-args" "$tmp/args"
 
 unset FAKE_STDIN_FILE
@@ -228,13 +129,14 @@ set -e
 }
 
 set +e
-FAKE_MODE=emit-failure "$WRAPPER" --mode json >"$stdout" 2>"$stderr"
+FAKE_MODE=emit-failure "$WRAPPER" --mode json >"$tmp/emit-failure-out" 2>"$stderr"
 emit_failure_rc=$?
 FAKE_MODE=backend-failure "$WRAPPER" --mode json >"$stdout" 2>"$stderr"
 backend_failure_rc=$?
 FAKE_MODE=signal "$WRAPPER" --mode json >"$stdout" 2>"$stderr"
 signal_rc=$?
 set -e
+grep -Fq 'emit failed' "$tmp/emit-failure-out"
 [[ $emit_failure_rc -eq 42 ]] || {
     echo "test-pi2-ollama-wrapper: emit failure was masked: $emit_failure_rc" >&2
     exit 1
@@ -248,8 +150,8 @@ set -e
     exit 1
 }
 
-# The wrapper and secure launcher both exec their child. External termination
-# therefore reaches the actual backend PID without an orphaning supervisor.
+# The wrapper execs its child exactly once. External termination therefore
+# reaches the actual backend PID without an orphaning supervisor.
 export FAKE_CHILD_PID_FILE="$tmp/backend-pid"
 FAKE_MODE=wait-for-signal "$WRAPPER" --mode json >"$stdout" 2>"$stderr" &
 wrapper_pid=$!
@@ -262,89 +164,6 @@ wait "$wrapper_pid"
 external_signal_rc=$?
 set -e
 [[ $external_signal_rc -eq 143 ]]
-
-# Exercise the pinned installed Ralph detector when available. Hermetic shim,
-# status, signal, and prompt checks above remain mandatory on product runners
-# that do not provision the orchestration binary.
-printf 'probe prompt\n' > "$tmp/PROMPT.md"
-cat > "$tmp/ralph.yml" <<EOF
-cli:
-  backend: pi
-  command: $WRAPPER
-event_loop:
-  prompt_file: PROMPT.md
-  starting_event: test.work
-  max_iterations: 2
-  max_runtime_seconds: 60
-  max_consecutive_failures: 1
-hats:
-  worker:
-    name: Worker
-    description: wrapper regression probe
-    triggers: [test.work]
-    publishes: [test.work]
-    default_publishes: test.work
-EOF
-if [[ -n "$REAL_RALPH" && $($REAL_RALPH --version) == 'ralph 2.10.1' ]]; then
-    cat > "$tmp/completion-hook" <<'EOF'
-#!/usr/bin/env bash
-cat >/dev/null
-printf 'hook\n' >> "${FAKE_COMPLETION_HOOK_LOG:?}"
-EOF
-    chmod +x "$tmp/completion-hook"
-    cat > "$tmp/completion.yml" <<EOF
-cli:
-  backend: pi
-  command: $WRAPPER
-event_loop:
-  prompt_file: PROMPT.md
-  completion_promise: LOOP_COMPLETE
-  starting_event: test.work
-  max_iterations: 2
-  max_runtime_seconds: 60
-hooks:
-  enabled: true
-  events:
-    pre.loop.complete:
-      - name: exact-raw-completion
-        command: ["$tmp/completion-hook"]
-        on_error: block
-hats:
-  worker:
-    name: Worker
-    description: exact raw completion regression probe
-    triggers: [test.work]
-    publishes: [test.work]
-    default_publishes: test.work
-EOF
-    export FAKE_COMPLETION_HOOK_LOG="$tmp/completion-hook.log"
-    : > "$FAKE_COMPLETION_HOOK_LOG"
-    FAKE_MODE=raw-completion "$REAL_RALPH" -c "$tmp/completion.yml" run --exclusive --no-tui \
-        >"$tmp/completion-out" 2>"$tmp/completion-err"
-    [[ $(grep -c '^hook$' "$FAKE_COMPLETION_HOOK_LOG") -eq 1 ]] || {
-        echo 'test-pi2-ollama-wrapper: exact raw token did not trigger completion exactly once' >&2
-        exit 1
-    }
-
-    export FAKE_COUNTER_FILE="$tmp/probe-count"
-    set +e
-    FAKE_MODE=ralph-probe "$REAL_RALPH" -c "$tmp/ralph.yml" run --exclusive --no-tui \
-        >"$tmp/ralph-out" 2>"$tmp/ralph-err"
-    ralph_rc=$?
-    set -e
-    [[ $ralph_rc -eq 2 ]] || {
-        echo "test-pi2-ollama-wrapper: unexpected Ralph probe status: $ralph_rc" >&2
-        tail -40 "$tmp/ralph-out" "$tmp/ralph-err" >&2
-        exit 1
-    }
-    sed 's/\x1b\[[0-9;]*m//g' "$tmp/ralph-out" | grep -Fq 'reason=max_iterations'
-    sed 's/\x1b\[[0-9;]*m//g' "$tmp/ralph-out" | grep -Fq 'finished naturally'
-    assert_absent 'Event emitted:' "$tmp/ralph-out"
-    assert_absent 'consecutive_failures' "$tmp/ralph-out"
-    [[ $(<"$tmp/probe-count") == 2 ]]
-else
-    echo 'test-pi2-ollama-wrapper: pinned Ralph 2.10.1 integration probe unavailable; hermetic checks only' >&2
-fi
 
 # Legacy guard credential-transport probe (QUOTA-02 / §22 test 24): a live
 # curl child, held mid-request, must never carry the cookie in argv or
@@ -464,4 +283,4 @@ net_rc=$?
 kill "$probe_server_pid" 2>/dev/null || true
 [[ $net_rc -eq 0 ]] || { echo "test: network usage check returned $net_rc" >&2; exit 1; }
 
-echo 'test: Pi2 Ralph event acknowledgement filtering checks passed'
+echo 'test: Pi2 Ollama wrapper passthrough checks passed'

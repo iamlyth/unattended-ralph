@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Adversarial validation of the Pi tool-call extension credential guardrail
-# (scripts/pi-ralph-emit-extension.mjs) and its tracked sibling guard
+# (scripts/pi-factory-guard-extension.mjs) and its tracked sibling guard
 # (scripts/credential-guard.py). Only fake secrets are used: every value is a
 # clearly-labelled FAKE_* placeholder, so nothing here touches real credential
 # material. The node fixture imports the exported extension helpers and
@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
-EXTENSION="$PROJECT_ROOT/.factory/tools/pi-ralph-emit-extension.mjs"
+EXTENSION="$PROJECT_ROOT/.factory/tools/pi-factory-guard-extension.mjs"
 GUARD="$PROJECT_ROOT/.factory/tools/credential-guard.py"
 
 if ! command -v node >/dev/null 2>&1; then
@@ -48,8 +48,8 @@ mkdir -p "$tmp/tmpdir"
 # exports it so the registered runtime hooks (the production path) bind the
 # tracked guard to the exact committed bytes, and so every tracked-guard
 # helper call exercises the digest gate honestly.
-PI_RALPH_GUARD_DIGEST=$(sha256sum "$GUARD" | awk '{print $1}')
-export PI_RALPH_GUARD_DIGEST
+PI_FACTORY_GUARD_DIGEST=$(sha256sum "$GUARD" | awk '{print $1}')
+export PI_FACTORY_GUARD_DIGEST
 
 TMPDIR="$tmp/tmpdir" \
     node --input-type=module - "$EXTENSION" "$tmp" <<'EOF'
@@ -68,7 +68,7 @@ const extension = await import(pathToFileURL(extensionUrl));
 
 // Every exported helper must exist so the harness can exercise it directly.
 for (const name of [
-  'rewriteRalphEmitCommand', 'rewriteGitCommitCommand', 'resolveGuardPath',
+  'rewriteGitCommitCommand', 'resolveGuardPath',
   'isOwnedRegularFile', 'parseBashOverflowPath', 'parseStrictGuardLine',
   'runGuardCheck', 'redactText', 'redactDeep', 'redactToolResultPatch',
   'failRedactedResult', 'guardToolCallInput', 'sanitizeBashOverflowPath',
@@ -178,20 +178,16 @@ for (const tool of ['read', 'edit', 'write']) {
   }
 }
 
-// ralph emit and git guard rewrites are preserved once the guardrail allows.
-const ralph = extension.rewriteRalphEmitCommand('ralph emit factory.implement done');
-assert.equal(ralph.matched, true);
-assert.equal(ralph.command, './.factory/tools/pi-cli-shims/ralph emit factory.implement done');
+// git guard rewrites are preserved once the guardrail allows.
 const git = extension.rewriteGitCommitCommand('git commit -m "done"');
 assert.equal(git.matched, true);
-assert.equal(git.command, './.factory/tools/pi-cli-shims/git commit -m "done"');
+assert(git.command.includes(extension.resolveGitShimPath()), git.command);
+assert(git.command.includes('commit -m done'), git.command);
 assert.equal(extension.rewriteGitCommitCommand('git commit --no-verify -m x').blocked, true);
 assert.equal(extension.rewriteGitCommitCommand('git cherry-pick abc').blocked, true);
-// Repeated -C is still routed through the argv-level shim; --git-dir and
+// Repeated -C is refused by the fail-closed boundary; --git-dir and
 // --work-tree redirection of the commit boundary is blocked before Git runs.
-const multiC = extension.rewriteGitCommitCommand('git -C /a -C /b commit -m "x"');
-assert.equal(multiC.matched, true);
-assert.equal(multiC.command, './.factory/tools/pi-cli-shims/git -C /a -C /b commit -m "x"');
+assert.equal(extension.rewriteGitCommitCommand('git -C /a -C /b commit -m "x"').blocked, true);
 assert.equal(extension.rewriteGitCommitCommand('git --git-dir=/tmp/fake-repo commit -m "x"').blocked, true);
 assert.equal(extension.rewriteGitCommitCommand('git --work-tree /tmp/fake commit -m "x"').blocked, true);
 assert.equal(extension.rewriteGitCommitCommand('git -c core.hookspath=/tmp/fake commit -m "x"').blocked, true);
@@ -582,11 +578,14 @@ if mode == 'redact':
     sys.stdout.write(data)
 sys.stdout.write('{"schema":"credential-guard/v1","tool":"credential-guard","version":"1","verdict":"allow","reason":"ok","reasons":["ok"]}\n')
 `);
-const orderEvent = { toolName: 'bash', input: { command: 'ralph emit factory.implement done' } };
+const orderEvent = { toolName: 'bash', input: { command: 'git commit -m "done"' } };
 assert.equal(extension.guardToolCallInput(orderEvent, { env: TEST_ENV, guardPath: recordGuard }), null);
 const seen = readFileSync(stdinLog, 'utf8');
-assert(seen.includes('check-command-stdin\nralph emit factory.implement done\n---\n'), `guard did not see the pre-rewrite command: ${JSON.stringify(seen)}`);
-assert.equal(extension.rewriteRalphEmitCommand(orderEvent.input.command).command, './.factory/tools/pi-cli-shims/ralph emit factory.implement done');
+assert(seen.includes('check-command-stdin\ngit commit -m "done"\n---\n'), `guard did not see the pre-rewrite command: ${JSON.stringify(seen)}`);
+assert.equal(extension.rewriteGitCommitCommand(orderEvent.input.command).matched, true);
+const orderRewritten = extension.rewriteGitCommitCommand(orderEvent.input.command);
+assert(orderRewritten.command.includes(extension.resolveGitShimPath()), orderRewritten.command);
+assert(orderRewritten.command.includes('commit -m done'), orderRewritten.command);
 
 // Registered hooks ignore hostile env: point CREDENTIAL_GUARD and
 // RALPH_CREDENTIAL_GUARD_TESTING at a guard that would block every redirect
@@ -602,12 +601,10 @@ const savedTesting = process.env.RALPH_CREDENTIAL_GUARD_TESTING;
 process.env.CREDENTIAL_GUARD = blockAllGuard;
 process.env.RALPH_CREDENTIAL_GUARD_TESTING = '1';
 try {
-  const ralphEvent = { toolName: 'bash', input: { command: 'ralph emit factory.implement done' } };
-  assert.equal(toolCallHook(ralphEvent), undefined);
-  assert.equal(ralphEvent.input.command, './.factory/tools/pi-cli-shims/ralph emit factory.implement done');
   const gitEvent = { toolName: 'bash', input: { command: 'git commit -m "done"' } };
-  toolCallHook(gitEvent);
-  assert.equal(gitEvent.input.command, './.factory/tools/pi-cli-shims/git commit -m "done"');
+  assert.equal(toolCallHook(gitEvent), undefined);
+  assert(gitEvent.input.command.includes(extension.resolveGitShimPath()), gitEvent.input.command);
+  assert(gitEvent.input.command.includes('commit -m done'), gitEvent.input.command);
 } finally {
   if (savedCred !== undefined) process.env.CREDENTIAL_GUARD = savedCred; else delete process.env.CREDENTIAL_GUARD;
   if (savedTesting !== undefined) process.env.RALPH_CREDENTIAL_GUARD_TESTING = savedTesting; else delete process.env.RALPH_CREDENTIAL_GUARD_TESTING;
