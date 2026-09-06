@@ -10,15 +10,15 @@ trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/valid.toml" <<'EOF'
 schema_version = 1
 [[tools]]
-name = "evtest"
-command = "evtest"
-capabilities = ["controller-input"]
+name = "example-tool"
+command = "example-tool"
+capabilities = ["example-capability"]
 [[runners]]
 name = "hardware"
 transport = "ssh"
 ssh_config_alias = "boilerplate-vm"
-working_directory = "/srv/dev-runner/workspaces/hardware"
-capabilities = ["controller-input", "gpu"]
+working_directory = "/srv/factory-runner/workspaces/hardware"
+capabilities = ["example-capability", "other-capability"]
 verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
 "$CHECK" "$tmp/valid.toml" >/dev/null
@@ -58,9 +58,9 @@ fi
 for mutation in bad-workdir bad-alias duplicate-capability shell-argv; do
     cp "$tmp/valid.toml" "$tmp/mutation.toml"
     case "$mutation" in
-        bad-workdir) sed -i 's#/srv/dev-runner/workspaces/hardware#/srv/dev-runner/workspaces/../escape#' "$tmp/mutation.toml" ;;
+        bad-workdir) sed -i 's#/srv/factory-runner/workspaces/hardware#/srv/factory-runner/workspaces/../escape#' "$tmp/mutation.toml" ;;
         bad-alias) sed -i 's/ssh_config_alias = "boilerplate-vm"/ssh_config_alias = "10.0.0.2"/' "$tmp/mutation.toml" ;;
-        duplicate-capability) sed -i 's/\["controller-input", "gpu"\]/["gpu", "gpu"]/' "$tmp/mutation.toml" ;;
+        duplicate-capability) sed -i 's/\["example-capability", "other-capability"\]/["other-capability", "other-capability"]/' "$tmp/mutation.toml" ;;
         shell-argv) sed -i 's#\["./scripts/verify-boilerplate.sh"\]#["./scripts/verify-boilerplate.sh", "; touch /tmp/pwned"]#' "$tmp/mutation.toml" ;;
     esac
     if "$CHECK" "$tmp/mutation.toml" >/dev/null 2>&1; then

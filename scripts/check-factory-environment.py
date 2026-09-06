@@ -119,6 +119,8 @@ def validate(path: Path, require_empty: bool) -> None:
             fail(f"runners[{index}].verify_argv must name a bounded repository-relative verifier")
         if any(any(ord(char) < 32 for char in item) or len(item.encode()) > 512 for item in argv):
             fail(f"runners[{index}].verify_argv must be control-character-free")
+        if any(re.search(r"[;&|`$<>]", item) for item in argv):
+            fail(f"runners[{index}].verify_argv contains shell syntax")
         if any(
             item.lower() in sensitive_flags
             or re.search(r"(?i)(authorization|bearer|password|private[-_]?key|token|secret|[a-z][a-z0-9+.-]*://)", item)
