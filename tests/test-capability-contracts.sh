@@ -41,6 +41,12 @@ working_directory = "/srv/dev-runner/workspaces/probe"
 capabilities = ["$capability"]
 verify_argv = ["./scripts/verify-project.sh"]
 EOF
+    cat > "$dir/.factory/config.toml" <<EOF
+[project]
+development_branch = "develop"
+[campaign]
+required_capabilities = ["$capability"]
+EOF
     printf '# Spec\n' > "$dir/docs/SPEC.md"
     printf '# Plan\n' > "$dir/.factory/artifacts/implementation-plan.md"
     printf '%s\n' ".factory-state/" > "$dir/.gitignore"
@@ -124,12 +130,14 @@ setup_repo "$tmp/missing-contract" probe-capability
 must_fail "declared capability without a contract" \
     "cd '$tmp/missing-contract' && ./scripts/check-capability-contracts.py"
 
-# A valid contract plus a clean exact-commit receipt is evidenced.
+# A valid contract plus a locally fabricated legacy receipt is still not
+# evidence: v3 signed campaign/readiness authority is mandatory.
 setup_repo "$tmp/valid" probe-capability
 write_contract "$tmp/valid" probe-capability "--- probe-capability contract ---"
 write_receipt "$tmp/valid" clean
 (cd "$tmp/valid" && ./scripts/check-capability-contracts.py >/dev/null)
-(cd "$tmp/valid" && ./scripts/check-capability-evidence.py >/dev/null)
+must_fail "legacy unnamespaced receipt is not evidence" \
+    "cd '$tmp/valid' && ./scripts/check-capability-evidence.py"
 
 # runner_class is optional candidate metadata (a candidate binds itself to its
 # root-configured runner class before provisioning): a valid lowercase class
@@ -140,7 +148,7 @@ python3 - "$tmp/runner-class-ok/.factory/capability-contracts.json" <<'PY'
 import json, sys
 path = sys.argv[1]
 data = json.load(open(path, encoding="utf-8"))
-data['capabilities'][0]['runner_class'] = 'runner'
+data['capabilities'][0]['runner_class'] = 'probe-runner'
 open(path, 'w', encoding="utf-8").write(json.dumps(data, indent=2))
 PY
 (cd "$tmp/runner-class-ok" && ./scripts/check-capability-contracts.py >/dev/null)
