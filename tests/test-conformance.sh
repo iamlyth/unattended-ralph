@@ -40,6 +40,12 @@ working_directory = "/srv/dev-runner/workspaces/probe"
 capabilities = ["probe-capability"]
 verify_argv = ["./scripts/verify-boilerplate.sh"]
 EOF
+    cat > "$dir/.factory/config.toml" <<'CONFIG'
+[project]
+development_branch = "develop"
+[campaign]
+required_capabilities = ["probe-capability"]
+CONFIG
     # The committed section-24 requirement registry is part of the acceptance
     # boundary: sidecar, plan matrix, and policy must each carry exactly these
     # IDs (Task 14 registry exact-set binding).
@@ -350,7 +356,10 @@ write_facts "$tmp/blessed"
 (cd "$tmp/blessed" && ./scripts/validate-conformance.py planning .factory/artifacts/conformance.json --facts .factory/artifacts/blocked-facts.json >/dev/null)
 (cd "$tmp/blessed" && ./scripts/validate-blocked-facts.py planning .factory/artifacts/blocked-facts.json >/dev/null)
 (cd "$tmp/blessed" && ./scripts/check-capability-contracts.py >/dev/null)
-(cd "$tmp/blessed" && ./scripts/check-capability-evidence.py >/dev/null)
+if (cd "$tmp/blessed" && ./scripts/check-capability-evidence.py >/dev/null 2>&1); then
+    echo "test: legacy unnamespaced capability fixture was accepted" >&2
+    exit 1
+fi
 
 # A complete state with a non-verified row must fail (blocked fails
 # implementation completion) and an open fact must keep completion failing.
