@@ -1208,7 +1208,7 @@ class InstalledTierSuite(unittest.TestCase):
         )
         failed = _run(command, cwd=ROOT, env=self.base_env(), check=False)
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("not allowlisted", failed.stderr)
+        self.assertIn("rejects pending executable/control-plane bytes", failed.stderr)
         self.assertFalse(prefix.exists(),
                          "failed install must roll back the created prefix")
         os.unlink(fixture / ".factory" / "loop" / "rogue_file.py")
@@ -1218,7 +1218,7 @@ class InstalledTierSuite(unittest.TestCase):
         )
         failed = _run(command, cwd=ROOT, env=self.base_env(), check=False)
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("not allowlisted", failed.stderr)
+        self.assertIn("rejects pending executable/control-plane bytes", failed.stderr)
         self.assertFalse(prefix.exists(),
                          "failed install must roll back the created prefix")
         os.unlink(fixture / ".factory" / "loop" / "secret_token.py")
