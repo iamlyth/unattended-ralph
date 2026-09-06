@@ -52,6 +52,45 @@ def _parse_auth_fd(argv: list) -> tuple:
     return auth_fd, remaining
 
 
+def _parse_credential_return_fd(argv: list) -> tuple:
+    """Extract ``--credential-return-fd N`` from the adapter argv (fail closed).
+
+    The trusted parent provisions one private credential-return pipe per
+    launch; the write end travels in the adapter's transient argv exactly like
+    the auth descriptor and is forwarded to the extension through the
+    sanitized env. The number is consumed here and is absent from model argv.
+    """
+    credential_return_fd = -1
+    remaining: list = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--credential-return-fd":
+            if credential_return_fd >= 0:
+                raise SystemExit(
+                    "factory-pi2-backend: --credential-return-fd was supplied twice"
+                )
+            if index + 1 >= len(argv):
+                raise SystemExit(
+                    "factory-pi2-backend: --credential-return-fd requires a value"
+                )
+            try:
+                credential_return_fd = int(argv[index + 1])
+            except ValueError:
+                raise SystemExit(
+                    "factory-pi2-backend: --credential-return-fd is not an integer"
+                )
+            if credential_return_fd < 0:
+                raise SystemExit(
+                    "factory-pi2-backend: --credential-return-fd is negative"
+                )
+            index += 2
+            continue
+        remaining.append(token)
+        index += 1
+    return credential_return_fd, remaining
+
+
 def _runtime_binding(argv: list) -> tuple[str, str]:
     """Extract the one trusted provider/model pair from generated Pi argv."""
     values = {}
@@ -187,6 +226,7 @@ def main() -> None:
     if not node.is_absolute() or not cli.is_absolute():
         raise SystemExit("factory-pi2-backend: runtime binding is not absolute")
     auth_fd, remaining = _parse_auth_fd(sys.argv[1:])
+    credential_return_fd, remaining = _parse_credential_return_fd(remaining)
     provider, model = _runtime_binding(remaining)
     _write_runtime_settings(agent_dir, provider, model)
     auth_file_identity = _materialize_auth_file(agent_dir, auth_fd)
@@ -209,6 +249,10 @@ def main() -> None:
     fd_limit = min(4096, finite_soft, finite_hard)
     if fd_limit <= auth_fd or fd_limit < 64:
         raise SystemExit("factory-pi2-backend: descriptor limit cannot bound auth aliases")
+    if credential_return_fd >= fd_limit:
+        raise SystemExit(
+            "factory-pi2-backend: credential return descriptor exceeds the alias bound"
+        )
     # Lower the hard limit too: untrusted model code must be unable to raise
     # the soft limit and duplicate the credential above the scanned range.
     resource.setrlimit(resource.RLIMIT_NOFILE, (fd_limit, fd_limit))
@@ -222,6 +266,8 @@ def main() -> None:
     env["PI_FACTORY_TOOL_FILE"] = str(agent_dir / "auth.json")
     env["PI_FACTORY_TOOL_FILE_DEV"] = str(auth_file_identity.st_dev)
     env["PI_FACTORY_TOOL_FILE_INO"] = str(auth_file_identity.st_ino)
+    if credential_return_fd >= 0:
+        env["PI_FACTORY_CREDENTIAL_RETURN_FD"] = str(credential_return_fd)
     os.execve(str(node), [str(node), str(cli), *remaining], env)
 
 

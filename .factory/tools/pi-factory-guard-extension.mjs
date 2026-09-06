@@ -154,6 +154,52 @@ function parseDirectGit(command) {
   };
 }
 
+// argv-aware commit option scan: reject -n (--no-verify) only when it is a
+// standalone flag or a member of a short-option cluster, and never when it is
+// the value of a value-taking option (-m/-c/-C/-F) or the optional value of
+// -S/-u. Long options that take a value consume the next argv; optional-value
+// long options (--gpg-sign/--untracked-files) consume only an inline =value,
+// so a following -n is still the no-verify flag.
+const COMMIT_VALUE_SHORT = new Set(["c", "C", "F", "m"]);
+const COMMIT_OPTIONAL_VALUE_SHORT = new Set(["S", "u"]);
+const COMMIT_VALUE_LONG = new Set([
+  "message", "file", "reuse-message", "reedit-message", "author", "date",
+  "cleanup", "fixup", "squash", "trailer", "template",
+]);
+
+function commitNoVerifyInArgv(args) {
+  let consumeNext = false;
+  for (const argument of args) {
+    if (consumeNext) {
+      consumeNext = false;
+      continue;
+    }
+    if (argument === "--") break;
+    if (argument.startsWith("--")) {
+      const eq = argument.indexOf("=");
+      if (eq === -1) {
+        const name = argument.slice(2);
+        if (COMMIT_VALUE_LONG.has(name)) consumeNext = true;
+      }
+      continue;
+    }
+    if (argument.length > 1 && argument.startsWith("-")) {
+      const cluster = argument.slice(1);
+      for (let i = 0; i < cluster.length; i += 1) {
+        const char = cluster[i];
+        if (COMMIT_VALUE_SHORT.has(char)) {
+          if (i + 1 < cluster.length) break; // value inline
+          consumeNext = true;
+          break;
+        }
+        if (COMMIT_OPTIONAL_VALUE_SHORT.has(char)) break; // optional value inline or none
+        if (char === "n") return true; // no-verify flag
+      }
+    }
+  }
+  return false;
+}
+
 export function resolveGitShimPath() {
   return GIT_SHIM;
 }
@@ -211,6 +257,12 @@ export function rewriteGitCommitCommand(command) {
     return {
       command, matched: false, blocked: true,
       reason: "Git output/external-filter options are forbidden on the read-only boundary.",
+    };
+  }
+  if (parsed.verb === "commit" && commitNoVerifyInArgv(parsed.words.slice(verbIndex + 1))) {
+    return {
+      command, matched: false, blocked: true,
+      reason: "git commit -n (--no-verify) is forbidden: it bypasses the fail-closed commit boundary.",
     };
   }
   const bash = resolveTrustedBash();
@@ -502,10 +554,12 @@ function currentUid() {
 // captures that credential into extension-owned memory and detaches the private
 // auth file before every tool. Tool subprocesses do not inherit the descriptor,
 // /proc is denied, and the allowlisted in-process tools have no numeric-
-// descriptor API. After each tool result is fully redacted, the extension
-// recreates the private mode-0600 file for Pi's next authenticated model turn;
-// the next tool call synchronously captures any legitimate OAuth rotation and
-// detaches it again before dispatch.
+// descriptor API. The credential stays detached for the whole session — after
+// every tool result and through shutdown — so no background descendant can ever
+// read it from a pathname. At session shutdown the extension returns the latest
+// (possibly rotated) bytes to the trusted parent through a private
+// credential-return pipe; the parent persists them only after the child
+// process tree is fully terminated.
 const TOOL_FD_ENV = "PI_FACTORY_TOOL_FD";
 const TOOL_FD_DEV_ENV = "PI_FACTORY_TOOL_FD_DEV";
 const TOOL_FD_INO_ENV = "PI_FACTORY_TOOL_FD_INO";
@@ -513,10 +567,87 @@ const TOOL_FD_LIMIT_ENV = "PI_FACTORY_TOOL_FD_LIMIT";
 const TOOL_FILE_ENV = "PI_FACTORY_TOOL_FILE";
 const TOOL_FILE_DEV_ENV = "PI_FACTORY_TOOL_FILE_DEV";
 const TOOL_FILE_INO_ENV = "PI_FACTORY_TOOL_FILE_INO";
+// The trusted parent provisions one private credential-return pipe per launch
+// and forwards its write end through the adapter env. The extension writes the
+// detached credential bytes there at session shutdown; the parent reads the
+// pipe only after the child process tree is fully terminated, so no background
+// descendant can observe the credential.
+const TOOL_RETURN_FD_ENV = "PI_FACTORY_CREDENTIAL_RETURN_FD";
 const DECIMAL_IDENTITY_RE = /^(?:0|[1-9][0-9]{0,30})$/;
 
 /** Credential bytes and exact file identity held only by this extension. */
 let toolCredentialState = null;
+
+// The credential-return channel is sealed at the earliest safe startup (before
+// any tool can run): the inherited write end is duplicated through
+// ``/proc/self/fd/N`` with ``O_WRONLY|O_CLOEXEC``, the original inheritable
+// descriptor is closed, and the environment exposure is deleted.  Only the
+// CLOEXEC duplicate survives in module state, so no tool subprocess (spawned
+// by bash or any Node-backed tool) can ever inherit or write the channel.
+let toolReturnFd = -1;
+let toolReturnSealed = false;
+
+/** Seal the inherited credential-return write end into a CLOEXEC duplicate.
+ *
+ * Called once at the earliest safe startup, before any tool runs.  The
+ * inherited descriptor is inheritable (the parent cleared CLOEXEC to pass it
+ * through ``pass_fds``), so it is duplicated through ``/proc/self/fd/N`` with
+ * ``O_WRONLY|O_CLOEXEC``, the original is closed, and the environment
+ * variable is deleted.  Only the CLOEXEC duplicate is retained in module
+ * state for the one-shot shutdown write/close.  Any invalid duplicate or
+ * close fails closed: the original descriptor is closed (so nothing inherits
+ * it), the environment exposure is deleted, and the channel is marked
+ * unsealed so shutdown fails closed instead of writing through an
+ * unverifiable descriptor. */
+export function sealCredentialReturnChannel(env = process.env) {
+  const fdText = env[TOOL_RETURN_FD_ENV];
+  if (fdText === undefined) {
+    return { ok: true, reason: "not-provisioned" };
+  }
+  if (typeof fdText !== "string" || !DECIMAL_IDENTITY_RE.test(fdText)) {
+    delete env[TOOL_RETURN_FD_ENV];
+    toolReturnFd = -1;
+    toolReturnSealed = false;
+    return { ok: false, reason: "credential-return-unprovisioned" };
+  }
+  const fd = Number(fdText);
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    delete env[TOOL_RETURN_FD_ENV];
+    toolReturnFd = -1;
+    toolReturnSealed = false;
+    return { ok: false, reason: "credential-return-unprovisioned" };
+  }
+  let duplicate = -1;
+  try {
+    const original = fstatSync(fd, { bigint: true });
+    if (!original.isFIFO()) {
+      throw new Error("credential-return channel is not a pipe");
+    }
+    duplicate = openSync(
+      `/proc/self/fd/${fd}`,
+      fsConstants.O_WRONLY | fsConstants.O_CLOEXEC,
+    );
+    const copied = fstatSync(duplicate, { bigint: true });
+    if (!copied.isFIFO()
+        || copied.dev !== original.dev || copied.ino !== original.ino) {
+      throw new Error("credential-return duplicate identity mismatch");
+    }
+    closeSync(fd);
+    delete env[TOOL_RETURN_FD_ENV];
+    toolReturnFd = duplicate;
+    toolReturnSealed = true;
+    return { ok: true, reason: "sealed" };
+  } catch {
+    if (duplicate >= 0) {
+      try { closeSync(duplicate); } catch { /* fail closed below */ }
+    }
+    try { closeSync(fd); } catch { /* already closed or invalid */ }
+    delete env[TOOL_RETURN_FD_ENV];
+    toolReturnFd = -1;
+    toolReturnSealed = false;
+    return { ok: false, reason: "credential-return-seal-failed" };
+  }
+}
 
 function validCredentialIdentity(identity, expectedDev = null, expectedIno = null) {
   return identity.isFile() && !identity.isSymbolicLink()
@@ -764,70 +895,43 @@ export function closeToolCredentialBoundary(env = process.env) {
   return { ok: true, reason: "detached" };
 }
 
-/** Restore auth.json after the redacted tool result and before Pi's next
- * authenticated model turn. An already-attached file is first captured and
- * transition-validated so shutdown also preserves a legitimate late refresh. */
-export function restoreToolCredentialBoundary() {
+/** Return the detached credential to the trusted parent through the private
+ * credential-return pipe (never a pathname). The parent reads the pipe only
+ * after the child process tree is fully terminated, so no background
+ * descendant can observe the credential. Any credential the provider
+ * recreated after the last tool boundary is first captured and detached
+ * (transition-validated) so no credential remains on a pathname at shutdown.
+ * A detached credential with no provisioned return channel fails closed. */
+export function returnToolCredential(env = process.env) {
+  const boundary = closeToolCredentialBoundary(env);
+  if (!boundary.ok) return boundary;
   const saved = toolCredentialState;
   if (saved === null) return { ok: true, reason: "not-detached" };
-  if (saved.status === "attached") {
-    const captured = captureAttachedCredential(saved);
-    if (!captured.ok) return captured;
+  if (saved.status !== "detached") {
+    return { ok: false, reason: "tool-file-still-attached" };
   }
-  if (saved.status !== "detached") return { ok: false, reason: "tool-file-still-attached" };
-  let targetFd = -1;
+  // The channel was sealed at startup: only the CLOEXEC duplicate survives in
+  // module state (the inheritable original is closed and the environment
+  // exposure deleted).  A missing or unsealed channel fails closed — the
+  // credential is never written through an unverifiable descriptor.
+  if (!toolReturnSealed || toolReturnFd < 0) {
+    return { ok: false, reason: "credential-return-unprovisioned" };
+  }
+  const fd = toolReturnFd;
   try {
-    // Pi's credential store may publish an empty-object placeholder before
-    // extension shutdown after observing the deliberately detached path.
-    // Replace only that exact safe placeholder; any other pre-existing inode
-    // is a fail-closed collision.
-    try {
-      const placeholder = lstatSync(saved.filePath, { bigint: true });
-      const document = JSON.parse(readFileSync(saved.filePath, "utf8"));
-      if (!placeholder.isFile() || placeholder.isSymbolicLink()
-          || placeholder.nlink !== 1n || placeholder.uid !== BigInt(currentUid())
-          || (placeholder.mode & 0o77n) !== 0n
-          || !document || typeof document !== "object" || Array.isArray(document)
-          || Object.keys(document).length !== 0) {
-        return { ok: false, reason: "tool-credential-restore-collision" };
-      }
-      unlinkSync(saved.filePath);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    targetFd = openSync(
-      saved.filePath,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
-        | fsConstants.O_NOFOLLOW | fsConstants.O_CLOEXEC,
-      0o600,
-    );
     let offset = 0;
     while (offset < saved.bytes.length) {
       offset += writeSync(
-        targetFd, saved.bytes, offset, saved.bytes.length - offset, offset
+        fd, saved.bytes, offset, saved.bytes.length - offset, null
       );
     }
-    fsyncSync(targetFd);
-    const fileIdentity = fstatSync(targetFd, { bigint: true });
-    if (!fileIdentity.isFile() || fileIdentity.nlink !== 1n
-        || fileIdentity.uid !== BigInt(currentUid())
-        || (fileIdentity.mode & 0o77n) !== 0n
-        || fileIdentity.size !== BigInt(saved.bytes.length)) {
-      throw new Error("restored credential identity mismatch");
-    }
-    closeSync(targetFd);
-    targetFd = -1;
-    saved.expectedFileDev = fileIdentity.dev;
-    saved.expectedFileIno = fileIdentity.ino;
-    saved.status = "attached";
-    return { ok: true, reason: "restored" };
+    closeSync(fd);
+    toolReturnFd = -1;
+    toolReturnSealed = false;
   } catch {
-    if (targetFd >= 0) {
-      try { closeSync(targetFd); } catch { /* fail closed below */ }
-    }
-    try { unlinkSync(saved.filePath); } catch { /* absent is safe */ }
-    return { ok: false, reason: "tool-credential-restore-failed" };
+    return { ok: false, reason: "credential-return-write-failed" };
   }
+  return { ok: true, reason: "returned" };
 }
 
 /** Identity predicate for the overflow log: not a symlink, a regular file,
@@ -1277,6 +1381,16 @@ export function failRedactedResult(event) {
 }
 
 export default function registerFactoryGuard(pi) {
+  // Earliest safe startup, before any tool can run: seal the inherited
+  // credential-return write end into a CLOEXEC duplicate, close the original
+  // inheritable descriptor, and delete the environment exposure.  A provisioned
+  // channel that cannot be sealed fails closed so no tool subprocess can ever
+  // inherit or write the return channel and shutdown never writes through an
+  // unverifiable descriptor.
+  const sealed = sealCredentialReturnChannel();
+  if (!sealed.ok) {
+    throw new Error(`${TOOLCALL_BLOCK_PREFIX}${sealed.reason}`);
+  }
   let providerAuthReady = false;
 
   pi.on("session_start", async () => {
@@ -1361,20 +1475,17 @@ export default function registerFactoryGuard(pi) {
       const redacted = redactToolResultPatch(event);
       result = redacted.failed ? failRedactedResult(event) : redacted.patch;
     }
-    // Restoration happens only after every raw result/overflow byte has been
-    // sanitized. The private file is then available to Pi's provider code for
-    // the next model turn, never to the just-completed tool implementation.
-    const restored = restoreToolCredentialBoundary();
-    if (!restored.ok) {
-      throw new Error(`${TOOLCALL_BLOCK_PREFIX}${restored.reason}`);
-    }
+    // The credential stays detached after every tool result: it is returned
+    // to the trusted parent only at session shutdown through the private
+    // credential-return pipe, never written back to a pathname a background
+    // descendant could read.
     return result;
   });
 
   pi.on("session_shutdown", () => {
-    const restored = restoreToolCredentialBoundary();
-    if (!restored.ok) {
-      throw new Error(`${TOOLCALL_BLOCK_PREFIX}${restored.reason}`);
+    const returned = returnToolCredential();
+    if (!returned.ok) {
+      throw new Error(`${TOOLCALL_BLOCK_PREFIX}${returned.reason}`);
     }
   });
 }

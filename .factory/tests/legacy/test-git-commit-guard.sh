@@ -258,6 +258,46 @@ for bypass in "--no-verify" "-n"; do
     set -e
     [[ $rc -eq 1 ]] || { echo "test-git-commit-guard: shim accepted $bypass" >&2; exit 1; }
 done
+# Combined short-option clusters: -n is the no-verify flag only when it is a
+# standalone flag or a member of a cluster of no-value options. It must be
+# rejected in -an/-qn/-sn/-vn/-pn/-on/-zn and when it follows an optional-value
+# -S/-u as a separate argv (-S -n, -u -n), but never when it is the value of a
+# value-taking option (-m -n, -mn, -cn) or the optional value of -S/-u (-Sn,
+# -un).
+for cluster in -an -qn -sn -vn -pn -on -zn; do
+    set +e
+    (cd "$tmp" && "$SHIM" commit "$cluster" -m "bypass-$cluster" >/dev/null 2>&1)
+    rc=$?
+    set -e
+    [[ $rc -eq 1 ]] || { echo "test-git-commit-guard: shim accepted cluster $cluster" >&2; exit 1; }
+done
+for pair in "-S -n" "-u -n"; do
+    set +e
+    # shellcheck disable=SC2086 # intended word splitting: each item is a full argv fragment
+    (cd "$tmp" && "$SHIM" commit $pair -m "bypass-$pair" >/dev/null 2>&1)
+    rc=$?
+    set -e
+    [[ $rc -eq 1 ]] || { echo "test-git-commit-guard: shim accepted $pair" >&2; exit 1; }
+done
+# Must-allow: -n as the value of a value-taking option is not the no-verify
+# flag, so the shim delegates and the substantive commit succeeds.
+printf 'shim-allow\n' >> "$tmp/source.txt"
+git -C "$tmp" add source.txt
+set +e
+(cd "$tmp" && "$SHIM" commit -m -n >/dev/null 2>&1)
+rc=$?
+set -e
+[[ $rc -eq 0 ]] || { echo "test-git-commit-guard: shim rejected -m -n (message value)" >&2; exit 1; }
+printf 'shim-allow-mn\n' >> "$tmp/source.txt"
+git -C "$tmp" add source.txt
+set +e
+(cd "$tmp" && "$SHIM" commit -mn >/dev/null 2>&1)
+rc=$?
+set -e
+[[ $rc -eq 0 ]] || { echo "test-git-commit-guard: shim rejected -mn (message value)" >&2; exit 1; }
+# -cn (reuse-message value "n") and -Sn/-un (optional values) are not the
+# no-verify flag; the extension-level checks below prove the shim delegates
+# them (blocked === false) rather than rejecting for no-verify.
 for argument in "-c core.hooksPath=/tmp/x commit -m hooks" \
         "--config core.hooksPath=/tmp/x commit -m hooks"; do
     set +e
@@ -332,6 +372,27 @@ const checks = [
     ["git pull origin main", (r) => r.blocked],
     ["git am fix.patch", (r) => r.blocked],
     ["git commit -m 'revert the broken pull request'", (r) => r.matched && !r.blocked],
+    ["git commit -n -m x", (r) => r.blocked],
+    ["git commit -an -m x", (r) => r.blocked],
+    ["git commit -qn -m x", (r) => r.blocked],
+    ["git commit -sn -m x", (r) => r.blocked],
+    ["git commit -vn -m x", (r) => r.blocked],
+    ["git commit -pn -m x", (r) => r.blocked],
+    ["git commit -on -m x", (r) => r.blocked],
+    ["git commit -zn -m x", (r) => r.blocked],
+    ["git commit -S -n -m x", (r) => r.blocked],
+    ["git commit -u -n -m x", (r) => r.blocked],
+    ["git commit -m -n", (r) => r.matched && !r.blocked],
+    ["git commit -mn", (r) => r.matched && !r.blocked],
+    ["git commit -cn", (r) => r.matched && !r.blocked],
+    ["git commit -Sn", (r) => r.matched && !r.blocked],
+    ["git commit -un", (r) => r.matched && !r.blocked],
+    ["git commit --message -n", (r) => r.matched && !r.blocked],
+    ["git commit --message=-n", (r) => r.matched && !r.blocked],
+    ["git commit --gpg-sign -n -m x", (r) => r.blocked],
+    ["git commit --untracked-files -n -m x", (r) => r.blocked],
+    ["git commit --gpg-sign=-n -m x", (r) => r.matched && !r.blocked],
+    ["git commit --untracked-files=-n -m x", (r) => r.matched && !r.blocked],
     ["git status --short",
         (r) => r.matched && r.command.includes(prefix) && !r.blocked],
     ["git log --oneline -5",

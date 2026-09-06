@@ -157,6 +157,9 @@ class _FixtureWorkspace:
         self.root = tmp / "workspace"
         scripts = self.root / "scripts"
         scripts.mkdir(parents=True)
+        # The migrated redaction authority reads the guard from the canonical
+        # ``.factory/tools/`` layout; create the directory before copying.
+        (self.root / ".factory" / "tools").mkdir(parents=True)
         # A placeholder so the empty (no-guard) base repo still has one
         # committed file (git refuses an empty initial commit).
         (self.root / "README").write_text("fixture\n", encoding="utf-8")
@@ -1005,8 +1008,12 @@ const restored = await handlers.tool_result({
   toolName, content: [{ type: 'text', text: 'safe' }], details: {}, isError: false,
 });
 assert(restored !== undefined);
-assert(readFileSync(authFile).includes(Buffer.from(secret)),
-  'auth file was not restored after the redacted tool result');
+// The credential stays detached after every tool result: it is returned to
+// the trusted parent only at session shutdown through the private
+// credential-return pipe, never written back to a pathname a background
+// descendant could read.
+assert.equal(existsSync(authFile), false,
+  'auth file was recreated after the redacted tool result');
 // Simulate Pi's legitimate provider refresh between turns. The next common
 // tool boundary must accept only this coherent same-account transition,
 // retain it in extension-owned memory, and detach it before dispatch.
@@ -1026,8 +1033,8 @@ const restored2 = await handlers.tool_result({
   toolName, content: [{ type: 'text', text: 'safe-2' }], details: {}, isError: false,
 });
 assert(restored2 !== undefined);
-assert(readFileSync(authFile).includes(Buffer.from(secret)),
-  'auth file was not restored for the next authenticated turn');
+assert.equal(existsSync(authFile), false,
+  'auth file was recreated for the next authenticated turn');
 
 // Reproduce the reviewed B1 race for every enabled tool: after a completed
 // tool/result cycle, detach the credential, recreate auth.json, and add a
@@ -1059,8 +1066,61 @@ assert.match(recreated.reason, /tool-file-binding-mismatch/);
 unlinkSync(aliasPath);
 unlinkSync(authFile);
 await handlers.session_shutdown({ reason: 'quit' }, {});
-assert(readFileSync(authFile).includes(Buffer.from(rotatedSecret)));
+// The credential is returned to the trusted parent only through the private
+// credential-return pipe at shutdown; it never reappears on a pathname.
+assert.equal(existsSync(authFile), false,
+  'auth file reappeared after session shutdown');
 console.log(`TOOL_CREDENTIAL_CYCLED:${toolName}`);
+'''
+
+RETURN_FD_FIXTURE = r'''
+import assert from 'node:assert/strict';
+import { existsSync, fstatSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+
+const [extensionPath, returnFdText, authFile, secret, pythonScanner, pollerPath] = process.argv.slice(2);
+const returnFd = Number(returnFdText);
+const extension = await import(pathToFileURL(extensionPath));
+const handlers = {};
+const registrations = [];
+extension.default({
+  on(name, callback) { handlers[name] = callback; },
+  registerProvider(name, config) { registrations.push({ name, config }); },
+});
+// Earliest-safe-startup sealing: the environment exposure is deleted and the
+// original inheritable descriptor is closed before any tool can run.
+assert.equal(process.env.PI_FACTORY_CREDENTIAL_RETURN_FD, undefined,
+  'credential-return env exposure survived startup sealing');
+assert.throws(() => fstatSync(returnFd), (error) => error?.code === 'EBADF',
+  'the inheritable return descriptor survived startup sealing');
+await handlers.session_start({}, {});
+assert.equal(registrations.length, 1);
+assert.equal(registrations[0].name, 'openai-codex');
+assert.equal(registrations[0].config.apiKey, secret);
+await handlers.before_agent_start({});
+const verdict = await handlers.tool_call({ toolName: 'bash', input: { command: 'printf safe' } });
+assert.equal(verdict ?? null, null, 'tool unexpectedly blocked');
+assert.equal(existsSync(authFile), false, 'private auth file survived tool boundary');
+// Background poller: from this point (credential detached) through
+// tool_result and session_shutdown the auth pathname must never reappear.
+const poller = spawn(process.env.FACTORY_TEST_PYTHON, [pollerPath, authFile, '3.0']);
+await handlers.tool_result({
+  toolName: 'bash', content: [{ type: 'text', text: 'safe' }], details: {}, isError: false,
+});
+assert.equal(existsSync(authFile), false, 'auth file recreated after tool_result');
+// A spawned child cannot inherit or write the sealed return descriptor
+// (CLOEXEC duplicate only; the inheritable original is closed).  The scanner
+// writes a marker byte to every inherited FIFO descriptor; the trusted parent
+// later proves the marker never reached the credential-return pipe.
+const child = spawnSync(process.env.FACTORY_TEST_PYTHON, [pythonScanner], { encoding: 'utf8' });
+assert.equal(child.status, 0, child.stderr);
+assert.equal(child.stdout.trim(), 'SCANNED_OK');
+await handlers.session_shutdown({ reason: 'quit' }, {});
+assert.equal(existsSync(authFile), false, 'auth file reappeared after shutdown');
+const pollerCode = await new Promise((resolve) => poller.on('exit', (code) => resolve(code)));
+assert.equal(pollerCode, 0, 'background poller observed the auth pathname');
+console.log('RETURN_FD_SEALED');
 '''
 
 NODE_FIXTURE = r'''
@@ -1201,26 +1261,46 @@ class NodeExtensionRedactionTests(unittest.TestCase):
                     auth_file.chmod(0o600)
                     file_identity = auth_file.stat()
                     env = dict(os.environ)
-                    env.update({
-                        launch_module.PI_FACTORY_GUARD_DIGEST_ENV: guard_digest,
-                        launch_module.PI_FACTORY_GUARD_PYTHON_ENV:
-                            launch_module.require_trusted_interpreter(),
-                        "PI_FACTORY_TOOL_FD": str(fd),
-                        "PI_FACTORY_TOOL_FD_DEV": str(identity.st_dev),
-                        "PI_FACTORY_TOOL_FD_INO": str(identity.st_ino),
-                        "PI_FACTORY_TOOL_FD_LIMIT": str(fd_limit),
-                        "PI_FACTORY_TOOL_FILE": str(auth_file),
-                        "PI_FACTORY_TOOL_FILE_DEV": str(file_identity.st_dev),
-                        "PI_FACTORY_TOOL_FILE_INO": str(file_identity.st_ino),
-                        "PI_CODING_AGENT_DIR": str(agent_dir),
-                        "FACTORY_TEST_PYTHON": sys.executable,
-                    })
-                    result = subprocess.run(
-                        ["node", str(fixture), str(extension), tool_name, str(fd),
-                         str(alias_fd), str(fd_limit), secret,
-                         str(python_scanner), str(node_scanner), str(auth_file)],
-                        pass_fds=(fd, alias_fd), env=env, capture_output=True, text=True,
-                        timeout=30,
+                    # Provision the private credential-return pipe: the write
+                    # end travels to the extension through the sanitized env
+                    # and ``pass_fds``; the parent reads the read end only
+                    # after the child exits, so no background descendant can
+                    # observe the returned credential.
+                    return_read, return_write = os.pipe2(
+                        getattr(os, "O_CLOEXEC", 0)
+                    )
+                    try:
+                        env.update({
+                            launch_module.PI_FACTORY_GUARD_DIGEST_ENV: guard_digest,
+                            launch_module.PI_FACTORY_GUARD_PYTHON_ENV:
+                                launch_module.require_trusted_interpreter(),
+                            "PI_FACTORY_TOOL_FD": str(fd),
+                            "PI_FACTORY_TOOL_FD_DEV": str(identity.st_dev),
+                            "PI_FACTORY_TOOL_FD_INO": str(identity.st_ino),
+                            "PI_FACTORY_TOOL_FD_LIMIT": str(fd_limit),
+                            "PI_FACTORY_TOOL_FILE": str(auth_file),
+                            "PI_FACTORY_TOOL_FILE_DEV": str(file_identity.st_dev),
+                            "PI_FACTORY_TOOL_FILE_INO": str(file_identity.st_ino),
+                            launch_module.CREDENTIAL_RETURN_ENV: str(return_write),
+                            "PI_CODING_AGENT_DIR": str(agent_dir),
+                            "FACTORY_TEST_PYTHON": sys.executable,
+                        })
+                        result = subprocess.run(
+                            ["node", str(fixture), str(extension), tool_name, str(fd),
+                             str(alias_fd), str(fd_limit), secret,
+                             str(python_scanner), str(node_scanner), str(auth_file)],
+                            pass_fds=(fd, alias_fd, return_write), env=env,
+                            capture_output=True, text=True, timeout=30,
+                        )
+                    finally:
+                        os.close(return_write)
+                    # The extension returned the latest detached (rotated)
+                    # credential through the pipe at session shutdown.
+                    returned = os.read(return_read, 1 << 20)
+                    os.close(return_read)
+                    self.assertIn(
+                        f"{secret}-ROTATED".encode(), returned,
+                        "the credential was not returned through the pipe",
                     )
                 finally:
                     os.close(fd)
@@ -1228,6 +1308,120 @@ class NodeExtensionRedactionTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"TOOL_CREDENTIAL_CYCLED:{tool_name}", result.stdout)
                 self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_return_fd_sealed_child_cannot_inherit_poller_never_sees_auth(self) -> None:
+        """The credential-return write end is sealed at earliest safe startup:
+        the env exposure is deleted, the inheritable descriptor is closed, a
+        spawned child cannot inherit or write it, and a background poller
+        never observes the auth pathname through tool_result/shutdown."""
+        if not hasattr(os, "memfd_create"):
+            self.skipTest("memfd_create is unavailable")
+        # The scanner writes a marker byte to every inherited FIFO descriptor
+        # (nonblocking, so an unrelated readerless pipe never blocks it).  The
+        # trusted parent later proves the marker never reached the
+        # credential-return pipe, so no tool subprocess could inherit or
+        # write the sealed return descriptor.
+        python_scanner = self.tmp / "return-fd-scanner.py"
+        python_scanner.write_text(
+            "import errno, fcntl, os, stat, sys\n"
+            "marker = b'RETURN_FD_LEAK_MARKER'\n"
+            "for candidate in range(3, 4096):\n"
+            "    try:\n"
+            "        info = os.fstat(candidate)\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "    if not stat.S_ISFIFO(info.st_mode):\n"
+            "        continue\n"
+            "    flags = fcntl.fcntl(candidate, fcntl.F_GETFL)\n"
+            "    fcntl.fcntl(candidate, fcntl.F_SETFL, flags | os.O_NONBLOCK)\n"
+            "    try:\n"
+            "        os.write(candidate, marker)\n"
+            "    except OSError as error:\n"
+            "        if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EPIPE):\n"
+            "            raise\n"
+            "print('SCANNED_OK')\n",
+            encoding="utf-8",
+        )
+        poller = self.tmp / "auth-poller.py"
+        poller.write_text(
+            "import os, sys, time\n"
+            "path = sys.argv[1]\n"
+            "deadline = time.monotonic() + float(sys.argv[2])\n"
+            "while time.monotonic() < deadline:\n"
+            "    if os.path.lexists(path):\n"
+            "        sys.exit(1)\n"
+            "    time.sleep(0.01)\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+        fixture = self.tmp / "return-fd-fixture.mjs"
+        fixture.write_text(RETURN_FD_FIXTURE, encoding="utf-8")
+        extension = ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs"
+        guard_digest = hashlib.sha256(REAL_GUARD.read_bytes()).hexdigest()
+        raw_fd = os.memfd_create("factory-pi2-auth-return", 0)
+        fd = fcntl.fcntl(raw_fd, fcntl.F_DUPFD, 200)
+        os.close(raw_fd)
+        fd_limit = 4096
+        try:
+            secret = "SYNTHETIC-RETURN-SEAL-VALUE"
+            auth_payload = json.dumps({
+                "openai-codex": {
+                    "type": "oauth", "access": secret,
+                    "refresh": "SYNTHETIC-REFRESH-VALUE",
+                    "accountId": "synthetic-account",
+                    "expires": int(time.time() * 1000) + 3_600_000,
+                },
+            }).encode("utf-8")
+            os.write(fd, auth_payload)
+            os.lseek(fd, 0, os.SEEK_SET)
+            identity = os.fstat(fd)
+            agent_dir = self.tmp / "agent-return"
+            agent_dir.mkdir()
+            auth_file = agent_dir / "auth.json"
+            auth_file.write_bytes(auth_payload)
+            auth_file.chmod(0o600)
+            file_identity = auth_file.stat()
+            return_read, return_write = os.pipe2(getattr(os, "O_CLOEXEC", 0))
+            try:
+                env = dict(os.environ)
+                env.update({
+                    launch_module.PI_FACTORY_GUARD_DIGEST_ENV: guard_digest,
+                    launch_module.PI_FACTORY_GUARD_PYTHON_ENV:
+                        launch_module.require_trusted_interpreter(),
+                    "PI_FACTORY_TOOL_FD": str(fd),
+                    "PI_FACTORY_TOOL_FD_DEV": str(identity.st_dev),
+                    "PI_FACTORY_TOOL_FD_INO": str(identity.st_ino),
+                    "PI_FACTORY_TOOL_FD_LIMIT": str(fd_limit),
+                    "PI_FACTORY_TOOL_FILE": str(auth_file),
+                    "PI_FACTORY_TOOL_FILE_DEV": str(file_identity.st_dev),
+                    "PI_FACTORY_TOOL_FILE_INO": str(file_identity.st_ino),
+                    launch_module.CREDENTIAL_RETURN_ENV: str(return_write),
+                    "PI_CODING_AGENT_DIR": str(agent_dir),
+                    "FACTORY_TEST_PYTHON": sys.executable,
+                })
+                result = subprocess.run(
+                    ["node", str(fixture), str(extension), str(return_write),
+                     str(auth_file), secret, str(python_scanner), str(poller)],
+                    pass_fds=(fd, return_write), env=env,
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                os.close(return_write)
+            returned = os.read(return_read, 1 << 20)
+            os.close(return_read)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("RETURN_FD_SEALED", result.stdout)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+            self.assertIn(
+                secret.encode(), returned,
+                "the credential was not returned through the sealed pipe",
+            )
+            self.assertNotIn(
+                b"RETURN_FD_LEAK_MARKER", returned,
+                "a tool subprocess wrote the sealed credential-return pipe",
+            )
+        finally:
+            os.close(fd)
 
     def test_exported_tool_call_and_result_redaction(self) -> None:
         # ``--input-type=module`` applies to stdin input only; the fixture
@@ -1362,20 +1556,22 @@ class ExternalBackendTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="factory-external-backend."))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         # A launch-style fixture: wrapper + backend + guard committed at HEAD.
+        # The migrated launch authority reads every staged executable from the
+        # canonical ``.factory/tools/`` layout.
         self.workspace = self.tmp / "workspace"
-        scripts = self.workspace / "scripts"
-        scripts.mkdir(parents=True)
+        tools = self.workspace / ".factory" / "tools"
+        tools.mkdir(parents=True)
         shutil.copy2(ROOT / launch_module.SECURE_WRAPPER,
-                     scripts / Path(launch_module.SECURE_WRAPPER).name)
-        shutil.copy2(REAL_GUARD, scripts / Path(GUARD_RELPATH).name)
+                     tools / Path(launch_module.SECURE_WRAPPER).name)
+        shutil.copy2(REAL_GUARD, tools / Path(GUARD_RELPATH).name)
         shutil.copy2(
             ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
-            scripts / "pi-factory-guard-extension.mjs",
+            tools / "pi-factory-guard-extension.mjs",
         )
-        (scripts / "pi-cli-shims").mkdir()
+        (tools / "pi-cli-shims").mkdir()
         shutil.copy2(
             ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
-            scripts / "pi-cli-shims" / "git",
+            tools / "pi-cli-shims" / "git",
         )
         loop = self.workspace / ".factory" / "loop"
         loop.mkdir(parents=True)

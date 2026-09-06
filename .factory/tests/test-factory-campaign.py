@@ -206,6 +206,8 @@ class FixtureWorkspace:
             ".factory/prompts",
             ".factory/audit-objectives",
             ".factory/artifacts",
+            ".factory/bugs",
+            ".factory/tests",
             ".factory/tests/fixtures",
             "fixture/templates",
             "src",

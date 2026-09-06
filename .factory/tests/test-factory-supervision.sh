@@ -74,15 +74,24 @@ fi
 
 # -- 3. End-to-end launch through the committed fixture repo ------------------
 repo="$tmp/repo"
-mkdir -p "$repo/scripts"
+mkdir -p "$repo/.factory/tools/pi-cli-shims"
 mkdir -p "$repo/.factory/loop"
 mkdir -p "$repo/.factory/schemas"
-cp .factory/tools/pi2-secure-exec.py "$repo/scripts/"
+# The migrated launch authority reads every staged executable from the
+# canonical ``.factory/tools/`` layout: the secure wrapper, the credential
+# guard, the model-side Pi guard extension, and the Git shim are committed
+# there so the bound-commit blob verification (F2/F5) resolves the exact
+# production paths.
+cp .factory/tools/pi2-secure-exec.py "$repo/.factory/tools/"
 # Task 11: every fixture repo commits the exact credential guard so the
 # launch authority can verify the guard source before any child output
 # channel is redacted.
-cp .factory/tools/credential-guard.py "$repo/scripts/"
+cp .factory/tools/credential-guard.py "$repo/.factory/tools/"
+cp .factory/tools/pi-factory-guard-extension.mjs "$repo/.factory/tools/"
+cp .factory/tools/pi-cli-shims/git "$repo/.factory/tools/pi-cli-shims/"
 cp .factory/loop/confine_launcher.py "$repo/.factory/loop/"
+cp .factory/loop/usage.py "$repo/.factory/loop/"
+cp .factory/loop/usage_fetch.py "$repo/.factory/loop/"
 cp .factory/schemas/factory-confinement-v1.schema.json "$repo/.factory/schemas/"
 cp .factory/tests/fixtures/plan-valid-base.md "$repo/plan.md"
 printf 'spec\n' > "$repo/spec.md"
@@ -165,7 +174,7 @@ grep -qi 'committed blob' "$tmp/tamper.err" \
 
 # The tampered wrapper (the file that must run from its exact bound-commit
 # bytes) is rejected the same way, before any backend read or spawn.
-printf '\n# tampered\n' >> "$repo/scripts/pi2-secure-exec.py"
+printf '\n# tampered\n' >> "$repo/.factory/tools/pi2-secure-exec.py"
 if run_launch >"$tmp/wraptamper.out" 2>"$tmp/wraptamper.err"; then
     fail "tampered wrapper was not rejected before exec"
 fi

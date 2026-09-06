@@ -61,6 +61,7 @@ from pathlib import Path
 import shutil
 import signal
 import stat
+import selectors
 import subprocess
 import sys
 import tempfile
@@ -373,6 +374,28 @@ class _Base(unittest.TestCase):
         shutil.copy2(
             ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
             scripts / "pi-cli-shims" / "git",
+        )
+        # The migrated launch authority reads every staged executable from the
+        # canonical ``.factory/tools/`` layout (never ``scripts/``): the
+        # secure wrapper, the credential guard, the model-side Pi guard
+        # extension, and the Git shim must all be committed there so the
+        # bound-commit blob verification (F2/F5) resolves the exact paths the
+        # production launch uses.
+        tools = self.workspace / ".factory" / "tools"
+        tools.mkdir(parents=True)
+        shutil.copy2(REAL_WRAPPER, tools / WRAPPER_BASENAME)
+        shutil.copy2(
+            ROOT / ".factory" / "tools" / "credential-guard.py",
+            tools / "credential-guard.py",
+        )
+        shutil.copy2(
+            ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
+            tools / "pi-factory-guard-extension.mjs",
+        )
+        (tools / "pi-cli-shims").mkdir()
+        shutil.copy2(
+            ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
+            tools / "pi-cli-shims" / "git",
         )
         loop = self.workspace / ".factory" / "loop"
         loop.mkdir(parents=True)
@@ -952,7 +975,7 @@ class ArgvEnvironmentTests(_Base):
         )
         self.assertEqual(argv[0], os.path.realpath(sys.executable))
         self.assertEqual(
-            argv[1], str(self.workspace / "scripts" / WRAPPER_BASENAME)
+            argv[1], str(self.workspace / ".factory" / "tools" / WRAPPER_BASENAME)
         )
         self.assertIn("--prompt-fd", argv)
         self.assertNotIn("--prompt-file", argv)
@@ -968,7 +991,7 @@ class ArgvEnvironmentTests(_Base):
         self.assertIn("--extension", argv)
         self.assertEqual(
             argv[argv.index("--extension") + 1],
-            str(self.workspace / "scripts" / "pi-factory-guard-extension.mjs"),
+            str(self.workspace / ".factory" / "tools" / "pi-factory-guard-extension.mjs"),
         )
         self.assertNotIn(SYNTHETIC_SECRET, json.dumps(argv))
         for flag in launch.FORBIDDEN_BACKEND_FLAGS:
@@ -1979,26 +2002,32 @@ class CliTests(_Base):
     def make_repo(self) -> tuple[Path, str, Path]:
         repo = self.tmp / "repo"
         repo.mkdir()
-        (repo / "scripts").mkdir()
         (repo / "src" / ".factory-test-output").mkdir(parents=True)
-        shutil.copy2(REAL_WRAPPER, repo / "scripts" / WRAPPER_BASENAME)
+        # The migrated launch authority reads every staged executable from the
+        # canonical ``.factory/tools/`` layout: the secure wrapper, the
+        # credential guard, the model-side Pi guard extension, and the Git
+        # shim are committed there so the bound-commit blob verification
+        # (F2/F5) resolves the exact production paths.
+        tools = repo / ".factory" / "tools"
+        tools.mkdir(parents=True)
+        shutil.copy2(REAL_WRAPPER, tools / WRAPPER_BASENAME)
         # Task 11: commit the exact credential guard into every fixture repo
         # (the launch redacts every child output channel through the exact
         # committed guard before any result is produced).
         shutil.copy2(
             ROOT / ".factory" / "tools" / "credential-guard.py",
-            repo / "scripts" / "credential-guard.py",
+            tools / "credential-guard.py",
         )
         # Task 11: commit the exact model-side Pi guard extension into every
         # fixture repo (the launch always loads it through ``--extension``).
         shutil.copy2(
             ROOT / ".factory" / "tools" / "pi-factory-guard-extension.mjs",
-            repo / "scripts" / "pi-factory-guard-extension.mjs",
+            tools / "pi-factory-guard-extension.mjs",
         )
-        (repo / "scripts" / "pi-cli-shims").mkdir()
+        (tools / "pi-cli-shims").mkdir()
         shutil.copy2(
             ROOT / ".factory" / "tools" / "pi-cli-shims" / "git",
-            repo / "scripts" / "pi-cli-shims" / "git",
+            tools / "pi-cli-shims" / "git",
         )
         # Task 8 confined launch: the fixture repo commits the exact
         # confine-launcher blob (F2/F5) so the production CLI can stage it
@@ -2148,7 +2177,7 @@ class CliTests(_Base):
     def test_tampered_workspace_wrapper_rejected_before_exec(self) -> None:
         """F2: the secure wrapper must run from its exact bound-commit bytes."""
         repo, head, plan = self.make_repo()
-        wrapper = repo / "scripts" / WRAPPER_BASENAME
+        wrapper = repo / ".factory" / "tools" / WRAPPER_BASENAME
         original = wrapper.read_bytes()
         wrapper.write_bytes(original + b"\n# tampered\n")
         argv = self._argv(repo, head, plan)
@@ -2430,7 +2459,7 @@ class AuthorityTokenTests(_Base):
         # Mutate both the workspace wrapper and backend after the token minted
         # the exact committed bytes into the private staging directory.
         self.backend.write_text("#!/bin/sh\necho swapped\n", encoding="utf-8")
-        wrapper = self.workspace / "scripts" / WRAPPER_BASENAME
+        wrapper = self.workspace / ".factory" / "tools" / WRAPPER_BASENAME
         wrapper.write_text("# swapped wrapper\n", encoding="utf-8")
         (self.workspace / launch.PI_FACTORY_GUARD_EXTENSION).write_text(
             "throw new Error('swapped extension');\n", encoding="utf-8"
@@ -2622,6 +2651,331 @@ class AuthorityTokenTests(_Base):
         os.chmod(script, 0o500)
         with self.assertRaises(gitutil.GitBoundaryError):
             gitutil.require_trusted_executable(str(script))
+
+
+class CredentialReturnTests(_Base):
+    """Focused credential-return pipe consume/publish/cleanup unit tests.
+
+    The trusted parent provisions one private pipe per openai-codex launch;
+    the model-side extension returns the detached credential bytes there at
+    session shutdown.  These tests exercise the parent-side consume contract:
+    exactly one JSON document, a 1 MiB cap, EOF ordering after the child is
+    reaped, and fd/thread cleanup on every path.
+    """
+
+    def _openai_supervisor(self) -> launch.LaunchSupervision:
+        """Build a supervisor bound to an openai-codex provider."""
+        binding, role, agents, spec, plan = self.make_binding()
+        codex = launch.InvocationBinding(
+            role=binding.role,
+            model=binding.model,
+            provider="openai-codex",
+            backend=binding.backend,
+            workspace=binding.workspace,
+            bound_commit=binding.bound_commit,
+            role_prompt_digest=binding.role_prompt_digest,
+            prompt_set_digest=binding.prompt_set_digest,
+            plan_digest=binding.plan_digest,
+            policy_digest=binding.policy_digest,
+            specification_digest=binding.specification_digest,
+            allowed_tools=binding.allowed_tools,
+            task_id=binding.task_id,
+            task_excerpt_digest=binding.task_excerpt_digest,
+            audit_objective_digest=binding.audit_objective_digest,
+            runtime_limit=binding.runtime_limit,
+            inactivity_limit=binding.inactivity_limit,
+        )
+        return launch.LaunchSupervision(codex, kill_grace=0.3)
+
+    def _valid_document(self) -> bytes:
+        return json.dumps({
+            "openai-codex": {
+                "type": "oauth", "access": "SYNTHETIC-ACCESS-VALUE",
+                "refresh": "SYNTHETIC-REFRESH-VALUE",
+                "accountId": "synthetic-account",
+                "expires": int(time.time() * 1000) + 3_600_000,
+            },
+        }).encode("utf-8")
+
+    def test_valid_single_document_returned(self) -> None:
+        supervisor = self._openai_supervisor()
+        valid = self._valid_document()
+        supervisor._credential_return_data = bytearray(valid)
+        supervisor._credential_return_eof = True
+        returned = supervisor._consume_credential_return()
+        self.assertEqual(returned, valid)
+        self.assertIsNone(supervisor._credential_return_data)
+
+    def test_missing_returns_none(self) -> None:
+        supervisor = self._openai_supervisor()
+        supervisor._credential_return_data = None
+        supervisor._credential_return_eof = True
+        self.assertIsNone(supervisor._consume_credential_return())
+
+    def test_malformed_raises(self) -> None:
+        supervisor = self._openai_supervisor()
+        supervisor._credential_return_data = bytearray(b"{not-json")
+        supervisor._credential_return_eof = True
+        with self.assertRaises(launch.SupervisionError):
+            supervisor._consume_credential_return()
+
+    def test_oversize_raises(self) -> None:
+        supervisor = self._openai_supervisor()
+        supervisor._credential_return_oversize = True
+        supervisor._credential_return_data = bytearray()
+        supervisor._credential_return_eof = True
+        with self.assertRaises(launch.SupervisionError):
+            supervisor._consume_credential_return()
+
+    def test_concatenated_documents_raise(self) -> None:
+        supervisor = self._openai_supervisor()
+        supervisor._credential_return_data = bytearray(
+            self._valid_document() + self._valid_document()
+        )
+        supervisor._credential_return_eof = True
+        with self.assertRaises(launch.SupervisionError):
+            supervisor._consume_credential_return()
+
+    def test_ordering_after_reap_and_cleanup(self) -> None:
+        """The reader thread reaches EOF only after the write end is closed
+        (the child is reaped); cleanup joins the thread and closes both ends."""
+        supervisor = self._openai_supervisor()
+        supervisor._provision_credential_return_pipe()
+        self.assertGreaterEqual(supervisor._credential_return_fd, 0)
+        self.assertGreaterEqual(supervisor._credential_return_write_fd, 0)
+        document = self._valid_document()
+        # The model writes the returned credential and closes its write end
+        # (the child process tree is fully terminated).
+        os.write(supervisor._credential_return_write_fd, document)
+        os.close(supervisor._credential_return_write_fd)
+        supervisor._credential_return_write_fd = -1
+        supervisor._credential_return_thread = threading.Thread(
+            target=supervisor._drain_credential_return, daemon=True
+        )
+        supervisor._credential_return_thread.start()
+        returned = supervisor._consume_credential_return()
+        self.assertEqual(returned, document)
+        self.assertTrue(supervisor._credential_return_eof)
+        # Cleanup is idempotent and closes the read end / joins the thread.
+        supervisor._cleanup()
+        supervisor._cleanup()
+        self.assertEqual(supervisor._credential_return_fd, -1)
+        self.assertEqual(supervisor._credential_return_write_fd, -1)
+        self.assertIsNone(supervisor._credential_return_thread)
+
+    def test_long_session_beyond_old_drain_window_still_consumes(self) -> None:
+        """Regression: the reader starts at spawn and must drain for an
+        arbitrarily long bounded campaign runtime, so a session longer than the
+        old 30s spawn-relative drain window must still reach EOF and consume.
+        The selector is mocked to report no events for 70 polls (each 0.5s =>
+        35s, beyond the removed 30s deadline) before the credential becomes
+        readable, without actually sleeping."""
+        supervisor = self._openai_supervisor()
+        supervisor._provision_credential_return_pipe()
+        document = self._valid_document()
+        # The model writes the returned credential and closes its write end at
+        # session shutdown; the reader only notices it after a long idle poll.
+        os.write(supervisor._credential_return_write_fd, document)
+        os.close(supervisor._credential_return_write_fd)
+        supervisor._credential_return_write_fd = -1
+
+        class _LongIdleSelector:
+            def __init__(self) -> None:
+                self._calls = 0
+                self._closed = False
+
+            def register(self, fileobj, events):
+                pass
+
+            def select(self, timeout=None):
+                self._calls += 1
+                # 70 idle polls * 0.5s = 35s, beyond the old 30s deadline.
+                if self._calls <= 70:
+                    return []
+                return [(None, selectors.EVENT_READ)]
+
+            def close(self):
+                self._closed = True
+
+        fake = _LongIdleSelector()
+        with unittest.mock.patch.object(
+            launch.selectors, "DefaultSelector", return_value=fake
+        ):
+            supervisor._credential_return_thread = threading.Thread(
+                target=supervisor._drain_credential_return, daemon=True
+            )
+            supervisor._credential_return_thread.start()
+            returned = supervisor._consume_credential_return()
+        self.assertEqual(returned, document)
+        self.assertTrue(supervisor._credential_return_eof)
+        self.assertTrue(fake._closed)
+        supervisor._cleanup()
+        self.assertEqual(supervisor._credential_return_fd, -1)
+        self.assertIsNone(supervisor._credential_return_thread)
+
+    def test_selector_register_failure_fails_closed_without_hang(self) -> None:
+        """A selector that cannot register the read end must fail closed (no
+        EOF, no consumed bytes) and return promptly rather than busy-looping
+        on an empty selector or hanging the drain thread."""
+        supervisor = self._openai_supervisor()
+        supervisor._provision_credential_return_pipe()
+        self.assertGreaterEqual(supervisor._credential_return_fd, 0)
+
+        class _RegisterFailingSelector:
+            def __init__(self) -> None:
+                self._closed = False
+
+            def register(self, fileobj, events):
+                raise OSError("synthetic register failure")
+
+            def select(self, timeout=None):
+                raise AssertionError("select must never be reached")
+
+            def close(self):
+                self._closed = True
+
+        fake = _RegisterFailingSelector()
+        with unittest.mock.patch.object(
+            launch.selectors, "DefaultSelector", return_value=fake
+        ):
+            supervisor._credential_return_thread = threading.Thread(
+                target=supervisor._drain_credential_return, daemon=True
+            )
+            supervisor._credential_return_thread.start()
+            supervisor._credential_return_thread.join(timeout=5.0)
+        self.assertFalse(supervisor._credential_return_thread.is_alive())
+        self.assertFalse(supervisor._credential_return_eof)
+        self.assertEqual(supervisor._credential_return_data, bytearray())
+        self.assertFalse(supervisor._credential_return_oversize)
+        self.assertTrue(fake._closed)
+        supervisor._cleanup()
+        self.assertEqual(supervisor._credential_return_fd, -1)
+        self.assertIsNone(supervisor._credential_return_thread)
+
+    # -- subprocess-level return-channel tests -------------------------------
+    # A real child process (the model) inherits the return write end, seals it
+    # exactly like the extension (CLOEXEC duplicate, original closed), spawns
+    # a descendant that attempts to hold/write the descriptor, returns a valid
+    # credential document, and exits.  The parent drains through the real
+    # reader thread, consumes only after EOF (the child is reaped), and
+    # atomically persists the returned bytes.
+
+    RETURN_CHILD_SOURCE = r'''
+import os, subprocess, sys
+
+fd = int(sys.argv[1])
+marker = sys.argv[2]
+descendant = sys.argv[3]
+document_path = sys.argv[4]
+# Seal exactly like the extension: duplicate through /proc/self/fd with
+# O_WRONLY|O_CLOEXEC, close the original inheritable descriptor.
+dup = os.open(f"/proc/self/fd/{fd}", os.O_WRONLY | os.O_CLOEXEC)
+os.close(fd)
+# A descendant spawned by the model must not inherit the sealed descriptor
+# (CLOEXEC) and therefore cannot write it.
+result = subprocess.run(
+    [sys.executable, descendant, str(dup)], capture_output=True, timeout=20
+)
+with open(marker, "w") as stream:
+    stream.write(f"rc={result.returncode}")
+if result.returncode != 0:
+    os._exit(9)
+with open(document_path, "rb") as stream:
+    document = stream.read()
+os.write(dup, document)
+os.close(dup)
+os._exit(0)
+'''
+
+    RETURN_DESCENDANT_SOURCE = r'''
+import os, sys
+
+fd = int(sys.argv[1])
+try:
+    os.write(fd, b"x")
+except OSError as error:
+    if error.errno == 9:  # EBADF: the sealed descriptor was not inherited
+        os._exit(0)
+    os._exit(3)
+os._exit(2)
+'''
+
+    def test_subprocess_descendant_cannot_inherit_and_persist_after_completion(self) -> None:
+        """A real child seals the return fd; its descendant cannot inherit or
+        write it, and the completed valid return is atomically persisted only
+        after the child (broker/leader) is reaped and EOF is reached."""
+        supervisor = self._openai_supervisor()
+        supervisor._provision_credential_return_pipe()
+        write_fd = supervisor._credential_return_write_fd
+        child_script = self.tmp / "return-child.py"
+        child_script.write_text(self.RETURN_CHILD_SOURCE, encoding="utf-8")
+        descendant_script = self.tmp / "return-descendant.py"
+        descendant_script.write_text(
+            self.RETURN_DESCENDANT_SOURCE, encoding="utf-8"
+        )
+        marker = self.tmp / "descendant.marker"
+        document = self._valid_document()
+        document_path = self.tmp / "return-document.json"
+        document_path.write_bytes(document)
+        child = subprocess.Popen(
+            [sys.executable, str(child_script), str(write_fd),
+             str(marker), str(descendant_script), str(document_path)],
+            pass_fds=(write_fd,),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        # The parent must not keep a writable copy: close it immediately so
+        # EOF arrives exactly when the child closes its sealed copy.
+        os.close(write_fd)
+        supervisor._credential_return_write_fd = -1
+        supervisor._credential_return_thread = threading.Thread(
+            target=supervisor._drain_credential_return, daemon=True
+        )
+        supervisor._credential_return_thread.start()
+        _, err = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 0, err)
+        # The descendant could not inherit or write the sealed return fd.
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), "rc=0")
+        # The completed valid return is consumed only after EOF (the child is
+        # reaped) and atomically persisted to the private home.
+        returned = supervisor._consume_credential_return()
+        self.assertEqual(returned, document)
+        home = self.tmp / "sanitized-home"
+        home.mkdir()
+        supervisor._sanitized_home = home
+        supervisor._publish_credential_return_to_private_home(returned)
+        persisted = home / ".pi" / "agent2" / "auth.json"
+        self.assertEqual(persisted.read_bytes(), returned)
+        self.assertEqual(persisted.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(persisted.stat().st_nlink, 1)
+        supervisor._cleanup()
+
+    def test_timeout_cleanup_zeroes_and_fails_closed(self) -> None:
+        """A write end that never closes (no EOF) fails the consume closed
+        within the bounded join window, zeroes the buffer, and cleanup
+        stops/joins/closes without deadlock."""
+        supervisor = self._openai_supervisor()
+        supervisor._provision_credential_return_pipe()
+        write_fd = supervisor._credential_return_write_fd
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            pass_fds=(write_fd,),
+        )
+        os.close(write_fd)
+        supervisor._credential_return_write_fd = -1
+        supervisor._credential_return_thread = threading.Thread(
+            target=supervisor._drain_credential_return, daemon=True
+        )
+        supervisor._credential_return_thread.start()
+        with self.assertRaises(launch.SupervisionError):
+            supervisor._consume_credential_return()
+        self.assertIsNone(supervisor._credential_return_data)
+        self.assertFalse(supervisor._credential_return_eof)
+        supervisor._cleanup()
+        holder.kill()
+        holder.wait(timeout=10)
+        self.assertEqual(supervisor._credential_return_fd, -1)
+        self.assertEqual(supervisor._credential_return_write_fd, -1)
+        self.assertIsNone(supervisor._credential_return_thread)
 
 
 if __name__ == "__main__":

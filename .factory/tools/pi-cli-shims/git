@@ -171,11 +171,54 @@ for argument in "$@"; do
     esac
 done
 if [[ "$verb" == commit ]]; then
+    # argv-aware commit option scan: reject -n (--no-verify) only when it is a
+    # standalone flag or a member of a short-option cluster, and never when it
+    # is the value of a value-taking option (-m/-c/-C/-F) or the optional value
+    # of -S/-u. Long options that take a value consume the next argv;
+    # optional-value long options (--gpg-sign/--untracked-files) consume only an
+    # inline =value, so a following -n is still the no-verify flag.
+    consume_next=0
     for argument in "$@"; do
-        if [[ "$argument" == -n ]]; then
-            echo "git-shim: commit -n (--no-verify) is forbidden: it bypasses the fail-closed commit boundary" >&2
-            exit 1
+        if [[ $consume_next -eq 1 ]]; then
+            consume_next=0
+            continue
         fi
+        case "$argument" in
+            --) break ;;
+            --*=*) continue ;;
+            --message|--file|--reuse-message|--reedit-message|--author|--date|--cleanup|--fixup|--squash|--trailer|--template)
+                consume_next=1
+                continue
+                ;;
+            -?*)
+                rest=${argument#-}
+                i=0
+                while [[ $i -lt ${#rest} ]]; do
+                    char=${rest:$i:1}
+                    case "$char" in
+                        c|C|F|m)
+                            # required value: rest of cluster is the value, else next argv
+                            if [[ $((i + 1)) -lt ${#rest} ]]; then
+                                break
+                            fi
+                            consume_next=1
+                            break
+                            ;;
+                        S|u)
+                            # optional value: only an inline rest attaches; next argv is not consumed
+                            break
+                            ;;
+                        n)
+                            echo "git-shim: commit -n (--no-verify) is forbidden: it bypasses the fail-closed commit boundary" >&2
+                            exit 1
+                            ;;
+                        *)
+                            i=$((i + 1))
+                            ;;
+                    esac
+                done
+                ;;
+        esac
     done
 fi
 if [[ -n ${GIT_CONFIG_PARAMETERS:-} || -n ${GIT_CONFIG_COUNT:-} ]] \
