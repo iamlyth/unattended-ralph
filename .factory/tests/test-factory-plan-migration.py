@@ -50,14 +50,15 @@ def _make_v1_plan() -> str:
     """The committed v1 plan plus the Phase 2D1 migration task (the real input).
 
     The canonical plan is now the concise v2 plan; the v1 input is the
-    committed HEAD 36-task v1 plan with the migration task added as Task 36
-    and the final audit renumbered to Task 37 (the exact pre-migration
-    state): 30 completed tasks, 7 unfinished (21, 24, 28, 29, 32, 36, 37).
+    pre-migration committed 36-task v1 plan (HEAD~1) with the migration task
+    added as Task 36 and the final audit renumbered to Task 37 (the exact
+    pre-migration state): 30 completed tasks, 7 unfinished (21, 24, 28, 29,
+    32, 36, 37).
     """
     import subprocess
 
     result = subprocess.run(
-        ["git", "show", "HEAD:.factory/artifacts/implementation-plan.md"],
+        ["git", "show", "HEAD~1:.factory/artifacts/implementation-plan.md"],
         capture_output=True, text=True, check=True,
     )
     text = result.stdout
