@@ -41,9 +41,11 @@ infrastructure-failure fail-closed closes, or human authority.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 SCHEMA_NAME = "factory-verifier-failure/v1"
 SCHEMA_FILE = "factory-verifier-failure-v1.schema.json"
@@ -142,16 +144,43 @@ def _validate_safe_ref(value: str, name: str) -> None:
 
 
 def _load_schema() -> Dict[str, object]:
+    """Read the committed schema with a no-follow, identity-safe open.
+
+    The schema is a committed control-plane authority: a symlink in any
+    component, a non-regular file, a wrong owner, or a group/other-writable
+    file fails closed instead of being read (EVID-02 hardening).  The read
+    is bounded and the bytes are parsed only after the identity checks pass.
+    """
     here = Path(__file__).resolve().parents[1]  # .factory/
     path = here / "schemas" / SCHEMA_FILE
     try:
-        data = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as exc:
         raise VerifierFailureError(
-            f"cannot load the committed schema {path}: {exc}"
+            f"cannot open the committed schema {path}: {exc}"
         ) from exc
-    if len(data) > 256 * 1024:
-        raise VerifierFailureError(f"the committed schema {path} is oversized")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise VerifierFailureError(
+                f"the committed schema {path} is not a regular file"
+            )
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise VerifierFailureError(
+                f"the committed schema {path} is not owned/private; the "
+                "schema authority fails closed"
+            )
+        if info.st_size > 256 * 1024:
+            raise VerifierFailureError(f"the committed schema {path} is oversized")
+        data = os.read(descriptor, info.st_size + 1)
+        if len(data) > 256 * 1024:
+            raise VerifierFailureError(f"the committed schema {path} is oversized")
+    finally:
+        os.close(descriptor)
     try:
         schema = json.loads(data)
     except ValueError as exc:
@@ -415,6 +444,63 @@ def parse_artifact(raw: bytes) -> Dict[str, object]:
         ) from exc
     validate_artifact(data)
     return data
+
+
+def validate_commit_context(
+    artifact: Mapping[str, object],
+    *,
+    expected_commit: str,
+    root: Path,
+    resolver: Optional[Callable[[str], bool]] = None,
+) -> None:
+    """Validate the artifact's commit against the expected bound commit and
+    repository resolvability (EVID-02 contextual binding).
+
+    The artifact records the exact commit the verifier ran at.  A consumer
+    that knows the expected bound commit (the commit the trusted control
+    plane launched the verifier at) must reject an artifact whose ``commit``
+    differs from that expected commit, and must reject a commit the
+    repository cannot resolve.  ``resolver`` is the pinned-Git resolvability
+    probe (``True`` when the 40-hex commit exists in the repository); when
+    it is omitted the artifact's own 40-hex syntax check is the only
+    resolvability gate, so callers that cannot prove repository
+    resolvability fail closed by refusing to accept the artifact as
+    contextually bound.
+    """
+    if not isinstance(expected_commit, str) or not SHA40_RE.fullmatch(
+        expected_commit
+    ):
+        raise VerifierFailureMalformedError(
+            "the expected bound commit must be a 40-hex commit hash"
+        )
+    commit = artifact.get("commit")
+    if not isinstance(commit, str) or not SHA40_RE.fullmatch(commit):
+        raise VerifierFailureMalformedError(
+            "verifier-failure commit must be a 40-hex commit hash"
+        )
+    if commit != expected_commit:
+        raise VerifierFailureMalformedError(
+            f"verifier-failure commit {commit!r} does not match the expected "
+            f"bound commit {expected_commit!r}; a stale or forged artifact "
+            "fails closed"
+        )
+    if resolver is not None:
+        try:
+            resolvable = bool(resolver(commit))
+        except Exception as exc:
+            raise VerifierFailureError(
+                f"cannot probe repository resolvability of {commit}: {exc}"
+            ) from exc
+        if not resolvable:
+            raise VerifierFailureMalformedError(
+                f"verifier-failure commit {commit!r} is not resolvable in the "
+                "repository; a stale or forged artifact fails closed"
+            )
+    elif not Path(root).is_dir():
+        raise VerifierFailureError(
+            f"cannot validate the verifier-failure commit context: the "
+            f"repository root {root!r} is not a directory"
+        )
 
 
 def build_artifact(

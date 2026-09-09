@@ -1600,11 +1600,31 @@ def _load_schema(name: str) -> Dict[str, object]:
     here = Path(__file__).resolve().parents[1]  # .factory/
     path = here / "schemas" / name
     try:
-        data = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as exc:
-        raise CampaignResultError(f"cannot load the committed schema {path}: {exc}") from exc
-    if len(data) > 256 * 1024:
-        raise CampaignResultError(f"the committed schema {path} is oversized")
+        raise CampaignResultError(f"cannot open the committed schema {path}: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise CampaignResultError(
+                f"the committed schema {path} is not a regular file"
+            )
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise CampaignResultError(
+                f"the committed schema {path} is not owned/private; the "
+                "schema authority fails closed"
+            )
+        if info.st_size > 256 * 1024:
+            raise CampaignResultError(f"the committed schema {path} is oversized")
+        data = os.read(descriptor, info.st_size + 1)
+        if len(data) > 256 * 1024:
+            raise CampaignResultError(f"the committed schema {path} is oversized")
+    finally:
+        os.close(descriptor)
     try:
         schema = json.loads(data)
     except ValueError as exc:
@@ -3055,6 +3075,12 @@ class Campaign:
         every sibling in ``.factory-state/`` stays denied.  An empty file the
         role never fills is treated as no structured result by
         :func:`read_phase_result`.
+
+        The creation is dirfd/no-follow parent-safe: every parent component
+        is opened with ``O_DIRECTORY|O_NOFOLLOW`` through ``openat`` and a
+        symlink in any component fails closed, so a raced or planted
+        symlink can never redirect the transient write outside the
+        repository (Phase 2A hardening).
         """
         if not relpath:
             return
@@ -3065,48 +3091,67 @@ class Campaign:
                 "result channel must stay inside the repository with no "
                 "traversal and no absolute path"
             )
-        # A symlink in any parent component would redirect the transient
-        # write outside the repository; fail closed (REQ 4).
-        current = Path(".")
-        for part in Path(relpath).parts[:-1]:
-            current = current / part
-            probe = Path(self._root) / current
-            try:
-                info = os.lstat(str(probe))
-            except OSError:
-                break
-            if stat.S_ISLNK(info.st_mode):
-                raise CampaignResultError(
-                    f"the {label} result path {relpath!r} has a symlink "
-                    "component; the transient result channel fails closed"
-                )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        flags = (
-            os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
+        parts = Path(relpath).parts
+        parent_fd = os.open(
+            str(self._root),
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
         )
         try:
-            descriptor = os.open(path, flags, 0o600)
-        except OSError as exc:
-            raise CampaignResultError(
-                f"cannot pre-create the {label} result file {path}: {exc}"
-            ) from exc
-        try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
+            for part in parts[:-1]:
+                try:
+                    parent_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=parent_fd,
+                    )
+                except OSError as exc:
+                    raise CampaignResultError(
+                        f"cannot open the {label} result parent component "
+                        f"{part!r}: {exc}; the transient result channel "
+                        "fails closed"
+                    ) from exc
+                try:
+                    info = os.fstat(parent_fd)
+                except OSError as exc:
+                    raise CampaignResultError(
+                        f"cannot stat the {label} result parent {part!r}: {exc}"
+                    ) from exc
+                if not stat.S_ISDIR(info.st_mode):
+                    raise CampaignResultError(
+                        f"the {label} result parent {part!r} is not a "
+                        "directory; the transient result channel fails closed"
+                    )
+            flags = (
+                os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                descriptor = os.open(parts[-1], flags, 0o600, dir_fd=parent_fd)
+            except OSError as exc:
                 raise CampaignResultError(
-                    f"the {label} result file {path} is not a regular file"
-                )
-            if info.st_uid != os.getuid() or info.st_mode & 0o022:
-                raise CampaignResultError(
-                    f"the {label} result file {path} is not owned/private; "
-                    "the transient result channel fails closed"
-                )
-            # A stale transient file from a crashed attempt is truncated so
-            # the fresh role starts from an empty handoff channel.
-            os.ftruncate(descriptor, 0)
+                    f"cannot pre-create the {label} result file {path}: {exc}"
+                ) from exc
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    raise CampaignResultError(
+                        f"the {label} result file {path} is not a regular file"
+                    )
+                if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                    raise CampaignResultError(
+                        f"the {label} result file {path} is not owned/private; "
+                        "the transient result channel fails closed"
+                    )
+                # A stale transient file from a crashed attempt is truncated so
+                # the fresh role starts from an empty handoff channel.
+                os.ftruncate(descriptor, 0)
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            os.close(parent_fd)
 
     def _preserve_phase_result(
         self, state: state_module.FactoryState, phase: str, raw_bytes: bytes
@@ -4989,9 +5034,36 @@ class Campaign:
                 self._lock.release()
 
     def _publish_result(self, result: CampaignResult) -> None:
-        """Publish the machine result under the ignored evidence namespace."""
+        """Publish the machine result under the ignored evidence namespace.
+
+        Publication is write-once/no-replace and byte-idempotent: a
+        byte-exact re-publication across a crash window is accepted, and any
+        other pre-existing content (a forged, tampered, or foreign result)
+        fails closed instead of being silently replaced (Phase 2A
+        hardening).
+        """
         name = f"campaign-result-{self._config.campaign_id}.json"
-        state_module.atomic_write_json(self._root, name, result.to_dict())
+        raw = json.dumps(
+            result.to_dict(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+        try:
+            state_module.atomic_write(self._root, name, raw, no_replace=True)
+        except state_module.StateIOError as exc:
+            try:
+                existing = state_module.read_bytes(
+                    self._root, name, maximum=MAX_RESULT_FILE, missing_ok=False
+                )
+            except state_module.StateIOError as read_exc:
+                raise CampaignResultError(
+                    f"cannot publish the campaign result {name}: a marker "
+                    f"already exists and cannot be safely re-read ({read_exc})"
+                ) from read_exc
+            if existing != raw:
+                raise CampaignResultError(
+                    f"cannot publish the campaign result {name}: a different "
+                    "marker already exists; a tampered or foreign campaign "
+                    "result fails closed"
+                ) from exc
 
 
 # ---------------------------------------------------------------------------

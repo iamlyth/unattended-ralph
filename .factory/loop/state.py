@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single mutable control-state authority: ``factory-state/v2`` (STATE-01).
+"""Single mutable control-state authority: ``factory-state/v1`` (STATE-01).
 
 This module implements the one minimal mutable control-state file
 ``.factory-state/factory-loop.json`` specified by FACTORY-LOOP-SPEC § 11 and
