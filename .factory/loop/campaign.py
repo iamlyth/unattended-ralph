@@ -4358,11 +4358,19 @@ class Campaign:
                 "trusted verification or runner capability evidence did not pass"
             ]
             findings = list(result_data["findings"])
-        if outcome in ("findings", "blocked"):
+        if outcome in (
+            "findings", "blocked",
+            "software_verified_external_acceptance_blocked",
+        ):
             # Task 10 §16: verification findings/blocked become next-round
             # planner input through an orchestrator-minted receipt that binds
             # the exact phase-base commit, the exact structured result digest,
-            # the phase tag, and the deterministic-gate evidence.
+            # the phase tag, and the deterministic-gate evidence.  The
+            # software-verified-external-acceptance-blocked outcome preserves
+            # the exact structured phase-result bytes (the tester's blocked
+            # references are evidence) but publishes no findings receipt: the
+            # external blockers are already explicit in the plan and the
+            # outcome advances to the independent audit.
             #
             # Task 23 (F): the exact-commit Redactor masks every free-text
             # finding and blocked reference and rebuilds the preserved
@@ -4378,16 +4386,17 @@ class Campaign:
             )
             redacted_digest = plan_sha256(redacted_bytes)
             self._preserve_phase_result(state, "verification", redacted_bytes)
-            self._publish_findings(
-                state, phase="verification", phase_tag=tag,
-                phase_base_commit=head, outcome=outcome,
-                result_digest=redacted_digest,
-                findings=findings_red,
-                blocked_on=blocked_red,
-                gate_ran=gate_ran, gate_exit=gate_exit,
-                capability_ran=capability_ran,
-                capability_exit=capability_exit,
-            )
+            if outcome in ("findings", "blocked"):
+                self._publish_findings(
+                    state, phase="verification", phase_tag=tag,
+                    phase_base_commit=head, outcome=outcome,
+                    result_digest=redacted_digest,
+                    findings=findings_red,
+                    blocked_on=blocked_red,
+                    gate_ran=gate_ran, gate_exit=gate_exit,
+                    capability_ran=capability_ran,
+                    capability_exit=capability_exit,
+                )
             record_result_digest = redacted_digest
         else:
             # A clean verification phase has no findings/blocked content to
