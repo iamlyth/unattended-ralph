@@ -296,14 +296,22 @@ CONVERGENCE_FIELDS: Tuple[str, ...] = (
 # trigger of the last independent audit; ``completed_audit_objectives`` is the
 # sorted set of objective IDs the independent audits have covered;
 # ``terminal_reason`` is the closed scheduler terminal-reason enum of the
-# campaign end.  A state with inactive scheduler fields serializes
-# byte-identically to a pre-Phase-2B2 state (migration compatibility).
+# campaign end.  ``pending_lease_audits`` is the Phase 2C2b-B sticky trusted
+# pending lease-audit set: one immutable trigger per developer attempt whose
+# authenticated task path-lease returned ``audit_required``, bound to the
+# campaign/task/attempt/lease digest and the exact resulting candidate
+# commit.  The model can never clear it; only a passing independent audit at
+# that exact commit consumes the matching trigger (findings/blocked/skipped/
+# infrastructure/interrupted/stale commits leave it pending).  A state with
+# inactive scheduler fields serializes byte-identically to a pre-Phase-2B2
+# state (migration compatibility).
 SCHEDULER_FIELDS: Tuple[str, ...] = (
     "campaign_budget_digest", "checkpoints", "task_attempts",
     "progress_fingerprint", "no_progress_streak",
     "last_planner_need", "last_planner_reason",
     "last_audit_checkpoint", "audit_risk_trigger",
     "completed_audit_objectives", "terminal_reason",
+    "pending_lease_audits",
 )
 
 # Closed trusted planner-need enum (STATE-01 scheduler extension): the reason
@@ -316,10 +324,13 @@ PLANNER_NEEDS = ("initial", "findings", "blocked", "replan", "none")
 # Closed trusted audit-risk-trigger enum (STATE-01 scheduler extension): the
 # milestone/risk boundary that scheduled the last independent audit.
 # ``failure`` is a task-failure/work-exhaustion/blocked boundary (no coherent
-# checkpoint progress) that forces the independent audit.
+# checkpoint progress) that forces the independent audit; ``lease_audit`` is a
+# Phase 2C2b-B pending lease-audit trigger (an authenticated task path-lease
+# returned ``audit_required`` and the exact candidate commit has not yet been
+# independently audited).
 AUDIT_RISK_TRIGGERS = (
     "final", "checkpoint_budget", "security", "verifier_risk", "interval",
-    "failure",
+    "failure", "lease_audit",
 )
 
 # Bounded trusted planner-reason prose (never model prose).
@@ -528,6 +539,35 @@ def live_branch(root) -> str:
 
 
 @dataclass(frozen=True)
+class PendingLeaseAudit:
+    """One sticky pending lease-audit trigger (Phase 2C2b-B).
+
+    Recorded by the trusted campaign when a developer attempt's authenticated
+    task path-lease returned ``audit_required``.  It binds the campaign, the
+    selected task, the attempt, the exact lease digest, and the exact
+    resulting candidate commit that contains the leased changes.  The model
+    can never clear it; only a passing independent audit at that exact
+    commit consumes the matching trigger.  It carries no secret/nonce/claim
+    bytes — only bounded non-secret digests and identifiers.
+    """
+
+    campaign_id: str
+    task_id: int
+    attempt: int
+    lease_digest: str
+    commit: str
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "campaign_id": self.campaign_id,
+            "task_id": self.task_id,
+            "attempt": self.attempt,
+            "lease_digest": self.lease_digest,
+            "commit": self.commit,
+        }
+
+
+@dataclass(frozen=True)
 class FactoryState:
     """Immutable ``factory-state/v1`` model.
 
@@ -573,6 +613,10 @@ class FactoryState:
     audit_risk_trigger: str = ""
     completed_audit_objectives: Tuple[str, ...] = ()
     terminal_reason: str = ""
+    # Phase 2C2b-B: the sticky trusted pending lease-audit set (serialized
+    # only when non-empty so a pre-Phase-2C2b-B state round-trips
+    # byte-identically).
+    pending_lease_audits: Tuple[PendingLeaseAudit, ...] = ()
 
     def to_dict(self) -> Dict[str, object]:
         """Deterministic JSON-ready dict (role digests sorted by role).
@@ -634,6 +678,10 @@ class FactoryState:
             )
         if self.terminal_reason:
             result["terminal_reason"] = self.terminal_reason
+        if self.pending_lease_audits:
+            result["pending_lease_audits"] = [
+                record.to_dict() for record in self.pending_lease_audits
+            ]
         return result
 
     def validate(self) -> None:
@@ -966,6 +1014,18 @@ def _validate_state(state: FactoryState) -> None:
             "`terminal_reason` must be a closed scheduler terminal reason "
             f"or empty, got {state.terminal_reason!r}"
         )
+    # Phase 2C2b-B: the pending lease-audit set is bounded, sorted, and
+    # bound to this campaign; a forged/rewound/foreign trigger fails closed
+    # exactly like every other state field.
+    if state.pending_lease_audits:
+        if not isinstance(state.pending_lease_audits, tuple):
+            raise StateTamperError(
+                "`pending_lease_audits` must be a sorted tuple"
+            )
+        _validate_pending_lease_audits(
+            [record.to_dict() for record in state.pending_lease_audits],
+            campaign_id=state.campaign_id,
+        )
 
 
 def migrate_offline_state(data: object) -> Dict[str, object]:
@@ -1090,6 +1150,10 @@ def parse_state(data: object) -> FactoryState:
             data.get("completed_audit_objectives", ())
         ),
         terminal_reason=data.get("terminal_reason", ""),
+        pending_lease_audits=tuple(
+            PendingLeaseAudit(**record)
+            for record in data.get("pending_lease_audits", ())
+        ),
     )
     _validate_state(state)
     return state
@@ -1354,7 +1418,7 @@ def advance(
                 f"{sorted(unknown)!r}"
             )
         _validate_scheduler_values(scheduler)
-        scheduler_changes = dict(scheduler)
+        scheduler_changes = _normalize_scheduler_changes(scheduler)
     scheduler_changes["checkpoints"] = next_checkpoints
     result = _checked_replace(
         state,
@@ -1462,10 +1526,97 @@ def _validate_scheduler_values(changes: Mapping[str, object]) -> None:
                     "`terminal_reason` must be a closed scheduler terminal "
                     f"reason or empty, got {value!r}"
                 )
+        elif name == "pending_lease_audits":
+            if not isinstance(value, (tuple, list)):
+                raise StateTamperError(
+                    "`pending_lease_audits` must be a sorted sequence"
+                )
+            _validate_pending_lease_audits(
+                [dict(record) for record in value]
+            )
         else:
             raise StateTamperError(
                 f"unknown scheduler-extension field {name!r}"
             )
+
+
+def _validate_pending_lease_audits(
+    records: Sequence[Mapping[str, object]],
+    *,
+    campaign_id: Optional[str] = None,
+) -> None:
+    """Validate one pending lease-audit trigger sequence (Phase 2C2b-B).
+
+    Every record is a closed five-field object (campaign/task/attempt/lease
+    digest/exact commit), the set is duplicate-free and sorted, and when a
+    campaign is given every record must bind that exact campaign (a foreign
+    campaign can never clear or forge a trigger).  The lease digest is a
+    bounded non-secret SHA-256; no secret/nonce/claim bytes are accepted.
+    """
+    seen: List[tuple] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise StateTamperError(
+                "each pending lease audit must be an object"
+            )
+        if set(record) != {
+            "campaign_id", "task_id", "attempt", "lease_digest", "commit",
+        }:
+            raise StateTamperError(
+                "a pending lease audit must carry exactly the documented "
+                "five fields"
+            )
+        record_campaign = record["campaign_id"]
+        if not isinstance(record_campaign, str) or not record_campaign:
+            raise StateTamperError(
+                "a pending lease audit `campaign_id` must be a non-empty "
+                "string"
+            )
+        if campaign_id is not None and record_campaign != campaign_id:
+            raise StateTamperError(
+                "a pending lease audit binds a foreign campaign"
+            )
+        task_id = record["task_id"]
+        if (
+            isinstance(task_id, bool)
+            or not isinstance(task_id, int)
+            or task_id < 1
+        ):
+            raise StateTamperError(
+                "a pending lease audit `task_id` must be a positive integer"
+            )
+        attempt = record["attempt"]
+        if (
+            isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+        ):
+            raise StateTamperError(
+                "a pending lease audit `attempt` must be a positive integer"
+            )
+        lease_digest = record["lease_digest"]
+        if not isinstance(lease_digest, str) or not SHA256_RE.fullmatch(
+            lease_digest
+        ):
+            raise StateTamperError(
+                "a pending lease audit `lease_digest` must be a 64-hex "
+                "SHA-256 digest"
+            )
+        commit = record["commit"]
+        if not isinstance(commit, str) or not SHA40_RE.fullmatch(commit):
+            raise StateTamperError(
+                "a pending lease audit `commit` must be a 40-hex commit"
+            )
+        key = (record_campaign, task_id, attempt, lease_digest, commit)
+        if key in seen:
+            raise StateTamperError(
+                "duplicate pending lease audit trigger"
+            )
+        seen.append(key)
+    if seen != sorted(seen):
+        raise StateTamperError(
+            "`pending_lease_audits` must be sorted"
+        )
 
 
 def record_scheduler(
@@ -1487,7 +1638,136 @@ def record_scheduler(
             f"unknown scheduler-extension field(s) {sorted(unknown)!r}"
         )
     _validate_scheduler_values(changes)
-    result = _checked_replace(state, **changes)
+    result = _checked_replace(state, **_normalize_scheduler_changes(changes))
+    result.validate()
+    return result
+
+
+def _normalize_scheduler_changes(
+    changes: Mapping[str, object],
+) -> Dict[str, object]:
+    """Convert validated scheduler-update values to the model form.
+
+    ``pending_lease_audits`` arrives as a sequence of plain objects (the
+    trusted campaign's control-plane encoding) and is normalized to the
+    frozen ``PendingLeaseAudit`` tuple the state model carries; every other
+    field passes through unchanged.
+    """
+    result = dict(changes)
+    if "pending_lease_audits" in result:
+        result["pending_lease_audits"] = tuple(
+            PendingLeaseAudit(**record)
+            for record in result["pending_lease_audits"]
+        )
+    return result
+
+
+def _pending_lease_audit_sort_key(
+    record: PendingLeaseAudit,
+) -> tuple:
+    return (
+        record.campaign_id, record.task_id, record.attempt,
+        record.lease_digest, record.commit,
+    )
+
+
+def add_pending_lease_audit(
+    state: FactoryState,
+    *,
+    campaign_id: str,
+    task_id: int,
+    attempt: int,
+    lease_digest: str,
+    commit: str,
+) -> FactoryState:
+    """Record one sticky pending lease-audit trigger (Phase 2C2b-B).
+
+    The trigger is bound to the campaign/task/attempt/lease digest and the
+    exact resulting candidate commit; it ORs across retries/attempts and the
+    model can never clear it.  A byte-identical trigger is idempotent; a
+    fresh sensitive lease (new attempt/digest/commit) adds a new trigger.
+    """
+    state.validate()
+    record = PendingLeaseAudit(
+        campaign_id=campaign_id,
+        task_id=task_id,
+        attempt=attempt,
+        lease_digest=lease_digest,
+        commit=commit,
+    )
+    if record in state.pending_lease_audits:
+        return state
+    merged = tuple(
+        sorted(
+            state.pending_lease_audits + (record,),
+            key=_pending_lease_audit_sort_key,
+        )
+    )
+    result = _checked_replace(state, pending_lease_audits=merged)
+    result.validate()
+    return result
+
+
+def consume_pending_lease_audits(
+    state: FactoryState, commit: str
+) -> Tuple[FactoryState, Tuple[PendingLeaseAudit, ...]]:
+    """Consume the pending lease-audit triggers matching one exact commit.
+
+    A passing independent audit at ``commit`` consumes only the triggers
+    whose bound candidate commit equals ``commit``; every other trigger
+    (foreign task/commit/digest/campaign) stays pending.  Returns the new
+    state and the consumed records.
+    """
+    state.validate()
+    consumed = tuple(
+        record for record in state.pending_lease_audits
+        if record.commit == commit
+    )
+    if not consumed:
+        return state, ()
+    remaining = tuple(
+        record for record in state.pending_lease_audits
+        if record.commit != commit
+    )
+    result = _checked_replace(state, pending_lease_audits=remaining)
+    result.validate()
+    return result, consumed
+
+
+def has_pending_lease_audits(state: FactoryState) -> bool:
+    """True when any sticky pending lease-audit trigger remains."""
+    return bool(state.pending_lease_audits)
+
+
+def supersede_pending_lease_audits(
+    state: FactoryState,
+    *,
+    task_id: int,
+    new_commit: str,
+    is_ancestor: Callable[[str, str], bool],
+) -> FactoryState:
+    """Supersede same-task pending triggers whose bound commit is a verified
+    ancestor of ``new_commit`` (Phase 2C2b-B).
+
+    The new commit's independent audit covers the ancestor commit's changes
+    (the ancestor is contained in the new commit's tree), so the ancestor
+    trigger is superseded rather than left to deadlock a campaign that can
+    never revisit the ancestor commit.  ``is_ancestor`` is the trusted Git
+    ancestry authority (never model prose); a trigger whose commit is not a
+    verified ancestor of the new commit is never touched.
+    """
+    state.validate()
+    remaining = tuple(
+        record for record in state.pending_lease_audits
+        if not (
+            record.task_id == task_id
+            and record.commit != new_commit
+            and is_ancestor(record.commit, new_commit)
+        )
+    )
+    if remaining == state.pending_lease_audits:
+        return state
+    result = _checked_replace(state, pending_lease_audits=remaining)
     result.validate()
     return result
 

@@ -577,6 +577,8 @@
     ".factory/loop/path_lease.py",
     ".factory/loop/launch.py",
     ".factory/loop/campaign.py",
+    ".factory/loop/scheduler.py",
+    ".factory/loop/state.py",
     ".factory/loop/workspace_confinement.py",
     ".factory/loop/confine_launcher.py",
     ".factory/path-lease-policy.json",
@@ -586,12 +588,14 @@
     ".factory/schemas/factory-launch-result-v1.schema.json",
     ".factory/tests/test-factory-path-lease.py",
     ".factory/tests/test-factory-lease-launch.py",
+    ".factory/tests/test-factory-scheduler.py",
+    ".factory/tests/test-factory-state.py",
     ".factory/tests/test-factory-campaign.py"
    ],
    "fact_refs": [
     "FACT-026"
    ],
-   "reason": "Phase 2C1 foundation plus the Phase 2C2a runtime-launch binding: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher; the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed); the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only); CI/security scopes set the immutable audit_required signal on the binding and launch result; default behavior without a lease is unchanged. Phase 2C2b-A adds campaign-controlled minting and developer launch delivery: the campaign reads the optional plan `Write scopes:` request from the exact committed plan blob at the phase head and the committed path-lease policy from the exact committed HEAD blob (never the worktree), mints one unique canonical claim per campaign/task/attempt/exact HEAD/plan digest/policy digest with a trusted nonce and a deadline clamped to the attempt/task/campaign budget, fails closed on unknown/forbidden/unavailable/nonexistent requests (never a silent fallback or broad write), and delivers the exact bytes+digest through the existing launch path without persisting any authority secret/token. The scheduler audit forcing of audit_required is the next slice (2C2b-B) and is not claimed."
+   "reason": "Phase 2C1 foundation plus the Phase 2C2a runtime-launch binding and the Phase 2C2b-A campaign minting/delivery are implemented (see the plan matrix row). Phase 2C2b-B wires the immutable audit_required signal into the adaptive scheduler/state and final acceptance: a developer attempt whose authenticated lease returned audit_required records a sticky trusted pending lease-audit trigger bound to campaign/task/attempt/lease digest and the exact resulting candidate commit (no secret/nonce/claim bytes in state/results); the trigger forces the independent tester/auditor milestone regardless of the configured interval; only a passing audit at that exact commit consumes the matching trigger (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay cannot clear; a same-task trigger whose bound commit is a verified ancestor of a new commit is superseded so convergence/resume never deadlocks); any pending trigger blocks success and the success validator independently rejects it; the trusted verifier still runs independently and leased modifications to scripts/nix/packaging/ci cannot self-certify. The row remains partial only because the plan is active and the full \u00a724 acceptance (installed-tier receipts, runner evidence, human approval) is not claimed."
   }
  ]
 }

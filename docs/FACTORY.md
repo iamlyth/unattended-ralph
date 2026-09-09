@@ -577,8 +577,7 @@ without a lease is unchanged.
 ### Campaign-controlled lease minting and delivery (Phase 2C2b-A, LEASE-01)
 
 The Phase 2C2b-A campaign slice mints and delivers the task path-lease
-for selected developer attempts (the scheduler audit consumption of
-`audit_required` is the next slice, 2C2b-B).  For each selected developer
+for selected developer attempts.  For each selected developer
 attempt the campaign reads the optional plan `Write scopes:` request of the
 selected task from the exact committed plan blob at the phase head (never
 the worktree; `Scope:` prose is never parsed) and loads the committed
@@ -597,6 +596,36 @@ persists no authority secret/token; bounded non-secret result fields may
 include scope IDs, the claim digest, and the immutable `audit_required`
 signal.  No command allowlist or verifier binding changes; the product-path
 lease remains write-only and cannot self-certify.
+
+### Scheduler/state wiring of the immutable lease audit_required signal (Phase 2C2b-B, LEASE-01)
+
+The Phase 2C2b-B slice wires the immutable lease `audit_required` signal
+into the adaptive scheduler/state and final acceptance.  Every leased
+verification surface (scripts, nix, packaging, ci) is security-sensitive —
+each can alter verification/build/release behavior — so the committed
+path-lease policy marks all four scopes `audit_required` (this grants no
+release authority).  When any developer attempt's authenticated task
+path-lease returns `audit_required`, the campaign records a sticky trusted
+pending lease-audit trigger bound to the campaign/task/attempt/lease
+digest and the exact resulting candidate commit containing the leased
+changes (no secret/nonce/claim bytes in state/results).  The trigger ORs
+across retries/attempts and the model can never clear it.  The trusted
+scheduler forces the independent tester/auditor milestone whenever any
+trigger is pending, regardless of the configured `audit_interval`; only a
+passing independent audit at that exact candidate commit consumes the
+matching trigger (findings/blocked/skipped/infrastructure/interrupted/
+stale/foreign/replay cannot clear).  A same-task trigger whose bound
+commit is a verified ancestor of a new commit is superseded (the new
+commit's audit covers the ancestor's changes) so a convergence retry or a
+crashed-attempt resume never deadlocks; no trigger is ever silently
+discarded on a non-ancestor commit.  Any pending trigger blocks success:
+the success validator independently rejects it and the scheduler routes
+honestly to planning/implementation/budget/no-progress.  The trusted
+verifier still runs independently at each candidate exact commit; leased
+modifications to scripts/nix/packaging/ci cannot self-certify current
+acceptance.  The no-progress fingerprint treats a passing required lease
+audit as trusted progress only when a matching trigger was actually
+consumed.
 
 ## Maintain one bug
 

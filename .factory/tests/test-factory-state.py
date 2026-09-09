@@ -430,9 +430,12 @@ class FieldSetTest(StateConformanceCase):
                 "last_planner_need", "last_planner_reason",
                 "last_audit_checkpoint", "audit_risk_trigger",
                 "completed_audit_objectives", "terminal_reason",
+                # Phase 2C2b-B: the sticky trusted pending lease-audit set
+                # (optional in parse, serialized only when non-empty).
+                "pending_lease_audits",
             ),
         )
-        self.assertEqual(len(FIELD_NAMES), 32)
+        self.assertEqual(len(FIELD_NAMES), 33)
 
     def test_extra_field_is_rejected(self) -> None:
         data = json.loads(self.fixture("state-field-extra.json").read_text("utf-8"))
@@ -2686,6 +2689,164 @@ class PurityAndBoundaryTest(StateConformanceCase):
         # The real owner check still runs with the default (current) UID.
         self.assertEqual(load_state(root).campaign_id, "state-conformance")
 
+
+class PendingLeaseAuditTest(StateConformanceCase):
+    """Phase 2C2b-B: the sticky pending lease-audit set.
+
+    The set is optional in parse and serialized only when non-empty (a
+    pre-Phase-2C2b-B state round-trips byte-identically); every record is a
+    closed five-field object bound to the campaign/task/attempt/lease
+    digest and the exact candidate commit.  The model can never clear it:
+    only a passing audit at the exact commit consumes the matching trigger,
+    and a same-task trigger whose bound commit is a verified ancestor of a
+    new commit is superseded (the new commit's audit covers the ancestor's
+    changes).
+    """
+
+    def _state(self, **overrides) -> FactoryState:
+        state = self.init_campaign(self.new_repo())
+        return dataclasses.replace(state, **overrides)
+
+    def _record(self, **overrides) -> dict:
+        record = {
+            "campaign_id": "state-conformance",
+            "task_id": 1,
+            "attempt": 1,
+            "lease_digest": "1" * 64,
+            "commit": "2" * 40,
+        }
+        record.update(overrides)
+        return record
+
+    def test_add_is_sticky_or_and_idempotent(self) -> None:
+        state = self._state()
+        state = state_module.add_pending_lease_audit(
+            state, **self._record())
+        self.assertTrue(state_module.has_pending_lease_audits(state))
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        # A byte-identical trigger is idempotent; a fresh attempt/commit
+        # ORs a second trigger (sticky across retries/attempts).
+        state = state_module.add_pending_lease_audit(
+            state, **self._record())
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        state = state_module.add_pending_lease_audit(
+            state, **self._record(attempt=2, commit="3" * 40))
+        self.assertEqual(len(state.pending_lease_audits), 2)
+        state.validate()
+
+    def test_consume_matches_only_the_exact_commit(self) -> None:
+        state = self._state()
+        state = state_module.add_pending_lease_audit(
+            state, **self._record(commit="2" * 40))
+        state = state_module.add_pending_lease_audit(
+            state, **self._record(attempt=2, commit="3" * 40))
+        # A passing audit at a foreign/stale commit consumes nothing.
+        state, consumed = state_module.consume_pending_lease_audits(
+            state, "9" * 40)
+        self.assertEqual(consumed, ())
+        self.assertEqual(len(state.pending_lease_audits), 2)
+        # A passing audit at the exact commit consumes only the matching
+        # trigger; the other stays pending.
+        state, consumed = state_module.consume_pending_lease_audits(
+            state, "2" * 40)
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(consumed[0].commit, "2" * 40)
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        self.assertEqual(state.pending_lease_audits[0].commit, "3" * 40)
+
+    def test_foreign_campaign_and_digest_cannot_clear(self) -> None:
+        state = self._state()
+        state = state_module.add_pending_lease_audit(
+            state, **self._record())
+        # A foreign campaign's trigger is rejected at add time.
+        with self.assertRaises(StateTamperError) as caught:
+            state_module.add_pending_lease_audit(
+                state, **self._record(campaign_id="other"))
+        self.assertIn("foreign campaign", str(caught.exception))
+        # A passing audit at the exact commit consumes the trigger
+        # regardless of the lease digest (the digest is a binding, not a
+        # consumption key); a replayed/foreign digest cannot clear a
+        # trigger bound to a different commit.
+        state, consumed = state_module.consume_pending_lease_audits(
+            state, "2" * 40)
+        self.assertEqual(len(consumed), 1)
+
+    def test_supersede_requires_verified_ancestry(self) -> None:
+        state = self._state()
+        state = state_module.add_pending_lease_audit(
+            state, **self._record(commit="2" * 40))
+        # A new commit that is NOT a verified ancestor of the old commit
+        # never supersedes it (no silent discard).
+        state = state_module.supersede_pending_lease_audits(
+            state, task_id=1, new_commit="3" * 40,
+            is_ancestor=lambda old, new: False)
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        # A verified ancestor is superseded by the new commit's trigger.
+        state = state_module.supersede_pending_lease_audits(
+            state, task_id=1, new_commit="3" * 40,
+            is_ancestor=lambda old, new: old == "2" * 40)
+        self.assertEqual(len(state.pending_lease_audits), 0)
+        # A different task's trigger is never superseded.
+        state = state_module.add_pending_lease_audit(
+            state, **self._record(task_id=2, commit="4" * 40))
+        state = state_module.supersede_pending_lease_audits(
+            state, task_id=1, new_commit="3" * 40,
+            is_ancestor=lambda old, new: True)
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        self.assertEqual(state.pending_lease_audits[0].task_id, 2)
+
+    def test_validation_fails_closed(self) -> None:
+        state = self._state()
+        for bad, fragment in (
+            (self._record(task_id=0), "positive integer"),
+            (self._record(attempt=0), "positive integer"),
+            (self._record(lease_digest="xyz"), "64-hex"),
+            (self._record(commit="xyz"), "40-hex"),
+            (self._record(campaign_id=""), "non-empty"),
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(StateTamperError) as caught:
+                    state_module.add_pending_lease_audit(state, **bad)
+                self.assertIn(fragment, str(caught.exception))
+        # Duplicate and unsorted records fail closed at parse.
+        duplicate = [self._record(), self._record()]
+        with self.assertRaises(StateTamperError) as caught:
+            parse_state({
+                "schema": SCHEMA_NAME,
+                "repository_identity": state.repository_identity,
+                "branch": state.branch,
+                "campaign_id": state.campaign_id,
+                "rounds_requested": state.rounds_requested,
+                "current_round": state.current_round,
+                "current_phase": state.current_phase,
+                "specification_digest": state.specification_digest,
+                "plan_digest": state.plan_digest,
+                "role_prompt_digests": state.role_prompt_digests,
+                "audit_objectives_digest": state.audit_objectives_digest,
+                "phase_base_commit": state.phase_base_commit,
+                "selected_task_id": state.selected_task_id,
+                "attempt_number": state.attempt_number,
+                "phase_started_at_monotonic": state.phase_started_at_monotonic,
+                "attempt_started_at_monotonic": state.attempt_started_at_monotonic,
+                "last_outcome": state.last_outcome,
+                "pending_lease_audits": duplicate,
+            })
+        self.assertIn("duplicate", str(caught.exception))
+
+    def test_round_trip_and_migration_compatibility(self) -> None:
+        state = self._state()
+        state = state_module.add_pending_lease_audit(
+            state, **self._record())
+        data = state.to_dict()
+        self.assertIn("pending_lease_audits", data)
+        parsed = parse_state(data)
+        self.assertEqual(parsed, state)
+        # An inactive set serializes byte-identically to a pre-2C2b-B state.
+        plain = dataclasses.replace(
+            state, pending_lease_audits=()).to_dict()
+        self.assertNotIn("pending_lease_audits", plain)
+        self.assertEqual(parse_state(plain), dataclasses.replace(
+            state, pending_lease_audits=()))
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])

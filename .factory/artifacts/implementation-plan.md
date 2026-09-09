@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: 8c05473d3a3211bd1e88f2aa987be7fc30fef571
-spec_blob: 865eb6512a030ae1ace25b32f917b986c30e1274
+spec_blob: 389f3aadc0f8ffa823db31489b14a6569145a590
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -154,7 +154,7 @@ Tasks 25-27 plus the pending final audit.
 | MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 23, Task 28 |
 | TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization; production gates executed from the installed copy | Task 16, Task 17, Task 20, Task 23, Task 28 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 28 |
-| LEASE-01 | §14.2, §14.2a, §14.2b, §22, §24 | partial | committed `factory-path-lease-policy/v1` config and `factory-task-path-lease/v1` claim authority with deny-dominant expansion, replay/expiry/context fail-closed, and the optional plan `Write scopes:` request field; the Phase 2C2a runtime-launch binding re-validates the exact canonical claim bytes against the committed policy and trusted context before spawn and inside the confined launcher; the Phase 2C2b-A campaign mints one unique claim per campaign/task/attempt/exact HEAD/plan digest/policy digest with a trusted nonce and a budget-clamped deadline and delivers bytes+digest through the existing launch path; no scheduler audit forcing (2C2b-B) | Task 32, Task 33, Task 34, Task 28 |
+| LEASE-01 | §14.2, §14.2a, §14.2b, §14.2c, §22, §24 | partial | committed `factory-path-lease-policy/v1` config and `factory-task-path-lease/v1` claim authority with deny-dominant expansion, replay/expiry/context fail-closed, and the optional plan `Write scopes:` request field; the Phase 2C2a runtime-launch binding re-validates the exact canonical claim bytes against the committed policy and trusted context before spawn and inside the confined launcher; the Phase 2C2b-A campaign mints one unique claim per campaign/task/attempt/exact HEAD/plan digest/policy digest with a trusted nonce and a budget-clamped deadline and delivers bytes+digest through the existing launch path; the Phase 2C2b-B scheduler/state wiring records a sticky pending lease-audit trigger bound to the campaign/task/attempt/lease digest and the exact resulting candidate commit whenever a developer attempt's lease returns `audit_required`, forces the independent tester/auditor milestone regardless of the configured interval, consumes a trigger only on a passing audit at that exact commit (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay cannot clear; a same-task trigger whose bound commit is a verified ancestor of a new commit is superseded), blocks success while any trigger is pending, and keeps the trusted verifier independent so leased modifications to scripts/nix/packaging/ci cannot self-certify; full §24 acceptance (installed-tier receipts, runner evidence, human approval) is not claimed | Task 33, Task 34, Task 35, Task 28 |
 
 ## Interaction acceptance inventory
 
@@ -1973,7 +1973,7 @@ Tasks 25-27 plus the pending final audit.
 
 ## Task 34: Campaign-controlled lease minting and developer launch delivery (Phase 2C2b-A)
 
-- Status: pending
+- Status: complete
 - Dependencies: Task 33
 - Write scopes: None
 - Scope: For each selected developer attempt, the campaign reads the
@@ -2025,10 +2025,64 @@ Tasks 25-27 plus the pending final audit.
   `.factory/artifacts/conformance.json`.
 
 
-## Task 35: Final documentation and specification audit
+## Task 35: Scheduler/state wiring of the immutable lease audit_required signal (Phase 2C2b-B)
+
+- Status: complete
+- Dependencies: Task 34
+- Write scopes: None
+- Scope: Wire the immutable lease `audit_required` signal into the
+  adaptive scheduler/state and final acceptance. When any developer
+  attempt's authenticated task path-lease returns `audit_required`, the
+  campaign records a sticky trusted pending lease-audit trigger bound to
+  the campaign/task/attempt/lease digest and the exact resulting candidate
+  commit containing the leased changes (no secret/nonce/claim bytes in
+  state/results). The trigger ORs across retries/attempts and the model can
+  never clear it. The trusted scheduler forces the independent
+  tester/auditor milestone whenever any trigger is pending, regardless of
+  the configured `audit_interval`; only a passing independent audit at
+  that exact candidate commit consumes the matching trigger
+  (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay
+  cannot clear). A same-task trigger whose bound commit is a verified
+  ancestor of a new commit is superseded (the new commit's audit covers
+  the ancestor's changes) so a convergence retry or a crashed-attempt
+  resume never deadlocks; no trigger is ever silently discarded on a
+  non-ancestor commit. Any pending trigger blocks success: the success
+  validator independently rejects it and the scheduler routes honestly to
+  planning/implementation/budget/no-progress. The trusted verifier still
+  runs independently at each candidate exact commit; leased modifications
+  to scripts/nix/packaging/ci cannot self-certify current acceptance. The
+  committed path-lease policy marks all four leased verification surfaces
+  `audit_required` (each can alter verification/build/release behavior;
+  this grants no release authority). The no-progress fingerprint treats a
+  passing required lease audit as trusted progress only when a matching
+  trigger was actually consumed.
+- Acceptance criteria: the focused state/scheduler/campaign suites cover
+  sticky OR, findings cannot clear, pass at the exact commit clears,
+  replay/foreign commit/task/digest cannot clear, convergence retry
+  supersession, multiple leases, interruption/restart stickiness, forced
+  tester/auditor regardless of interval, no success while pending,
+  non-audit scope unaffected, policy tamper, and no model clearing; the
+  state, scheduler, campaign, and lease suites pass serially; the full
+  `./scripts/verify-boilerplate.sh` gate passes.
+- Verification: `.factory/tests/test-factory-state.py`
+  (`PendingLeaseAuditTest`); `.factory/tests/test-factory-scheduler.py`
+  (`ShouldAuditTest`/`ProgressFingerprintTest`/`AuditNextPhaseTest`);
+  `.factory/tests/test-factory-campaign.py`
+  (`CampaignLeaseAuditForcing`); `.factory/tools/verify-boilerplate.sh`.
+- Evidence: Phase 2C2b-B slice committed on `boilerplate-develop` with the
+  scheduler/state/campaign wiring, the committed policy marking all four
+  leased verification surfaces `audit_required`, the focused
+  state/scheduler/campaign lease-audit suites, the updated
+  spec/docs/plan/conformance, and the full boilerplate gate passing.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.2b, §22, §24
+  LEASE-01); `docs/FACTORY.md`; `docs/OPERATIONS.md`;
+  `.factory/artifacts/conformance.json`.
+
+
+## Task 36: Final documentation and specification audit
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32, Task 33, Task 34
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32, Task 33, Task 34, Task 35
 - Scope: Current checkpoint: the Phase 2B2 runtime wiring is complete: the campaign consumes the trusted scheduler decisions (planning initial/on-demand only with the planner need/reason recorded in the control state; the trusted deterministic verifier runs at each candidate exact commit; the independent tester/auditor run only at milestone/risk boundaries; the audit resolves the next phase and the closed terminal reason), `--rounds` is a finite maximum budget (never an exact count, no exactly-five rejection) capped by the committed `factory-campaign-budget/v1` `max_rounds`, the scheduler-extension state fields (checkpoints, task attempts, progress/no-progress fingerprints, planner need/reason, audit trigger, completed audit objectives, terminal reason) are optional-in-parse and serialized only when active (byte-compatible migration), and the distinct honest terminal reasons (`success`, `software_verified_external_acceptance_blocked`, `blocked`, `no_progress`, `budget_exhausted`, `interrupted`, `infrastructure_failure`) are never mis-mapped to success/findings. The security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the

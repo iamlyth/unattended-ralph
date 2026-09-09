@@ -450,6 +450,7 @@ def should_audit(
     verifier_risk: bool,
     more_tasks: bool,
     budget: CampaignBudget,
+    pending_lease_audits: bool = False,
 ) -> bool:
     """The milestone decision: run the independent tester/auditor now?
 
@@ -464,13 +465,20 @@ def should_audit(
     * a security/trust-sensitive path changed in this checkpoint;
     * the verifier risk classification requests it;
     * the configured coherent-checkpoint interval (``audit_interval``) has
-      elapsed since the last audit.
+      elapsed since the last audit;
+    * a Phase 2C2b-B pending lease-audit trigger exists — an authenticated
+      task path-lease returned ``audit_required`` and the exact candidate
+      commit containing the leased changes has not yet been independently
+      audited.  The pending trigger forces the milestone regardless of the
+      configured interval (the model can never defer or clear it).
 
     ``checkpoint`` is the 1-based coherent-checkpoint count after the current
     task completion; ``last_audit_checkpoint`` is the checkpoint count at the
     last independent audit (0 before the first).  The decision is a pure
     function of the budget and the trusted inputs.
     """
+    if pending_lease_audits:
+        return True
     if not more_tasks:
         return True
     if checkpoint >= budget.max_checkpoints:
@@ -502,23 +510,31 @@ def progress_fingerprint(
     *,
     checkpoints: int,
     passed_mandatory_objectives: Sequence[str],
+    consumed_lease_audits: int = 0,
 ) -> str:
     """Deterministic monotonic progress fingerprint of one audit boundary.
 
     The fingerprint binds only trusted monotonic evidence: the coherent
     checkpoint count (newly independently verified exact-commit software
-    checkpoint/task completion) and the set of PASSed mandatory audit
-    objectives.  It deliberately excludes planner-authored task statuses,
+    checkpoint/task completion), the set of PASSed mandatory audit
+    objectives, and the number of Phase 2C2b-B pending lease-audit triggers
+    actually consumed by the passing audit at the exact candidate commit.
+    Passing a required lease audit counts as trusted progress only when a
+    matching trigger was actually consumed (``consumed_lease_audits > 0``);
+    a passing audit that consumed nothing (stale/foreign/replay) reproduces
+    the same fingerprint and terminates honestly as ``no_progress``.  It
+    deliberately excludes planner-authored task statuses,
     findings/outcome alternation, and mere objective rotation, so repeated
-    activity without a new checkpoint or a newly PASSed mandatory objective
-    reproduces the same fingerprint and terminates honestly as
-    ``no_progress`` after ``no_progress_limit`` identical fingerprints even if
-    the planner toggles statuses.
+    activity without a new checkpoint, a newly PASSed mandatory objective,
+    or a newly consumed lease audit reproduces the same fingerprint and
+    terminates honestly as ``no_progress`` after ``no_progress_limit``
+    identical fingerprints even if the planner toggles statuses.
     """
     payload = "|".join(
         (
             str(checkpoints),
             ",".join(sorted(passed_mandatory_objectives)),
+            str(consumed_lease_audits),
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -534,6 +550,7 @@ def audit_next_phase(
     max_rounds_reached: bool,
     max_checkpoints_reached: bool,
     re_plan_needed: bool,
+    pending_lease_audits: bool = False,
 ) -> Tuple[str, str]:
     """Resolve one audit outcome to the next phase and terminal reason.
 
@@ -549,9 +566,14 @@ def audit_next_phase(
       verification — software is fully verified while external release
       acceptance remains blocked; the campaign terminates ``blocked`` with
       that reason (never success);
-    * ``pass`` with a complete plan, every mandatory objective covered, and
-      a passing verification — verified completion; the campaign terminates
-      ``success`` (early, before the maximum round budget);
+    * ``pass`` with a complete plan, every mandatory objective covered, a
+      passing verification, and no pending lease-audit trigger — verified
+      completion; the campaign terminates ``success`` (early, before the
+      maximum round budget).  A pending Phase 2C2b-B lease-audit trigger
+      blocks success: the exact candidate commit containing leased changes
+      has not yet been independently audited, so the campaign routes
+      honestly to planning/implementation/budget/no-progress instead of
+      ever succeeding with an unaudited sensitive lease;
     * ``pass`` with a reproduced no-progress fingerprint — the campaign
       terminates ``no_progress``;
     * ``pass`` at the maximum round/checkpoint budget without verified
@@ -577,7 +599,12 @@ def audit_next_phase(
     # outcome == "pass"
     if verification_outcome == "software_verified_external_acceptance_blocked":
         return "blocked", "software_verified_external_acceptance_blocked"
-    if plan_complete and objectives_covered and verification_outcome == "pass":
+    if (
+        plan_complete
+        and objectives_covered
+        and verification_outcome == "pass"
+        and not pending_lease_audits
+    ):
         return "success", "success"
     if no_progress:
         return "no_progress", "no_progress"

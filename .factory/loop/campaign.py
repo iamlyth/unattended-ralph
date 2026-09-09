@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import fnmatch
 import json
 import os
 import re
@@ -369,6 +370,12 @@ class RoleOutcome:
     # state so the independent audit is mandatory before further normal flow
     # and before success.
     audit_required: bool = False
+    # Phase 2C2b-B: the exact lease digest of the authenticated task
+    # path-lease that bound this developer attempt (empty when no lease was
+    # minted).  It is a bounded non-secret SHA-256 — never the claim bytes,
+    # nonce, or any secret material — and binds the pending lease-audit
+    # trigger to the exact lease that produced the candidate commit.
+    lease_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -3108,7 +3115,7 @@ class Campaign:
     def _mint_task_lease(
         self, head: str, task_id: Optional[int], attempt: int,
         plan_blob: bytes,
-    ) -> Tuple[Optional[bytes], str]:
+    ) -> Tuple[Optional[bytes], str, bool]:
         """Mint the campaign-controlled task path-lease for one developer attempt.
 
         Phase 2C2b: the optional plan ``Write scopes:`` request of the
@@ -3122,12 +3129,18 @@ class Campaign:
         attempt/task/campaign budget.  Unknown/forbidden/unavailable/
         nonexistent path requests fail closed with a bounded campaign error
         (never a silent fallback and never a broad write).  No requested
-        scopes returns ``(None, "")``: the exact previous default
+        scopes returns ``(None, "", False)``: the exact previous default
         confinement applies unchanged.  Convergence retries mint a fresh
         lease/nonce/attempt binding, so a replayed claim fails closed.
+
+        Phase 2C2b-B: the third return value is the immutable
+        ``audit_required`` signal of the minted claim (set when any granted
+        scope is marked ``audit_required`` by the committed policy).  The
+        campaign records it in the scheduler state so the independent audit
+        is mandatory before further normal flow and before success.
         """
         if task_id is None:
-            return None, ""
+            return None, "", False
         try:
             plan = plan_parser.Plan.from_bytes(plan_blob)
         except plan_parser.PlanError as exc:
@@ -3143,7 +3156,7 @@ class Campaign:
             )
         requested = list(task.write_scopes)
         if not requested:
-            return None, ""
+            return None, "", False
         try:
             policy_raw = self._git.blob_at(head, lease_authority.POLICY_RELPATH)
             policy = lease_authority.parse_policy(policy_raw)
@@ -3200,7 +3213,11 @@ class Campaign:
             raise CampaignPhaseError(
                 f"the task path-lease request fails closed: {exc}"
             ) from exc
-        return lease_authority.claim_to_bytes(claim), claim.claim_digest
+        return (
+            lease_authority.claim_to_bytes(claim),
+            claim.claim_digest,
+            claim.audit_required,
+        )
 
     def _run_role(
         self,
@@ -3277,9 +3294,10 @@ class Campaign:
         # and never a broad write.
         lease_bytes: Optional[bytes] = None
         lease_digest = ""
+        lease_audit_required = False
         if role == "developer" and task_id is not None:
-            lease_bytes, lease_digest = self._mint_task_lease(
-                head, task_id, attempt, plan_blob
+            lease_bytes, lease_digest, lease_audit_required = (
+                self._mint_task_lease(head, task_id, attempt, plan_blob)
             )
         claims = {
             "readiness_nonce": self._runner_readiness_nonce(),
@@ -3310,7 +3328,7 @@ class Campaign:
             ),
         }
         token = self._launch_store.mint(claims)
-        return launch_role_attempt(
+        outcome = launch_role_attempt(
             bounded,
             role=role,
             head=head,
@@ -3325,6 +3343,12 @@ class Campaign:
             _authorization_token=token,
             _authorization_claims=claims,
         )
+        # Phase 2C2b-B: the immutable audit signal and exact lease digest of
+        # the authenticated task path-lease that bound this attempt travel
+        # with the outcome (the model can never clear them).
+        if role == "developer" and lease_audit_required:
+            outcome = replace(outcome, audit_required=True, lease_digest=lease_digest)
+        return outcome
 
     def _run_driver(
         self, role, state, head, *, task_id, attempt, findings_payload=None,
@@ -3398,8 +3422,8 @@ class Campaign:
             # bytes do not carry it, so a substituted or tampered claim can
             # never reach the retry.  No requested scopes means no lease
             # channel at all (the exact previous default confinement).
-            lease_bytes, lease_digest = self._mint_task_lease(
-                head, task_id, attempt, plan_blob
+            lease_bytes, lease_digest, lease_audit_required = (
+                self._mint_task_lease(head, task_id, attempt, plan_blob)
             )
             if lease_bytes is not None:
                 env[CAMPAIGN_ENV_PREFIX + "LEASE"] = base64.b64encode(
@@ -3409,6 +3433,9 @@ class Campaign:
             else:
                 env[CAMPAIGN_ENV_PREFIX + "LEASE"] = ""
                 env[CAMPAIGN_ENV_PREFIX + "LEASE_DIGEST"] = ""
+        else:
+            lease_digest = ""
+            lease_audit_required = False
         # Task 10 §16: the planner role receives the deterministic
         # receipt-backed findings payload of the previous round as its only
         # findings channel (the fixture seam mirrors the digest-bound
@@ -3476,7 +3503,15 @@ class Campaign:
                 role, result.returncode, interrupted=True,
                 signal=f"SIG{-result.returncode}",
             )
-        return RoleOutcome(role, result.returncode)
+        outcome = RoleOutcome(role, result.returncode)
+        # Phase 2C2b-B: the immutable audit signal and exact lease digest of
+        # the authenticated task path-lease that bound this attempt travel
+        # with the outcome (the model can never clear them).
+        if lease_audit_required:
+            outcome = replace(
+                outcome, audit_required=True, lease_digest=lease_digest
+            )
+        return outcome
 
     def _publish_findings(
         self,
@@ -4479,6 +4514,7 @@ class Campaign:
         verifier_risk: bool,
         more_tasks: bool,
         no_checkpoint_progress: bool = False,
+        pending_lease_audits: bool = False,
     ) -> str:
         """The closed milestone/risk trigger that scheduled this audit.
 
@@ -4486,11 +4522,15 @@ class Campaign:
         the recorded ``audit_risk_trigger`` is the exact deterministic
         reason the independent audit ran (never model prose).  A task
         failure/work-exhaustion/blocked boundary (no coherent checkpoint
-        progress) forces the audit first; the remaining triggers mirror
-        ``should_audit``.
+        progress) forces the audit first; a Phase 2C2b-B pending lease-audit
+        trigger forces it next (the exact candidate commit containing
+        leased changes has not yet been independently audited); the
+        remaining triggers mirror ``should_audit``.
         """
         if no_checkpoint_progress:
             return "failure"
+        if pending_lease_audits:
+            return "lease_audit"
         if not more_tasks:
             return "final"
         if checkpoint >= self._config.campaign_budget.max_checkpoints:
@@ -4620,6 +4660,77 @@ class Campaign:
             retry=True,
         )
 
+    def _dirty_work_requires_audit(self, paths: Sequence[str]) -> bool:
+        """True when any dirty path matches an ``audit_required`` scope of
+        the committed path-lease policy (Phase 2C2b-B).
+
+        The committed policy is the authority (never model prose): a crashed
+        attempt's dirty work that touches a security-sensitive verification
+        surface must be independently audited at the resume commit that
+        preserves it.
+        """
+        try:
+            policy_raw = self._git.blob_at(
+                self._git.head(), lease_authority.POLICY_RELPATH
+            )
+            policy = lease_authority.parse_policy(policy_raw)
+        except (lease_authority.PathLeaseError, CampaignGitError):
+            # A workspace without the committed policy (or an unparsable
+            # one) has no audit_required scope authority; the conservative
+            # default is no forced lease audit from dirty work alone.
+            return False
+        for path in paths:
+            for scope in policy.scopes:
+                if not scope.audit_required:
+                    continue
+                if any(
+                    path == scope_path or path.startswith(scope_path + "/")
+                    for scope_path in scope.paths
+                ):
+                    return True
+                if any(
+                    fnmatch.fnmatchcase(path, pattern)
+                    for pattern in scope.patterns
+                ):
+                    return True
+        return False
+
+    def _record_pending_lease_audit(
+        self,
+        state: state_module.FactoryState,
+        *,
+        task_id: int,
+        attempt: int,
+        lease_digest: str,
+        commit: str,
+    ) -> state_module.FactoryState:
+        """Record one sticky pending lease-audit trigger (Phase 2C2b-B).
+
+        The trigger binds the campaign/task/attempt/lease digest and the
+        exact candidate commit containing the leased changes; it ORs across
+        retries/attempts and the model can never clear it.  A same-task
+        trigger whose bound commit is a verified ancestor of the new commit
+        is superseded (the new commit's independent audit covers the
+        ancestor's changes), so a convergence retry or a crashed-attempt
+        resume never deadlocks on a commit the campaign can never revisit.
+        """
+        if not lease_digest:
+            return state
+        state = state_module.add_pending_lease_audit(
+            state,
+            campaign_id=self._config.campaign_id,
+            task_id=task_id,
+            attempt=attempt,
+            lease_digest=lease_digest,
+            commit=commit,
+        )
+        return state_module.supersede_pending_lease_audits(
+            state,
+            task_id=task_id,
+            new_commit=commit,
+            is_ancestor=lambda old, new: bool(self._git.is_ancestor(old, new)),
+        )
+
     def _step_implementation(self, state: state_module.FactoryState) -> _Step:
         head = self._git.head()
         plan = self._git.plan_at(head)
@@ -4747,6 +4858,30 @@ class Campaign:
                     ),
                 )
                 plan = self._git.plan_at(head)
+                # Phase 2C2b-B: a crashed attempt's dirty work was produced
+                # under its authenticated task path-lease.  When that work
+                # touches an ``audit_required`` scope of the committed
+                # policy, the resume commit is itself a candidate commit
+                # containing leased changes: record a sticky pending
+                # lease-audit trigger bound to it so the independent audit
+                # is mandatory before further normal flow and before
+                # success.  The lease digest is the fresh attempt's minted
+                # lease digest when one exists (a bounded non-secret
+                # binding); the consumption is by exact commit, so the
+                # trigger forces the audit at this exact resume commit.
+                if self._dirty_work_requires_audit(dirty):
+                    lease_bytes, lease_digest, _ = self._mint_task_lease(
+                        head, task_id, attempt,
+                        self._git.blob_at(head, self._config.plan_path),
+                    )
+                    if not lease_digest:
+                        lease_digest = hashlib.sha256(
+                            f"resume:{self._config.campaign_id}:{task_id}:{head}".encode("utf-8")
+                        ).hexdigest()
+                    state = self._record_pending_lease_audit(
+                        state, task_id=task_id, attempt=attempt,
+                        lease_digest=lease_digest, commit=head,
+                    )
                 if resumed_complete:
                     acceptance_pass, acceptance_detail = self._acceptance_gate(
                         task_id, plan
@@ -4847,6 +4982,17 @@ class Campaign:
             new_head = self._git.commit(
                 allowed, f"factory-campaign: task {task_id} complete"
             )
+            # Phase 2C2b-B: a developer attempt whose authenticated task
+            # path-lease returned ``audit_required`` records a sticky
+            # pending lease-audit trigger bound to the exact candidate
+            # commit containing the leased changes.  The model can never
+            # clear it; only a passing independent audit at this exact
+            # commit consumes it.
+            if role.audit_required:
+                state = self._record_pending_lease_audit(
+                    state, task_id=task_id, attempt=attempt,
+                    lease_digest=role.lease_digest, commit=new_head,
+                )
             state2 = state_module.advance(state, "task_completed")
             state_module.write_state(self._root, state2)
             return _Step(self._record(state, attempt, "task_completed", ""), state=state2)
@@ -4861,9 +5007,19 @@ class Campaign:
                 )
             ]
             if allowed:
-                self._git.commit(
+                new_head = self._git.commit(
                     allowed, f"factory-campaign: progress task {task_id}"
                 )
+                # Phase 2C2b-B: a progress checkpoint produced under an
+                # ``audit_required`` lease is also a candidate commit
+                # containing leased changes; it records the same sticky
+                # trigger so the independent audit is mandatory before
+                # further normal flow and before success.
+                if role.audit_required:
+                    state = self._record_pending_lease_audit(
+                        state, task_id=task_id, attempt=attempt,
+                        lease_digest=role.lease_digest, commit=new_head,
+                    )
             return self._implementation_outcome(
                 state, attempt, "task_progress", "", dirty_work=False,
                 resource_budget_exhausted=resource_budget_exhausted,
@@ -5020,6 +5176,12 @@ class Campaign:
         no_checkpoint_progress = state.last_outcome in (
             "task_failed", "work_exhausted", "blocked",
         )
+        # Phase 2C2b-B: any sticky pending lease-audit trigger forces the
+        # independent tester/auditor milestone regardless of the configured
+        # interval — the exact candidate commit containing leased changes
+        # has not yet been independently audited and the model can never
+        # defer or clear it.
+        pending_lease_audits = state_module.has_pending_lease_audits(state)
         milestone = no_checkpoint_progress or scheduler_module.should_audit(
             checkpoint=checkpoint,
             last_audit_checkpoint=state.last_audit_checkpoint,
@@ -5027,6 +5189,7 @@ class Campaign:
             verifier_risk=verifier_risk,
             more_tasks=more_tasks,
             budget=self._config.campaign_budget,
+            pending_lease_audits=pending_lease_audits,
         )
         trigger = self._audit_trigger(
             checkpoint=checkpoint,
@@ -5034,6 +5197,7 @@ class Campaign:
             verifier_risk=verifier_risk,
             more_tasks=more_tasks,
             no_checkpoint_progress=no_checkpoint_progress,
+            pending_lease_audits=pending_lease_audits,
         )
         if milestone:
             # A successful tester process can still omit its mandatory
@@ -5399,11 +5563,34 @@ class Campaign:
             verification_outcome in ("findings", "blocked")
             or not self._more_tasks(plan, state)
         )
+        outcome = classify_audit(
+            role=role,
+            scope_ok=violation is None,
+            result_valid=result_valid,
+            outcome=result_data.get("outcome") if result_data else None,
+            findings=list(result_data.get("findings", [])) if result_data else [],
+            blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
+        )
+        # Phase 2C2b-B: a passing independent audit at the exact candidate
+        # commit consumes only the pending lease-audit triggers bound to that
+        # exact commit.  Findings/blocked/skipped/infrastructure/
+        # interrupted/stale/foreign/replay audits leave every trigger pending
+        # (the model can never clear them).  The consumption happens before
+        # the final acceptance gates so the success validator independently
+        # rejects any trigger that remains — a passing audit at a different
+        # commit can never silently drop a stale/foreign trigger.
+        pending_remaining = state_module.has_pending_lease_audits(state)
+        consumed_lease_audits: Tuple[object, ...] = ()
+        if outcome == "pass":
+            state, consumed_lease_audits = (
+                state_module.consume_pending_lease_audits(state, head)
+            )
+            pending_remaining = state_module.has_pending_lease_audits(state)
         if (
-            result_valid
+            outcome == "pass"
+            and result_valid
             and role.exit_status == 0
             and violation is None
-            and result_data.get("outcome") == "pass"
             and plan_complete
             and objectives_covered
             and verification_outcome == "pass"
@@ -5436,7 +5623,13 @@ class Campaign:
                 failures.append("final capability/evidence command did not pass without skips")
             if not acc_ran or acc_exit != 0 or acc_skipped:
                 failures.append("final project acceptance command did not pass without skips")
+            if pending_remaining:
+                failures.append(
+                    "pending lease audits require an independent audit at the "
+                    "exact candidate commit"
+                )
             if failures:
+                outcome = "findings"
                 result_data = dict(result_data)
                 result_data["outcome"] = "findings"
                 result_data["findings"] = [
@@ -5447,18 +5640,11 @@ class Campaign:
                 # A command/checker binding or signed-protocol integrity
                 # failure is control-plane infrastructure, not an ordinary
                 # capability finding. Preserve the structured terminal class.
+                outcome = "infrastructure_failure"
                 role = replace(
                     role, exit_status=-1,
                     diagnostic="runner evidence integrity failure",
                 )
-        outcome = classify_audit(
-            role=role,
-            scope_ok=violation is None,
-            result_valid=result_valid,
-            outcome=result_data.get("outcome") if result_data else None,
-            findings=list(result_data.get("findings", [])) if result_data else [],
-            blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
-        )
         # The deterministic progress fingerprint and the no-progress streak
         # are monotonic and recorded in the trusted state.  The fingerprint
         # binds only trusted monotonic evidence — the coherent checkpoint
@@ -5476,6 +5662,7 @@ class Campaign:
         fingerprint = scheduler_module.progress_fingerprint(
             checkpoints=state.checkpoints,
             passed_mandatory_objectives=passed_mandatory,
+            consumed_lease_audits=len(consumed_lease_audits),
         )
         if fingerprint == state.progress_fingerprint:
             no_progress_streak = state.no_progress_streak + 1
@@ -5563,6 +5750,7 @@ class Campaign:
             max_rounds_reached=max_rounds_reached,
             max_checkpoints_reached=max_checkpoints_reached,
             re_plan_needed=re_plan_needed,
+            pending_lease_audits=pending_remaining,
         )
         scheduler_changes: Dict[str, object] = {
             "last_audit_checkpoint": state.checkpoints,

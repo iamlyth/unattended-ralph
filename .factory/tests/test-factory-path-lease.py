@@ -348,7 +348,11 @@ class ExpansionTest(unittest.TestCase):
         self.assertEqual(scopes, ["scripts", "nix"])
         self.assertEqual(paths, ["flake.nix", "nix", "scripts", "shell.nix"])
         self.assertEqual(patterns, ["nix/*.nix", "scripts/*.py", "scripts/*.sh"])
-        self.assertFalse(audit)
+        # Phase 2C2b-B: every leased verification surface (scripts, nix,
+        # packaging, ci) is security-sensitive — each can alter
+        # verification/build/release behavior — so the committed policy
+        # marks all four scopes ``audit_required``.
+        self.assertTrue(audit)
 
     def test_ci_marks_audit_required(self) -> None:
         scopes, paths, patterns, audit = pl.expand_request(["ci"], self.policy)
@@ -415,7 +419,9 @@ class ClaimMintParseTest(unittest.TestCase):
             (NOW + timedelta(seconds=pl.DEFAULT_LEASE_SECONDS)).isoformat(),
         )
         self.assertEqual(claim.nonce, "c" * 64)
-        self.assertFalse(claim.audit_required)
+        # Phase 2C2b-B: every leased verification surface is security-
+        # sensitive, so a scripts/nix lease is ``audit_required`` too.
+        self.assertTrue(claim.audit_required)
         self.assertEqual(len(claim.claim_digest), 64)
 
     def test_audit_required_for_sensitive_scope(self) -> None:

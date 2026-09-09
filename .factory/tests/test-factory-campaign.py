@@ -2213,9 +2213,13 @@ class CampaignLeaseMinting(_CampaignBase):
         _git(ws.root, "add", "scripts", ".github")
         _git(ws.root, "commit", "-qm", "lease scope fixture paths")
 
-    def _lease_workspace(self, scopes: list[str]) -> FixtureWorkspace:
-        ws = self.make(SUCCESS_SCENARIO, rounds=3,
-                       task_specs=self._lease_tasks(scopes))
+    def _lease_workspace(
+        self, scopes: list[str], scenario: dict | None = None,
+    ) -> FixtureWorkspace:
+        ws = self.make(
+            SUCCESS_SCENARIO if scenario is None else scenario,
+            rounds=3, task_specs=self._lease_tasks(scopes),
+        )
         ws.commit_policy(self.LEASE_POLICY)
         self._commit_lease_paths(ws)
         return ws
@@ -2392,7 +2396,7 @@ class CampaignLeaseMinting(_CampaignBase):
         try:
             head = campaign._git.head()
             plan_blob = campaign._git.blob_at(head, config.plan_path)
-            lease_bytes, _ = campaign._mint_task_lease(head, 1, 1, plan_blob)
+            lease_bytes, _, _ = campaign._mint_task_lease(head, 1, 1, plan_blob)
             self.assertIsNotNone(lease_bytes)
             claim = lease_module.parse_claim(lease_bytes)
             committed = lease_module.parse_policy(
@@ -2493,6 +2497,241 @@ class CampaignLeaseMinting(_CampaignBase):
             self.assertIn(marker, source)
 
 
+class CampaignLeaseAuditForcing(CampaignLeaseMinting):
+    """Phase 2C2b-B: the immutable lease ``audit_required`` signal wired
+    into the adaptive scheduler/state and final acceptance.
+
+    A developer attempt whose authenticated task path-lease returned
+    ``audit_required`` records a sticky trusted pending lease-audit trigger
+    bound to the campaign/task/attempt/lease digest and the exact resulting
+    candidate commit.  The trigger forces the independent tester/auditor
+    milestone regardless of the configured interval; only a passing audit
+    at that exact commit consumes the matching trigger (findings/blocked/
+    skipped/infrastructure/interrupted/stale/foreign/replay cannot clear);
+    any pending trigger blocks success and stays sticky across restart/
+    interruption/convergence.  The model can never clear it.
+    """
+
+    def _assert_no_pending(self, ws: FixtureWorkspace) -> None:
+        state = ws.load_state()
+        self.assertFalse(state_module.has_pending_lease_audits(state))
+        self.assertEqual(state.pending_lease_audits, ())
+
+    def test_pending_lease_audit_forces_audit_and_consumes_on_pass(self) -> None:
+        # audit_interval=100: only the pending lease-audit trigger forces
+        # the independent audit at the exact candidate commit containing
+        # the leased changes; the passing audit at that exact commit
+        # consumes the matching trigger and the campaign succeeds.
+        ws = self._lease_workspace(["ci"])
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self._assert_no_pending(ws)
+        # The first audit ran at the task-1 completion commit (the pending
+        # trigger forced it; the interval alone would not have scheduled
+        # an audit at checkpoint 1).
+        audits = [r for r in data["phase_history"]
+                  if r["phase"] == "audit"]
+        impls = [r for r in data["phase_history"]
+                 if r["phase"] == "implementation"]
+        self.assertEqual(audits[0]["head_commit"], impls[0]["head_commit"])
+        self.assertEqual(len(audits), 2)  # forced + final milestone
+
+    def test_findings_leave_trigger_pending(self) -> None:
+        # A findings audit at the exact commit cannot clear the trigger:
+        # it stays sticky and the campaign routes honestly to findings.
+        scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
+        scenario["auditor"] = {"behavior": "findings"}
+        ws = self._lease_workspace(["ci"], scenario=scenario)
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["terminal_phase"], "findings")
+        state = ws.load_state()
+        self.assertTrue(state_module.has_pending_lease_audits(state))
+        self.assertEqual(len(state.pending_lease_audits), 1)
+        self.assertEqual(state.pending_lease_audits[0].task_id, 1)
+
+    def test_stale_trigger_blocks_success(self) -> None:
+        # A pending trigger bound to a stale commit (the audit passed at a
+        # different commit) blocks success: the campaign terminates honestly
+        # as budget_exhausted rather than ever succeeding with an unaudited
+        # sensitive lease.
+        scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
+        scenario["auditor"] = {"behavior": "findings"}
+        ws = self._lease_workspace(["ci"], scenario=scenario)
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["terminal_phase"], "findings")
+        state = ws.load_state()
+        self.assertTrue(state_module.has_pending_lease_audits(state))
+        # The trigger is bound to the exact candidate commit that contains
+        # the leased changes (the task-1 completion commit).
+        self.assertEqual(len(state.pending_lease_audits[0].commit), 40)
+
+    def test_convergence_retry_supersedes_and_consumes(self) -> None:
+        # The deterministic verifier fails once; the campaign converges on
+        # the SAME task, mints a fresh lease, and the new trigger
+        # supersedes the old one (verified ancestry).  The passing audit at
+        # the retry's completion commit consumes the trigger and the
+        # campaign succeeds.
+        ws = self._lease_workspace(["ci"])
+        gate = ws.root / "fixture" / "gate.sh"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(
+            "#!/bin/sh\n"
+            "if [ -f \"$FACTORY_VERIFIER_ROOT/src/fixed-1.md\" ]; then\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        os.chmod(gate, 0o755)
+        _git(ws.root, "add", "fixture/gate.sh")
+        _git(ws.root, "commit", "-qm", "fixture gate script")
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", "./fixture/gate.sh",
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self._assert_no_pending(ws)
+        history = [
+            (r["round"], r["phase"], r["outcome"])
+            for r in data["phase_history"]
+        ]
+        self.assertIn((1, "verification", "verifier_failure"), history)
+        self.assertIn((1, "implementation", "task_completed"), history)
+
+    def test_multiple_leases_require_multiple_audits(self) -> None:
+        # Two tasks with audit_required leases record two sticky triggers;
+        # each exact candidate commit is independently audited and both
+        # triggers are consumed before success.
+        tasks = self._lease_tasks(["ci"])
+        tasks[1]["write_scopes"] = ["ci"]
+        ws = self.make(SUCCESS_SCENARIO, rounds=3, task_specs=tasks)
+        ws.commit_policy(self.LEASE_POLICY)
+        self._commit_lease_paths(ws)
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self._assert_no_pending(ws)
+        audits = [r for r in data["phase_history"]
+                  if r["phase"] == "audit"]
+        impls = [r for r in data["phase_history"]
+                 if r["phase"] == "implementation"]
+        # Both leased completion commits were independently audited.
+        self.assertEqual(audits[0]["head_commit"], impls[0]["head_commit"])
+        self.assertEqual(audits[1]["head_commit"], impls[1]["head_commit"])
+
+    def test_interruption_restart_keeps_trigger_pending(self) -> None:
+        # A crash after the trigger was durably recorded (before the audit
+        # ran) leaves the trigger pending; the restarted campaign forces
+        # the audit at the exact commit, consumes the trigger, and succeeds.
+        ws = self._lease_workspace(["ci"])
+        ws.commit_budget({"audit_interval": 100})
+        original = state_module.write_state
+        crashed = {"raised": False}
+
+        def crashing_write(root, state):
+            if (
+                not crashed["raised"]
+                and state.current_phase == "audit"
+                and state_module.has_pending_lease_audits(state)
+            ):
+                crashed["raised"] = True
+                raise state_module.StateError(
+                    "simulated crash: state write lost")
+            return original(root, state)
+
+        config = ws.derive_config()
+        with unittest.mock.patch.object(
+            campaign_module.state_module, "write_state",
+            side_effect=crashing_write,
+        ):
+            with self.assertRaises(state_module.StateError):
+                campaign_module.Campaign(config).run()
+        self.assertTrue(crashed["raised"])
+        # The state file is at the previous trusted write: the verification
+        # phase with the pending trigger durably recorded.
+        state = ws.load_state()
+        self.assertEqual(state.current_phase, "verification")
+        self.assertTrue(state_module.has_pending_lease_audits(state))
+        # The restarted campaign forces the audit, consumes the trigger,
+        # and succeeds.
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self._assert_no_pending(ws)
+
+    def test_non_audit_scope_records_no_trigger(self) -> None:
+        # A task whose lease grants only a non-audit_required scope (the
+        # fixture policy marks scripts false) records no pending trigger and
+        # the campaign succeeds without any forced lease audit.
+        ws = self._lease_workspace(["scripts"])
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self._assert_no_pending(ws)
+        evidence = ws.developer_evidence(1, 1)
+        self.assertFalse(evidence["lease_audit_required"])
+
+    def test_policy_tamper_does_not_change_audit_signal(self) -> None:
+        # The mint loads the policy from the exact committed HEAD blob: a
+        # worktree tamper that flips audit_required cannot change the
+        # minted claim's immutable audit signal.
+        ws = self._lease_workspace(["ci"])
+        tampered = json.loads(json.dumps(self.LEASE_POLICY))
+        tampered["scopes"]["ci"]["audit_required"] = False
+        (ws.root / ".factory" / "path-lease-policy.json").write_text(
+            json.dumps(tampered), encoding="utf-8")
+        config = ws.derive_config()
+        campaign = campaign_module.Campaign(config)
+        campaign._acquire()
+        try:
+            head = campaign._git.head()
+            plan_blob = campaign._git.blob_at(head, config.plan_path)
+            lease_bytes, _, audit_required = campaign._mint_task_lease(
+                head, 1, 1, plan_blob)
+            self.assertIsNotNone(lease_bytes)
+            self.assertTrue(audit_required)
+            claim = lease_module.parse_claim(lease_bytes)
+            self.assertTrue(claim.audit_required)
+        finally:
+            campaign._lock.release()
+
+    def test_model_cannot_clear_pending_state(self) -> None:
+        # The pending lease-audit set lives in the trusted control state
+        # written only by the orchestrator; a model role (developer/auditor)
+        # can never clear it.  A findings audit leaves it pending and the
+        # state file is orchestrator-owned (mode 0600, no-follow).
+        scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
+        scenario["auditor"] = {"behavior": "findings"}
+        ws = self._lease_workspace(["ci"], scenario=scenario)
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 1)
+        state = ws.load_state()
+        self.assertTrue(state_module.has_pending_lease_audits(state))
+        info = os.stat(ws.state_file(), follow_symlinks=False)
+        self.assertEqual(info.st_uid, os.getuid())
+        self.assertEqual(info.st_mode & 0o077, 0)
+
+
 class LifecycleAndCli(_CampaignBase):
     """§11 one-lifecycle surface, committed schema, and CLI behavior."""
 
@@ -2530,10 +2769,14 @@ class LifecycleAndCli(_CampaignBase):
         # the scheduler-extension fields are serialized because the trusted
         # scheduler recorded its decisions (planner need, audit trigger,
         # progress fingerprint, terminal reason) in the control state.
+        # Phase 2C2b-B: ``pending_lease_audits`` is serialized only when a
+        # sensitive lease trigger is pending, so a campaign with no
+        # ``audit_required`` lease round-trips the exact pre-2C2b-B shape.
         self.assertEqual(
             keys,
             sorted(f for f in state_module.FIELD_NAMES
-                   if f not in state_module.CONVERGENCE_FIELDS),
+                   if f not in state_module.CONVERGENCE_FIELDS
+                   and f != "pending_lease_audits"),
         )
         self.assertNotIn("convergence_task_id", keys)
         self.assertNotIn("verifier_failure_digest", keys)

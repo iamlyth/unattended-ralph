@@ -4,17 +4,17 @@
     "scripts": {
       "paths": ["scripts"],
       "patterns": ["scripts/*.sh", "scripts/*.py"],
-      "audit_required": false
+      "audit_required": true
     },
     "nix": {
       "paths": ["flake.nix", "shell.nix", "nix"],
       "patterns": ["nix/*.nix"],
-      "audit_required": false
+      "audit_required": true
     },
     "packaging": {
       "paths": ["CMakeLists.txt", "cmake", "packaging"],
       "patterns": ["cmake/*.cmake", "packaging/*"],
-      "audit_required": false
+      "audit_required": true
     },
     "ci": {
       "paths": [".github", ".forgejo"],

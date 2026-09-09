@@ -508,6 +508,26 @@ class ShouldAuditTest(unittest.TestCase):
                 budget=budget,
             ))
 
+    def test_pending_lease_audit_forces_regardless_of_interval(self) -> None:
+        # Phase 2C2b-B: a pending lease-audit trigger forces the milestone
+        # even when the configured interval has not elapsed and no other
+        # trigger fires (the model can never defer or clear it).
+        self.assertTrue(self._decide(
+            checkpoint=1, last_audit_checkpoint=0, pending_lease_audits=True,
+        ))
+        self.assertTrue(self._decide(
+            checkpoint=1, more_tasks=False, pending_lease_audits=True,
+        ))
+        self.assertTrue(self._decide(
+            checkpoint=1, security_changed=True, pending_lease_audits=True,
+        ))
+
+    def test_no_pending_lease_audit_keeps_interval_behavior(self) -> None:
+        self.assertFalse(self._decide(
+            checkpoint=1, last_audit_checkpoint=0,
+            pending_lease_audits=False,
+        ))
+
 
 class ObjectiveCoverageTest(unittest.TestCase):
     """Every committed mandatory objective must be covered before success."""
@@ -628,6 +648,25 @@ class ProgressFingerprintTest(unittest.TestCase):
         second = self._fp()
         self.assertEqual(first, second)
 
+    def test_consumed_lease_audit_is_trusted_progress(self) -> None:
+        # Phase 2C2b-B: passing a required lease audit counts as trusted
+        # progress only when a matching trigger was actually consumed.
+        self.assertNotEqual(
+            self._fp(), self._fp(consumed_lease_audits=1)
+        )
+        self.assertNotEqual(
+            self._fp(consumed_lease_audits=1),
+            self._fp(consumed_lease_audits=2),
+        )
+
+    def test_unconsumed_pass_reproduces_fingerprint(self) -> None:
+        # A passing audit that consumed nothing (stale/foreign/replay)
+        # reproduces the same fingerprint and terminates honestly as
+        # no_progress rather than counting as trusted progress.
+        self.assertEqual(
+            self._fp(), self._fp(consumed_lease_audits=0)
+        )
+
 
 class AuditNextPhaseTest(unittest.TestCase):
     """The terminal resolution is a pure function of the trusted inputs."""
@@ -648,6 +687,38 @@ class AuditNextPhaseTest(unittest.TestCase):
 
     def test_verified_completion_success(self) -> None:
         self.assertEqual(self._resolve(), ("success", "success"))
+
+    def test_pending_lease_audit_blocks_success(self) -> None:
+        # Phase 2C2b-B: a pending lease-audit trigger blocks success even
+        # when the plan is complete, every objective is covered, and the
+        # verification passed — the exact candidate commit containing
+        # leased changes has not yet been independently audited.
+        self.assertEqual(
+            self._resolve(pending_lease_audits=True),
+            ("implementation", ""),
+        )
+        self.assertEqual(
+            self._resolve(pending_lease_audits=True, re_plan_needed=True),
+            ("planning", ""),
+        )
+        self.assertEqual(
+            self._resolve(
+                pending_lease_audits=True, max_rounds_reached=True,
+            ),
+            ("budget_exhausted", "budget_exhausted"),
+        )
+        self.assertEqual(
+            self._resolve(
+                pending_lease_audits=True, no_progress=True,
+            ),
+            ("no_progress", "no_progress"),
+        )
+
+    def test_no_pending_lease_audit_keeps_success(self) -> None:
+        self.assertEqual(
+            self._resolve(pending_lease_audits=False),
+            ("success", "success"),
+        )
 
     def test_success_requires_objective_coverage(self) -> None:
         # Impossibility of success before required audit coverage.

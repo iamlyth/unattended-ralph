@@ -685,6 +685,60 @@ Delivery:
 - no command allowlist or verifier binding changes; the product-path
   lease remains write-only and cannot self-certify.
 
+### 14.2c Scheduler/state wiring of the immutable lease audit_required signal (Phase 2C2b-B, LEASE-01)
+
+The Phase 2C2b-B slice wires the immutable lease `audit_required` signal
+into the adaptive scheduler/state and final acceptance.  Every leased
+verification surface (scripts, nix, packaging, ci) is security-sensitive —
+each can alter verification/build/release behavior — so the committed
+path-lease policy marks all four scopes `audit_required`; this grants no
+release authority (the lease remains write-path scope only).
+
+Pending lease-audit state (trusted control state, `pending_lease_audits`):
+
+- when any developer attempt's authenticated task path-lease returns
+  `audit_required`, the campaign records one sticky trusted pending
+  lease-audit trigger bound to the campaign/task/attempt/lease digest and
+  the exact resulting candidate commit containing the leased changes;
+- the trigger ORs across retries/attempts and the model can never clear
+  it; it carries no secret/nonce/claim bytes — only bounded non-secret
+  digests and identifiers;
+- the set is optional in parse and serialized only when non-empty, so a
+  pre-Phase-2C2b-B state round-trips byte-identically (migration
+  compatibility); every record is validated (closed five-field shape,
+  positive task/attempt, 64-hex lease digest, 40-hex commit, sorted,
+  duplicate-free, bound to the exact campaign).
+
+Forced audit milestone and consumption:
+
+- the trusted scheduler forces the independent tester/auditor milestone
+  whenever any trigger is pending, regardless of the configured
+  `audit_interval` (the model can never defer or clear it);
+- only a passing independent audit at that exact candidate commit
+  consumes the matching trigger; findings/blocked/skipped/infrastructure/
+  interrupted/stale/foreign/replay audits leave every trigger pending and
+  route honestly;
+- a same-task trigger whose bound commit is a verified ancestor of a new
+  commit is superseded (the new commit's independent audit covers the
+  ancestor's changes), so a convergence retry or a crashed-attempt resume
+  never deadlocks on a commit the campaign can never revisit; a trigger
+  whose commit is not a verified ancestor is never discarded;
+- the trusted verifier still runs independently at each candidate exact
+  commit; leased modifications to scripts/nix/packaging/ci cannot
+  self-certify current acceptance.
+
+Success blocking and the success validator:
+
+- any pending trigger blocks success: the scheduler routes honestly to
+  planning/implementation/budget-exhausted/no-progress instead of ever
+  succeeding with an unaudited sensitive lease;
+- the success validator independently rejects a pending trigger that
+  remains after the passing audit at the exact commit (a stale/foreign
+  trigger can never be silently dropped by a passing audit at a different
+  commit);
+- the no-progress fingerprint treats a passing required lease audit as
+  trusted progress only when a matching trigger was actually consumed.
+
 ## 15. Completion predicates
 
 The following predicates MUST remain distinct:
@@ -853,7 +907,18 @@ The generic implementation is not acceptable until tests prove:
     attempt/task/campaign budget, fails closed on unknown/forbidden/
     unavailable/nonexistent requests (never a silent fallback or broad
     write), and delivers the exact bytes+digest through the existing
-    launch path without persisting any authority secret/token.
+    launch path without persisting any authority secret/token; the Phase
+    2C2b-B scheduler/state wiring records a sticky pending lease-audit
+    trigger bound to the campaign/task/attempt/lease digest and the exact
+    resulting candidate commit whenever a developer attempt's lease
+    returns `audit_required`, forces the independent tester/auditor
+    milestone regardless of the configured interval, consumes a trigger
+    only on a passing audit at that exact commit (findings/blocked/
+    skipped/infrastructure/interrupted/stale/foreign/replay cannot clear;
+    a same-task trigger whose bound commit is a verified ancestor of a
+    new commit is superseded), blocks success while any trigger is
+    pending, and keeps the trusted verifier independent so leased
+    modifications to scripts/nix/packaging/ci cannot self-certify.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -906,4 +971,4 @@ The stable IDs below are the conformance authority for this specification. Secti
 | MIG-01 | §21 | Generic-first migration preserves code, plan, evidence, blockers, and dirty work without importing Ralph control state | installed |
 | TEST-01 | §22 | The full adversarial conformance suite and documentation synchronization pass | installed |
 | ACCEPT-01 | §23 | Boilerplate acceptance requires all mapped requirements verified and an independent audit without critical findings | installed |
-| LEASE-01 | §14.2, §14.2a, §14.2b, §22, §24 | The task-scoped path-lease authority is strict and foundation-only: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself. The Phase 2C2a runtime-launch foundation binds the claim into the existing signed launch authority as an optional developer-only extension: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher, the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed), the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only), CI/security scopes set the immutable `audit_required` signal on the binding and launch result, and default behavior without a lease is unchanged. The Phase 2C2b-A campaign mints one unique claim per selected developer attempt from the committed plan `Write scopes:` request and the committed HEAD policy blob (never the worktree), clamps the deadline to the attempt/task/campaign budget, fails closed on unknown/forbidden/unavailable/nonexistent requests (never a silent fallback or broad write), and delivers the exact bytes+digest through the existing launch path without persisting any authority secret/token; the scheduler audit forcing of `audit_required` is the next slice (2C2b-B) | unit |
+| LEASE-01 | §14.2, §14.2a, §14.2b, §14.2c, §22, §24 | The task-scoped path-lease authority is strict and foundation-only: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself. The Phase 2C2a runtime-launch foundation binds the claim into the existing signed launch authority as an optional developer-only extension: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher, the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed), the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only), CI/security scopes set the immutable `audit_required` signal on the binding and launch result, and default behavior without a lease is unchanged. The Phase 2C2b-A campaign mints one unique claim per selected developer attempt from the committed plan `Write scopes:` request and the committed HEAD policy blob (never the worktree), clamps the deadline to the attempt/task/campaign budget, fails closed on unknown/forbidden/unavailable/nonexistent requests (never a silent fallback or broad write), and delivers the exact bytes+digest through the existing launch path without persisting any authority secret/token. The Phase 2C2b-B scheduler/state wiring records a sticky pending lease-audit trigger bound to the campaign/task/attempt/lease digest and the exact resulting candidate commit whenever a developer attempt's lease returns `audit_required`, forces the independent tester/auditor milestone regardless of the configured interval, consumes a trigger only on a passing audit at that exact commit (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay cannot clear; a same-task trigger whose bound commit is a verified ancestor of a new commit is superseded), blocks success while any trigger is pending, and keeps the trusted verifier independent so leased modifications to scripts/nix/packaging/ci cannot self-certify | unit |
