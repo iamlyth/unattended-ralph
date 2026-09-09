@@ -14,7 +14,7 @@ terms = [
     "licensed-"+"diagram", r"\bs"+r"dl2?\b", r"\bu"+r"input\b",
 ]
 rx=re.compile("|".join(terms),re.I)
-allowed_spec_lines={35,564,626}
+allowed_spec_lines={35,615,682}
 failures=[]
 names=[x.decode() for x in subprocess.check_output(["git","ls-files","-z"]).split(b"\0") if x]
 allowed_forwarders={"scripts/verify-boilerplate.sh","scripts/check-docs-sync.sh","scripts/check-generic-leakage.sh","scripts/ollama-usage-guard.sh"}
