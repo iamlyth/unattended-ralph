@@ -534,6 +534,55 @@ objective set and the security-sensitive path prefixes come only from the
 committed closed config, and the audit objective itself is selected
 deterministically from the round number by the committed registry authority.
 
+### 14.2 Task-scoped path-lease foundation (Phase 2C1, LEASE-01)
+
+The generic task-scoped path-lease authority is the strict, foundation-only
+mechanism for task-scoped write authority over product-owned verification
+surfaces.  It is implemented by the committed `factory-path-lease-policy/v1`
+config (`.factory/path-lease-policy.json`) and the strict
+`factory-task-path-lease/v1` claim schema, with the pure authority in
+`.factory/loop/path_lease.py`.  Phase 2C1 deliberately does NOT wire leases
+into launch/confinement behavior: no Landlock/workspace-confinement write
+candidate is altered and no claim is self-authorizing.  Phase 2C2 binds
+claims into the existing signed launch authority and applies exact no-follow
+path grants.
+
+Policy (closed config, deny-dominant):
+
+- scope IDs are closed (`^[a-z][a-z0-9_-]*$`) and map to bounded
+  repository-relative path prefixes/patterns for product-owned verification
+  surfaces (scripts, build environment/Nix files, packaging, CI/forge files);
+- deny zones are absolute and non-overridable: `.factory` security/control
+  machinery, `.factory-state`, `.git`, the product spec path, credential/key/
+  env authorities, and ALL goldens/approval/release/human-authority surfaces
+  are immutable deny zones.  No carve-out/override field exists in the
+  schema; a human-only override mechanism is deliberately out of scope and
+  must never be mintable by a campaign/model;
+- deny is dominant over allow: a requested scope's paths inside a deny zone
+  are removed, and a scope that grants nothing after expansion is forbidden
+  (the request fails closed);
+- the policy rejects absolute/traversal/backslash/control/symlink-ambiguous
+  patterns, duplicate keys, unsafe globs, and overlapping deny escapes at
+  load; grant patterns never contain `**` (deny patterns may, conservatively);
+- a planner `Write scopes:` request is a REQUEST, never a grant: the trusted
+  policy intersection decides whether a requested scope is known and grants
+  anything, and unknown/duplicate/forbidden scopes fail closed.  `Scope:`
+  prose is never authority.
+
+Claims (strict DATA, never self-authorizing):
+
+- a `factory-task-path-lease/v1` claim binds campaign ID, selected task ID,
+  attempt, exact HEAD commit, plan digest, policy digest, requested/granted
+  scopes, the exact deny-dominant expanded paths/patterns, issued/deadline
+  bounds, and a unique attempt nonce, sealed by a canonical claim digest;
+- claims carry no free-form commands and never resolve symlinks; every
+  granted path/pattern is a bounded repository-relative prefix/pattern;
+- replay prevention fails closed on any campaign/task/attempt/commit/digest
+  mismatch and on expiry; a same-UID workspace JSON can never self-
+  authorize;
+- security-sensitive leases (a scope marked `audit_required`) mark
+  `audit_required` so the independent audit is mandatory.
+
 ## 15. Completion predicates
 
 The following predicates MUST remain distinct:
@@ -684,7 +733,18 @@ The generic implementation is not acceptable until tests prove:
     duplicate/unknown/overflow/path-traversal/unsafe-glob config, requires
     every mandatory audit objective to be covered before success, detects
     repeated no-progress, and terminates honestly on verified completion,
-    external-acceptance-blocked, and round/checkpoint budget exhaustion.
+    external-acceptance-blocked, and round/checkpoint budget exhaustion;
+30. the path-lease authority (`factory-path-lease-policy/v1` and
+    `factory-task-path-lease/v1`) rejects every documented defect class
+    (absolute/traversal/backslash/control/unsafe-glob/symlink-ambiguous
+    patterns, duplicate keys, overlapping deny escapes, unknown fields),
+    keeps deny zones absolute and non-overridable (no carve-out exists;
+    goldens/approval/release/human-authority paths are never grantable),
+    expands requests deny-dominantly with unknown/duplicate/forbidden scopes
+    failing closed, binds claims to campaign/task/attempt/HEAD/plan/policy/
+    nonce/deadline with canonical digests, fails closed on forgery, drift,
+    replay, and expiry, marks security-sensitive scopes `audit_required`,
+    and loads the committed policy no-follow with bounded size.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -737,3 +797,4 @@ The stable IDs below are the conformance authority for this specification. Secti
 | MIG-01 | §21 | Generic-first migration preserves code, plan, evidence, blockers, and dirty work without importing Ralph control state | installed |
 | TEST-01 | §22 | The full adversarial conformance suite and documentation synchronization pass | installed |
 | ACCEPT-01 | §23 | Boilerplate acceptance requires all mapped requirements verified and an independent audit without critical findings | installed |
+| LEASE-01 | §14.2, §22, §24 | The task-scoped path-lease foundation is a strict, foundation-only authority: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself; no launch/confinement wiring is claimed | unit |

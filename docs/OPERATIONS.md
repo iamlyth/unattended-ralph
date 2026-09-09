@@ -593,6 +593,45 @@ the class principal/key, making revocation fail closed. Until external policy,
 authority, transport, keys, trust and capabilities are enrolled, production
 readiness remains blocked and declarations count as no evidence.
 
+## Task-scoped path-lease authority (Phase 2C1, LEASE-01)
+
+The generic task-scoped path-lease authority is the strict, foundation-only
+mechanism for task-scoped write authority over product-owned verification
+surfaces.  The committed `factory-path-lease-policy/v1` config
+(`.factory/path-lease-policy.json`) maps closed scope IDs (scripts, nix,
+packaging, ci) to bounded repository-relative path prefixes/patterns and
+declares absolute non-overridable deny zones: `.factory` security/control
+machinery, `.factory-state`, `.git`, the product spec path, credential/key/
+env authorities, and all goldens/approval/release/human-authority surfaces.
+No carve-out/override field exists in the schema; a human-only override
+mechanism is deliberately out of scope and must never be mintable by a
+campaign/model.  Deny is dominant over allow, and the policy rejects
+absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate
+keys, unsafe globs, and overlapping deny escapes at load.
+
+`factory-task-path-lease/v1` claims are strict DATA minted by the trusted
+harness: they bind campaign ID, selected task ID, attempt, exact HEAD
+commit, plan digest, policy digest, requested/granted scopes, the exact
+deny-dominant expanded paths/patterns, issued/deadline bounds, and a unique
+attempt nonce, sealed by a canonical claim digest.  Claims carry no
+free-form commands, never resolve symlinks, and are never self-authorizing
+(a same-UID workspace JSON cannot grant itself authority).  Replay
+prevention fails closed on any campaign/task/attempt/commit/digest mismatch
+and on expiry; security-sensitive scopes mark `audit_required` so the
+independent audit is mandatory.  The optional plan `Write scopes:` request
+field is closed-format and grants nothing by itself — the trusted policy
+intersection decides.  Phase 2C1 does NOT wire leases into launch or
+confinement behavior; Phase 2C2 binds claims into the existing signed launch
+authority with exact no-follow path grants.
+
+Operators validate the committed policy and inspect deny-dominant expansion
+with the pure CLI:
+
+```bash
+python3 .factory/loop/path_lease.py --root "$PWD" policy-validate
+python3 .factory/loop/path_lease.py --root "$PWD" expand scripts nix
+```
+
 ## Evidence and verifier authority (Task 12)
 
 Before the tester starts, the trusted campaign opens the configured committed

@@ -72,6 +72,7 @@
         "priority",
         "dependencies",
         "blocked_on",
+        "write_scopes",
         "fields"
       ],
       "properties": {
@@ -97,6 +98,14 @@
         "blocked_on": {
           "type": ["string", "null"],
           "description": "Exact unresolved reference; non-null for blocked tasks."
+        },
+        "write_scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "description": "Closed-format `Write scopes:` request list (Phase 2C1). The planner request grants nothing by itself; the trusted policy intersection decides. Empty when the field is absent or `None`."
         },
         "fields": {
           "type": "object",

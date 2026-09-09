@@ -47,6 +47,7 @@ parsed plan and never consults a runtime task ledger.
 | MIG-01 | §21 | missing | fixture exercises selector determinism | Task 1 |
 | TEST-01 | §22 | missing | fixture exercises selector determinism | Task 1 |
 | ACCEPT-01 | §23 | missing | fixture exercises selector determinism | Task 1 |
+| LEASE-01 | §14.2, §22, §24 | missing | fixture exercises selector determinism | Task 1 |
 
 ## Interaction acceptance inventory
 

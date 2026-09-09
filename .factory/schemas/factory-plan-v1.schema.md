@@ -87,10 +87,24 @@ and cardinality are fixed:
 | `Priority` | no | positive integer; defaults to the task number |
 | `Evidence` | no | acceptance/evidence references recorded by the developer |
 | `Blocked on` | no | required when `Status: blocked`; names the exact unresolved requirement/fact reference |
+| `Write scopes` | no | closed-format request list (Phase 2C1); see §4.1 |
 
 Duplicate field labels, unknown field labels, missing required fields, and
 empty required values are parse errors. Body lines that are neither a field, a
 field continuation, nor blank make the task section ambiguous and are rejected.
+
+### 4.1 `Write scopes:` request list (Phase 2C1)
+
+The optional `- Write scopes:` field is a single-line, closed-format request
+list of path-lease scope IDs: `None` (no request) or a comma-separated list of
+scope IDs matching `^[a-z][a-z0-9_-]*$`, each exactly once.  A continuation
+line, an empty item, an invalid ID, or a duplicate ID is a parse error.  The
+planner request grants nothing by itself: the trusted policy intersection
+(`.factory/loop/path_lease.py`, committed `factory-path-lease-policy/v1`
+config) decides whether a requested scope is known and grants anything, and
+unknown/forbidden scopes fail closed at claim time.  The `Scope:` prose field
+is never interpreted as write authority.  Plans without the field remain
+byte/parse compatible.
 
 ## 5. Statuses and transitions
 

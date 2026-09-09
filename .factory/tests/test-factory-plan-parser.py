@@ -126,8 +126,8 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         plan = Plan.from_file(CANONICAL_PLAN)
         self.assertEqual(plan.schema, SCHEMA_NAME)
         self.assertEqual(plan.status, "active")
-        self.assertEqual(len(plan.tasks), 32)
-        self.assertEqual(len(plan.matrix), 26)
+        self.assertEqual(len(plan.tasks), 33)
+        self.assertEqual(len(plan.matrix), 27)
         self.assertEqual(
             [entry.boundary for entry in plan.interactions],
             list(INTERACTION_BOUNDARIES),
@@ -138,16 +138,16 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         )
         final = [task for task in plan.tasks if task.title == FINAL_AUDIT_TITLE]
         self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].number, 32)
-        self.assertEqual(set(final[0].dependencies), set(range(1, 32)))
+        self.assertEqual(final[0].number, 33)
+        self.assertEqual(set(final[0].dependencies), set(range(1, 33)))
         # Default priority derives from the task id for a stable sort. Task 19
         # alone retains its explicit remediation priority; dependencies keep
         # audit-round tasks 20-24 finite and serialized; the redesign
         # foundation tasks 25-27 and the scheduler foundation task 30 precede
-        # the final audit.
+        # the final audit; the Phase 2C1 path-lease foundation is Task 32.
         self.assertEqual(
             [task.priority for task in plan.tasks],
-            list(range(1, 19)) + [1] + list(range(20, 33)),
+            list(range(1, 19)) + [1] + list(range(20, 34)),
         )
         # Front matter binds the canonical specification.
         self.assertEqual(plan.spec_path, "docs/FACTORY-LOOP-SPEC.md")
@@ -218,11 +218,12 @@ class RoundTripAndDeterminismTest(unittest.TestCase):
             self.assertEqual(
                 set(task),
                 {"number", "title", "status", "priority", "dependencies",
-                 "blocked_on", "fields"},
+                 "blocked_on", "write_scopes", "fields"},
             )
             self.assertIn(task["status"], TASK_STATUSES)
             self.assertIsInstance(task["priority"], int)
             self.assertGreaterEqual(task["priority"], 1)
+            self.assertIsInstance(task["write_scopes"], list)
             for required in ("Status", "Dependencies", "Scope",
                              "Acceptance criteria", "Verification",
                              "Documentation impact"):
@@ -342,6 +343,66 @@ class BoundedRangeProbeTest(unittest.TestCase):
             "range probes grew peak RSS by "
             f"{rss_after - rss_before} KiB",
         )
+
+
+class WriteScopesFieldTest(unittest.TestCase):
+    """The optional closed-format `Write scopes:` request field (Phase 2C1).
+
+    The planner request grants nothing by itself (the trusted policy
+    intersection decides); the parser only enforces the closed format,
+    duplicate rejection, and byte-exact legacy compatibility.
+    """
+
+    BASE = (FIXTURES / "plan-valid-base.md").read_text("utf-8")
+
+    def _with_field(self, value: str) -> str:
+        return self.BASE.replace(
+            "- Status: pending\n- Dependencies: None\n- Priority: 3",
+            f"- Status: pending\n- Dependencies: None\n- Priority: 3\n- Write scopes: {value}",
+        )
+
+    def test_absent_field_is_legacy_compatible(self) -> None:
+        plan = parse_plan(self.BASE)
+        self.assertEqual(plan.tasks[0].write_scopes, [])
+        self.assertEqual(plan.serialize(), self.BASE)
+
+    def test_request_list_parses_and_roundtrips(self) -> None:
+        text = self._with_field("scripts, nix")
+        plan = parse_plan(text)
+        self.assertEqual(plan.tasks[0].write_scopes, ["scripts", "nix"])
+        self.assertEqual(plan.serialize(), text)
+        model = json.loads(plan.dump_json())
+        self.assertEqual(model["tasks"][0]["write_scopes"], ["scripts", "nix"])
+
+    def test_none_means_no_request(self) -> None:
+        plan = parse_plan(self._with_field("None"))
+        self.assertEqual(plan.tasks[0].write_scopes, [])
+
+    def test_duplicate_scope_is_rejected(self) -> None:
+        with self.assertRaises(PlanError) as caught:
+            parse_plan(self._with_field("scripts, scripts"))
+        self.assertIn("duplicate write scope", str(caught.exception))
+
+    def test_invalid_scope_id_is_rejected(self) -> None:
+        for bad in ("Scripts", "scripts/", "-scripts", "scripts..", "a b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PlanError) as caught:
+                    parse_plan(self._with_field(bad))
+                self.assertIn("invalid write scope", str(caught.exception))
+
+    def test_empty_item_is_rejected(self) -> None:
+        with self.assertRaises(PlanError) as caught:
+            parse_plan(self._with_field("scripts, "))
+        self.assertIn("malformed", str(caught.exception))
+
+    def test_continuation_line_is_rejected(self) -> None:
+        text = self._with_field("scripts").replace(
+            "- Write scopes: scripts",
+            "- Write scopes: scripts\n  nix",
+        )
+        with self.assertRaises(PlanError) as caught:
+            parse_plan(text)
+        self.assertIn("continuation", str(caught.exception))
 
 
 class TransitionTableTest(unittest.TestCase):

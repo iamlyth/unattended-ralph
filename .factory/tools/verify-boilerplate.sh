@@ -9,6 +9,7 @@ cd "$root"
 ./.factory/tools/validate-extension-conformance.py
 python3 -m compileall -q .factory/loop .factory/tools .factory/tests
 python3 .factory/tests/test-factory-plan-parser.py
+python3 .factory/tests/test-factory-path-lease.py
 python3 .factory/tests/test-factory-selector.py
 python3 .factory/tests/test-factory-state.py
 python3 .factory/tests/test-factory-readiness.py

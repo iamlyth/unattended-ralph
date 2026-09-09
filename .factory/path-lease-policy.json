@@ -1,0 +1,44 @@
+{
+  "schema": "factory-path-lease-policy/v1",
+  "scopes": {
+    "scripts": {
+      "paths": ["scripts"],
+      "patterns": ["scripts/*.sh", "scripts/*.py"],
+      "audit_required": false
+    },
+    "nix": {
+      "paths": ["flake.nix", "shell.nix", "nix"],
+      "patterns": ["nix/*.nix"],
+      "audit_required": false
+    },
+    "packaging": {
+      "paths": ["CMakeLists.txt", "cmake", "packaging"],
+      "patterns": ["cmake/*.cmake", "packaging/*"],
+      "audit_required": false
+    },
+    "ci": {
+      "paths": [".github", ".forgejo"],
+      "patterns": [".github/*.yml", ".github/*.yaml", ".forgejo/*.yml"],
+      "audit_required": true
+    }
+  },
+  "deny": {
+    "paths": [
+      ".factory",
+      ".factory-state",
+      ".git",
+      "docs/SPEC.md",
+      ".env",
+      "secrets",
+      "release",
+      "goldens",
+      "goldens/approved"
+    ],
+    "patterns": [
+      "**/*.pem",
+      "**/*.key",
+      "**/.env*",
+      "**/*.secret"
+    ]
+  }
+}

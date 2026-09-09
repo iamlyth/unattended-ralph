@@ -79,14 +79,15 @@ STABLE_REQUIREMENT_IDS = (
     "LOCK-01", "PROC-01", "GIT-01", "PHASE-01", "COMPLETE-01",
     "FIND-01", "CRED-01", "EVID-01", "EVID-02", "VIS-01",
     "RUNNER-01", "HIDE-01", "MIG-01", "TEST-01", "ACCEPT-01",
+    "LEASE-01",
 )
 
 # Structured lifecycle fields are machine-read as single lines; a continuation
 # line on one of them must be rejected instead of silently ignored (Task 18
 # item 6). ``Blocked on`` is intentionally excluded: its exact reference is
 # prose that may span lines, and the parser joins them so nothing is silently
-# truncated.
-STRUCTURED_FIELDS = ("Status", "Dependencies", "Priority")
+# truncated. ``Write scopes`` is a closed-format structured request list.
+STRUCTURED_FIELDS = ("Status", "Dependencies", "Priority", "Write scopes")
 
 # An endpoint larger than 10^40 can never reference a task in any plan; this
 # cap keeps int() conversion (and the Python max-str-digits limit) out of the
@@ -128,7 +129,7 @@ REQUIRED_FIELDS = (
     "Verification",
     "Documentation impact",
 )
-OPTIONAL_FIELDS = ("Priority", "Evidence", "Blocked on")
+OPTIONAL_FIELDS = ("Priority", "Evidence", "Blocked on", "Write scopes")
 ALL_FIELDS = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
 # The canonical sections, in canonical order, before any task section.
@@ -170,6 +171,12 @@ FRONT_RE = re.compile(r"^([a-z_]+):\s*(\S.*?)\s*$")
 DEP_ITEM_RE = re.compile(r"^Tasks?\s+(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?$", re.I)
 PRIORITY_RE = re.compile(r"^\d+$")
 BOUNDARY_RE = re.compile(r"^- ((?:input|semantic|production|evidence) boundary):\s*(.*?)\s*$")
+# Closed-format write-scope ID (Phase 2C1): the same grammar the committed
+# path-lease policy uses, so a plan can only request scopes the policy can
+# name.  The parser enforces the closed format and duplicate rejection; the
+# trusted policy intersection (``.factory/loop/path_lease.py``) decides
+# whether a requested scope is known and grants anything.
+WRITE_SCOPE_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _parse_dep_spans(value: str, what: str, *, allow_empty: bool = False) -> List[Tuple[int, int]]:
@@ -280,6 +287,11 @@ class Task:
     blocked_on: Optional[str]
     fields: Dict[str, str]
     field_order: List[str]
+    # Closed-format ``Write scopes:`` request list (Phase 2C1).  The planner
+    # request grants nothing by itself; the trusted policy intersection
+    # (``.factory/loop/path_lease.py``) decides.  Empty when the field is
+    # absent or ``None``.
+    write_scopes: List[str] = dataclass_field(default_factory=list)
     # Unmaterialized ``(start, end)`` spans parsed from ``Dependencies``; they
     # are expanded against the parsed task count before validation so an
     # attacker-sized range can never be materialized (Task 18 item 5).
@@ -360,6 +372,7 @@ class Plan:
                     "priority": task.priority,
                     "dependencies": list(task.dependencies),
                     "blocked_on": task.blocked_on,
+                    "write_scopes": list(task.write_scopes),
                     "fields": {key: task.fields[key] for key in task.field_order},
                 }
                 for task in self.tasks
@@ -723,6 +736,31 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
             f"blocked task {number} must name an exact unresolved reference in `- Blocked on:`"
         )
 
+    if "Write scopes" in values:
+        raw_scopes = values["Write scopes"][0].strip()
+        if raw_scopes.lower() == "none":
+            write_scopes: List[str] = []
+        else:
+            items = [part.strip() for part in raw_scopes.split(",")]
+            if not items or any(not item for item in items):
+                raise PlanError(
+                    f"task {number} has a malformed `- Write scopes:` list: {raw_scopes!r}"
+                )
+            seen_scopes: set = set()
+            for item in items:
+                if not WRITE_SCOPE_RE.fullmatch(item):
+                    raise PlanError(
+                        f"task {number} has an invalid write scope `{item}` "
+                        "(must match `^[a-z][a-z0-9_-]*$`)"
+                    )
+                if item in seen_scopes:
+                    raise PlanError(
+                        f"task {number} has a duplicate write scope `{item}`"
+                    )
+                seen_scopes.add(item)
+            write_scopes = items
+    else:
+        write_scopes = []
     fields = {
         label: "\n".join(part.lstrip(" \t") for part in values[label])
         for label in order
@@ -736,6 +774,7 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
         blocked_on=blocked_on,
         fields=fields,
         field_order=order,
+        write_scopes=write_scopes,
         dep_spans=dep_spans,
     )
 

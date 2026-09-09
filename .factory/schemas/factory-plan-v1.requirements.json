@@ -1,6 +1,6 @@
 {
   "schema": "factory-plan/v1/requirements",
-  "description": "Machine registry of the 24 stable normative requirement IDs of docs/FACTORY-LOOP-SPEC.md section 24. The deterministic parser (.factory/loop/plan_parser.py) loads this file as part of the acceptance boundary and rejects any conformance matrix that misses, duplicates, or exceeds these IDs (PLAN-01, Task 18 item 3). An adopting product must not edit this registry: the requirement policy map (.factory/requirement-policy.json) is the separate authority for required evidence tiers.",
+  "description": "Machine registry of the 27 stable normative requirement IDs of docs/FACTORY-LOOP-SPEC.md section 24. The deterministic parser (.factory/loop/plan_parser.py) loads this file as part of the acceptance boundary and rejects any conformance matrix that misses, duplicates, or exceeds these IDs (PLAN-01, Task 18 item 3). An adopting product must not edit this registry: the requirement policy map (.factory/requirement-policy.json) is the separate authority for required evidence tiers.",
   "requirement_ids": [
     "AUTH-01",
     "CTX-01",
@@ -27,6 +27,7 @@
     "HIDE-01",
     "MIG-01",
     "TEST-01",
-    "ACCEPT-01"
+    "ACCEPT-01",
+    "LEASE-01"
   ]
 }

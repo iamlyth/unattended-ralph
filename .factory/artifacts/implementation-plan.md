@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: 06382b168ca8a990cf8045d33014f4b0f227bc9a
-spec_blob: a566b98f2e22ffcd3f80fdaa378e987ebaa0594e
+spec_blob: 58b99727d4d01cb118fc7c5727af8cb8e34fbc43
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -102,9 +102,13 @@ provisioned, signed hardware runner the generic environment does not declare;
 external-human remediation is Task 24, FACT-020), HIDE-01, MIG-01, and
 TEST-01 are `partial` (footprint inventory, generic-first migration, and the
 §22 adversarial suite exist but their installed/checked evidence is still
-owed by Task 23), and ACCEPT-01 is `missing` (no boilerplate acceptance
-evidence exists yet); no row is `verified` until its task completes with
-exact-commit evidence at the required tier.
+owed by Task 23), ACCEPT-01 is `missing` (no boilerplate acceptance
+evidence exists yet), and LEASE-01 is `partial` (the Phase 2C1 path-lease
+foundation — committed policy config, claim authority, and the optional
+plan `Write scopes:` request field — exists with its unit/adversarial
+suite, but no launch wiring binds claims into the signed launch authority
+and no installed-tier evidence exists); no row is `verified` until its task
+completes with exact-commit evidence at the required tier.
 
 Matrix ownership: the round-1 independent audit
 (`.factory/artifacts/campaign-audit.md` at commit `02a1de4`) reported
@@ -151,6 +155,7 @@ Tasks 25-27 plus the pending final audit.
 | MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 23, Task 28 |
 | TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization; production gates executed from the installed copy | Task 16, Task 17, Task 20, Task 23, Task 28 |
 | ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 28 |
+| LEASE-01 | §14.2, §22, §24 | partial | committed `factory-path-lease-policy/v1` config and `factory-task-path-lease/v1` claim authority with deny-dominant expansion, replay/expiry/context fail-closed, and the optional plan `Write scopes:` request field; no launch wiring | Task 32, Task 28 |
 
 ## Interaction acceptance inventory
 
@@ -1840,10 +1845,72 @@ Tasks 25-27 plus the pending final audit.
 - Evidence: conformance suite 46/46; generic gate passes.
 
 
-## Task 32: Final documentation and specification audit
+## Task 32: Generic task-scoped path-lease foundation (Phase 2C1)
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31
+- Dependencies: Task 2, Task 30
+- Write scopes: None
+- Scope: Implement the strict task-scoped product-path lease authority
+  foundation without runtime confinement wiring. The committed generic
+  `factory-path-lease-policy/v1` schema/config (`.factory/path-lease-policy.json`)
+  maps closed scope IDs to bounded repository-relative path prefixes/patterns
+  for product-owned verification surfaces (scripts, build environment/Nix
+  files, packaging, CI/forge files) with explicit immutable deny zones
+  (`.factory` security/control machinery, `.factory-state`, `.git`,
+  credential/key/env authorities, the product spec path, and
+  release/human-approval/golden surfaces as configured) and explicit deny
+  overrides that carve specific paths out of a deny zone; deny is dominant
+  over allow. The policy rejects absolute/dotdot/backslash/control/
+  symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping
+  deny escapes, and every deny override must be strictly inside a deny zone.
+  The strict `factory-task-path-lease/v1` claim schema binds campaign ID,
+  selected task ID, attempt, exact HEAD commit, plan digest, policy digest,
+  requested/granted scopes, the exact deny-dominant expanded paths/patterns,
+  issued/deadline bounds, and a unique attempt nonce/digest; claims are DATA
+  for the existing HMAC/FD launch authority (Phase 2C2) and no same-UID
+  workspace JSON may self-authorize. Replay prevention fails closed on any
+  campaign/task/attempt/commit/digest mismatch and on expiry; claims carry no
+  free-form commands and never resolve symlinks. The generic plan task schema
+  gains an optional closed-format `Write scopes:` request list (planner
+  request grants nothing by itself; the trusted policy intersection decides;
+  unknown/duplicate/forbidden scopes fail closed; `Scope:` prose is never
+  authority; plans without the field stay byte/parse compatible). The pure
+  authority implements policy loading from the committed blob/digest, request
+  validation, deny-dominant expansion, claim mint/parse/validate/context
+  validation, and canonical digests; security-sensitive leases mark
+  independent audit required. Landlock/workspace-confinement write candidates
+  and launch behavior are NOT altered.
+- Acceptance criteria: the committed policy and both schemas are present and
+  reject every documented defect class (absolute/traversal/backslash/control/
+  unsafe-glob/symlink-ambiguous patterns, duplicate keys, overlapping deny
+  escapes, override escapes); the unit/adversarial suite covers planner
+  forgery, unknown scopes, replay across campaign/task/attempt/commit, expiry,
+  policy-digest drift, path traversal/glob abuse, deny override, factory/spec/
+  credential/golden paths never grantable, duplicate keys, malformed claims,
+  deterministic canonical bytes, the security-audit flag, and legacy plan
+  compatibility; the parser accepts the optional `Write scopes:` field and
+  rejects malformed/duplicate IDs while existing plans round-trip byte-exactly;
+  the focused suites and the full `./scripts/verify-boilerplate.sh` gate pass
+  serially.
+- Verification: `.factory/tests/test-factory-path-lease.py`;
+  `.factory/tests/test-factory-plan-parser.py`;
+  `.factory/tools/verify-boilerplate.sh`.
+- Evidence: Phase 2C1 slice committed on `boilerplate-develop` with the
+  path-lease policy/schemas/authority, the plan-parser `Write scopes:`
+  extension, the registered unit/adversarial suite, the updated
+  spec/docs/plan/requirements/conformance, and the full boilerplate gate
+  passing. This is implementation evidence for the pure foundation only; no
+  claim is made that leases are bound into launch authority or that any
+  confinement behavior changed.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.2, §22, §24
+  LEASE-01); `.factory/schemas/factory-plan-v1.schema.md`;
+  `docs/FACTORY.md`; `docs/OPERATIONS.md`.
+
+
+## Task 33: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32
 - Scope: Current checkpoint: the Phase 2B2 runtime wiring is complete: the campaign consumes the trusted scheduler decisions (planning initial/on-demand only with the planner need/reason recorded in the control state; the trusted deterministic verifier runs at each candidate exact commit; the independent tester/auditor run only at milestone/risk boundaries; the audit resolves the next phase and the closed terminal reason), `--rounds` is a finite maximum budget (never an exact count, no exactly-five rejection) capped by the committed `factory-campaign-budget/v1` `max_rounds`, the scheduler-extension state fields (checkpoints, task attempts, progress/no-progress fingerprints, planner need/reason, audit trigger, completed audit objectives, terminal reason) are optional-in-parse and serialized only when active (byte-compatible migration), and the distinct honest terminal reasons (`success`, `software_verified_external_acceptance_blocked`, `blocked`, `no_progress`, `budget_exhausted`, `interrupted`, `infrastructure_failure`) are never mis-mapped to success/findings. The security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the
