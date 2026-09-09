@@ -425,6 +425,16 @@ class CampaignResult:
             completed_audits = {record.round for record in self.phase_history if record.phase == "audit"}
             if completed_audits != set(range(1, self.rounds_requested + 1)):
                 raise CampaignResultError("campaign success requires complete passing phase history")
+            if any(
+                record.phase == "verification"
+                and record.outcome
+                == "software_verified_external_acceptance_blocked"
+                for record in self.phase_history
+            ):
+                raise CampaignResultError(
+                    "campaign success is impossible when verification history "
+                    "contains software_verified_external_acceptance_blocked"
+                )
         for record in self.phase_history:
             if record.round < 1 or record.round > self.rounds_requested:
                 raise CampaignResultError(
@@ -1726,6 +1736,23 @@ def phase_result_schema() -> Dict[str, object]:
     return _PHASE_RESULT_SCHEMA
 
 
+def _reject_duplicate_keys(pairs: List[tuple]) -> Dict[str, object]:
+    """JSON object-pairs hook: reject any repeated object key.
+
+    A duplicate key silently overwrites its predecessor under a plain
+    ``dict`` decode and can hide a drifted authority; the live phase-result
+    gate rejects it instead (EVID-02 duplicate-key rejection).
+    """
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CampaignResultError(
+                f"duplicate JSON object key in phase result: {key!r}"
+            )
+        result[key] = value
+    return result
+
+
 def read_phase_result(
     root: Path, relpath: str, label: str
 ) -> Optional[Tuple[Dict[str, object], str, bytes]]:
@@ -1811,7 +1838,10 @@ def read_phase_result(
             # it is removed like every other consumed handoff.
             return None
         try:
-            data = json.loads(raw_bytes.decode("utf-8"))
+            data = json.loads(
+                raw_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+            )
         except (ValueError, UnicodeDecodeError) as exc:
             raise CampaignResultError(f"{label} result {path} is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):

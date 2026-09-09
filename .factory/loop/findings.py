@@ -483,6 +483,23 @@ def preserve_phase_result(
     return name
 
 
+def _reject_duplicate_keys(pairs: List[tuple]) -> Dict[str, object]:
+    """JSON object-pairs hook: reject any repeated object key.
+
+    A duplicate key silently overwrites its predecessor under a plain
+    ``dict`` decode and can hide a drifted authority; the preserved
+    phase-result gate rejects it instead (EVID-02 duplicate-key rejection).
+    """
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise FindingsMalformedError(
+                f"duplicate JSON object key in preserved phase result: {key!r}"
+            )
+        result[key] = value
+    return result
+
+
 def read_preserved_phase_result(
     root, round_number: int, phase: str
 ) -> Optional[Tuple[Dict[str, object], str]]:
@@ -504,7 +521,9 @@ def read_preserved_phase_result(
         return None
     raw_digest = sha256(raw)
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
     except (ValueError, UnicodeDecodeError) as exc:
         raise FindingsMalformedError(
             f"the preserved phase result {name} is not valid JSON: {exc}"

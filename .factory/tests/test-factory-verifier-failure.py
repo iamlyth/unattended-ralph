@@ -299,11 +299,48 @@ class DataBoundaryTest(unittest.TestCase):
         self.assertEqual(reparsed["command"], ["rm", "-rf", "/"])
 
     def test_refs_are_bounded_references_not_paths(self) -> None:
-        # Refs are bounded strings; traversal-shaped refs are rejected by the
-        # bounded-size and shape checks (no executable path authority).
-        artifact = valid_artifact(output_ref="../../etc/passwd")
-        validate_artifact(artifact)
-        self.assertEqual(artifact["output_ref"], "../../etc/passwd")
+        # Refs are bounded repository-relative references; traversal-shaped,
+        # absolute, backslash, control-char, and dot/dotdot/empty-segment
+        # refs are rejected (no executable path authority).
+        for bad in (
+            "../../etc/passwd",
+            "/etc/passwd",
+            "a\\b",
+            "a/../b",
+            "a/./b",
+            "a//b",
+            "a/\x00b",
+        ):
+            with self.assertRaises(VerifierFailureMalformedError) as caught:
+                validate_artifact(valid_artifact(output_ref=bad))
+            self.assertIn("output_ref", str(caught.exception))
+
+    def test_safe_ref_syntax_is_accepted(self) -> None:
+        # Repository-relative refs and bare non-path identifiers are
+        # preserved; they carry no traversal or absolute authority.
+        for good in (
+            ".factory-state/generic-evidence/verifier-output.tail",
+            "src/main.c",
+            "verifier-output.tail",
+            "sha256:abc123",
+        ):
+            validate_artifact(valid_artifact(output_ref=good))
+            validate_artifact(valid_artifact(changed_files=[good]))
+            validate_artifact(valid_artifact(artifact_refs=[good]))
+
+    def test_unsafe_changed_files_and_artifact_refs_are_rejected(self) -> None:
+        for field in ("changed_files", "artifact_refs"):
+            for bad in (
+                "/etc/passwd",
+                "../escape",
+                "./x",
+                "a//b",
+                "a\\b",
+                "a/\x1fb",
+            ):
+                with self.assertRaises(VerifierFailureMalformedError) as caught:
+                    validate_artifact(valid_artifact(**{field: [bad]}))
+                self.assertIn(field, str(caught.exception))
 
 
 class StaleCommitTest(unittest.TestCase):

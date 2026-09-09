@@ -1810,6 +1810,23 @@ class LifecycleAndCli(_CampaignBase):
                 ws.root, f"{STATE_DIR}/duplicate-result.json", "fixture")
         self.assertFalse(bad.exists(), "duplicate handoff must be consumed securely")
 
+    def test_duplicate_phase_result_key_fails_closed(self) -> None:
+        # A repeated JSON object key inside one phase-result object is
+        # rejected at parse time (EVID-02 duplicate-key rejection): a forged
+        # result cannot hide a drifted field behind a duplicate.
+        ws = self.make(SUCCESS_SCENARIO)
+        bad = ws.root / STATE_DIR / "dup-key-result.json"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text(
+            '{"schema":"factory-phase-result/v1","schema":"x",'
+            '"outcome":"pass"}',
+            encoding="utf-8")
+        with self.assertRaises(campaign_module.CampaignResultError) as caught:
+            campaign_module.read_phase_result(
+                ws.root, f"{STATE_DIR}/dup-key-result.json", "fixture")
+        self.assertIn("duplicate JSON object key", str(caught.exception))
+        self.assertFalse(bad.exists(), "duplicate-key handoff must be consumed securely")
+
     def test_pass_phase_result_rejects_findings_and_blockers(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)
         state = ws.root / STATE_DIR
@@ -1905,6 +1922,54 @@ class LifecycleAndCli(_CampaignBase):
         )
         with self.assertRaises(campaign_module.CampaignResultError):
             result.validate()
+
+    def test_success_rejects_external_acceptance_blocked_history(self) -> None:
+        # Software fully verified while external release acceptance remains
+        # blocked can never end the campaign in success (STATE-02): a
+        # terminal success whose verification history contains
+        # software_verified_external_acceptance_blocked fails closed.
+        result = campaign_module.CampaignResult(
+            campaign_id="campaign", rounds_requested=1, rounds_completed=1,
+            terminal_phase="success", terminal_outcome="pass",
+            head_commit="0" * 40,
+            phase_history=(
+                campaign_module.PhaseRecord(
+                    round=1, phase="verification", attempt=1,
+                    outcome="software_verified_external_acceptance_blocked",
+                    head_commit="0" * 40, plan_digest="0" * 64,
+                ),
+                campaign_module.PhaseRecord(
+                    round=1, phase="audit", attempt=1, outcome="pass",
+                    head_commit="0" * 40, plan_digest="0" * 64,
+                ),
+            ),
+        )
+        with self.assertRaises(campaign_module.CampaignResultError) as caught:
+            result.validate()
+        self.assertIn(
+            "software_verified_external_acceptance_blocked",
+            str(caught.exception),
+        )
+
+    def test_success_without_blocked_history_validates(self) -> None:
+        # A genuine success whose verification history never reports the
+        # external-acceptance-blocked outcome still validates.
+        result = campaign_module.CampaignResult(
+            campaign_id="campaign", rounds_requested=1, rounds_completed=1,
+            terminal_phase="success", terminal_outcome="pass",
+            head_commit="0" * 40,
+            phase_history=(
+                campaign_module.PhaseRecord(
+                    round=1, phase="verification", attempt=1, outcome="pass",
+                    head_commit="0" * 40, plan_digest="0" * 64,
+                ),
+                campaign_module.PhaseRecord(
+                    round=1, phase="audit", attempt=1, outcome="pass",
+                    head_commit="0" * 40, plan_digest="0" * 64,
+                ),
+            ),
+        )
+        result.validate()
 
     def test_config_validation_fails_closed(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)

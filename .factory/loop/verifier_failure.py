@@ -97,6 +97,50 @@ def _reject_duplicate_keys(pairs: List[tuple]) -> Dict[str, object]:
     return result
 
 
+# Control characters (C0 controls plus DEL) are never valid in a reference.
+_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20)) | frozenset(chr(0x7F))
+
+
+def _validate_safe_ref(value: str, name: str) -> None:
+    """Reject unsafe reference/path syntax in a verifier-failure ref.
+
+    ``output_ref``/``artifact_refs``/``changed_files`` are bounded
+    repository-relative references to already-produced evidence artifacts,
+    never executable paths (EVID-02).  A value that is absolute, contains a
+    backslash or a control character, or contains a dot/dotdot/empty path
+    segment fails closed.  A bare non-path identifier (for example a digest
+    or a single-segment artifact name) is preserved: it is not a path and
+    carries no traversal or absolute authority.
+    """
+    if not value:
+        raise VerifierFailureMalformedError(
+            f"verifier-failure {name} must be a non-empty string"
+        )
+    if value.startswith("/"):
+        raise VerifierFailureMalformedError(
+            f"verifier-failure {name} must be a repository-relative reference, "
+            "not an absolute path"
+        )
+    if "\\" in value:
+        raise VerifierFailureMalformedError(
+            f"verifier-failure {name} must not contain a backslash"
+        )
+    if any(ch in _CONTROL_CHARS for ch in value):
+        raise VerifierFailureMalformedError(
+            f"verifier-failure {name} must not contain control characters"
+        )
+    for segment in value.split("/"):
+        if not segment:
+            raise VerifierFailureMalformedError(
+                f"verifier-failure {name} must not contain an empty path segment"
+            )
+        if segment in (".", ".."):
+            raise VerifierFailureMalformedError(
+                f"verifier-failure {name} must not contain a dot/dotdot path "
+                "segment"
+            )
+
+
 def _load_schema() -> Dict[str, object]:
     here = Path(__file__).resolve().parents[1]  # .factory/
     path = here / "schemas" / SCHEMA_FILE
@@ -302,6 +346,8 @@ def validate_artifact(artifact: Mapping[str, object]) -> None:
             raise VerifierFailureMalformedError(
                 f"verifier-failure {name} must be a bounded string"
             )
+        if value:
+            _validate_safe_ref(value, name)
     for name, ceiling in (
         ("changed_files", MAX_CHANGED_FILES),
         ("artifact_refs", MAX_ARTIFACT_REFS),
@@ -318,6 +364,8 @@ def validate_artifact(artifact: Mapping[str, object]) -> None:
             raise VerifierFailureMalformedError(
                 f"verifier-failure {name} must be a bounded string array"
             )
+        for item in values:
+            _validate_safe_ref(item, name)
     environment = artifact.get("environment_classification")
     if environment not in ENVIRONMENT_CLASSIFICATIONS:
         raise VerifierFailureMalformedError(

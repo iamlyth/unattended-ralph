@@ -749,6 +749,24 @@ class FindingsConsumeUnit(_FindingsBase):
                                 "findings", findings=["fixture finding"]))),
             ])
 
+    def test_duplicate_key_preserved_result_fails_closed(self) -> None:
+        # A repeated JSON object key in the preserved phase-result artifact
+        # is rejected at parse time (EVID-02 duplicate-key rejection): a
+        # forged artifact cannot hide a drifted field behind a duplicate.
+        self._post_mint_consume()
+        self._write_artifact(
+            findings_module.result_name(1, "verification"),
+            b'{"schema":"factory-phase-result/v1","schema":"x",'
+            b'"outcome":"findings","findings":["fixture finding"]}',
+        )
+        with self.assertRaises(findings_module.FindingsMalformedError) as caught:
+            self.consume([
+                self.record(1, "verification", "findings",
+                            result_digest=sha256(_canonical_result(
+                                "findings", findings=["fixture finding"]))),
+            ])
+        self.assertIn("duplicate JSON object key", str(caught.exception))
+
     def test_missing_preserved_result_fails_closed(self) -> None:
         # A receipt without its preserved phase-result artifact is a
         # receipt-only claim whose content cannot be authenticated.
