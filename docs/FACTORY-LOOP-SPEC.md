@@ -483,8 +483,11 @@ The budget bounds:
   campaign early, before the maximum;
 - `max_checkpoints` — the maximum number of coherent task checkpoints
   (committed task completions) the campaign may produce;
-- `max_wall_seconds` — the wall-clock budget, enforced by the existing
-  campaign-timeout authority;
+- `max_wall_seconds` — the committed wall-clock budget.  The effective
+  campaign deadline is the tighter of the operator `campaign_timeout` and
+  this committed `max_wall_seconds` (`min`), applied consistently on start
+  and resume, so neither a larger operator timeout nor a larger committed
+  budget can silently extend the wall-clock bound;
 - `max_task_attempts` — the per-task attempt budget, enforced by the existing
   task-resource-budget authority;
 - `audit_interval` — the coherent-checkpoint interval at which the

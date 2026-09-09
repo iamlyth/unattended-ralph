@@ -73,6 +73,7 @@ import campaign as campaign_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
 import pre_round as pre_round_module  # noqa: E402
+import scheduler as scheduler_module  # noqa: E402
 import sidecars as sidecars_module  # noqa: E402
 import state as state_module  # noqa: E402
 import task_budget as task_budget_module  # noqa: E402
@@ -1419,6 +1420,88 @@ class EmptyWorkAndFindings(_CampaignBase):
                 config,
                 campaign_timeout=campaign_module.MAX_CAMPAIGN_TIMEOUT + 1,
             )
+
+    def _budget_config(
+        self, ws, *, max_wall_seconds: float, campaign_timeout: float
+    ):
+        """A campaign config with a specific committed wall budget and operator
+        timeout, keeping the committed-budget digest consistent."""
+        config = ws.derive_config()
+        budget = dataclasses.replace(
+            config.campaign_budget, max_wall_seconds=max_wall_seconds
+        )
+        return dataclasses.replace(
+            config,
+            campaign_timeout=campaign_timeout,
+            campaign_budget=budget,
+            campaign_budget_digest=scheduler_module.budget_digest(budget),
+        )
+
+    def test_effective_deadline_tighter_committed_cap(self) -> None:
+        # A committed max_wall_seconds tighter than the operator timeout wins:
+        # the effective deadline is the committed cap, never the larger
+        # operator timeout (the model can never weaken the committed budget).
+        ws = self.make(SUCCESS_SCENARIO)
+        config = self._budget_config(
+            ws, max_wall_seconds=100.0, campaign_timeout=1000.0)
+        campaign = campaign_module.Campaign(config)
+        self.assertEqual(campaign._effective_campaign_timeout(), 100.0)
+        self.assertEqual(campaign._remaining_time("test"), 100.0)
+
+    def test_effective_deadline_tighter_operator_cap(self) -> None:
+        # An operator campaign_timeout tighter than the committed cap wins:
+        # the effective deadline is the operator timeout, never the larger
+        # committed budget.
+        ws = self.make(SUCCESS_SCENARIO)
+        config = self._budget_config(
+            ws, max_wall_seconds=1000.0, campaign_timeout=100.0)
+        campaign = campaign_module.Campaign(config)
+        self.assertEqual(campaign._effective_campaign_timeout(), 100.0)
+        self.assertEqual(campaign._remaining_time("test"), 100.0)
+
+    def test_effective_deadline_boundary_equal(self) -> None:
+        # Equal caps: the effective deadline is exactly that shared value.
+        ws = self.make(SUCCESS_SCENARIO)
+        config = self._budget_config(
+            ws, max_wall_seconds=500.0, campaign_timeout=500.0)
+        campaign = campaign_module.Campaign(config)
+        self.assertEqual(campaign._effective_campaign_timeout(), 500.0)
+        self.assertEqual(campaign._remaining_time("test"), 500.0)
+
+    def test_effective_deadline_consistent_on_restart_resume(self) -> None:
+        # The same effective deadline is applied on start and on resume: both
+        # go through run(), which anchors the deadline to the same
+        # min(campaign_timeout, max_wall_seconds) computation.
+        ws = self.make(SUCCESS_SCENARIO)
+        config = self._budget_config(
+            ws, max_wall_seconds=100.0, campaign_timeout=1000.0)
+        with unittest.mock.patch.object(
+            campaign_module.time, "monotonic", return_value=1234.0
+        ), unittest.mock.patch.object(
+            campaign_module.Campaign, "_run_in_state_namespace",
+            return_value=None,
+        ):
+            first = campaign_module.Campaign(config)
+            first.run()
+            resumed = campaign_module.Campaign(config)
+            resumed.run()
+        # Both start and resume anchor the deadline to the same effective
+        # committed cap (min(campaign_timeout, max_wall_seconds) = 100.0).
+        self.assertEqual(first._deadline, 1234.0 + 100.0)
+        self.assertEqual(resumed._deadline, 1234.0 + 100.0)
+
+    def test_effective_deadline_exhaustion_fails_closed(self) -> None:
+        # When the effective wall-clock deadline is exhausted, the campaign
+        # fails closed (CampaignPhaseError) rather than continuing past the
+        # committed/operator cap.
+        ws = self.make(SUCCESS_SCENARIO)
+        config = self._budget_config(
+            ws, max_wall_seconds=100.0, campaign_timeout=1000.0)
+        campaign = campaign_module.Campaign(config)
+        campaign._deadline = 0.0  # already expired
+        with self.assertRaises(campaign_module.CampaignPhaseError) as cm:
+            campaign._remaining_time("test")
+        self.assertIn("deadline expired", str(cm.exception))
 
     def test_absent_verification_command_fails_closed(self) -> None:
         # Verification argv is a construction/preflight requirement.  Even a

@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: 2369019f119005a430f88d9fc10cefcf957dad65
-spec_blob: 64da0b747ac0044df9685c80ffa38667f5d70181
+spec_blob: 8d41480c2d34e4e6cabef281b6b3028d908d07bb
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---

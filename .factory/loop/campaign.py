@@ -2522,10 +2522,28 @@ class Campaign:
                         f"start: {exc}"
                     ) from exc
 
+    def _effective_campaign_timeout(self) -> float:
+        """The effective campaign wall-clock budget (seconds).
+
+        The effective deadline is the tighter of the operator's
+        ``campaign_timeout`` and the committed campaign budget's
+        ``max_wall_seconds`` (``min``), so a committed cap can never be
+        silently exceeded by a larger operator timeout and an operator cap
+        can never be silently exceeded by a larger committed budget.  The
+        committed budget is bound by its digest in the control state, so the
+        model can never influence this value.  The same computation is used
+        on start and on resume, so a resumed campaign enforces the identical
+        effective deadline.
+        """
+        budget = self._config.campaign_budget
+        if budget is None:
+            return self._config.campaign_timeout
+        return min(self._config.campaign_timeout, budget.max_wall_seconds)
+
     def _remaining_time(self, label: str) -> float:
         """Return the finite remaining campaign wall-clock budget."""
         if self._deadline is None:
-            return self._config.campaign_timeout
+            return self._effective_campaign_timeout()
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
             raise CampaignPhaseError(
@@ -5610,7 +5628,7 @@ class Campaign:
 
     def run(self) -> CampaignResult:
         """Run inside this campaign's sole lifecycle/evidence namespace."""
-        self._deadline = time.monotonic() + self._config.campaign_timeout
+        self._deadline = time.monotonic() + self._effective_campaign_timeout()
         if self._config.role_driver is None:
             # Programmatic callers cannot bypass the CLI preflight.  Re-prove
             # clean HEAD, accepted commit, installed bytes/manifest, explicit
