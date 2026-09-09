@@ -4613,109 +4613,56 @@ class PlanBindingDigestTest(unittest.TestCase):
     """Phase 2D1: the composite plan binding at the campaign boundary."""
 
     def test_v1_plan_keeps_plain_digest(self) -> None:
-        v1 = (ROOT / ".factory" / "artifacts" / "implementation-plan.md").read_bytes()
+        # A v1 plan (no sidecar binding) keeps the plain plan-file digest.
+        import subprocess
+
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--", ".factory/artifacts/implementation-plan.md"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        v1 = None
+        for commit in commits:
+            candidate = subprocess.run(
+                ["git", "show", f"{commit}:.factory/artifacts/implementation-plan.md"],
+                capture_output=True, check=True,
+            ).stdout
+            if b"schema: factory-plan/v2" not in candidate[:2048]:
+                v1 = candidate
+                break
+        self.assertIsNotNone(v1)
         self.assertEqual(
             campaign_module._plan_binding_digest(ROOT, v1),
             campaign_module.plan_sha256(v1),
         )
 
     def test_v2_plan_binds_sidecars(self) -> None:
-        import hashlib
-        import json
+        v2 = (ROOT / ".factory" / "artifacts" / "implementation-plan.md").read_bytes()
+        archive = (ROOT / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE).read_bytes()
+        history = (ROOT / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE).read_bytes()
+        expected = plan_sidecars.plan_binding_digest(v2, archive, history)
+        self.assertEqual(
+            campaign_module._plan_binding_digest(ROOT, v2),
+            expected,
+        )
+        self.assertNotEqual(
+            campaign_module._plan_binding_digest(ROOT, v2),
+            campaign_module.plan_sha256(v2),
+        )
+
+    def test_archive_records_at_v1_repo_is_empty(self) -> None:
+        # The canonical repo now carries the archive sidecar; a v1-only
+        # repository (no sidecar) yields an empty index.
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".factory").mkdir()
             (root / ".factory" / "artifacts").mkdir()
-            archive = plan_sidecars.serialize_archive([
-                plan_sidecars.ArchiveRecord(
-                    schema=plan_sidecars.ARCHIVE_SCHEMA, task_id=2,
-                    title="t", priority=1, dependencies=(), status="complete",
-                    scope="s", acceptance="a", verification="v",
-                    documentation_impact="d", evidence_refs=(),
-                    archived_commit="a" * 40, provenance="migration",
-                )
-            ])
-            history = plan_sidecars.serialize_history([
-                plan_sidecars.HistoryRecord(
-                    schema=plan_sidecars.HISTORY_SCHEMA, event="migrated",
-                    task_id=None, commit="a" * 40, plan_digest="b" * 64,
-                    detail="migrated",
-                )
-            ])
-            (root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE).write_bytes(archive)
-            (root / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE).write_bytes(history)
-            plan = (
-                "---\n"
-                "schema: factory-plan/v2\n"
-                "spec_path: docs/SPEC.md\n"
-                "spec_commit: " + "c" * 40 + "\n"
-                "spec_blob: " + "d" * 40 + "\n"
-                "base_commit: " + "e" * 40 + "\n"
-                "status: active\n"
-                "sidecars: " + json.dumps(
-                    {"archive": plan_sidecars.sidecar_digest(archive),
-                     "history": plan_sidecars.sidecar_digest(history)},
-                    sort_keys=True, separators=(",", ":"),
-                ) + "\n"
-                "---\n"
-                "\n"
-                "# Implementation Plan\n"
-                "\n"
-                "## Goal and non-goals\n"
-                "\n"
-                "goal\n"
-                "\n"
-                "## Architecture and constraints\n"
-                "\n"
-                "arch\n"
-                "\n"
-                "## Task 1: Final documentation and specification audit\n"
-                "\n"
-                "- Status: pending\n"
-                "- Dependencies: Task 2\n"
-                "- Priority: 1\n"
-                "- Scope: scope\n"
-                "- Acceptance criteria: acceptance\n"
-                "- Verification: verification\n"
-                "- Documentation impact: docs\n"
-                "\n"
-            ).encode("utf-8")
-            (root / ".factory" / "artifacts" / "implementation-plan.md").write_bytes(plan)
-            expected = plan_sidecars.plan_binding_digest(plan, archive, history)
-
-            class _StubGit:
-                def __init__(self, blobs):
-                    self._blobs = blobs
-
-                def blob_at(self, commit, relpath):
-                    if relpath not in self._blobs:
-                        raise campaign_module.CampaignGitError(
-                            f"path {relpath!r} is not tracked"
-                        )
-                    return self._blobs[relpath]
-
-            stub = _StubGit({
-                plan_sidecars.ARCHIVE_FILE: archive,
-                plan_sidecars.HISTORY_FILE: history,
-            })
             self.assertEqual(
-                campaign_module._plan_binding_digest(
-                    root, plan, commit="a" * 40, git=stub
-                ),
-                expected,
+                campaign_module._archive_records_at(root), []
             )
-            self.assertNotEqual(
-                campaign_module._plan_binding_digest(
-                    root, plan, commit="a" * 40, git=stub
-                ),
-                campaign_module.plan_sha256(plan),
-            )
-
-    def test_archive_records_at_v1_repo_is_empty(self) -> None:
         self.assertEqual(
-            campaign_module._archive_records_at(ROOT), []
+            len(campaign_module._archive_records_at(ROOT)), 30
         )
 
 

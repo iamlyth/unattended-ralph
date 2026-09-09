@@ -1199,7 +1199,8 @@ class TrustedGit:
             plan_bytes = self.blob_at(commit, self._plan_path)
             try:
                 archive_bytes = self.blob_at(
-                    commit, plan_sidecars.ARCHIVE_FILE
+                    commit,
+                    f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}",
                 )
                 archive_records = plan_sidecars.parse_archive(archive_bytes)
             except (CampaignGitError, plan_sidecars.PlanSidecarError):
@@ -1398,10 +1399,14 @@ def _plan_binding_digest(
     def blob(relpath: str) -> bytes:
         if git is not None:
             return git.blob_at(commit, relpath)
-        return _blob_at(root, relpath, revision=commit)
+        return _blob_at(root, relpath, revision=commit or "HEAD")
 
-    archive_bytes = blob(plan_sidecars.ARCHIVE_FILE)
-    history_bytes = blob(plan_sidecars.HISTORY_FILE)
+    archive_bytes = blob(
+        f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}"
+    )
+    history_bytes = blob(
+        f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.HISTORY_FILE}"
+    )
     return plan_sidecars.plan_binding_digest(
         plan_blob, archive_bytes, history_bytes
     )
@@ -1420,14 +1425,17 @@ def _archive_records_at(
     try:
         if worktree:
             data = _bounded_read(
-                root, plan_sidecars.ARCHIVE_FILE, "archive sidecar",
-                plan_sidecars.SIDECAR_MAX_BYTES,
+                root, f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}",
+                "archive sidecar", plan_sidecars.SIDECAR_MAX_BYTES,
             )
         elif git is not None:
-            data = git.blob_at(commit, plan_sidecars.ARCHIVE_FILE)
+            data = git.blob_at(
+                commit, f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}"
+            )
         else:
             data = _blob_at(
-                root, plan_sidecars.ARCHIVE_FILE, revision=commit
+                root, f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}",
+                revision=commit or "HEAD",
             )
     except (CampaignError, CampaignGitError):
         return []
@@ -5669,8 +5677,8 @@ class Campaign:
         new_head = self._git.commit(
             [
                 self._config.plan_path,
-                plan_sidecars.ARCHIVE_FILE,
-                plan_sidecars.HISTORY_FILE,
+                f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}",
+                f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.HISTORY_FILE}",
             ],
             "factory-campaign: archive verified completed tasks "
             + ",".join(str(task_id) for task_id in completed),
