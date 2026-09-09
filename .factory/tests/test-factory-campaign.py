@@ -1639,6 +1639,71 @@ class ConvergenceRetry(_CampaignBase):
         self.assertEqual(rc, 1)
         self.assertEqual(data["phase_history"][2]["outcome"], "findings")
 
+    def _assert_negative_gate_never_converges(self, ws, signal_name: str) -> None:
+        """A gate that dies by a signal is a supervisor/infrastructure
+        failure, never a deterministic software verifier failure: it must not
+        publish a verifier-failure artifact, must not retry implementation on
+        the same task, and must follow the honest infrastructure_failure
+        path."""
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", "./fixture/gate.sh",
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 5)
+        assert_terminal(self, data, terminal_phase="infrastructure_failure",
+                        terminal_outcome="infrastructure_failure",
+                        exit_code=5, rounds_completed=0)
+        assert_history(self, data, [
+            (1, "planning", "planned"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "infrastructure_failure"),
+        ])
+        # No same-task convergence: no verifier_failure outcome, no second
+        # implementation retry, and no published verifier-failure artifact.
+        self.assertNotIn(
+            "verifier_failure",
+            [r["outcome"] for r in data["phase_history"]],
+        )
+        self.assertEqual(
+            [r["phase"] for r in data["phase_history"]].count("implementation"),
+            1,
+        )
+        state = ws.load_state()
+        self.assertIsNone(state.convergence_task_id)
+        self.assertEqual(state.verifier_failure_digest, "")
+        self.assertEqual(state.convergence_retries, 0)
+        self.assertEqual(state.last_failure_fingerprint, "")
+        artifacts = list((ws.root / STATE_DIR).glob("verifier-failure-*.json"))
+        self.assertEqual(artifacts, [])
+
+    def test_sigsegv_gate_never_converges(self) -> None:
+        # A gate killed by SIGSEGV (negative supervisor exit -11) is
+        # infrastructure, never a deterministic software verifier failure:
+        # no verifier-failure artifact, no same-task implementation retry,
+        # honest infrastructure_failure path.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        })
+        self._commit_gate_script(ws, "#!/bin/sh\nkill -SEGV $$\n")
+        self._assert_negative_gate_never_converges(ws, "SIGSEGV")
+
+    def test_sigkill_gate_never_converges(self) -> None:
+        # A gate killed by SIGKILL (negative supervisor exit -9) is
+        # infrastructure, never a deterministic software verifier failure:
+        # no verifier-failure artifact, no same-task implementation retry,
+        # honest infrastructure_failure path.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        })
+        self._commit_gate_script(ws, "#!/bin/sh\nkill -KILL $$\n")
+        self._assert_negative_gate_never_converges(ws, "SIGKILL")
+
     def test_verifier_modification_fails_closed(self) -> None:
         # The verifier is independently bound before planning; a developer
         # that changes the verifier-owned path is rejected by the scope

@@ -4602,8 +4602,9 @@ class Campaign:
         # Phase 2B1: the inner same-task convergence edge.  Only a genuine
         # deterministic software verifier failure may return to
         # implementation for the SAME task: the deterministic gate actually
-        # ran and returned an ordinary nonzero status (never 126/127 or a
-        # negative supervisor status), the tester passed with no findings,
+        # ran and returned an ordinary positive nonzero status (never 0,
+        # never 126/127, and never a negative supervisor/signal status), the
+        # tester passed with no findings,
         # the declared capability is available and ran clean, no scope
         # violation, the task is bound, the retry budget remains, the
         # failure is not a byte-identical repeat, the task resource budget
@@ -4617,8 +4618,8 @@ class Campaign:
         convergence_eligible = (
             outcome == "findings"
             and gate_ran
+            and gate_exit > 0
             and gate_exit not in (126, 127)
-            and gate_exit != 0
             and not verification_skipped
             and result_outcome == "pass"
             and not findings
