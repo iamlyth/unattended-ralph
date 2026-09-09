@@ -1450,7 +1450,10 @@ class EmptyWorkAndFindings(_CampaignBase):
     def test_verification_blocked_requires_declared_capability(self) -> None:
         # A tester blocked result with exact references becomes a genuine
         # verification blocked only when the declared capability probe fails;
-        # without a capability command the blocked claim is a finding.
+        # without a capability command the blocked claim is software fully
+        # verified while external release acceptance remains blocked (the
+        # deterministic gate passed, no finding remains, and the tester
+        # cited exact blocked references).
         ws = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": "complete"},
@@ -1471,7 +1474,32 @@ class EmptyWorkAndFindings(_CampaignBase):
         })
         rc2, data2 = ws2.run_cli()
         self.assertEqual(rc2, 1)
-        self.assertEqual(data2["phase_history"][2]["outcome"], "findings")
+        self.assertEqual(
+            data2["phase_history"][2]["outcome"],
+            "software_verified_external_acceptance_blocked",
+        )
+        self.assertEqual(data2["phase_history"][3]["outcome"], "findings")
+
+    def test_external_acceptance_blocked_never_produces_success(self) -> None:
+        # Software fully verified while external release acceptance remains
+        # blocked: even a final-round audit pass can never end the campaign in
+        # success — the state machine resolves it to the terminal blocked
+        # state (STATE-02).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "blocked"},
+            "auditor": {"behavior": "pass"},
+        })
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 2)
+        self.assertEqual(data["terminal_phase"], "blocked")
+        self.assertNotEqual(data["terminal_phase"], "success")
+        self.assertEqual(
+            data["phase_history"][2]["outcome"],
+            "software_verified_external_acceptance_blocked",
+        )
+        self.assertEqual(data["phase_history"][3]["outcome"], "pass")
 
 
 class ScopeAndGit(_CampaignBase):
@@ -1998,10 +2026,27 @@ class ClassificationUnits(_CampaignBase):
             **{**base, "tester_result_outcome": "blocked",
                "blocked_refs": ["ext"], "capability_available": False}),
             "blocked")
+        # Software fully verified while external release acceptance remains
+        # blocked: the deterministic gate passed, no finding remains, the
+        # declared capability is available, and the tester cited exact
+        # blocked references.  The outcome advances to the independent audit
+        # and can never produce campaign success.
         self.assertEqual(campaign_module.classify_verification(
             **{**base, "tester_result_outcome": "blocked",
                "blocked_refs": ["ext"], "capability_available": True}),
+            "software_verified_external_acceptance_blocked")
+        # A blocked tester result with findings keeps findings precedence.
+        self.assertEqual(campaign_module.classify_verification(
+            **{**base, "tester_result_outcome": "blocked",
+               "blocked_refs": ["ext"], "capability_available": True,
+               "findings": ["higher precedence"]}),
             "findings")
+        # A blocked tester result without exact references is never the new
+        # outcome: it is an infrastructure failure (no refs to bind).
+        self.assertEqual(campaign_module.classify_verification(
+            **{**base, "tester_result_outcome": "blocked",
+               "blocked_refs": [], "capability_available": True}),
+            "infrastructure_failure")
         self.assertEqual(campaign_module.classify_verification(
             **{**base, "tester_result_valid": False}),
             "infrastructure_failure")

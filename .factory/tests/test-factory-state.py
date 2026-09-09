@@ -220,6 +220,7 @@ ADVANCE_EDGES = {
     ("verification", "pass"): "audit",
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
+    ("verification", "software_verified_external_acceptance_blocked"): "audit",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
     # Task 9 review B1: an interrupted audit and an untrusted audit are
     # terminal campaign ends with no nonfinal edge; the round never advances.
@@ -232,7 +233,10 @@ ALLOWED_ADVANCE_OUTCOMES = {
         "task_completed", "work_exhausted", "blocked", "task_failed",
         "interrupted",
     ),
-    "verification": ("pass", "findings", "blocked", "infrastructure_failure"),
+    "verification": (
+        "pass", "findings", "blocked", "infrastructure_failure",
+        "software_verified_external_acceptance_blocked",
+    ),
     "audit": ("pass", "findings", "blocked", "interrupted",
                "infrastructure_failure"),
 }
@@ -557,7 +561,10 @@ class CounterTest(StateConformanceCase):
             )
         )
         self.assertEqual(
-            PHASE_OUTCOMES["audit"], frozenset({"pass", "findings", "blocked"})
+            PHASE_OUTCOMES["audit"], frozenset(
+                {"pass", "findings", "blocked",
+                 "software_verified_external_acceptance_blocked"}
+            )
         )
         # `last_outcome` is null only during a fresh planning phase.
         null_verification = json.loads(
@@ -701,6 +708,7 @@ class OutcomeTest(StateConformanceCase):
                 "task_completed", "task_progress", "task_failed",
                 "work_exhausted", "blocked",
                 "pass", "findings", "infrastructure_failure",
+                "software_verified_external_acceptance_blocked",
                 "success",
             ),
         )
@@ -981,6 +989,186 @@ class TransitionTableTest(StateConformanceCase):
         self.assertIsNone(state.selected_task_id)
         self.assertEqual(state.attempt_number, 0)
         self.assertEqual(state.attempt_started_at_monotonic, 0)
+
+
+class SoftwareVerifiedExternalAcceptanceBlockedTest(StateConformanceCase):
+    """The verification outcome ``software_verified_external_acceptance_blocked``.
+
+    Software fully verified while external release acceptance remains blocked:
+    the outcome advances to the independent audit exactly like
+    ``pass``/``findings``/``blocked``, but it can never produce campaign
+    success — an audit ``pass`` entered from it resolves to the terminal
+    ``blocked`` state in the final round and to the next round's ``planning``
+    in a non-final round.  It never weakens round-zero readiness,
+    infrastructure-failure fail-closed closes, or human authority.
+    """
+
+    OUTCOME = "software_verified_external_acceptance_blocked"
+
+    def _verification(self) -> FactoryState:
+        return make_state(
+            current_phase="verification", last_outcome="task_completed"
+        )
+
+    def test_verification_advances_to_audit(self) -> None:
+        state = advance(self._verification(), self.OUTCOME, now=MONOTONIC2)
+        self.assertEqual(state.current_phase, "audit")
+        self.assertEqual(state.last_outcome, self.OUTCOME)
+        # The audit-phase state persists the verification outcome and
+        # re-validates (the persisted form is coherent).
+        parse_state(state.to_dict())
+
+    def test_audit_pass_never_produces_success_in_final_round(self) -> None:
+        final = make_state(
+            current_phase="audit", last_outcome=self.OUTCOME,
+            current_round=1, rounds_requested=1,
+        )
+        result = advance(final, "pass", now=MONOTONIC2)
+        self.assertEqual(result.current_phase, "blocked")
+        self.assertEqual(result.last_outcome, "blocked")
+        self.assertNotEqual(result.current_phase, "success")
+
+    def test_audit_pass_advances_nonfinal_round(self) -> None:
+        nonfinal = make_state(
+            current_phase="audit", last_outcome=self.OUTCOME,
+            current_round=1, rounds_requested=2,
+        )
+        result = advance(nonfinal, "pass", now=MONOTONIC2)
+        self.assertEqual(result.current_phase, "planning")
+        self.assertEqual(result.current_round, 2)
+        self.assertEqual(result.last_outcome, "pass")
+
+    def test_audit_findings_and_blocked_keep_their_terminals(self) -> None:
+        final = make_state(
+            current_phase="audit", last_outcome=self.OUTCOME,
+            current_round=1, rounds_requested=1,
+        )
+        for outcome, terminal in (("findings", "findings"), ("blocked", "blocked")):
+            with self.subTest(audit_outcome=outcome):
+                result = advance(final, outcome, now=MONOTONIC2)
+                self.assertEqual(result.current_phase, terminal)
+                self.assertEqual(result.last_outcome, terminal)
+
+    def test_audit_abort_edges_stay_terminal(self) -> None:
+        final = make_state(
+            current_phase="audit", last_outcome=self.OUTCOME,
+            current_round=1, rounds_requested=1,
+        )
+        for outcome, terminal in AUDIT_ABORT_TARGETS.items():
+            with self.subTest(abort_outcome=outcome):
+                result = advance(final, outcome, now=MONOTONIC2)
+                self.assertEqual(result.current_phase, terminal)
+                self.assertEqual(result.current_round, 1)
+
+    def test_plain_audit_pass_still_produces_success(self) -> None:
+        # Backward compatibility: an audit entered from a normal verification
+        # ``pass`` still resolves to ``success`` in the final round.
+        final = make_state(
+            current_phase="audit", last_outcome="pass",
+            current_round=1, rounds_requested=1,
+        )
+        result = advance(final, "pass", now=MONOTONIC2)
+        self.assertEqual(result.current_phase, "success")
+
+    def test_outcome_is_rejected_outside_verification(self) -> None:
+        for phase in ("planning", "implementation", "audit"):
+            with self.subTest(phase=phase):
+                source = self._source(phase)
+                with self.assertRaises(StateTransitionError) as caught:
+                    advance(source, self.OUTCOME, now=MONOTONIC2)
+                self.assertIn("no §11", str(caught.exception))
+
+    def _source(self, phase: str) -> FactoryState:
+        if phase == "planning":
+            return make_state()
+        if phase == "implementation":
+            return implementation_state()
+        if phase == "audit":
+            return make_state(current_phase="audit", last_outcome="pass")
+        raise AssertionError(phase)
+
+    def test_legacy_v2_migration_remains_compatible(self) -> None:
+        # A legacy factory-state/v2 document migrates to the canonical v1
+        # field set; the new outcome is a v1-only extension and never appears
+        # in a legacy document, so migration stays byte-compatible.
+        legacy = {
+            "schema": "factory-state/v2",
+            "repository_identity": "1a2b3c:4d5e6f",
+            "branch": "boilerplate-develop",
+            "campaign_id": "state-conformance",
+            "rounds_requested": 2,
+            "current_round": 1,
+            "current_phase": "planning",
+            "specification_digest": SHA,
+            "plan_digest": PLAN_SHA,
+            "role_prompt_digests": {"planner": ROLE_SHA},
+            "audit_objectives_digest": AUDIT_SHA,
+            "pre_round_hook_configuration_digest": "0" * 64,
+            "pre_round_hook_commit": "0" * 40,
+            "pre_round_hook_results_digest": "0" * 64,
+            "pre_round_hook_started_round": 0,
+            "pre_round_hook_completed_round": 0,
+            "phase_base_commit": BASE_COMMIT,
+            "selected_task_id": None,
+            "attempt_number": 0,
+            "phase_started_at_monotonic": MONOTONIC,
+            "attempt_started_at_monotonic": 0,
+            "last_outcome": None,
+        }
+        migrated = state_module.migrate_offline_state(legacy)
+        self.assertEqual(migrated["schema"], SCHEMA_NAME)
+        self.assertNotIn("pre_round_hook_configuration_digest", migrated)
+        canonical = {k: v for k, v in migrated.items() if k != "_sidecars"}
+        parse_state(canonical)
+
+    def test_legacy_v2_audit_state_still_parses_after_migration(self) -> None:
+        # A legacy v2 document already in the audit phase migrates and the
+        # canonical v1 parser accepts the result (backward compatibility).
+        legacy = {
+            "schema": "factory-state/v2",
+            "repository_identity": "1a2b3c:4d5e6f",
+            "branch": "boilerplate-develop",
+            "campaign_id": "state-conformance",
+            "rounds_requested": 1,
+            "current_round": 1,
+            "current_phase": "audit",
+            "specification_digest": SHA,
+            "plan_digest": PLAN_SHA,
+            "role_prompt_digests": {"planner": ROLE_SHA},
+            "audit_objectives_digest": AUDIT_SHA,
+            "pre_round_hook_configuration_digest": "0" * 64,
+            "pre_round_hook_commit": "0" * 40,
+            "pre_round_hook_results_digest": "0" * 64,
+            "pre_round_hook_started_round": 0,
+            "pre_round_hook_completed_round": 0,
+            "phase_base_commit": BASE_COMMIT,
+            "selected_task_id": None,
+            "attempt_number": 0,
+            "phase_started_at_monotonic": MONOTONIC,
+            "attempt_started_at_monotonic": 0,
+            "last_outcome": "pass",
+        }
+        migrated = state_module.migrate_offline_state(legacy)
+        canonical = {k: v for k, v in migrated.items() if k != "_sidecars"}
+        state = parse_state(canonical)
+        self.assertEqual(state.current_phase, "audit")
+        self.assertEqual(state.last_outcome, "pass")
+
+    def test_full_campaign_with_external_blocker_ends_blocked(self) -> None:
+        # A complete campaign whose verification reports the new outcome can
+        # never end in success: the final audit pass resolves to blocked.
+        state = make_state(rounds_requested=1)
+        state = advance(
+            state, "planned", plan_digest="0" * 64,
+            phase_base_commit="0" * 40, now=1,
+        )
+        state = advance(state, "task_completed", now=2)
+        state = advance(state, self.OUTCOME, now=3)
+        self.assertEqual(state.current_phase, "audit")
+        state = advance(state, "pass", now=4)
+        self.assertEqual(state.current_phase, "blocked")
+        self.assertEqual(state.last_outcome, "blocked")
+        self.assertNotEqual(state.current_phase, "success")
 
 
 class RetryAndAttemptTest(StateConformanceCase):

@@ -48,7 +48,7 @@ python3 .factory/loop/state.py --root "$PWD" show
 python3 .factory/loop/migration.py --root "$PWD" status  # Ralph migration
 ```
 
-A campaign always terminates with one of six outcomes: `success`, `findings`, `blocked`, `failed`, `infrastructure_failure`, `interrupted`.
+A campaign always terminates with one of six outcomes: `success`, `findings`, `blocked`, `failed`, `infrastructure_failure`, `interrupted`. Verification may also report `software_verified_external_acceptance_blocked` (software fully verified while external release acceptance remains blocked); it advances to the independent audit and can never produce `success`.
 
 ## Code and test patterns
 

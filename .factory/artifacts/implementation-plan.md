@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
-spec_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
-spec_blob: ca2334abf18a6557eb09c9baeb4b03bb3df523a4
+spec_commit: 2369019f119005a430f88d9fc10cefcf957dad65
+spec_blob: 3d68ddd10dfbf7848b76866a5c8325fc5d567438
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -114,38 +114,43 @@ installed-harness mechanics are complete at `6b9c626` with fixture-authority
 receipts only; round-1 objective coverage, live campaign control state,
 live generic-namespace/coordinator receipts and check-installed acceptance,
 and external runner provisioning remain pending) — and remains NOT
-VERIFIED under the pending final audit (Task 25), which may only report
+VERIFIED under the pending final audit (Task 28), which may only report
 clean when every row is verified with exact-commit receipts at its required
 tier. RUNNER-01's row is owned by blocked Tasks 21/24 and stays `blocked`
 until the external human resolves FACT-020; no row is reclassified or
-elevated by prose.
+elevated by prose. The redesign foundation rows STATE-02 (the
+`software_verified_external_acceptance_blocked` outcome) and EVID-02 (the
+strict structured verifier-failure artifact) are `partial` and owned by
+Tasks 25-27 plus the pending final audit.
 
 | ID | Spec § | Classification | Evidence | Task |
 |----|--------|--------------|----------|------|
-| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16, Task 20, Task 22, Task 23, Task 25 |
-| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16, Task 20, Task 22, Task 23, Task 25 |
-| CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools; generic checker read authority scoped to the exact commit and dedicated generic namespace | Task 8, Task 15, Task 16, Task 20, Task 23, Task 25 |
-| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16, Task 20, Task 22, Task 23, Task 25 |
-| PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18, Task 25 |
-| TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16, Task 22, Task 25 |
-| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 25 |
-| QUOTA-01 | §10 | partial | existing `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 25 |
-| QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 25 |
-| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25 |
-| LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 25 |
-| PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 22, Task 25 |
-| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 23, Task 25 |
-| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16, Task 22, Task 25 |
-| COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 22, Task 25 |
-| FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 25 |
-| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 22, Task 25 |
-| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained; installed-tier receipts minted from the installed copy | Task 12, Task 16, Task 20, Task 23, Task 25 |
-| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 23, Task 25 |
-| RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 21, Task 24, Task 25 |
-| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 23, Task 25 |
-| MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 23, Task 25 |
-| TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization; production gates executed from the installed copy | Task 16, Task 17, Task 20, Task 23, Task 25 |
-| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25 |
+| AUTH-01 | §5, §7 | partial | existing spec/plan authority retained; new loop binds the config spec to the FACTORY-LOOP-SPEC and keeps the plan as the sole task ledger | Task 1, Task 8, Task 9, Task 16, Task 20, Task 22, Task 23, Task 28 |
+| CTX-01 | §5, §9 | partial | fresh process per role with disabled session/resume/memory injection implemented | Task 6, Task 8, Task 16, Task 20, Task 22, Task 23, Task 28 |
+| CTX-02 | §5, §18 | partial | legacy `.ralph/`, `.factory-state/`, scratchpad, task, and memory paths unavailable to model tools; generic checker read authority scoped to the exact commit and dedicated generic namespace | Task 8, Task 15, Task 16, Task 20, Task 23, Task 28 |
+| ROLE-01 | §6 | partial | four distinct static roles (planner/developer/tester/auditor) with no adaptive model roles | Task 8, Task 16, Task 20, Task 22, Task 23, Task 28 |
+| PLAN-01 | §7 | partial | `factory-plan/v1` schema and parser binding spec/base/tasks/requirements/interactions/conformance unambiguously, with byte-exact round-trip, §24 registry coverage, and range-bounds, lifecycle-field, traversal, and final-audit invariants closed by exact adversarial fixtures | Task 2, Task 14, Task 16, Task 18, Task 28 |
+| TASK-01 | §7, §8 | partial | trusted task transitions and deterministic priority-then-ID selection | Task 3, Task 9, Task 16, Task 22, Task 28 |
+| TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 28 |
+| QUOTA-01 | §10 | partial | existing `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 28 |
+| QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 28 |
+| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25, Task 28 |
+| STATE-02 | §11, §13, §14, §15 | partial | the verification outcome `software_verified_external_acceptance_blocked` records software fully verified while external release acceptance remains blocked; it advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority | Task 25, Task 27, Task 28 |
+| LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 28 |
+| PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 22, Task 28 |
+| GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 23, Task 28 |
+| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28 |
+| COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28 |
+| FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 27, Task 28 |
+| CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 22, Task 28 |
+| EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained; installed-tier receipts minted from the installed copy | Task 12, Task 16, Task 20, Task 23, Task 26, Task 28 |
+| EVID-02 | §19 | partial | verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection | Task 26, Task 27, Task 28 |
+| VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 23, Task 28 |
+| RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 21, Task 24, Task 28 |
+| HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 23, Task 28 |
+| MIG-01 | §21 | partial | generic-first migration preserves code/plan/evidence/blockers without importing Ralph control state | Task 15, Task 16, Task 20, Task 23, Task 28 |
+| TEST-01 | §22 | partial | full adversarial conformance suite (§22 tests 1-27) and documentation synchronization; production gates executed from the installed copy | Task 16, Task 17, Task 20, Task 23, Task 28 |
+| ACCEPT-01 | §23 | missing | boilerplate acceptance criteria, all §24 requirements mapped and verified, independent audit clean | Task 14, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 28 |
 
 ## Interaction acceptance inventory
 
@@ -1645,10 +1650,94 @@ elevated by prose.
 - Documentation impact: none beyond the evidence receipts and blocked-facts
   resolution.
 
-## Task 25: Final documentation and specification audit
+## Task 25: `software_verified_external_acceptance_blocked` outcome in the state machine
+
+- Status: complete
+- Dependencies: Task 4, Task 9
+- Scope: Add the verification outcome `software_verified_external_acceptance_blocked`
+  to the `factory-state/v1` authority (`.factory/loop/state.py`): the trusted
+  outcome enum, the `verification -> audit` transition, the audit-phase
+  persisted-outcome set, and the fail-closed audit constraint that an audit
+  `pass` entered from this outcome resolves to the terminal `blocked` state
+  in the final round (never `success`) and to the next round's `planning` in
+  a non-final round.  The outcome records software fully verified while
+  external release acceptance (human approval, real-system evidence, or an
+  unavailable external release authority) remains blocked; it never weakens
+  round-zero readiness, infrastructure-failure fail-closed closes, or human
+  authority.  Update the state schema docs (v1/v2) and the hidden state
+  suite with positive, backward-compatibility, migration, malformed, and
+  never-success fixtures.
+- Acceptance criteria: the new outcome advances `verification -> audit`;
+  an audit `pass` entered from it resolves to terminal `blocked` in the
+  final round and to the next round's `planning` in a non-final round;
+  existing states and the legacy `factory-state/v2` migration remain
+  byte-compatible; the outcome is rejected outside the verification phase;
+  a full campaign whose verification reports the outcome can never end in
+  `success`.
+- Verification: `.factory/tests/test-factory-state.py`;
+  `.factory/tools/validate-implementation-plan.py planning
+  .factory/artifacts/implementation-plan.md`.
+- Documentation impact: `.factory/schemas/factory-state-v1.schema.md`,
+  `.factory/schemas/factory-state-v2.schema.md`, `docs/OPERATIONS.md`.
+
+## Task 26: Strict structured verifier-failure artifact (EVID-02)
+
+- Status: complete
+- Dependencies: Task 12
+- Scope: Commit the `factory-verifier-failure/v1` schema
+  (`.factory/schemas/factory-verifier-failure-v1.schema.json`) and the
+  stdlib-only validator `.factory/loop/verifier_failure.py` carrying the
+  exact command (as data, never executable path/argv authority), the exact
+  exit status, expected vs observed, a bounded relevant output tail and/or a
+  bounded output reference, changed files, artifact references, an
+  environment/capability classification, and a rerun scope.  Enforce
+  bounded sizes, closed enums, and duplicate-key rejection at parse time;
+  export the authority from the hidden package surface.  The artifact is
+  the structured-handoff foundation for the implementer-owned
+  inspect/edit/test/diagnose loop and never weakens round-zero readiness,
+  infrastructure-failure fail-closed closes, or human authority.
+- Acceptance criteria: the committed schema accepts exactly the documented
+  field set with closed enums and bounded sizes; strings are data (the
+  validator never executes a recorded command); duplicate JSON keys,
+  oversized documents, unknown enum values, invalid commit/campaign
+  bindings, and malformed fields fail closed; canonical bytes are
+  deterministic and round-trip without semantic loss; `build_artifact`
+  mints only schema-valid artifacts.
+- Verification: `.factory/tests/test-factory-verifier-failure.py`;
+  `.factory/tools/check-generic-leakage.sh`.
+- Documentation impact: `docs/FACTORY.md`, `docs/OPERATIONS.md`.
+
+## Task 27: Campaign classifier and minimum wiring for the new outcome
+
+- Status: complete
+- Dependencies: Task 9, Task 25, Task 26
+- Scope: Wire the new outcome through the campaign classifier
+  (`.factory/loop/campaign.py`): add it to the verification outcome set
+  and classify it when the deterministic gate passed, no finding remains,
+  the declared capability is available, and the tester cited exact blocked
+  references.  Update the canonical specification (§11, §13.3, §14, §15,
+  §19, §24) and the registry/policy/sidecar/facts to make the contract
+  normative (STATE-02, EVID-02, FACT-024, FACT-025).  Add campaign-level
+  never-success fixtures and the verifier-failure suite to the complete
+  boilerplate gate.
+- Acceptance criteria: the classifier returns
+  `software_verified_external_acceptance_blocked` exactly when software is
+  fully verified and external acceptance is blocked; a campaign whose
+  verification reports the outcome and whose final audit passes ends in
+  terminal `blocked`, never `success`; the conformance sidecar, plan
+  matrix, requirement policy, and §24 registry agree exactly; the complete
+  boilerplate gate passes.
+- Verification: `.factory/tests/test-factory-campaign.py`;
+  `.factory/tests/test-factory-verifier-failure.py`;
+  `.factory/tools/validate-conformance.py planning
+  .factory/artifacts/conformance.json`; `./.factory/tools/verify-boilerplate.sh`.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md`, `docs/FACTORY.md`,
+  `docs/OPERATIONS.md`.
+
+## Task 28: Final documentation and specification audit
 
 - Status: pending
-- Dependencies: Tasks 1-24
+- Dependencies: Tasks 1-27
 - Scope: Current checkpoint: the security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the

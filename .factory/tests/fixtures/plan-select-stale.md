@@ -31,6 +31,7 @@ parsed plan and never consults a runtime task ledger.
 | QUOTA-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | QUOTA-02 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | STATE-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
+| STATE-02 | §11, §13, §14, §15 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | LOCK-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | PROC-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | GIT-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
@@ -39,6 +40,7 @@ parsed plan and never consults a runtime task ledger.
 | FIND-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | CRED-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | EVID-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
+| EVID-02 | §19 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | VIS-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | RUNNER-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |
 | HIDE-01 | §5, §7 | missing | fixture exercises selector determinism | Task 1 |

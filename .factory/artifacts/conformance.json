@@ -219,6 +219,31 @@
       "reason": ""
     },
     {
+      "id": "STATE-02",
+      "spec_sections": [
+        "\u00a711",
+        "\u00a713",
+        "\u00a714",
+        "\u00a715"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/state.py",
+        ".factory/loop/campaign.py",
+        ".factory/tests/test-factory-state.py",
+        ".factory/tests/test-factory-campaign.py"
+      ],
+      "fact_refs": [
+        "FACT-024"
+      ],
+      "reason": ""
+    },
+    {
       "id": "LOCK-01",
       "spec_sections": [
         "\u00a712"
@@ -387,6 +412,27 @@
       ],
       "fact_refs": [
         "FACT-018"
+      ],
+      "reason": ""
+    },
+    {
+      "id": "EVID-02",
+      "spec_sections": [
+        "\u00a719"
+      ],
+      "classification": "partial",
+      "evidence_tier": "private_integration",
+      "required_tier": "unit",
+      "required_capabilities": [],
+      "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
+      "receipts": [],
+      "artifacts": [
+        ".factory/loop/verifier_failure.py",
+        ".factory/schemas/factory-verifier-failure-v1.schema.json",
+        ".factory/tests/test-factory-verifier-failure.py"
+      ],
+      "fact_refs": [
+        "FACT-025"
       ],
       "reason": ""
     },

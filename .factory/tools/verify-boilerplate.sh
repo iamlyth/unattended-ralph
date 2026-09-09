@@ -17,6 +17,7 @@ python3 .factory/tests/test-factory-usage.py
 python3 .factory/tests/test-factory-lock.py
 python3 .factory/tests/test-factory-campaign.py
 python3 .factory/tests/test-factory-findings.py
+python3 .factory/tests/test-factory-verifier-failure.py
 python3 .factory/tests/test-factory-evidence.py
 ./.factory/tests/test-factory-footprint.sh
 ./.factory/tests/test-factory-installed.sh

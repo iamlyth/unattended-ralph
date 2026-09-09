@@ -36,6 +36,7 @@ transition):
     verification   pass                 -> audit
     verification   findings             -> audit
     verification   blocked              -> audit
+    verification   software_verified_external_acceptance_blocked -> audit
     audit          pass | findings | blocked -> planning(next round)
                                       when current_round < rounds_requested
     audit          pass                 -> success            (final, terminal)
@@ -43,6 +44,17 @@ transition):
     audit          blocked              -> blocked            (final, terminal)
     audit          interrupted          -> interrupted        (terminal)
     audit          infrastructure_failure -> infrastructure_failure (terminal)
+
+``software_verified_external_acceptance_blocked`` is the verification
+outcome that records software fully verified while external release
+acceptance remains blocked (human approval, real-system evidence, or an
+unavailable external release authority).  It advances to the independent
+``audit`` exactly like ``pass``/``findings``/``blocked``, but it can never
+produce campaign success: when the audit phase was entered with this
+verification outcome, an audit ``pass`` resolves to the terminal ``blocked``
+state in the final round (never ``success``) and to the next round's
+``planning`` in a non-final round.  The outcome never weakens round-zero
+readiness, infrastructure-failure fail-closed closes, or human authority.
 
 An interrupted audit and an untrusted audit (``infrastructure_failure``)
 are the two terminal fail-closed closes that have no nonfinal ``audit --
@@ -144,11 +156,18 @@ PHASE_VALUES = PHASES + TERMINAL_PHASES
 # Trusted control-plane outcome enum (§13). ``last_outcome`` is exactly one
 # of these values (or ``None`` before the first trusted outcome); it is set by
 # the trusted harness, never by model output.
+#
+# ``software_verified_external_acceptance_blocked`` is the verification
+# outcome recording software fully verified while external release acceptance
+# remains blocked; it advances to the independent audit and can never produce
+# campaign success (an audit ``pass`` entered from this outcome resolves to
+# the terminal ``blocked`` state in the final round).
 OUTCOMES = (
     "planned", "failed", "interrupted",
     "task_completed", "task_progress", "task_failed",
     "work_exhausted", "blocked",
     "pass", "findings", "infrastructure_failure",
+    "software_verified_external_acceptance_blocked",
     "success",
 )
 
@@ -169,6 +188,7 @@ TRANSITIONS: Dict[Tuple[str, str], str] = {
     ("verification", "pass"): "audit",
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
+    ("verification", "software_verified_external_acceptance_blocked"): "audit",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
     ("audit", "interrupted"): "interrupted",
     ("audit", "infrastructure_failure"): "infrastructure_failure",
@@ -207,7 +227,10 @@ PHASE_OUTCOMES: Dict[str, frozenset] = {
     "verification": frozenset(
         {"task_completed", "work_exhausted", "blocked", "task_failed"}
     ),
-    "audit": frozenset({"pass", "findings", "blocked"}),
+    "audit": frozenset(
+        {"pass", "findings", "blocked",
+         "software_verified_external_acceptance_blocked"}
+    ),
 }
 
 # Campaign-scoped fields bound once by ``init`` and immutable afterwards.
@@ -801,6 +824,12 @@ def advance(
     * ``planning --planned--> implementation`` binds the round's committed
       plan: ``plan_digest`` and ``phase_base_commit`` are required there and
       are write-once until the next ``planning -> implementation`` edge;
+    * ``verification --software_verified_external_acceptance_blocked--> audit``
+      records software fully verified while external release acceptance
+      remains blocked; the independent audit still runs, but an audit
+      ``pass`` entered from this outcome resolves to the terminal ``blocked``
+      state in the final round (never ``success``) and to the next round's
+      ``planning`` in a non-final round;
     * ``audit`` resolves finality from ``rounds_requested``:
       ``current_round < rounds_requested`` advances to the next round's
       ``planning`` (``current_round`` increments); the final round ends the
@@ -838,7 +867,19 @@ def advance(
             )
         else:
             final = state.current_round >= state.rounds_requested
-            target = AUDIT_FINAL_TARGETS[outcome] if final else "planning"
+            if (
+                outcome == "pass"
+                and state.last_outcome
+                == "software_verified_external_acceptance_blocked"
+            ):
+                # Software is fully verified but external release acceptance
+                # remains blocked: an audit pass can never produce campaign
+                # success.  The final round ends in the terminal ``blocked``
+                # state; a non-final round advances to the next planner so
+                # the external blocker stays explicit in the plan.
+                target = "blocked" if final else "planning"
+            else:
+                target = AUDIT_FINAL_TARGETS[outcome] if final else "planning"
     else:
         target = TRANSITIONS.get((state.current_phase, outcome))
         if target is None:

@@ -137,7 +137,10 @@ IMPLEMENTATION_OUTCOMES = (
     "task_completed", "task_progress", "task_failed",
     "interrupted", "work_exhausted", "blocked",
 )
-VERIFICATION_OUTCOMES = ("pass", "findings", "blocked", "infrastructure_failure")
+VERIFICATION_OUTCOMES = (
+    "pass", "findings", "blocked", "infrastructure_failure",
+    "software_verified_external_acceptance_blocked",
+)
 AUDIT_OUTCOMES = (
     "pass", "findings", "blocked",
     "interrupted", "infrastructure_failure",
@@ -1456,7 +1459,15 @@ def classify_verification(
     result, unrun gate); ``pass`` when both the deterministic gate and the
     tester pass; ``findings`` when a deterministic check fails or a finding
     is reported; ``blocked`` only when a required declared capability
-    cannot execute and the tester cited exact unavailable references.
+    cannot execute and the tester cited exact unavailable references;
+    ``software_verified_external_acceptance_blocked`` when the deterministic
+    gate passed, no finding remains, the declared capability is available,
+    and the tester cited exact blocked references — software is fully
+    verified while external release acceptance (human approval, real-system
+    evidence, or an unavailable external release authority) remains blocked.
+    The new outcome advances to the independent audit and can never produce
+    campaign success (an audit ``pass`` entered from it resolves to the
+    terminal ``blocked`` state in the final round).
 
     ``gate_ran`` reflects an **explicit deterministic verification
     command** executed by the trusted orchestrator (Task 9 review MED):
@@ -1523,7 +1534,14 @@ def classify_verification(
         # being confused with command-not-found/permission infrastructure.
         if not capability_available:
             return "blocked"
-        return "findings"
+        # The deterministic gate passed, no finding remains, and the declared
+        # capability is available: the tester's exact blocked references are
+        # external release acceptance (human approval, real-system evidence,
+        # or an unavailable external release authority), not a verification
+        # failure.  Software is fully verified while external acceptance
+        # remains blocked; the outcome advances to the independent audit and
+        # can never produce campaign success.
+        return "software_verified_external_acceptance_blocked"
     if tester_result_outcome == "findings":
         return "findings"
     return "pass"

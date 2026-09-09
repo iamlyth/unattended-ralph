@@ -30,6 +30,7 @@ Plan: Python 3.11 standard library only.
 | QUOTA-01 | §10 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | QUOTA-02 | §10 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | STATE-01 | §11, §17 | missing | fixture exercises a registry-bound matrix | Task 1 |
+| STATE-02 | §11, §13, §14, §15 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | LOCK-01 | §12 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | PROC-01 | §9, §12, §17 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | GIT-01 | §12, §17 | missing | fixture exercises a registry-bound matrix | Task 1 |
@@ -38,6 +39,7 @@ Plan: Python 3.11 standard library only.
 | FIND-01 | §16 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | CRED-01 | §18 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | EVID-01 | §19 | missing | fixture exercises a registry-bound matrix | Task 1 |
+| EVID-02 | §19 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | VIS-01 | §19 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | RUNNER-01 | §19 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | HIDE-01 | §3 | missing | fixture exercises a registry-bound matrix | Task 1 |

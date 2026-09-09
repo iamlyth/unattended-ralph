@@ -114,6 +114,7 @@ implementation interrupted     -> interrupted       (terminal)
 verification   pass            -> audit
 verification   findings        -> audit
 verification   blocked         -> audit
+verification   software_verified_external_acceptance_blocked -> audit
 verification   infrastructure_failure -> infrastructure_failure (terminal)
 audit          pass            -> planning (next round) | success      (final)
 audit          findings        -> planning (next round) | findings     (final)
@@ -121,6 +122,17 @@ audit          blocked         -> planning (next round) | blocked      (final)
 audit          interrupted     -> interrupted        (terminal)
 audit          infrastructure_failure -> infrastructure_failure (terminal)
 ```
+
+`software_verified_external_acceptance_blocked` is the verification outcome
+that records software fully verified while external release acceptance
+remains blocked (human approval, real-system evidence, or an unavailable
+external release authority).  It advances to the independent `audit` exactly
+like `pass`/`findings`/`blocked`, but it can never produce campaign success:
+when the audit phase was entered with this verification outcome, an audit
+`pass` resolves to the terminal `blocked` state in the final round (never
+`success`) and to the next round's `planning` in a non-final round.  The
+outcome never weakens round-zero readiness, the `infrastructure_failure`
+fail-closed closes, or human authority.
 
 An interrupted audit and an untrusted audit (`infrastructure_failure`) are
 the two terminal fail-closed closes that have no nonfinal `audit ->

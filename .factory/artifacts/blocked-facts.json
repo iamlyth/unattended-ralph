@@ -255,6 +255,28 @@
       ],
       "blocking_evidence": "MIG-01 requires installed-tier evidence that migration preserves only plan, code, evidence metadata, blockers, and one control-state authority without importing Ralph or credential content. Exact-commit private-integration migration tests pass at 11a4f8e98497fefcff1c5917568e663c1ab48350, but no installed-tier migration campaign receipt exists.",
       "resolution": null
+    },
+    {
+      "id": "FACT-024",
+      "title": "STATE-02 external-acceptance-blocked outcome acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "STATE-02"
+      ],
+      "blocking_evidence": "STATE-02 requires unit-tier evidence that the verification outcome software_verified_external_acceptance_blocked records software fully verified while external release acceptance remains blocked, advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority. The state-machine and campaign fixtures pass, but acceptance within a completed campaign is pending final verification.",
+      "resolution": null
+    },
+    {
+      "id": "FACT-025",
+      "title": "EVID-02 verifier-failure artifact acceptance pending",
+      "status": "open",
+      "capabilities": [],
+      "requirements": [
+        "EVID-02"
+      ],
+      "blocking_evidence": "EVID-02 requires unit-tier evidence that verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection. The hidden verifier-failure suite passes, but acceptance within a completed campaign is pending final verification.",
+      "resolution": null
     }
   ]
 }

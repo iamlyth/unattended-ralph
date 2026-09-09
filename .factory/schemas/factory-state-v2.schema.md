@@ -132,6 +132,16 @@ audit          interrupted     -> interrupted        (terminal)
 audit          infrastructure_failure -> infrastructure_failure (terminal)
 ```
 
+The canonical `factory-state/v1` authority additionally accepts the
+verification outcome `software_verified_external_acceptance_blocked`
+(software fully verified while external release acceptance remains blocked;
+it advances to the independent audit and can never produce campaign success
+— an audit `pass` entered from it resolves to the terminal `blocked` state
+in the final round).  A legacy `factory-state/v2` document predates that
+outcome and never carries it; the offline migration helper converts a v2
+document to the canonical v1 field set, and a migrated v1 document may then
+record the new outcome on later trusted transitions.
+
 An interrupted audit and an untrusted audit (`infrastructure_failure`) are
 the two terminal fail-closed closes that have no nonfinal `audit ->
 planning(next round)` edge: they always end the campaign (Task 9 review

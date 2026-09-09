@@ -65,7 +65,7 @@ SCHEMA_NAME = "factory-plan/v1"
 PLAN_TITLE = "# Implementation Plan"
 FINAL_AUDIT_TITLE = "Final documentation and specification audit"
 
-# Committed machine registry of the 24 stable FACTORY-LOOP-SPEC \u00a724
+# Committed machine registry of the 26 stable FACTORY-LOOP-SPEC \u00a724
 # normative requirement IDs (PLAN-01, Task 18 item 3). The parser loads it
 # deterministically at parse time and fails closed when it is missing,
 # malformed, or diverges from the stable set below.
@@ -75,9 +75,10 @@ REQUIREMENTS_REGISTRY = (
 )
 STABLE_REQUIREMENT_IDS = (
     "AUTH-01", "CTX-01", "CTX-02", "ROLE-01", "PLAN-01", "TASK-01",
-    "TASK-02", "QUOTA-01", "QUOTA-02", "STATE-01", "LOCK-01", "PROC-01",
-    "GIT-01", "PHASE-01", "COMPLETE-01", "FIND-01", "CRED-01", "EVID-01",
-    "VIS-01", "RUNNER-01", "HIDE-01", "MIG-01", "TEST-01", "ACCEPT-01",
+    "TASK-02", "QUOTA-01", "QUOTA-02", "STATE-01", "STATE-02",
+    "LOCK-01", "PROC-01", "GIT-01", "PHASE-01", "COMPLETE-01",
+    "FIND-01", "CRED-01", "EVID-01", "EVID-02", "VIS-01",
+    "RUNNER-01", "HIDE-01", "MIG-01", "TEST-01", "ACCEPT-01",
 )
 
 # Structured lifecycle fields are machine-read as single lines; a continuation

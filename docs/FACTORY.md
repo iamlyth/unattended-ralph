@@ -69,6 +69,24 @@ while trusted Git operations remain outside Landlock. Work exhaustion still
 runs verification and audit. Campaigns are finite and publish one of the six
 specified terminal outcomes rather than retrying empty work indefinitely.
 
+Software verification is separate from external release acceptance. When the
+deterministic gate passed, no finding remains, the declared capability is
+available, and the tester cited exact blocked references, verification
+reports `software_verified_external_acceptance_blocked` (STATE-02): software
+is fully verified while external release acceptance (human approval,
+real-system evidence, or an unavailable external release authority) remains
+blocked. The outcome advances to the independent audit but can never produce
+campaign success — a final-round audit `pass` entered from it resolves to
+the terminal `blocked` state, never `success` — and it never weakens
+round-zero readiness, infrastructure-failure fail-closed closes, or human
+authority. Every deterministic verifier failure is additionally recorded as
+a strict structured verifier-failure artifact (`factory-verifier-failure/v1`,
+EVID-02) carrying the exact command as data (never an executable path/argv
+authority), the exact exit status, expected vs observed, a bounded output
+tail/reference, changed files, artifact refs, an environment/capability
+classification, and a rerun scope, with bounded sizes, closed enums, and
+duplicate-key rejection.
+
 Findings are evidence, not tasks. Trusted findings/blocked outcomes produce an
 exact-commit, digest-bound, write-once receipt. The next fresh planner alone
 receives the deterministic findings payload and may convert it into canonical

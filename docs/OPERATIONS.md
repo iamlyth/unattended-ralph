@@ -60,6 +60,22 @@ real `stat` metadata against an internal expected owner UID (default: the
 current user), so the exact owner-rejection branch is always exercisable
 with real stat metadata and a wrong expected UID, with no `chown` required.
 
+The verification outcome `software_verified_external_acceptance_blocked`
+(STATE-02) records software fully verified while external release acceptance
+remains blocked: it advances `verification -> audit` exactly like
+`pass`/`findings`/`blocked`, but an audit `pass` entered from it resolves to
+the terminal `blocked` state in the final round (never `success`) and to the
+next round's `planning` in a non-final round.  It never weakens round-zero
+readiness, infrastructure-failure fail-closed closes, or human authority.
+
+Every deterministic verifier failure is recorded as a strict structured
+verifier-failure artifact (`factory-verifier-failure/v1`, EVID-02) carrying
+the exact command as data (never an executable path/argv authority), the
+exact exit status, expected vs observed, a bounded output tail/reference,
+changed files, artifact refs, an environment/capability classification, and
+a rerun scope, with bounded sizes, closed enums, and duplicate-key rejection
+(`.factory/loop/verifier_failure.py`).
+
 Trusted control-plane operations only (each prints one machine-readable
 outcome; `ROOT` defaults to the canonical repository):
 
