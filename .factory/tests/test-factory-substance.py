@@ -134,6 +134,19 @@ class SemanticChangeTest(unittest.TestCase):
         )
         self.assertFalse(self._semantic(self.v1, changed))
 
+    def test_spec_commit_sync_is_semantic(self) -> None:
+        # A plan-contract binding sync (spec_commit) is a genuine plan edit:
+        # the freshness checker independently validates the recorded binding.
+        import re
+
+        match = re.search(rb"spec_commit: ([0-9a-f]{40})", self.v1)
+        self.assertIsNotNone(match)
+        changed = self.v1.replace(
+            match.group(0),
+            b"spec_commit: " + b"f" * 40,
+        )
+        self.assertTrue(self._semantic(self.v1, changed))
+
     def test_unparsable_plan_fails_closed(self) -> None:
         with self.assertRaises(SubstanceError):
             plan_change_is_semantic(

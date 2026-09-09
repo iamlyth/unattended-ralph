@@ -102,6 +102,22 @@ def _plan_signature(plan: plan_parser.Plan) -> Dict[int, Dict[str, object]]:
     return {task.number: _task_signature(task) for task in plan.tasks}
 
 
+def _binding_signature(plan: plan_parser.Plan) -> Dict[str, str]:
+    """The plan-contract binding fields (spec path/commit/blob, base commit).
+
+    A change to the spec binding is a genuine plan-contract edit (PLAN-01):
+    the freshness checker independently validates the recorded spec commit/
+    blob against the committed specification, so a binding sync is never
+    manufactured progress — a wrong binding fails the freshness gate.
+    """
+    return {
+        "spec_path": plan.spec_path,
+        "spec_commit": plan.spec_commit,
+        "spec_blob": plan.spec_blob,
+        "base_commit": plan.base_commit,
+    }
+
+
 def _parse_plan_bytes(
     data: bytes, archive_records: Optional[Sequence[object]]
 ) -> plan_parser.Plan:
@@ -132,7 +148,11 @@ def plan_change_is_semantic(
     old_signature = _plan_signature(old_plan)
     new_signature = _plan_signature(new_plan)
     if old_signature == new_signature:
-        return False
+        # No task-level change: a plan-contract binding sync (spec path/
+        # commit/blob or base commit) is still a genuine plan edit, because
+        # the freshness checker independently validates the recorded binding
+        # against the committed specification (a wrong binding fails closed).
+        return _binding_signature(old_plan) != _binding_signature(new_plan)
     # A reorder is semantic: compare the ordered task-id sequence.
     old_order = [task.number for task in old_plan.tasks]
     new_order = [task.number for task in new_plan.tasks]

@@ -1,7 +1,7 @@
 ---
 schema: factory-plan/v2
 spec_path: docs/FACTORY-LOOP-SPEC.md
-spec_commit: 8c05473d3a3211bd1e88f2aa987be7fc30fef571
+spec_commit: bbf951d95ecc59b9623fc0b1debcabcc758e6182
 spec_blob: cf477ccaff935d8fc4301e97b445803d2bcd68fd
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
