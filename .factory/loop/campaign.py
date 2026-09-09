@@ -64,6 +64,7 @@ The fixed §10 decision table runs immediately before every model invocation.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -73,6 +74,7 @@ import stat
 import sys
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -89,6 +91,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import selector as selector_module
     from . import state as state_module
     from . import launch as launch_module
+    from . import path_lease as lease_authority
     from . import task_budget as task_budget_module
     from . import workspace_confinement as confinement_authority
     from . import redaction as output_redaction
@@ -109,6 +112,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import selector as selector_module  # type: ignore[no-redef]
     import state as state_module  # type: ignore[no-redef]
     import launch as launch_module  # type: ignore[no-redef]
+    import path_lease as lease_authority  # type: ignore[no-redef]
     import task_budget as task_budget_module  # type: ignore[no-redef]
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
@@ -359,6 +363,12 @@ class RoleOutcome:
     interrupted: bool = False
     signal: Optional[str] = None
     diagnostic: str = ""
+    # Phase 2C2b: the immutable security-sensitive audit signal of the
+    # authenticated task path-lease that bound this developer attempt.  The
+    # model can never clear it; the campaign records it in the scheduler
+    # state so the independent audit is mandatory before further normal flow
+    # and before success.
+    audit_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -2159,11 +2169,14 @@ def launch_role_attempt(
     role: str,
     head: str,
     task_id: Optional[int] = None,
+    attempt: int = 1,
     round_number: int = 1,
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
     findings_payload: Optional[bytes] = None,
     verifier_failure: Optional[Mapping[str, object]] = None,
+    lease: Optional[bytes] = None,
+    lease_digest: str = "",
     _authorization_store: Optional[object] = None,
     _authorization_token: str = "",
     _authorization_claims: Optional[Mapping[str, object]] = None,
@@ -2310,6 +2323,20 @@ def launch_role_attempt(
             result_write_path=result_write_path,
             runtime_limit=config.runtime_limit,
             inactivity_limit=config.inactivity_limit,
+            # Phase 2C2b: the campaign-controlled task path-lease.  The
+            # trusted campaign mints one unique claim per
+            # campaign/task/attempt/exact HEAD/plan digest/policy digest
+            # with a trusted nonce and a deadline no later than the
+            # attempt/task/campaign budget; the exact canonical claim bytes
+            # and digest travel through ``authorize_launch``, which
+            # re-validates schema, committed-policy expansion, and
+            # context/expiry before any prompt byte or confinement rule is
+            # composed.  No requested scopes means no lease: the exact
+            # previous default confinement applies unchanged.
+            campaign_id=config.campaign_id if lease is not None else "",
+            attempt=attempt if lease is not None else 0,
+            lease_digest=lease_digest if lease is not None else "",
+            lease_bytes=lease if lease is not None else b"",
         )
         launch_module.verify_invocation(binding)
         authority = launch_module.authorize_launch(
@@ -2323,6 +2350,7 @@ def launch_role_attempt(
             findings=findings_payload,
             verifier_failure=verifier_failure,
             task_budget=budget,
+            lease=lease,
             _authorization_store=_authorization_store,
             _authorization_token=_authorization_token,
             _authorization_claims=_authorization_claims,
@@ -2367,9 +2395,11 @@ def launch_role_attempt(
         return RoleOutcome(
             role, result.returncode, interrupted=True, signal=result.signal,
             diagnostic=diagnostic,
+            audit_required=bool(getattr(result, "audit_required", False)),
         )
     return RoleOutcome(
-        role, result.returncode or 0, interrupted=False, diagnostic=diagnostic
+        role, result.returncode or 0, interrupted=False, diagnostic=diagnostic,
+        audit_required=bool(getattr(result, "audit_required", False)),
     )
 
 
@@ -3075,6 +3105,103 @@ class Campaign:
 
     # -- role execution -----------------------------------------------------------
 
+    def _mint_task_lease(
+        self, head: str, task_id: Optional[int], attempt: int,
+        plan_blob: bytes,
+    ) -> Tuple[Optional[bytes], str]:
+        """Mint the campaign-controlled task path-lease for one developer attempt.
+
+        Phase 2C2b: the optional plan ``Write scopes:`` request of the
+        selected task is loaded from the exact committed plan blob at
+        ``head`` and treated only as a REQUEST — the trusted policy
+        intersection/expansion decides.  The committed path-lease policy is
+        loaded from the exact committed HEAD blob (never the mutable
+        worktree) and its digest is bound into the claim.  A unique claim is
+        minted per campaign/task/attempt/exact HEAD/plan digest/policy digest
+        with a trusted nonce and a deadline no later than the remaining
+        attempt/task/campaign budget.  Unknown/forbidden/unavailable/
+        nonexistent path requests fail closed with a bounded campaign error
+        (never a silent fallback and never a broad write).  No requested
+        scopes returns ``(None, "")``: the exact previous default
+        confinement applies unchanged.  Convergence retries mint a fresh
+        lease/nonce/attempt binding, so a replayed claim fails closed.
+        """
+        if task_id is None:
+            return None, ""
+        try:
+            plan = plan_parser.Plan.from_bytes(plan_blob)
+        except plan_parser.PlanError as exc:
+            raise CampaignPhaseError(
+                f"cannot parse the committed plan to derive the task write "
+                f"scopes: {exc}"
+            ) from exc
+        task = next((t for t in plan.tasks if t.number == task_id), None)
+        if task is None:
+            raise CampaignPhaseError(
+                f"the committed plan has no Task {task_id}; a task path-lease "
+                "cannot be minted for a nonexistent task"
+            )
+        requested = list(task.write_scopes)
+        if not requested:
+            return None, ""
+        try:
+            policy_raw = self._git.blob_at(head, lease_authority.POLICY_RELPATH)
+            policy = lease_authority.parse_policy(policy_raw)
+        except lease_authority.PathLeaseError as exc:
+            raise CampaignPhaseError(
+                f"the committed path-lease policy at HEAD is not usable: {exc}"
+            ) from exc
+        plan_digest = plan_sha256(plan_blob)
+        policy_digest = lease_authority.policy_digest(policy)
+        # The lease deadline is no later than the remaining attempt/task/
+        # campaign budget: the campaign wall-clock deadline is the trusted
+        # outer bound, and the per-task resource budget's remaining wall
+        # time (when a ledger exists) is the tighter inner bound.  A lease
+        # can never outlive the campaign or the task it authorizes.
+        remaining = self._remaining_time("task path-lease mint")
+        lease_seconds = min(
+            lease_authority.DEFAULT_LEASE_SECONDS, max(1.0, remaining)
+        )
+        if task_id is not None:
+            try:
+                budget = task_budget_module.load_budget_config(self._root)
+                ledger = task_budget_module.load_ledger(
+                    self._root, self._config.campaign_id, task_id
+                )
+                remaining_limits = task_budget_module.remaining_limits(
+                    ledger, budget
+                )
+                lease_seconds = min(
+                    lease_seconds,
+                    max(1.0, float(remaining_limits["wall_time_seconds"])),
+                )
+            except task_budget_module.TaskBudgetError:
+                # The task-budget ledger is best-effort for the lease
+                # deadline clamp; the supervisor still enforces the exact
+                # cumulative budget independently.  A malformed ledger fails
+                # closed at the supervisor, never here.
+                pass
+        now = datetime.now(timezone.utc)
+        deadline = now + timedelta(seconds=lease_seconds)
+        try:
+            claim = lease_authority.mint_claim(
+                campaign_id=self._config.campaign_id,
+                task_id=task_id,
+                attempt=attempt,
+                head_commit=head,
+                plan_digest=plan_digest,
+                policy_digest=policy_digest,
+                requested_scopes=requested,
+                policy=policy,
+                issued_at=now,
+                deadline=deadline,
+            )
+        except lease_authority.PathLeaseError as exc:
+            raise CampaignPhaseError(
+                f"the task path-lease request fails closed: {exc}"
+            ) from exc
+        return lease_authority.claim_to_bytes(claim), claim.claim_digest
+
     def _run_role(
         self,
         role: str,
@@ -3137,6 +3264,23 @@ class Campaign:
         if self._launch_store is None:
             raise CampaignPhaseError("readiness did not mint a campaign launch authority")
         plan_blob = self._git.blob_at(head, self._config.plan_path)
+        # Phase 2C2b: the campaign-controlled task path-lease.  The optional
+        # plan ``Write scopes:`` request of the selected developer task is
+        # loaded from the exact committed plan blob at ``head`` and minted
+        # into one unique claim per campaign/task/attempt/exact HEAD/plan
+        # digest/policy digest with a trusted nonce and a deadline no later
+        # than the attempt/task/campaign budget.  The exact canonical claim
+        # bytes and digest travel through ``authorize_launch``; no requested
+        # scopes means no lease (the exact previous default confinement).
+        # A refused request (unknown/forbidden/unavailable/nonexistent path)
+        # fails closed as a bounded campaign error — never a silent fallback
+        # and never a broad write.
+        lease_bytes: Optional[bytes] = None
+        lease_digest = ""
+        if role == "developer" and task_id is not None:
+            lease_bytes, lease_digest = self._mint_task_lease(
+                head, task_id, attempt, plan_blob
+            )
         claims = {
             "readiness_nonce": self._runner_readiness_nonce(),
             "phase": state.current_phase,
@@ -3171,9 +3315,12 @@ class Campaign:
             role=role,
             head=head,
             task_id=task_id,
+            attempt=attempt,
             round_number=state.current_round,
             findings_payload=findings_payload,
             verifier_failure=verifier_failure,
+            lease=lease_bytes,
+            lease_digest=lease_digest,
             _authorization_store=self._launch_store,
             _authorization_token=token,
             _authorization_claims=claims,
@@ -3244,6 +3391,24 @@ class Campaign:
                     f"cannot derive the developer task-excerpt digest: {exc}"
                 ) from exc
             env[CAMPAIGN_ENV_PREFIX + "TASK_EXCERPT_DIGEST"] = excerpt_digest
+            # Phase 2C2b: the campaign-controlled task path-lease travels to
+            # the deterministic driver as a digest-bound structured channel
+            # (mirroring the production sealed-prompt section).  The driver
+            # fails closed when the digest is present but the delivered
+            # bytes do not carry it, so a substituted or tampered claim can
+            # never reach the retry.  No requested scopes means no lease
+            # channel at all (the exact previous default confinement).
+            lease_bytes, lease_digest = self._mint_task_lease(
+                head, task_id, attempt, plan_blob
+            )
+            if lease_bytes is not None:
+                env[CAMPAIGN_ENV_PREFIX + "LEASE"] = base64.b64encode(
+                    lease_bytes
+                ).decode("ascii")
+                env[CAMPAIGN_ENV_PREFIX + "LEASE_DIGEST"] = lease_digest
+            else:
+                env[CAMPAIGN_ENV_PREFIX + "LEASE"] = ""
+                env[CAMPAIGN_ENV_PREFIX + "LEASE_DIGEST"] = ""
         # Task 10 §16: the planner role receives the deterministic
         # receipt-backed findings payload of the previous round as its only
         # findings channel (the fixture seam mirrors the digest-bound

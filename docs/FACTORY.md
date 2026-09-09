@@ -574,6 +574,30 @@ existing paths only).  CI/security-sensitive scopes set the immutable
 the Phase 2C2b scheduler; the model can never clear it.  Default behavior
 without a lease is unchanged.
 
+### Campaign-controlled lease minting and delivery (Phase 2C2b-A, LEASE-01)
+
+The Phase 2C2b-A campaign slice mints and delivers the task path-lease
+for selected developer attempts (the scheduler audit consumption of
+`audit_required` is the next slice, 2C2b-B).  For each selected developer
+attempt the campaign reads the optional plan `Write scopes:` request of the
+selected task from the exact committed plan blob at the phase head (never
+the worktree; `Scope:` prose is never parsed) and loads the committed
+path-lease policy from the exact committed HEAD blob (never the worktree).
+The request is validated through the trusted deny-dominant policy
+intersection/expansion, and one unique canonical claim is minted per
+campaign/task/attempt/exact HEAD/plan digest/policy digest with a trusted
+nonce and a deadline no later than the remaining attempt/task/campaign
+budget.  Unknown/forbidden/unavailable/nonexistent requests fail closed
+with a bounded campaign error — never a silent fallback and never a broad
+write.  The exact claim bytes plus digest travel through the existing
+`authorize_launch`/LaunchSupervision path (production) and the digest-bound
+driver channel (fixture seam).  No requested scopes means no lease: the
+exact previous default confinement applies unchanged.  The campaign
+persists no authority secret/token; bounded non-secret result fields may
+include scope IDs, the claim digest, and the immutable `audit_required`
+signal.  No command allowlist or verifier binding changes; the product-path
+lease remains write-only and cannot self-certify.
+
 ## Maintain one bug
 
 Ordinary defects stay out of `docs/SPEC.md`. Canonical state is tracked in

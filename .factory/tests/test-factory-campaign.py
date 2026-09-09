@@ -51,6 +51,7 @@ import dataclasses
 import hashlib
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import shutil
@@ -72,6 +73,8 @@ import audit_objectives as audit_objectives_module  # noqa: E402
 import campaign as campaign_module  # noqa: E402
 import gitutil  # noqa: E402
 import launch as launch_module  # noqa: E402
+import path_lease as lease_module  # noqa: E402
+import plan_parser  # noqa: E402
 import pre_round as pre_round_module  # noqa: E402
 import scheduler as scheduler_module  # noqa: E402
 import sidecars as sidecars_module  # noqa: E402
@@ -185,6 +188,7 @@ class FixtureWorkspace:
         implementation_attempts: int = 3,
         phase_result: str = f"{STATE_DIR}/phase-result.json",
         audit_result: str = f"{STATE_DIR}/audit-result.json",
+        task_specs: list[dict] | None = None,
     ) -> None:
         self.root = tmp / "workspace"
         self.scenario = scenario
@@ -193,6 +197,10 @@ class FixtureWorkspace:
         self.implementation_attempts = implementation_attempts
         self.phase_result = phase_result
         self.audit_result = audit_result
+        # Phase 2C2b: a test may supply its own task set (e.g. tasks that
+        # carry a closed-format ``Write scopes:`` request) instead of the
+        # default fixture tasks.
+        self.task_specs = TASK_SPECS if task_specs is None else task_specs
         self.scenario_commit: str | None = None
         self.build()
 
@@ -285,7 +293,7 @@ class FixtureWorkspace:
     def _generate_plans(self, common: dict) -> None:
         ws = self.root
         gen_plan(ws, common, ".factory/artifacts/implementation-plan.md",
-                 TASK_SPECS)
+                 self.task_specs)
         # The planner template of round N preserves the tasks the previous
         # rounds already completed (a real planner revises the plan from the
         # committed plan state), so a multi-round campaign works through
@@ -298,29 +306,29 @@ class FixtureWorkspace:
                               + f" revised {round_no}."),
                     "status": "complete" if t["number"] < round_no else t["status"],
                 }
-                for t in TASK_SPECS
+                for t in self.task_specs
             ]
-            if round_no > len(TASK_SPECS):
+            if round_no > len(self.task_specs):
                 revised[-1] = {
                     **revised[-1], "status": "blocked",
                     "blocked_on": "synthetic-five-round-extension",
                 }
             gen_plan(ws, common, f"fixture/templates/planner-{round_no}.md",
                      revised)
-        complete = [{**dict(t), "status": "complete"} for t in TASK_SPECS]
+        complete = [{**dict(t), "status": "complete"} for t in self.task_specs]
         gen_plan(ws, {**common, "lifecycle": "complete"},
                  "fixture/templates/planner-complete.md", complete)
         blocked = [
-            {**dict(TASK_SPECS[0]), "status": "blocked",
+            {**dict(self.task_specs[0]), "status": "blocked",
              "blocked_on": "external-capability-required"},
-            {**dict(TASK_SPECS[1]), "dependencies": [1]},
-            TASK_SPECS[2],
+            {**dict(self.task_specs[1]), "dependencies": [1]},
+            self.task_specs[2],
         ]
         gen_plan(ws, common, "fixture/templates/planner-blocked.md", blocked)
         # An unbound template: every binding matches except the cycle base.
         gen_plan(ws, {**common, "base_commit": "1" * 40},
-                 "fixture/templates/planner-unbound.md", TASK_SPECS)
-        for task in TASK_SPECS:
+                 "fixture/templates/planner-unbound.md", self.task_specs)
+        for task in self.task_specs:
             number = task["number"]
             # The developer's completion template of task N keeps every
             # earlier task complete (it revises the already-committed plan
@@ -331,7 +339,7 @@ class FixtureWorkspace:
             complete_tasks = [
                 {**dict(t),
                  "status": "complete" if t["number"] <= number else t["status"]}
-                for t in TASK_SPECS
+                for t in self.task_specs
             ]
             dev_common = (
                 {**common, "lifecycle": "complete"}
@@ -347,7 +355,7 @@ class FixtureWorkspace:
                 progress_tasks = [
                     {**dict(t),
                      "status": "in_progress" if t["number"] == number else t["status"]}
-                    for t in TASK_SPECS
+                    for t in self.task_specs
                 ]
                 gen_plan(ws, common,
                          f"fixture/templates/dev-{number}-progress.md",
@@ -389,6 +397,31 @@ class FixtureWorkspace:
         )
         _git(self.root, "add", ".factory/campaign-budget.json")
         _git(self.root, "commit", "-qm", "campaign budget fixture")
+
+    def commit_policy(self, policy: dict) -> None:
+        """Write and commit a path-lease policy (Phase 2C2b).
+
+        The committed ``.factory/path-lease-policy.json`` blob is what the
+        campaign mint binds (never the mutable worktree), so a test that
+        commits a policy exercises the exact committed-blob path.
+        """
+        (self.root / ".factory" / "path-lease-policy.json").write_text(
+            json.dumps(policy, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        _git(self.root, "add", ".factory/path-lease-policy.json")
+        _git(self.root, "commit", "-qm", "path-lease policy fixture")
+
+    def developer_evidence(self, round_no: int, task_id: int) -> dict | None:
+        """Read the committed developer evidence of one attempt (if any)."""
+        rel = (
+            f"src/.factory-test-output/developer-evidence-round-"
+            f"{round_no}-task-{task_id}.json"
+        )
+        path = self.root / rel
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     # -- invocation ------------------------------------------------------------
 
@@ -2097,6 +2130,367 @@ class ScopeAndGit(_CampaignBase):
                 or message in ("fixture base", "fixture plan and driver",
                                "scenario fixture"),
                 msg=f"unexpected commit {message!r}")
+
+
+class CampaignLeaseMinting(_CampaignBase):
+    """Phase 2C2b-A: campaign-controlled task path-lease minting/delivery.
+
+    The campaign mints one unique canonical claim per
+    campaign/task/attempt/exact HEAD/plan digest/policy digest with a
+    trusted nonce and a deadline no later than the attempt/task/campaign
+    budget, and delivers the exact bytes+digest to the developer through
+    the existing launch/driver channel.  No requested scopes means no lease
+    (the exact previous default confinement).  Unknown/forbidden/
+    unavailable requests fail closed with a bounded campaign error — never
+    a silent fallback and never a broad write.  Scope prose is never
+    parsed.  A committed plan scope change forces plan/HEAD revalidation
+    (the claim binds the exact committed plan digest and HEAD).  A
+    convergence retry mints a fresh nonce/attempt lease; a replayed claim
+    fails closed.  The real Landlock confinement behavior (write
+    candidates, symlink/hardlink/mount, deny zones, expiry inside the
+    child, missing signed launch authority, failed-authorization cleanup)
+    is covered by the Phase 2C2a ``test-factory-lease-launch.py`` suite and
+    is reused, never duplicated, here.
+    """
+
+    LEASE_POLICY = {
+        "schema": "factory-path-lease-policy/v1",
+        "scopes": {
+            "scripts": {
+                "paths": ["scripts"],
+                "patterns": ["scripts/*.sh", "scripts/*.py"],
+                "audit_required": False,
+            },
+            "ci": {
+                "paths": [".github"],
+                "patterns": [],
+                "audit_required": True,
+            },
+        },
+        "deny": {
+            "paths": [
+                ".factory", ".factory-state", ".git", "docs/SPEC.md",
+                ".env", "secrets", "release", "goldens",
+                "goldens/approved",
+            ],
+            "patterns": [
+                "**/*.pem", "*.pem", "**/*.key", "*.key",
+                "**/.env*", ".env*", "**/*.secret", "*.secret",
+            ],
+        },
+    }
+
+    def _lease_tasks(self, scopes: list[str]) -> list[dict]:
+        """The standard fixture task set with a closed-format request."""
+        return [
+            {
+                "number": 1, "title": "Implement the fixture feature",
+                "status": "pending", "priority": 10, "dependencies": [],
+                "blocked_on": None, "scope": "initial scope statement.",
+                "verification": "`src/work-1.md`",
+                "write_scopes": scopes,
+            },
+            {
+                "number": 2, "title": "Implement the second feature",
+                "status": "pending", "priority": 20, "dependencies": [],
+                "blocked_on": None,
+                "verification": "`src/work-2.md`",
+            },
+            {
+                "number": 3, "title": "final", "status": "pending",
+                "priority": 1, "dependencies": [1, 2], "blocked_on": None,
+                "verification": "`src/work-3.md`",
+            },
+        ]
+
+    def _commit_lease_paths(self, ws: FixtureWorkspace) -> None:
+        """Create and commit the paths the granted scopes require."""
+        for rel in ("scripts", ".github"):
+            path = ws.root / rel
+            path.mkdir(parents=True, exist_ok=True)
+            (path / ".keep").write_text(
+                "fixture path\n", encoding="utf-8")
+        _git(ws.root, "add", "scripts", ".github")
+        _git(ws.root, "commit", "-qm", "lease scope fixture paths")
+
+    def _lease_workspace(self, scopes: list[str]) -> FixtureWorkspace:
+        ws = self.make(SUCCESS_SCENARIO, rounds=3,
+                       task_specs=self._lease_tasks(scopes))
+        ws.commit_policy(self.LEASE_POLICY)
+        self._commit_lease_paths(ws)
+        return ws
+
+    def _assert_claim_bindings(
+        self, claim: dict, ws: FixtureWorkspace, head: str,
+        task_id: int, attempt: int, plan_blob: bytes, policy: dict,
+    ) -> None:
+        """Re-validate the delivered claim against the committed blobs."""
+        raw = json.dumps(claim, sort_keys=True, separators=(",", ":"))
+        parsed = lease_module.parse_claim(raw.encode("utf-8"))
+        self.assertEqual(parsed.schema, "factory-task-path-lease/v1")
+        self.assertEqual(parsed.campaign_id, "campaign")
+        self.assertEqual(parsed.task_id, task_id)
+        self.assertEqual(parsed.attempt, attempt)
+        self.assertEqual(parsed.head_commit, head)
+        self.assertEqual(parsed.plan_digest, sha256(plan_blob))
+        self.assertEqual(
+            parsed.policy_digest, lease_module.policy_digest(policy))
+        self.assertEqual(
+            list(parsed.requested_scopes), list(claim["requested_scopes"]))
+        self.assertEqual(
+            list(parsed.granted_scopes), list(claim["granted_scopes"]))
+        self.assertTrue(lease_module.SHA256_RE.fullmatch(parsed.nonce))
+        # The deadline is no later than the attempt/task/campaign budget:
+        # the default lease bound (3600s) is the outer clamp and the claim
+        # can never outlive the campaign wall-clock budget.
+        issued = datetime.fromisoformat(parsed.issued_at)
+        deadline = datetime.fromisoformat(parsed.deadline)
+        seconds = (deadline - issued).total_seconds()
+        self.assertGreater(seconds, 0)
+        self.assertLessEqual(seconds, lease_module.DEFAULT_LEASE_SECONDS)
+        self.assertLessEqual(seconds, 21600.0)
+
+    def test_no_scope_unchanged(self) -> None:
+        # A task without a ``Write scopes:`` request mints no lease: the
+        # exact previous default confinement applies unchanged and the
+        # campaign succeeds byte-identically in behavior.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        evidence = ws.developer_evidence(1, 1)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["lease_digest"], "")
+        self.assertEqual(evidence["lease_scope_ids"], [])
+        self.assertFalse(evidence["lease_audit_required"])
+        self.assertIsNone(evidence["lease_claim"])
+
+    def test_scope_prose_is_never_parsed(self) -> None:
+        # ``Scope:`` prose that merely mentions a scope name is never
+        # authority: only the closed-format ``Write scopes:`` request list
+        # is read, so prose alone mints no lease.
+        tasks = self._lease_tasks([])
+        tasks[0]["scope"] = (
+            "initial scope statement. Write scopes: scripts, ci")
+        ws = self.make(SUCCESS_SCENARIO, rounds=3, task_specs=tasks)
+        ws.commit_policy(self.LEASE_POLICY)
+        self._commit_lease_paths(ws)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        evidence = ws.developer_evidence(1, 1)
+        self.assertEqual(evidence["lease_digest"], "")
+        self.assertIsNone(evidence["lease_claim"])
+
+    def test_valid_scope_request_mints_and_delivers(self) -> None:
+        # The end-to-end campaign developer launch: the selected task's
+        # closed-format request is minted into one unique canonical claim
+        # bound to campaign/task/attempt/exact HEAD/plan digest/policy
+        # digest and delivered to the developer through the campaign launch
+        # channel; the trusted suite re-validates every binding against the
+        # committed blobs.
+        ws = self._lease_workspace(["scripts"])
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        evidence = ws.developer_evidence(1, 1)
+        self.assertIsNotNone(evidence)
+        self.assertRegex(evidence["lease_digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(evidence["lease_scope_ids"], ["scripts"])
+        self.assertFalse(evidence["lease_audit_required"])
+        claim = evidence["lease_claim"]
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["requested_scopes"], ["scripts"])
+        self.assertEqual(claim["granted_scopes"], ["scripts"])
+        self.assertEqual(claim["claim_digest"], evidence["lease_digest"])
+        # The claim binds the exact committed plan blob and HEAD at the
+        # implementation phase.  The phase record's head_commit is the
+        # post-work commit; the mint happened at its parent (the head
+        # before the developer's completion commit).
+        impl = next(
+            r for r in data["phase_history"]
+            if r["phase"] == "implementation"
+        )
+        mint_head = _git(
+            ws.root, "rev-parse", f"{impl['head_commit']}^"
+        ).stdout.strip()
+        plan_blob = _git(
+            ws.root, "show", f"{mint_head}:{PLAN_REL}").stdout.encode("utf-8")
+        policy = lease_module.parse_policy(
+            _git(ws.root, "show",
+                 f"{mint_head}:.factory/path-lease-policy.json"
+                 ).stdout.encode("utf-8"))
+        self._assert_claim_bindings(
+            claim, ws, mint_head, 1, 1, plan_blob, policy)
+
+    def test_audit_scope_sets_audit_required(self) -> None:
+        # A CI/security-sensitive scope sets the immutable audit_required
+        # signal on the delivered claim; the model can never clear it.
+        ws = self._lease_workspace(["ci"])
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        evidence = ws.developer_evidence(1, 1)
+        self.assertTrue(evidence["lease_audit_required"])
+        self.assertEqual(evidence["lease_scope_ids"], ["ci"])
+        self.assertTrue(evidence["lease_claim"]["audit_required"])
+
+    def test_unknown_scope_fails_closed(self) -> None:
+        # An unknown scope ID is a bounded campaign error: the campaign
+        # never silently falls back to the default confinement and never
+        # grants a broad write.
+        ws = self._lease_workspace(["unknown-scope"])
+        rc, data = ws.run_cli()
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(data)
+
+    def test_forbidden_scope_fails_closed(self) -> None:
+        # A scope that grants nothing after deny-dominant expansion is
+        # forbidden: the request fails closed instead of overgranting.
+        policy = json.loads(json.dumps(self.LEASE_POLICY))
+        policy["scopes"]["forbidden"] = {
+            "paths": [".factory"], "patterns": [],
+            "audit_required": False,
+        }
+        ws = self.make(SUCCESS_SCENARIO, rounds=3,
+                       task_specs=self._lease_tasks(["forbidden"]))
+        ws.commit_policy(policy)
+        self._commit_lease_paths(ws)
+        rc, data = ws.run_cli()
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(data)
+
+    def test_unavailable_policy_fails_closed(self) -> None:
+        # A task that requests scopes while no committed path-lease policy
+        # exists at HEAD fails closed (never a silent fallback).
+        ws = self.make(SUCCESS_SCENARIO, rounds=3,
+                       task_specs=self._lease_tasks(["scripts"]))
+        self._commit_lease_paths(ws)
+        rc, data = ws.run_cli()
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(data)
+
+    def test_policy_worktree_tamper_does_not_affect_mint(self) -> None:
+        # The mint loads the policy from the exact committed HEAD blob,
+        # never the mutable worktree: a worktree tamper (deny weakened)
+        # cannot change the minted claim or its policy digest.  The mint is
+        # exercised directly on the locked campaign so the tampered worktree
+        # file never becomes role dirt.
+        ws = self._lease_workspace(["scripts"])
+        tampered = json.loads(json.dumps(self.LEASE_POLICY))
+        tampered["deny"]["paths"].remove(".factory")
+        (ws.root / ".factory" / "path-lease-policy.json").write_text(
+            json.dumps(tampered), encoding="utf-8")
+        config = ws.derive_config()
+        campaign = campaign_module.Campaign(config)
+        campaign._acquire()
+        try:
+            head = campaign._git.head()
+            plan_blob = campaign._git.blob_at(head, config.plan_path)
+            lease_bytes, _ = campaign._mint_task_lease(head, 1, 1, plan_blob)
+            self.assertIsNotNone(lease_bytes)
+            claim = lease_module.parse_claim(lease_bytes)
+            committed = lease_module.parse_policy(
+                campaign._git.blob_at(
+                    head, ".factory/path-lease-policy.json"))
+            self.assertEqual(
+                claim.policy_digest,
+                lease_module.policy_digest(committed))
+            self.assertNotEqual(
+                claim.policy_digest,
+                lease_module.policy_digest(
+                    lease_module.parse_policy(
+                        json.dumps(tampered).encode("utf-8"))))
+        finally:
+            campaign._lock.release()
+
+    def test_convergence_retry_mints_fresh_lease(self) -> None:
+        # A convergence retry mints a fresh nonce/claim lease: the two
+        # per-nonce records bind the same committed plan/HEAD but distinct
+        # nonces and digests, so a replayed claim can never satisfy the
+        # retry.
+        ws = self._lease_workspace(["scripts"])
+        gate = ws.root / "fixture" / "gate.sh"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(
+            "#!/bin/sh\n"
+            "if [ -f \"$FACTORY_VERIFIER_ROOT/src/fixed-1.md\" ]; then\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n", encoding="utf-8")
+        os.chmod(gate, 0o755)
+        _git(ws.root, "add", "fixture/gate.sh")
+        _git(ws.root, "commit", "-qm", "fixture gate script")
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", "./fixture/gate.sh",
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 0)
+        history = data["phase_history"]
+        self.assertEqual(history[2]["outcome"], "verifier_failure")
+        self.assertEqual(history[3]["outcome"], "task_completed")
+        out = ws.root / "src" / ".factory-test-output"
+        records = sorted(
+            out.glob("developer-lease-round-1-task-1-nonce-*.json"))
+        self.assertEqual(len(records), 2,
+                         "the convergence retry must mint a fresh lease")
+        claims = [json.loads(p.read_bytes()) for p in records]
+        self.assertNotEqual(claims[0]["nonce"], claims[1]["nonce"])
+        self.assertNotEqual(
+            claims[0]["claim_digest"], claims[1]["claim_digest"])
+        # The retry claim binds the exact committed plan/HEAD at its own
+        # mint: the first attempt's completion commit moved HEAD and revised
+        # the plan, so the retry claim binds the new head/plan digest with a
+        # fresh nonce — a replayed claim (old head/plan/nonce) fails closed.
+        self.assertNotEqual(
+            claims[0]["head_commit"], claims[1]["head_commit"])
+        self.assertNotEqual(
+            claims[0]["plan_digest"], claims[1]["plan_digest"])
+        self.assertEqual(
+            claims[0]["policy_digest"], claims[1]["policy_digest"])
+
+    def test_deadline_clamped_to_budget(self) -> None:
+        # The lease deadline is no later than the attempt/task/campaign
+        # budget: the claim can never outlive the campaign wall-clock
+        # deadline or the default lease bound.
+        ws = self._lease_workspace(["scripts"])
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        evidence = ws.developer_evidence(1, 1)
+        claim = evidence["lease_claim"]
+        issued = datetime.fromisoformat(claim["issued_at"])
+        deadline = datetime.fromisoformat(claim["deadline"])
+        seconds = (deadline - issued).total_seconds()
+        self.assertGreater(seconds, 0)
+        self.assertLessEqual(seconds, lease_module.DEFAULT_LEASE_SECONDS)
+        self.assertLessEqual(seconds, 21600.0)
+
+    def test_phase2c2a_confinement_suite_is_reused(self) -> None:
+        # The real Landlock confinement behavior (write candidates,
+        # symlink/hardlink/mount, deny zones, expiry inside the child,
+        # missing signed launch authority, failed-authorization cleanup) is
+        # covered by the Phase 2C2a suite and is reused, never duplicated:
+        # the campaign suite asserts the lease-launch suite still registers
+        # those adversarial cases.
+        source = (ROOT / ".factory" / "tests" /
+                  "test-factory-lease-launch.py").read_text(encoding="utf-8")
+        for marker in (
+            "test_lease_without_signed_launch_authority_fails",
+            "test_lease_with_signed_launch_authority_works",
+            "test_expired_claim_fails",
+            "test_worktree_policy_tamper_fails_before_spawn",
+            "test_symlink_lease_candidate_fails_closed",
+            "test_hardlink_lease_candidate_fails_closed",
+            "test_mount_escape_lease_candidate_fails_closed",
+            "test_authorize_failure_cleans_private_dirs",
+            "test_confined_lease_directory_write_and_deny_zones",
+        ):
+            self.assertIn(marker, source)
 
 
 class LifecycleAndCli(_CampaignBase):

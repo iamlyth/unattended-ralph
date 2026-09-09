@@ -640,6 +640,51 @@ Confinement and revalidation:
 - default behavior without a lease is unchanged: no lease section, no
   lease write rules, no `audit_required`.
 
+### 14.2b Campaign-controlled lease minting and delivery (Phase 2C2b-A, LEASE-01)
+
+The Phase 2C2b-A campaign slice mints and delivers the task path-lease for
+selected developer attempts; the Phase 2C2b scheduler audit consumption of
+the `audit_required` signal is the next slice (2C2b-B) and is explicitly
+out of scope here.
+
+Minting (trusted campaign, per selected developer attempt):
+
+- the optional plan `Write scopes:` request of the selected task is read
+  from the exact committed plan blob at the phase head (never the mutable
+  worktree) and is treated only as a REQUEST — `Scope:` prose is never
+  parsed and never authority;
+- the committed path-lease policy (`.factory/path-lease-policy.json`) is
+  loaded from the exact committed HEAD blob (never the worktree) and its
+  digest is bound into the claim; the request is validated through the
+  trusted deny-dominant policy intersection/expansion;
+- one unique canonical `factory-task-path-lease/v1` claim is minted per
+  campaign/task/attempt/exact HEAD/plan digest/policy digest with a
+  trusted nonce and a deadline no later than the remaining
+  attempt/task/campaign budget (the campaign wall-clock deadline is the
+  outer bound; the per-task resource budget's remaining wall time is the
+  tighter inner bound when a ledger exists);
+- unknown/forbidden/unavailable/nonexistent expanded path requests fail
+  closed with a bounded campaign error — never a silent fallback and never
+  a broad write; a committed plan scope change forces plan/HEAD
+  revalidation (the claim binds the exact committed plan digest and
+  HEAD); a convergence retry mints a fresh nonce/claim lease and a
+  replayed claim fails closed;
+- no requested scopes means no lease: the exact previous default
+  confinement applies unchanged.
+
+Delivery:
+
+- the exact canonical claim bytes plus digest travel through the existing
+  `authorize_launch`/LaunchSupervision path (production) and the
+  digest-bound driver channel (fixture seam), which re-validates schema,
+  committed-policy expansion, and context/expiry before any prompt byte
+  or confinement rule is composed;
+- the campaign persists no authority secret/token; bounded non-secret
+  result fields may include scope IDs, the claim digest, and the immutable
+  `audit_required` signal;
+- no command allowlist or verifier binding changes; the product-path
+  lease remains write-only and cannot self-certify.
+
 ## 15. Completion predicates
 
 The following predicates MUST remain distinct:
@@ -801,7 +846,14 @@ The generic implementation is not acceptable until tests prove:
     failing closed, binds claims to campaign/task/attempt/HEAD/plan/policy/
     nonce/deadline with canonical digests, fails closed on forgery, drift,
     replay, and expiry, marks security-sensitive scopes `audit_required`,
-    and loads the committed policy no-follow with bounded size.
+    and loads the committed policy no-follow with bounded size; the Phase
+    2C2b-A campaign mints one unique claim per selected developer attempt
+    from the committed plan `Write scopes:` request and the committed HEAD
+    policy blob (never the worktree), clamps the deadline to the
+    attempt/task/campaign budget, fails closed on unknown/forbidden/
+    unavailable/nonexistent requests (never a silent fallback or broad
+    write), and delivers the exact bytes+digest through the existing
+    launch path without persisting any authority secret/token.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -854,4 +906,4 @@ The stable IDs below are the conformance authority for this specification. Secti
 | MIG-01 | §21 | Generic-first migration preserves code, plan, evidence, blockers, and dirty work without importing Ralph control state | installed |
 | TEST-01 | §22 | The full adversarial conformance suite and documentation synchronization pass | installed |
 | ACCEPT-01 | §23 | Boilerplate acceptance requires all mapped requirements verified and an independent audit without critical findings | installed |
-| LEASE-01 | §14.2, §14.2a, §22, §24 | The task-scoped path-lease authority is strict and foundation-only: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself. The Phase 2C2a runtime-launch foundation binds the claim into the existing signed launch authority as an optional developer-only extension: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher, the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed), the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only), CI/security scopes set the immutable `audit_required` signal on the binding and launch result, and default behavior without a lease is unchanged. No campaign minting is claimed | unit |
+| LEASE-01 | §14.2, §14.2a, §14.2b, §22, §24 | The task-scoped path-lease authority is strict and foundation-only: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself. The Phase 2C2a runtime-launch foundation binds the claim into the existing signed launch authority as an optional developer-only extension: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher, the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed), the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only), CI/security scopes set the immutable `audit_required` signal on the binding and launch result, and default behavior without a lease is unchanged. The Phase 2C2b-A campaign mints one unique claim per selected developer attempt from the committed plan `Write scopes:` request and the committed HEAD policy blob (never the worktree), clamps the deadline to the attempt/task/campaign budget, fails closed on unknown/forbidden/unavailable/nonexistent requests (never a silent fallback or broad write), and delivers the exact bytes+digest through the existing launch path without persisting any authority secret/token; the scheduler audit forcing of `audit_required` is the next slice (2C2b-B) | unit |

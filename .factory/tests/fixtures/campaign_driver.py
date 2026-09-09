@@ -26,6 +26,7 @@ It is not evidence of real model acceptance or real confinement; production
 campaigns launch real roles through the launch authority.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -275,6 +276,88 @@ def main() -> int:
                 "campaign driver: the verifier-failure channel must carry "
                 "both the artifact and its exact digest"
             )
+        # Phase 2C2b: the campaign-controlled task path-lease travels as a
+        # digest-bound structured channel (mirroring the production sealed-
+        # prompt section).  The driver fails closed when the digest is
+        # present but the delivered bytes do not carry it, so a substituted
+        # or tampered claim can never reach the retry.  No requested scopes
+        # means no lease channel at all (the exact previous default
+        # confinement).
+        lease_env = os.environ.get(PREFIX + "LEASE", "")
+        lease_digest_env = os.environ.get(PREFIX + "LEASE_DIGEST", "")
+        if bool(lease_env) != bool(lease_digest_env):
+            raise SystemExit(
+                "campaign driver: the task path-lease channel must carry "
+                "both the claim and its exact digest"
+            )
+        lease_claim = None
+        if lease_env:
+            try:
+                lease_bytes = base64.b64decode(lease_env.encode("ascii"))
+            except (ValueError, TypeError) as exc:
+                raise SystemExit(
+                    f"campaign driver: task path-lease is not base64: {exc}"
+                )
+            try:
+                lease_claim = json.loads(lease_bytes.decode("utf-8"))
+            except ValueError as exc:
+                raise SystemExit(
+                    f"campaign driver: task path-lease is not JSON: {exc}"
+                )
+            if not isinstance(lease_claim, dict) or lease_claim.get("schema") != (
+                "factory-task-path-lease/v1"
+            ):
+                raise SystemExit(
+                    "campaign driver: task path-lease has the wrong schema"
+                )
+            # The delivered digest is the claim's own canonical claim
+            # digest (the exact value the launch authority re-validates at
+            # authorize/spawn), never a hash of the transport document.
+            if lease_claim.get("claim_digest") != lease_digest_env:
+                raise SystemExit(
+                    "campaign driver: task path-lease digest mismatch; the "
+                    "delivered claim is substituted or tampered"
+                )
+            if lease_claim.get("task_id") != int(task_id):
+                raise SystemExit(
+                    "campaign driver: task path-lease task does not match "
+                    "the selected task; a replay fails closed"
+                )
+            if lease_claim.get("attempt") != int(attempt):
+                raise SystemExit(
+                    "campaign driver: task path-lease attempt does not match "
+                    "the current attempt; a replay fails closed"
+                )
+            if lease_claim.get("campaign_id") != os.environ.get(
+                PREFIX + "CAMPAIGN_ID", ""
+            ):
+                raise SystemExit(
+                    "campaign driver: task path-lease campaign does not "
+                    "match the campaign; a replay fails closed"
+                )
+            if lease_claim.get("head_commit") != os.environ.get(
+                PREFIX + "BOUND_COMMIT", ""
+            ):
+                raise SystemExit(
+                    "campaign driver: task path-lease HEAD does not match "
+                    "the bound commit; a replay fails closed"
+                )
+        # Phase 2C2b: the exact claim that bound this attempt is preserved
+        # as a per-nonce fixture record (never overwritten by a later
+        # attempt), so the trusted suite can prove a convergence retry
+        # minted a fresh nonce/claim and a replayed claim never reached the
+        # retry.  No requested scopes means no record at all.
+        if lease_claim is not None:
+            lease_rel = (
+                f"src/.factory-test-output/developer-lease-round-"
+                f"{round_no}-task-{task_id}-nonce-"
+                f"{lease_claim.get('nonce', '')}.json"
+            )
+            lease_path = os.path.join(root, lease_rel)
+            os.makedirs(os.path.dirname(lease_path), exist_ok=True)
+            with open(lease_path, "w", encoding="utf-8") as stream:
+                json.dump(lease_claim, stream, sort_keys=True,
+                          separators=(",", ":"))
         if verifier_failure_env:
             if sha256(verifier_failure_env.encode("utf-8")) != verifier_failure_digest:
                 raise SystemExit(
@@ -318,6 +401,25 @@ def main() -> int:
                 "plan_digest": sha256(plan_bytes),
                 "findings_present": bool(findings_env),
                 "verifier_failure_digest": verifier_failure_digest,
+                # Phase 2C2b: the campaign-controlled task path-lease is
+                # recorded as bounded non-secret result fields (granted
+                # scope IDs, the exact claim digest, and the immutable
+                # audit_required signal) so the trusted suite can prove the
+                # exact claim that bound this attempt.  No requested scopes
+                # means no lease channel at all (the exact previous default
+                # confinement).  The full claim document is also recorded as
+                # fixture-only evidence so the trusted suite can re-verify
+                # every binding (campaign/task/attempt/HEAD/plan/policy
+                # digest, nonce, deadline) against the committed blobs.
+                "lease_digest": lease_digest_env,
+                "lease_scope_ids": (
+                    list(lease_claim.get("granted_scopes", []))
+                    if lease_claim is not None else []
+                ),
+                "lease_audit_required": bool(
+                    lease_claim.get("audit_required", False)
+                ) if lease_claim is not None else False,
+                "lease_claim": lease_claim if lease_claim is not None else None,
             }
             evidence_rel = (
                 f"src/.factory-test-output/developer-evidence-round-"

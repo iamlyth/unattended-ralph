@@ -186,6 +186,15 @@ def generate(spec: Dict[str, object], registry: Path) -> str:
         )
         if raw.get("blocked_on"):
             blocks.append(f"- Blocked on: {raw['blocked_on']}")
+        if raw.get("write_scopes"):
+            scopes = raw["write_scopes"]
+            if not isinstance(scopes, list) or not scopes or any(
+                not isinstance(item, str) or not item for item in scopes
+            ):
+                raise SystemExit(
+                    f"task {number} has a malformed write_scopes list"
+                )
+            blocks.append(f"- Write scopes: {', '.join(scopes)}")
         if raw.get("evidence"):
             blocks.append(f"- Evidence: {raw['evidence']}")
         blocks.append("")
