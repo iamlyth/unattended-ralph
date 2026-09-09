@@ -212,6 +212,28 @@ class PolicyDefectRejectionTest(unittest.TestCase):
         ))
         self.assertIn("**/*.pem", policy.deny_patterns)
 
+    def test_root_level_credential_suffixes_are_denied(self) -> None:
+        # Root-level credential suffix files must be denied too: the
+        # ``**/``-prefixed deny patterns alone would not match a root-level
+        # file, so the committed policy carries explicit root patterns.
+        policy = pl.load_policy_config(ROOT)
+        for path in ("foo.pem", "secret.key", ".env", ".env.local", "a.secret"):
+            with self.subTest(path=path):
+                self.assertTrue(pl._path_in_deny(path, policy), path)
+        # A scope whose only grant is a root-level credential path grants
+        # nothing after deny-dominant expansion (root patterns included).
+        root_patterns = ["**/*.pem", "*.pem", "**/*.key", "*.key",
+                         "**/.env*", ".env*", "**/*.secret", "*.secret"]
+        for path in ("foo.pem", "secret.key", ".env", "a.secret"):
+            with self.subTest(expand=path):
+                with self.assertRaises(pl.PathLeaseClaimError) as caught:
+                    pl.expand_request(["s"], _parse_document(_policy_document(
+                        scopes={"s": {"paths": [path], "patterns": [],
+                                      "audit_required": False}},
+                        deny={"paths": [".factory"], "patterns": root_patterns},
+                    )))
+                self.assertIn("grants nothing", str(caught.exception))
+
     def test_duplicate_paths_and_patterns(self) -> None:
         self._rejects(
             _policy_document(scopes={"s": {"paths": ["a", "a"], "patterns": [],
@@ -249,6 +271,27 @@ class PolicyDefectRejectionTest(unittest.TestCase):
                              deny={"paths": ["a"], "patterns": []}),
             "overlapping deny escape",
         )
+
+    def test_scope_pattern_matching_prefix_of_deeper_deny_path(self) -> None:
+        # M1: a grant pattern that can match a prefix of a deeper immutable
+        # deny path is an overlapping deny escape — a write to that prefix
+        # could create the deeper deny path inside it.
+        self._rejects(
+            _policy_document(scopes={"s": {"paths": [], "patterns": ["scripts/*"],
+                                           "audit_required": False}},
+                             deny={"paths": ["scripts/secret/deep"], "patterns": []}),
+            "overlapping deny escape",
+        )
+
+    def test_pattern_reaches_deeper_deny_path_directly(self) -> None:
+        # Direct unit check of the M1 predicate: a shorter grant pattern
+        # that matches a prefix of a deeper deny path reaches the deny zone.
+        self.assertTrue(pl._pattern_reaches_deny_path(
+            "scripts/*", "scripts/secret/deep"))
+        self.assertTrue(pl._pattern_reaches_deny_path(
+            "scripts/*", "scripts/secret"))
+        self.assertFalse(pl._pattern_reaches_deny_path(
+            "scripts/*.sh", "scripts/secret/deep"))
 
     def test_scope_pattern_overlapping_deny_pattern(self) -> None:
         # A grant pattern that overlaps a deny pattern is not a load-time
@@ -422,6 +465,17 @@ class ClaimMintParseTest(unittest.TestCase):
             _mint(self.policy, ["scripts"],
                   deadline=NOW + timedelta(seconds=pl.MAX_LEASE_SECONDS + 1))
 
+    def test_naive_datetime_rejected_at_mint(self) -> None:
+        # A naive (tz-naive) issued/deadline would serialize to a non-UTC
+        # timestamp and be rejected later; reject it at mint so no claim is
+        # ever minted with an ambiguous bound.
+        naive = datetime(2026, 7, 14, 12, 0, 0)
+        with self.assertRaises(pl.PathLeaseClaimError) as caught:
+            _mint(self.policy, ["scripts"], issued_at=naive)
+        self.assertIn("aware UTC", str(caught.exception))
+        with self.assertRaises(pl.PathLeaseClaimError):
+            _mint(self.policy, ["scripts"], deadline=naive)
+
     def test_bad_nonce_fails_closed(self) -> None:
         with self.assertRaises(pl.PathLeaseClaimError):
             _mint(self.policy, ["scripts"], nonce="short")
@@ -500,6 +554,20 @@ class ClaimParseAdversarialTest(unittest.TestCase):
         with self.assertRaises(pl.PathLeaseClaimError):
             pl.parse_claim(self._mutate(audit_required="yes"))
 
+    def test_oversized_arrays_fail_closed(self) -> None:
+        # parse_claim enforces the same array count bounds as the policy
+        # loader so an attacker-sized claim cannot carry unbounded arrays.
+        with self.assertRaises(pl.PathLeaseClaimError) as caught:
+            pl.parse_claim(self._mutate(
+                granted_paths=["a"] * (pl.MAX_PATHS + 1)))
+        self.assertIn("at most", str(caught.exception))
+        with self.assertRaises(pl.PathLeaseClaimError):
+            pl.parse_claim(self._mutate(
+                granted_patterns=["a/*"] * (pl.MAX_PATTERNS + 1)))
+        with self.assertRaises(pl.PathLeaseClaimError):
+            pl.parse_claim(self._mutate(
+                requested_scopes=["scripts"] * (pl.MAX_SCOPES + 1)))
+
 
 class ClaimValidationTest(unittest.TestCase):
     """validate_claim and validate_claim_context fail closed on drift."""
@@ -574,6 +642,20 @@ class NoFollowLoadTest(unittest.TestCase):
             target = root / "real-policy.json"
             target.write_text(POLICY_FILE.read_text("utf-8"))
             os.symlink(target, root / ".factory" / "path-lease-policy.json")
+            with self.assertRaises(pl.PathLeasePolicyError) as caught:
+                pl.load_policy_config(root)
+            self.assertIn("cannot open", str(caught.exception))
+
+    def test_symlinked_parent_component_fails_closed(self) -> None:
+        # Every path component is opened dirfd/no-follow: a symlinked
+        # ``.factory`` parent directory must fail closed too.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            real.mkdir()
+            (real / "path-lease-policy.json").write_text(
+                POLICY_FILE.read_text("utf-8"))
+            os.symlink(real, root / ".factory")
             with self.assertRaises(pl.PathLeasePolicyError) as caught:
                 pl.load_policy_config(root)
             self.assertIn("cannot open", str(caught.exception))

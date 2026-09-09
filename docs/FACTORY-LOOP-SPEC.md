@@ -575,6 +575,14 @@ Claims (strict DATA, never self-authorizing):
   attempt, exact HEAD commit, plan digest, policy digest, requested/granted
   scopes, the exact deny-dominant expanded paths/patterns, issued/deadline
   bounds, and a unique attempt nonce, sealed by a canonical claim digest;
+- the claim digest is an UNKEYED SHA-256 over the canonical claim bytes: a
+  deterministic integrity check against accidental corruption and
+  forgery-by-a-non-writer, but NOT authoritative on its own (any same-UID
+  writer can recompute it, so it never proves provenance or authorization).
+  Only the trusted harness mints and re-validates claims, and Phase 2C2
+  binds the claim into the existing signed launch token (HMAC/FD authority);
+  until that binding exists the digest is non-authoritative integrity data,
+  never a grant;
 - claims carry no free-form commands and never resolve symlinks; every
   granted path/pattern is a bounded repository-relative prefix/pattern;
 - replay prevention fails closed on any campaign/task/attempt/commit/digest

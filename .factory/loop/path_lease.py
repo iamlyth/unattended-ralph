@@ -28,6 +28,15 @@ into the existing signed launch authority and applies exact no-follow path
 grants; this module deliberately does not touch Landlock/workspace
 confinement or launch behavior.
 
+The claim digest is an UNKEYED SHA-256 over the canonical claim bytes.  It
+is a deterministic integrity check against accidental corruption and
+forgery-by-a-non-writer, but it is NOT authoritative on its own: any
+same-UID writer can recompute it, so it never proves provenance or
+authorization.  Only the trusted harness mints and re-validates claims, and
+Phase 2C2 binds the claim into the existing signed launch token (HMAC/FD
+authority) — until that binding exists, the digest is non-authoritative
+integrity data, never a grant.
+
 Security properties:
 
 * deny-dominant expansion — a requested scope's paths that fall inside an
@@ -318,7 +327,10 @@ def _pattern_reaches_deny_path(pattern: str, deny_path: str) -> bool:
 
     ``pattern`` never contains ``**`` (grant patterns reject it), so it
     matches exactly ``len(segments)`` segments.  It reaches ``deny_path``
-    when the segment counts align and every segment is compatible.
+    when the segment counts align and every segment is compatible, when it
+    matches a path under the deny path, or when it matches a prefix of the
+    deny path (a write to that prefix could create the deeper immutable
+    deny path inside it — M1).
     """
     pattern_segments = pattern.split("/")
     deny_segments = deny_path.split("/")
@@ -329,7 +341,13 @@ def _pattern_reaches_deny_path(pattern: str, deny_path: str) -> bool:
             _segment_compatible(a, b)
             for a, b in zip(pattern_segments[:len(deny_segments)], deny_segments)
         )
-    return False
+    # The pattern is shorter than the deny path: it reaches the deny zone
+    # when it can match a prefix of the deny path, because a write to that
+    # prefix could create the deeper immutable deny path inside it.
+    return all(
+        _segment_compatible(a, b)
+        for a, b in zip(pattern_segments, deny_segments[:len(pattern_segments)])
+    )
 
 
 def _patterns_overlap(a: str, b: str) -> bool:
@@ -396,11 +414,13 @@ def _validate_scope_deny_escapes(policy: PathLeasePolicy) -> None:
 
     A scope path that contains a deny path grants the deny zone itself (the
     deny-dominant filter cannot split a prefix), and a scope pattern that
-    could match a deny path or a path under it reaches the deny zone; both
-    are overlapping deny escapes and fail closed at policy load.  A scope
-    path that is itself inside a deny zone is not an escape: deny-dominant
-    expansion removes it at request time.  Deny zones are absolute and
-    non-overridable, so no carve-out can ever make an escape safe.
+    could match a deny path, a path under it, or a prefix of it (a write to
+    that prefix could create the deeper immutable deny path inside it — M1)
+    reaches the deny zone; all are overlapping deny escapes and fail closed
+    at policy load.  A scope path that is itself inside a deny zone is not
+    an escape: deny-dominant expansion removes it at request time.  Deny
+    zones are absolute and non-overridable, so no carve-out can ever make an
+    escape safe.
     """
     for scope in policy.scopes:
         for path in scope.paths:
@@ -577,50 +597,89 @@ def load_policy_config(root: object) -> PathLeasePolicy:
     disabled); a malformed, unsafe, or unbounded document fails closed as a
     policy error.  The read is identity-pinned (no-follow, regular file,
     bounded size, unchanged while read) so a symlink or concurrent swap can
-    never substitute a different policy.
+    never substitute a different policy.  Every path component is opened
+    dirfd/no-follow through ``openat``: a symlink in any component (the
+    root, ``.factory``, or the policy file itself) fails closed.
     """
     root_path = Path(str(root)).absolute()
-    path = root_path / POLICY_RELPATH
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
+    rel = Path(POLICY_RELPATH)
+    parts = rel.parts
+    parent_fd = os.open(
+        str(root_path),
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
     )
     try:
-        descriptor = os.open(str(path), flags)
-    except OSError as exc:
-        raise PathLeasePolicyError(
-            f"cannot open the committed path-lease policy {path}: {exc}"
-        ) from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise PathLeasePolicyError(
-                f"the path-lease policy {path} is not a regular file"
-            )
-        if info.st_size > MAX_POLICY_BYTES:
-            raise PathLeasePolicyError(
-                f"the path-lease policy {path} exceeds the "
-                f"{MAX_POLICY_BYTES}-byte bound"
-            )
-        before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-        raw = bytearray()
-        while True:
-            chunk = os.read(descriptor, 65536)
-            if not chunk:
-                break
-            raw.extend(chunk)
-            if len(raw) > MAX_POLICY_BYTES:
-                raise PathLeasePolicyError(
-                    f"the path-lease policy {path} exceeds the bound"
+        for part in parts[:-1]:
+            try:
+                parent_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
                 )
-        after = os.fstat(descriptor)
-        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != before:
+            except OSError as exc:
+                raise PathLeasePolicyError(
+                    f"cannot open the committed path-lease policy parent "
+                    f"component {part!r}: {exc}"
+                ) from exc
+            try:
+                info = os.fstat(parent_fd)
+            except OSError as exc:
+                raise PathLeasePolicyError(
+                    f"cannot stat the path-lease policy parent {part!r}: {exc}"
+                ) from exc
+            if not stat.S_ISDIR(info.st_mode):
+                raise PathLeasePolicyError(
+                    f"the path-lease policy parent {part!r} is not a directory"
+                )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(parts[-1], flags, dir_fd=parent_fd)
+        except OSError as exc:
             raise PathLeasePolicyError(
-                f"the path-lease policy {path} changed while being read"
-            )
+                f"cannot open the committed path-lease policy "
+                f"{root_path / POLICY_RELPATH}: {exc}"
+            ) from exc
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise PathLeasePolicyError(
+                    f"the path-lease policy {root_path / POLICY_RELPATH} is "
+                    "not a regular file"
+                )
+            if info.st_size > MAX_POLICY_BYTES:
+                raise PathLeasePolicyError(
+                    f"the path-lease policy {root_path / POLICY_RELPATH} "
+                    f"exceeds the {MAX_POLICY_BYTES}-byte bound"
+                )
+            before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            raw = bytearray()
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > MAX_POLICY_BYTES:
+                    raise PathLeasePolicyError(
+                        f"the path-lease policy {root_path / POLICY_RELPATH} "
+                        "exceeds the bound"
+                    )
+            after = os.fstat(descriptor)
+            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != before:
+                raise PathLeasePolicyError(
+                    f"the path-lease policy {root_path / POLICY_RELPATH} changed "
+                    "while being read"
+                )
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        os.close(parent_fd)
     return parse_policy(bytes(raw))
 
 
@@ -866,10 +925,14 @@ def mint_claim(
     issued = issued_at if issued_at is not None else (now if now is not None else _utc_now())
     if not isinstance(issued, datetime):
         raise PathLeaseClaimError("issued_at must be a datetime")
+    if issued.tzinfo is None or issued.utcoffset() != timedelta(0):
+        raise PathLeaseClaimError("issued_at must be an aware UTC datetime")
     if deadline is None:
         deadline = issued + timedelta(seconds=DEFAULT_LEASE_SECONDS)
     if not isinstance(deadline, datetime):
         raise PathLeaseClaimError("deadline must be a datetime")
+    if deadline.tzinfo is None or deadline.utcoffset() != timedelta(0):
+        raise PathLeaseClaimError("deadline must be an aware UTC datetime")
     lease_seconds = (deadline - issued).total_seconds()
     if lease_seconds <= 0 or lease_seconds > MAX_LEASE_SECONDS:
         raise PathLeaseClaimError(
@@ -942,6 +1005,10 @@ def parse_claim(data: bytes) -> TaskPathLease:
     granted_scopes = document["granted_scopes"]
     if not isinstance(requested_scopes, list) or not isinstance(granted_scopes, list):
         raise PathLeaseClaimError("requested/granted scopes must be JSON arrays")
+    if len(requested_scopes) > MAX_SCOPES or len(granted_scopes) > MAX_SCOPES:
+        raise PathLeaseClaimError(
+            f"the claim may carry at most {MAX_SCOPES} requested/granted scopes"
+        )
     for scope_id in requested_scopes + granted_scopes:
         if not is_scope_id(scope_id):
             raise PathLeaseClaimError(
@@ -959,6 +1026,14 @@ def parse_claim(data: bytes) -> TaskPathLease:
     granted_patterns = document["granted_patterns"]
     if not isinstance(granted_paths, list) or not isinstance(granted_patterns, list):
         raise PathLeaseClaimError("granted paths/patterns must be JSON arrays")
+    if len(granted_paths) > MAX_PATHS:
+        raise PathLeaseClaimError(
+            f"the claim may carry at most {MAX_PATHS} granted paths"
+        )
+    if len(granted_patterns) > MAX_PATTERNS:
+        raise PathLeaseClaimError(
+            f"the claim may carry at most {MAX_PATTERNS} granted patterns"
+        )
     for path in granted_paths:
         if not is_safe_path(path):
             raise PathLeaseClaimError(

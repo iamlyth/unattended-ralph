@@ -170,6 +170,12 @@ FIELD_RE = re.compile(r"^- ([A-Z][A-Za-z ]*?):\s*(.*?)\s*$")
 FRONT_RE = re.compile(r"^([a-z_]+):\s*(\S.*?)\s*$")
 DEP_ITEM_RE = re.compile(r"^Tasks?\s+(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?$", re.I)
 PRIORITY_RE = re.compile(r"^\d+$")
+# Bound the priority digit length before any ``int()`` conversion so an
+# attacker-sized digit string can never reach the (Python 3.11+) bounded
+# int-string conversion limit and raise an uncaught ValueError traceback.
+# A 9-digit bound is far beyond any real priority and keeps the conversion
+# trivially bounded.
+MAX_PRIORITY_DIGITS = 9
 BOUNDARY_RE = re.compile(r"^- ((?:input|semantic|production|evidence) boundary):\s*(.*?)\s*$")
 # Closed-format write-scope ID (Phase 2C1): the same grammar the committed
 # path-lease policy uses, so a plan can only request scopes the policy can
@@ -719,9 +725,14 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
     )
     if "Priority" in values:
         raw_priority = values["Priority"][0].strip()
-        if not PRIORITY_RE.fullmatch(raw_priority) or int(raw_priority) < 1:
+        if (
+            not PRIORITY_RE.fullmatch(raw_priority)
+            or len(raw_priority) > MAX_PRIORITY_DIGITS
+            or int(raw_priority) < 1
+        ):
             raise PlanError(
-                f"task {number} priority must be a positive integer, got `{raw_priority}`"
+                f"task {number} priority must be a positive integer of at most "
+                f"{MAX_PRIORITY_DIGITS} digits, got `{raw_priority}`"
             )
         priority = int(raw_priority)
     else:

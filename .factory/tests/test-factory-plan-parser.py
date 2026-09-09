@@ -31,6 +31,7 @@ CANONICAL_PLAN = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 VALIDATOR = ROOT / ".factory" / "tools" / "validate-implementation-plan.py"
 
 sys.path.insert(0, str(LOOP))
+import plan_parser  # noqa: E402
 from plan_parser import (  # noqa: E402
     ALLOWED_TRANSITIONS,
     FINAL_AUDIT_TITLE,
@@ -343,6 +344,34 @@ class BoundedRangeProbeTest(unittest.TestCase):
             "range probes grew peak RSS by "
             f"{rss_after - rss_before} KiB",
         )
+
+
+class BoundedPriorityTest(unittest.TestCase):
+    """M2: an oversized Priority digit string is bounded before int() and
+    raises a PlanError, never an uncaught ValueError traceback.
+
+    Python 3.11+ caps int-string conversion (``sys.set_int_max_str_digits``
+    default 4300), so an attacker-sized digit string would otherwise raise
+    an uncaught ``ValueError``.  The parser bounds the digit length first and
+    raises a bounded ``PlanError``.
+    """
+
+    BASE = (FIXTURES / "plan-valid-base.md").read_text("utf-8")
+
+    def _with_priority(self, value: str) -> str:
+        return self.BASE.replace("- Priority: 3", f"- Priority: {value}")
+
+    def test_oversized_priority_raises_bounded_plan_error(self) -> None:
+        huge = "9" * (plan_parser.MAX_PRIORITY_DIGITS + 1)
+        with self.assertRaises(PlanError) as caught:
+            parse_plan(self._with_priority(huge))
+        self.assertIn("priority must be", str(caught.exception))
+        self.assertIn("at most", str(caught.exception))
+
+    def test_max_digit_priority_is_accepted(self) -> None:
+        ok = "9" * plan_parser.MAX_PRIORITY_DIGITS
+        plan = parse_plan(self._with_priority(ok))
+        self.assertEqual(plan.tasks[0].priority, int(ok))
 
 
 class WriteScopesFieldTest(unittest.TestCase):

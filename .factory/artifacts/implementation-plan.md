@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: dd44e0b84e7bbb83c63a33467c0fb95743e0f6c9
-spec_blob: 58b99727d4d01cb118fc7c5727af8cb8e34fbc43
+spec_blob: 29d94b910c58249cb9b9c7bce1fd1c227a742ca4
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -1879,7 +1879,15 @@ Tasks 25-27 plus the pending final audit.
   validation, deny-dominant expansion, claim mint/parse/validate/context
   validation, and canonical digests; security-sensitive leases mark
   independent audit required. Landlock/workspace-confinement write candidates
-  and launch behavior are NOT altered.
+  and launch behavior are NOT altered. Security hardening (Phase 2C1): a
+  grant pattern that can match a prefix of a deeper immutable deny path is
+  rejected as an overlapping deny escape (M1); the plan Priority digit length
+  is bounded before int conversion and raises a bounded PlanError (M2); the
+  policy load opens every path component dirfd/no-follow; root-level
+  credential suffix patterns are denied; parse_claim enforces the schema
+  array count limits; mint rejects naive datetimes; and the claim digest is
+  documented as unkeyed/non-authoritative until the Phase 2C2 launch token
+  binds it.
 - Acceptance criteria: the committed policy and both schemas are present and
   reject every documented defect class (absolute/traversal/backslash/control/
   unsafe-glob/symlink-ambiguous patterns, duplicate keys, overlapping deny

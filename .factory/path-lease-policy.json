@@ -35,10 +35,10 @@
       "goldens/approved"
     ],
     "patterns": [
-      "**/*.pem",
-      "**/*.key",
-      "**/.env*",
-      "**/*.secret"
+      "**/*.pem", "*.pem",
+      "**/*.key", "*.key",
+      "**/.env*", ".env*",
+      "**/*.secret", "*.secret"
     ]
   }
 }
