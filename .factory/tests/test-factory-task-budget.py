@@ -652,6 +652,7 @@ class CommitContextTest(unittest.TestCase):
             environment_classification="clean",
             capability_classification="available",
             rerun_scope="targeted",
+            task_id=1,
         )
         artifact.update(overrides)
         return artifact
