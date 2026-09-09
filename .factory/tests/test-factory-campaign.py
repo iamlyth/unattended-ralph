@@ -3802,6 +3802,86 @@ class Phase2B2Scheduler(_CampaignBase):
             r["result_digest"] != "0" * 64 for r in verifications
         ))
 
+    def test_symlink_change_forces_audit(self) -> None:
+        # A changed Git symlink (benign name, sensitive target) is always
+        # security-sensitive and forces the independent audit even when the
+        # interval has not elapsed and no configured path prefix matches.
+        scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
+        scenario["developer"] = {"behavior": "complete-symlink"}
+        ws = self.make(scenario, rounds=3)
+        ws.commit_budget({"audit_interval": 100})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        # Every checkpoint touched a symlink so every verification ran the
+        # independent tester/auditor (not just the final milestone).
+        verifications = [
+            r for r in data["phase_history"] if r["phase"] == "verification"
+        ]
+        self.assertTrue(all(
+            r["result_digest"] != "0" * 64 for r in verifications
+        ))
+
+    def test_findings_do_not_cover_objective(self) -> None:
+        # Only an audit outcome of ``pass`` adds objective coverage;
+        # findings never cover an objective.
+        scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
+        scenario["auditor"] = {"behavior": "findings"}
+        ws = self.make(scenario, rounds=1)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 1)  # findings terminal
+        state = ws.load_state()
+        self.assertEqual(state.completed_audit_objectives, ())
+
+    def test_planner_status_flipping_still_no_progress(self) -> None:
+        # The planner toggles task statuses between rounds (the fixture
+        # planner-{round} templates mark earlier tasks complete), yet with
+        # no new checkpoint and no newly PASSed mandatory objective the
+        # scheduler still terminates honestly as no_progress: the
+        # fingerprint never binds planner-authored task statuses.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "exit1"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        }, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 7)
+        assert_terminal(self, data, terminal_phase="no_progress",
+                        terminal_outcome="pass", exit_code=7,
+                        rounds_completed=1)
+        state = ws.load_state()
+        self.assertEqual(state.terminal_reason, "no_progress")
+        self.assertGreaterEqual(state.no_progress_streak, 2)
+
+    def test_genuine_checkpoint_resets_no_progress(self) -> None:
+        # A newly independently verified exact-commit checkpoint resets the
+        # no-progress streak: the campaign reaches success, never no_progress.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        state = ws.load_state()
+        self.assertEqual(state.terminal_reason, "success")
+        self.assertGreaterEqual(state.checkpoints, 1)
+
+    def test_passed_objective_resets_no_progress(self) -> None:
+        # A newly PASSed mandatory audit objective resets the no-progress
+        # streak: success is reached only after every mandatory objective is
+        # covered, never a false no_progress.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"mandatory_audit_objectives": ["AUD-02"]})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=2)
+        state = ws.load_state()
+        self.assertEqual(state.completed_audit_objectives,
+                         ("AUD-01", "AUD-02"))
+        self.assertEqual(state.terminal_reason, "success")
+
     def test_mandatory_objective_coverage_blocks_success(self) -> None:
         # A mandatory audit objective that is never covered blocks verified
         # completion: with a one-round budget the campaign honestly exhausts

@@ -1094,6 +1094,64 @@ class TrustedGit:
             return []
         return [item.decode("utf-8", "replace") for item in raw.split(b"\x00") if item]
 
+    def diff_symlink_paths(self, base: str) -> List[str]:
+        """Paths whose Git mode is a symlink in the ``base``..HEAD diff.
+
+        The modes come from trusted ``git diff --raw`` metadata (never by
+        resolving/following the target), so a benign-named symlink that
+        redirects outside the intended namespace is still detected.  The
+        output is bounded and parsed fail-closed: a malformed mode, an
+        oversized record, or a non-raw line is a campaign error, never a
+        silent skip.
+        """
+        result = self._bytes(
+            ["diff", "--raw", "-z", "--no-renames", base, "HEAD"]
+        )
+        if result.returncode != 0:
+            raise CampaignGitError(f"cannot diff {base}..HEAD")
+        raw = result.stdout
+        if not raw:
+            return []
+        if len(raw) > 4 * 1024 * 1024:
+            raise CampaignGitError(
+                f"diff {base}..HEAD raw output exceeds the 4MiB bound"
+            )
+        symlink_paths: List[str] = []
+        fields = raw.split(b"\x00")
+        i = 0
+        while i < len(fields):
+            field = fields[i]
+            if not field:
+                i += 1
+                continue
+            if not field.startswith(b":"):
+                raise CampaignGitError(
+                    f"malformed raw diff record {field[:80]!r}"
+                )
+            parts = field.split(b" ")
+            if len(parts) < 5:
+                raise CampaignGitError(
+                    f"malformed raw diff header {field[:80]!r}"
+                )
+            old_mode = parts[0][1:].decode("utf-8", "replace")
+            new_mode = parts[1].decode("utf-8", "replace")
+            if not old_mode.isdigit() or not new_mode.isdigit():
+                raise CampaignGitError(
+                    f"malformed raw diff mode {field[:80]!r}"
+                )
+            if scheduler_module.is_symlink_mode(old_mode) or scheduler_module.is_symlink_mode(
+                new_mode
+            ):
+                if i + 1 >= len(fields):
+                    raise CampaignGitError(
+                        f"raw diff header {field[:80]!r} has no path"
+                    )
+                symlink_paths.append(
+                    fields[i + 1].decode("utf-8", "replace")
+                )
+            i += 2
+        return symlink_paths
+
     def blob_at(self, commit: str, relpath: str) -> bytes:
         """The exact blob bytes of ``<commit>:<relpath>`` (bounded)."""
         resolved = self._run(["rev-parse", f"{commit}:{relpath}"])
@@ -4226,19 +4284,6 @@ class Campaign:
             f"planning entered with unexpected last_outcome {last!r}"
         )
 
-    def _task_statuses(self, plan: object) -> str:
-        """Deterministic ``"<id>:<status>,..."`` string of the committed plan.
-
-        The scheduler's progress fingerprint binds this string so two audits
-        that reproduce the same plan task statuses (plus the same
-        verification/audit outcomes and covered objective set) are
-        recognized as no meaningful progress.  The string is a pure function
-        of the committed plan — never of model prose.
-        """
-        return ",".join(
-            f"{task.number}:{task.status}" for task in plan.tasks
-        )
-
     def _plan_complete(self, plan: object) -> bool:
         """True when every committed plan task is complete."""
         return all(task.status == "complete" for task in plan.tasks)
@@ -4791,8 +4836,10 @@ class Campaign:
         plan = self._git.plan_at(head)
         checkpoint = state.checkpoints
         changed_paths = self._git.diff_paths(state.phase_base_commit)
+        symlink_paths = self._git.diff_symlink_paths(state.phase_base_commit)
         security_changed = scheduler_module.security_sensitive_changed(
-            changed_paths, self._config.campaign_budget
+            changed_paths, self._config.campaign_budget,
+            symlink_paths=symlink_paths,
         )
         verifier_risk = bool(
             not gate_ran
@@ -5248,15 +5295,22 @@ class Campaign:
             blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
         )
         # The deterministic progress fingerprint and the no-progress streak
-        # are monotonic and recorded in the trusted state.  Two consecutive
-        # audits that reproduce the same fingerprint made no meaningful
-        # progress; the scheduler terminates honestly as ``no_progress``
-        # after the configured limit.
+        # are monotonic and recorded in the trusted state.  The fingerprint
+        # binds only trusted monotonic evidence — the coherent checkpoint
+        # count (newly independently verified exact-commit software
+        # checkpoint/task completion) and the set of PASSed mandatory audit
+        # objectives — never planner-authored task statuses, findings/outcome
+        # alternation, or mere objective rotation.  Two consecutive audits
+        # that reproduce the same fingerprint made no meaningful progress;
+        # the scheduler terminates honestly as ``no_progress`` after the
+        # configured limit even if the planner toggles statuses.
+        passed_mandatory = sorted(
+            set(state.completed_audit_objectives)
+            & set(self._config.campaign_budget.mandatory_audit_objectives)
+        )
         fingerprint = scheduler_module.progress_fingerprint(
-            task_statuses=self._task_statuses(plan),
-            verification_outcome=verification_outcome,
-            audit_outcome=outcome,
-            covered_objectives=state.completed_audit_objectives,
+            checkpoints=state.checkpoints,
+            passed_mandatory_objectives=passed_mandatory,
         )
         if fingerprint == state.progress_fingerprint:
             no_progress_streak = state.no_progress_streak + 1
@@ -5266,10 +5320,10 @@ class Campaign:
             no_progress_streak >= self._config.campaign_budget.no_progress_limit
         )
         # The objective this audit exercised is the deterministic per-round
-        # selection; a completed audit with a verdict covers it (a blocked,
-        # interrupted, or untrusted audit never covers an objective).
+        # selection; only an audit outcome of ``pass`` adds objective
+        # coverage (findings/blocked never cover an objective).
         covered_objectives = list(state.completed_audit_objectives)
-        if outcome in ("pass", "findings"):
+        if outcome == "pass":
             try:
                 objective_bytes = _audit_objective_bytes(
                     self._root, state.current_round

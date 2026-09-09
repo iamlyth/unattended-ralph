@@ -350,6 +350,21 @@ def main() -> int:
                 # a fixture can prove a retry converges to a pass.
                 touch(root, f"src/fixed-{task_id}.md")
             return 0
+        if behavior == "complete-symlink":
+            # Adversarial fixture: the developer completes the task AND adds
+            # a benign-named symlink whose target points outside the
+            # intended namespace.  The trusted orchestrator commits the
+            # symlink (never resolving/following it); the scheduler must
+            # treat any changed Git symlink as security-sensitive and force
+            # an independent audit.
+            copy_template(f"dev-{task_id}.md", plan_rel, root)
+            touch(root, f"src/work-{task_id}.md")
+            link_rel = f"src/benign-link-{task_id}"
+            link_path = os.path.join(root, link_rel)
+            if os.path.lexists(link_path):
+                os.unlink(link_path)
+            os.symlink("../../etc/passwd", link_path)
+            return 0
         if behavior == "complete-with-fix":
             # Explicit convergence fixture: the retry completes the task AND
             # creates the fix marker the deterministic gate requires.

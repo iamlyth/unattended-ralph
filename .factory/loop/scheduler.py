@@ -413,11 +413,33 @@ def is_security_sensitive(path: str, budget: CampaignBudget) -> bool:
     return False
 
 
+def is_symlink_mode(mode: str) -> bool:
+    """True when a Git diff mode string denotes a symlink (``120000``).
+
+    The mode is trusted diff metadata (never a resolved/followed target), so
+    a benign-named symlink that redirects outside the intended namespace is
+    still recognized as security-sensitive without ever dereferencing it.
+    """
+    return mode == "120000"
+
+
 def security_sensitive_changed(
-    paths: Sequence[str], budget: CampaignBudget
+    paths: Sequence[str],
+    budget: CampaignBudget,
+    symlink_paths: Sequence[str] = (),
 ) -> bool:
-    """True when any changed path is security-sensitive."""
-    return any(is_security_sensitive(path, budget) for path in paths)
+    """True when any changed path is security-sensitive or a changed symlink.
+
+    A changed Git symlink is always security-sensitive: it can redirect a
+    later read/write outside the intended namespace even when its path name
+    is not itself sensitive.  ``symlink_paths`` is the trusted set of paths
+    whose Git mode is a symlink in the base..HEAD diff, derived from trusted
+    diff mode metadata (``is_symlink_mode``) without resolving/following the
+    target.
+    """
+    if any(is_security_sensitive(path, budget) for path in paths):
+        return True
+    return bool(symlink_paths)
 
 
 def should_audit(
@@ -478,27 +500,25 @@ def objective_coverage(
 
 def progress_fingerprint(
     *,
-    task_statuses: str,
-    verification_outcome: str,
-    audit_outcome: str,
-    covered_objectives: Sequence[str],
+    checkpoints: int,
+    passed_mandatory_objectives: Sequence[str],
 ) -> str:
     """Deterministic monotonic progress fingerprint of one audit boundary.
 
-    The fingerprint binds the plan task statuses, the verification outcome,
-    the audit outcome, and the covered objective set.  Two consecutive audits
-    that reproduce the same fingerprint made no meaningful progress; the
-    campaign terminates honestly as ``no_progress`` after
-    ``no_progress_limit`` identical fingerprints.  ``task_statuses`` is the
-    deterministic ``"<id>:<status>,..."`` string derived from the committed
-    plan by the trusted campaign (never model prose).
+    The fingerprint binds only trusted monotonic evidence: the coherent
+    checkpoint count (newly independently verified exact-commit software
+    checkpoint/task completion) and the set of PASSed mandatory audit
+    objectives.  It deliberately excludes planner-authored task statuses,
+    findings/outcome alternation, and mere objective rotation, so repeated
+    activity without a new checkpoint or a newly PASSed mandatory objective
+    reproduces the same fingerprint and terminates honestly as
+    ``no_progress`` after ``no_progress_limit`` identical fingerprints even if
+    the planner toggles statuses.
     """
     payload = "|".join(
         (
-            task_statuses,
-            verification_outcome,
-            audit_outcome,
-            ",".join(sorted(covered_objectives)),
+            str(checkpoints),
+            ",".join(sorted(passed_mandatory_objectives)),
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

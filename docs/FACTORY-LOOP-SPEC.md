@@ -503,6 +503,20 @@ The budget bounds:
   same progress fingerprint before the campaign terminates honestly as
   `no_progress`.
 
+The progress fingerprint binds only trusted monotonic evidence: the
+coherent checkpoint count (newly independently verified exact-commit
+software checkpoint/task completion) and the set of PASSed mandatory audit
+objectives.  It deliberately excludes planner-authored task statuses,
+findings/outcome alternation, and mere objective rotation, so repeated
+activity without a new checkpoint or a newly PASSed mandatory objective
+reproduces the same fingerprint and terminates honestly as `no_progress`
+even if the planner toggles statuses.  Only an audit outcome of `pass` adds
+objective coverage; findings/blocked never cover an objective.  A changed
+Git symlink is always security-sensitive and forces an independent audit,
+recognized from trusted `git diff --raw` mode metadata (mode `120000`)
+without resolving/following the target, so a benign-named symlink that
+redirects outside the intended namespace is still detected.
+
 The scheduler continues only while meaningful progress is possible and
 terminates deterministically on verified completion,
 `software_verified_external_acceptance_blocked`, a persistent

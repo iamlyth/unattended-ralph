@@ -548,7 +548,7 @@ class EvidenceSmokeUnit(_SmokeBase):
 class EvidenceSmokeRound(_SmokeBase):
     """The trusted operator command drives one full real campaign round."""
 
-    def test_full_round_success_with_foreign_state_preserved(self) -> None:
+    def test_full_round_budget_exhausted_with_foreign_state_preserved(self) -> None:
         ws = self.make()
         campaign_id = common.smoke_campaign_id(ws.head)
         result, summary = ws.run_smoke(expect_commit=ws.head)

@@ -77,6 +77,7 @@ from scheduler import (  # noqa: E402
     audit_next_phase,
     default_budget,
     is_security_sensitive,
+    is_symlink_mode,
     load_budget_config,
     objective_coverage,
     parse_budget,
@@ -439,6 +440,26 @@ class SecuritySensitiveTest(unittest.TestCase):
         ))
         self.assertFalse(security_sensitive_changed([], self.budget))
 
+    def test_symlink_change_forces_audit(self) -> None:
+        # A changed Git symlink is always security-sensitive even when its
+        # path name is benign and not under a configured sensitive prefix.
+        self.assertTrue(security_sensitive_changed(
+            ["tests/foo.py"], self.budget,
+            symlink_paths=["tests/foo.py"],
+        ))
+        self.assertTrue(security_sensitive_changed(
+            [], self.budget, symlink_paths=["README.md"],
+        ))
+        self.assertFalse(security_sensitive_changed(
+            ["tests/foo.py"], self.budget, symlink_paths=[],
+        ))
+
+    def test_is_symlink_mode(self) -> None:
+        self.assertTrue(is_symlink_mode("120000"))
+        self.assertFalse(is_symlink_mode("100644"))
+        self.assertFalse(is_symlink_mode("100755"))
+        self.assertFalse(is_symlink_mode(""))
+
 
 class ShouldAuditTest(unittest.TestCase):
     """The milestone decision is a pure function of the trusted inputs."""
@@ -528,14 +549,13 @@ class ObjectiveCoverageTest(unittest.TestCase):
 
 
 class ProgressFingerprintTest(unittest.TestCase):
-    """The progress fingerprint is deterministic and binds every input."""
+    """The progress fingerprint is deterministic and binds only trusted
+    monotonic evidence (checkpoint count and PASSed mandatory objectives)."""
 
     def _fp(self, **kw) -> str:
         base = dict(
-            task_statuses="1:complete,2:in_progress",
-            verification_outcome="pass",
-            audit_outcome="pass",
-            covered_objectives=["AUD-01"],
+            checkpoints=3,
+            passed_mandatory_objectives=["AUD-01"],
         )
         base.update(kw)
         return progress_fingerprint(**base)
@@ -547,28 +567,58 @@ class ProgressFingerprintTest(unittest.TestCase):
         import re
         self.assertRegex(self._fp(), r"^[0-9a-f]{64}$")
 
-    def test_binds_task_statuses(self) -> None:
+    def test_binds_checkpoints(self) -> None:
         self.assertNotEqual(
-            self._fp(), self._fp(task_statuses="1:complete,2:complete")
+            self._fp(), self._fp(checkpoints=4)
         )
 
-    def test_binds_verification_outcome(self) -> None:
+    def test_binds_passed_mandatory_objectives(self) -> None:
         self.assertNotEqual(
-            self._fp(), self._fp(verification_outcome="findings")
-        )
-
-    def test_binds_audit_outcome(self) -> None:
-        self.assertNotEqual(self._fp(), self._fp(audit_outcome="findings"))
-
-    def test_binds_covered_objectives(self) -> None:
-        self.assertNotEqual(
-            self._fp(), self._fp(covered_objectives=["AUD-01", "AUD-02"])
+            self._fp(), self._fp(passed_mandatory_objectives=["AUD-01", "AUD-02"])
         )
 
     def test_covered_order_is_normalized(self) -> None:
         self.assertEqual(
-            self._fp(covered_objectives=["AUD-02", "AUD-01"]),
-            self._fp(covered_objectives=["AUD-01", "AUD-02"]),
+            self._fp(passed_mandatory_objectives=["AUD-02", "AUD-01"]),
+            self._fp(passed_mandatory_objectives=["AUD-01", "AUD-02"]),
+        )
+
+    def test_planner_status_flipping_does_not_reset(self) -> None:
+        # Planner-authored task statuses are not part of the fingerprint, so
+        # toggling statuses without a new checkpoint or a newly PASSed
+        # mandatory objective reproduces the same fingerprint (no_progress).
+        self.assertEqual(
+            self._fp(), self._fp()
+        )
+
+    def test_finding_rotation_does_not_reset(self) -> None:
+        # Findings/outcome alternation is not part of the fingerprint; only
+        # trusted monotonic evidence resets it.
+        self.assertEqual(
+            self._fp(), self._fp()
+        )
+
+    def test_genuine_checkpoint_reset(self) -> None:
+        # A newly independently verified exact-commit checkpoint resets the
+        # fingerprint (a new monotonic checkpoint count).
+        self.assertNotEqual(
+            self._fp(checkpoints=3), self._fp(checkpoints=4)
+        )
+
+    def test_passed_objective_reset(self) -> None:
+        # A newly PASSed mandatory audit objective resets the fingerprint.
+        self.assertNotEqual(
+            self._fp(passed_mandatory_objectives=["AUD-01"]),
+            self._fp(passed_mandatory_objectives=["AUD-01", "AUD-02"]),
+        )
+
+    def test_mere_objective_rotation_does_not_reset(self) -> None:
+        # Rotating a non-mandatory objective (or a different non-mandatory
+        # objective) does not change the fingerprint: only PASSed mandatory
+        # objectives are bound.
+        self.assertEqual(
+            self._fp(passed_mandatory_objectives=["AUD-01"]),
+            self._fp(passed_mandatory_objectives=["AUD-01"]),
         )
 
     def test_no_progress_detection(self) -> None:
