@@ -460,6 +460,57 @@ For the final round:
 
 Planning-attempt exhaustion produces `failed`; dirty implementation-attempt exhaustion or operator/process interruption produces `interrupted`; untrusted verifier/control-plane failure produces `infrastructure_failure`. A finite campaign therefore always terminates as success, findings, blocked, failed, infrastructure failure, or interruption. It never spins because there is no runnable task.
 
+### 14.1 Campaign budget (adaptive scheduler authority)
+
+The campaign/audit scheduler is a pure generic authority: every milestone,
+objective-coverage, no-progress, and terminal decision is a deterministic
+function of the committed campaign budget, the plan state, the control state,
+and the trusted phase outcomes — never of model prose, wall-clock time, or
+runtime randomness.  The committed `.factory/campaign-budget.json` document
+(closed schema `factory-campaign-budget/v1`, bounded values, duplicate-key
+rejection) supplies the budget; an absent config uses the documented defaults.
+The budget bounds:
+
+- `max_rounds` — the maximum number of planning/implementation/
+  verification/audit cycles.  It is a maximum budget, never an exact count
+  (there is no exactly-five rejection); verified completion may terminate the
+  campaign early, before the maximum;
+- `max_checkpoints` — the maximum number of coherent task checkpoints
+  (committed task completions) the campaign may produce;
+- `max_wall_seconds` — the wall-clock budget, enforced by the existing
+  campaign-timeout authority;
+- `max_task_attempts` — the per-task attempt budget, enforced by the existing
+  task-resource-budget authority;
+- `audit_interval` — the coherent-checkpoint interval at which the
+  independent tester/auditor run (milestone-boundary roles, not mandatory
+  after every patch);
+- `security_sensitive_paths` — trusted closed-config repository-relative path
+  prefixes that force an independent audit when a checkpoint touches them
+  (never plan prose; absolute paths, traversal segments, and glob characters
+  are rejected);
+- `mandatory_audit_objectives` — the audit objective IDs that must all be
+  covered before release success, regardless of checkpoint count;
+- `no_progress_limit` — the number of consecutive audits that reproduce the
+  same progress fingerprint before the campaign terminates honestly as
+  `no_progress`.
+
+The scheduler continues only while meaningful progress is possible and
+terminates deterministically on verified completion,
+`software_verified_external_acceptance_blocked`, a persistent
+external/infrastructure blocker, repeated/no meaningful progress,
+task/campaign budget exhaustion, or interruption.  The terminal reason is a
+closed enum (`success`, `findings`, `blocked`, `failed`, `interrupted`,
+`infrastructure_failure`, `budget_exhausted`, `no_progress`,
+`software_verified_external_acceptance_blocked`) recorded in the control
+state and the published campaign result so operators can distinguish success,
+findings, infrastructure failure, interrupted, budget exhausted/no progress,
+and software-verified-external-acceptance-blocked without weakening the
+existing bounded public reasons or the exact-commit evidence chain.  The
+scheduler never selects audit authority from task/plan prose: the mandatory
+objective set and the security-sensitive path prefixes come only from the
+committed closed config, and the audit objective itself is selected
+deterministically from the round number by the committed registry authority.
+
 ## 15. Completion predicates
 
 The following predicates MUST remain distinct:
@@ -605,7 +656,12 @@ The generic implementation is not acceptable until tests prove:
     verifier-failure artifact is digest-bound and rendered as inert data, a
     repeated identical failure and a consumed task resource budget terminate
     the loop honestly, and infrastructure/capability/tester-finding failures
-    never converge.
+    never converge;
+29. the adaptive scheduler budget (`factory-campaign-budget/v1`) rejects
+    duplicate/unknown/overflow/path-traversal/unsafe-glob config, requires
+    every mandatory audit objective to be covered before success, detects
+    repeated no-progress, and terminates honestly on verified completion,
+    external-acceptance-blocked, and round/checkpoint budget exhaustion.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -642,6 +698,7 @@ The stable IDs below are the conformance authority for this specification. Secti
 | QUOTA-02 | §10 | Ollama credentials appear in no child argv/environment/log and owned material is securely removed | private_integration |
 | STATE-01 | §11, §17 | One minimal atomic state file enforces the explicit monotonic transition table and detects tampering | unit |
 | STATE-02 | §11, §13, §14, §15 | The verification outcome `software_verified_external_acceptance_blocked` records software fully verified while external release acceptance remains blocked; it advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority | unit |
+| BUDGET-01 | §14.1 | The adaptive campaign/audit scheduler is a pure generic authority: every milestone, objective-coverage, no-progress, and terminal decision is a deterministic function of the committed `factory-campaign-budget/v1` budget and the trusted plan/state/outcome inputs; the budget is closed-config with bounded values and duplicate-key rejection, security-sensitive paths are trusted closed config (never plan prose) and reject absolute/traversal/glob paths, mandatory audit objectives must all be covered before success, and the campaign terminates honestly on verified completion, external-acceptance-blocked, no progress, and round/checkpoint budget exhaustion | unit |
 | LOCK-01 | §12 | Canonical root-descriptor lock enforces one writer and is not inherited or unlockable by untrusted children | private_integration |
 | PROC-01 | §9, §12, §17 | Bounded process-session signaling, escaped-child detection, full reap, and dirty-work preservation hold | private_integration |
 | GIT-01 | §12, §17 | Canonical repository/branch/spec/plan bindings and guarded commit boundary fail closed | installed |
