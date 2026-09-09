@@ -1020,8 +1020,9 @@ class FindingsProductionLaunch(unittest.TestCase):
             return object()
 
         class _Supervisor:
-            def __init__(self, binding):
+            def __init__(self, binding, **kwargs):
                 self.binding = binding
+                self.kwargs = kwargs
 
             def run(self, authority):
                 return type("_Result", (), {"outcome": "exited",

@@ -24,10 +24,12 @@ plan; if they differ from the plan section, stop and report.
    persistence, error, and shutdown paths relevant to the adopting project.
 3. Run bounded focused backpressure, not a duplicate complete gate. The
    trusted orchestrator runs the configured full verifier when a task claims
-   completion: do not start nested environment shells or the project's full
-   verification/acceptance gate inside this confined turn. Run at most three
-   focused commands under `timeout 120`, invoke repository scripts through
-   explicit `bash`/`python3`, and then leave the coherent change promptly. A focused
+   completion; your own runs are diagnostic only and acceptance remains an
+   independently bound exact-commit verifier. Run as many focused
+   inspect/edit/test/diagnose cycles and project test scripts or the full
+   project gate as fit the task's cumulative resource budget (wall time,
+   process CPU, combined captured output, live processes) stated in your
+   prompt; invoke repository scripts through explicit `bash`/`python3`. A focused
    failure must be investigated, fixed when safe, or recorded — never
    dismissed or retried indefinitely.
 4. Derive tests from specification acceptance criteria: observable

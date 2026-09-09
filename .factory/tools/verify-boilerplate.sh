@@ -15,6 +15,8 @@ python3 .factory/tests/test-factory-readiness.py
 python3 .factory/tests/test-factory-pre-round.py
 python3 .factory/tests/test-factory-usage.py
 python3 .factory/tests/test-factory-lock.py
+python3 .factory/tests/test-factory-launch.py
+python3 .factory/tests/test-factory-task-budget.py
 python3 .factory/tests/test-factory-campaign.py
 python3 .factory/tests/test-factory-findings.py
 python3 .factory/tests/test-factory-verifier-failure.py

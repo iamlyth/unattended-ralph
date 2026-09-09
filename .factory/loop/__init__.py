@@ -201,6 +201,8 @@ from .verifier_failure import (  # strict structured verifier-failure artifact (
     validate_commit_context as validate_verifier_failure_commit,
 )
 from .task_budget import (  # versioned strict task-resource budget (Phase 2A)
+    BUDGET_CONFIG_FILE,
+    DEFAULT_TASK_BUDGET,
     EXHAUSTION_REASONS,
     LEDGER_SCHEMA_NAME,
     MAX_BUDGET_BYTES,
@@ -217,6 +219,7 @@ from .task_budget import (  # versioned strict task-resource budget (Phase 2A)
     budget_bytes as task_budget_bytes,
     exhausted_reason as task_budget_exhausted_reason,
     ledger_bytes as task_budget_ledger_bytes,
+    load_budget_config as load_task_budget_config,
     load_ledger as load_task_budget_ledger,
     parse_budget as parse_task_budget,
     parse_ledger as parse_task_budget_ledger,
@@ -423,6 +426,7 @@ __all__ = [
     "load_audit_objectives",
     "load_sibling",
     "load_state",
+    "load_task_budget_config",
     "load_task_budget_ledger",
     "lock_environment",
     "owner_tamper_gate",

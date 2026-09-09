@@ -77,6 +77,7 @@ sys.path.insert(0, str(LOOP))
 import gitutil  # noqa: E402
 import launch  # noqa: E402
 import lock as lock_module  # noqa: E402
+import task_budget  # noqa: E402
 from launch import (  # noqa: E402
     DEFAULT_ALLOWED_TOOLS,
     DEFAULT_INACTIVITY_LIMIT,
@@ -203,6 +204,30 @@ def main():
             written += take
         sys.stderr.buffer.write(b"err-" * 100)
         sys.stdout.flush(); sys.stderr.flush()
+        return 0
+    if mode == "burn-cpu":
+        # Deterministic CPU-budget fixture: busy-loop on one core for the
+        # configured wall seconds so the trusted supervisor's /proc
+        # utime+stime sampling observes real CPU consumption.
+        end = time.monotonic() + int(cfg.get("seconds", 30))
+        while time.monotonic() < end:
+            pass
+        return 0
+    if mode == "fork-many":
+        # Deterministic live-process-budget fixture: fork ``count``
+        # pipe-holding sleeping descendants so the trusted supervisor's
+        # descendant closure exceeds the configured live-process budget.
+        count = int(cfg.get("count", 4))
+        children = []
+        for _ in range(count):
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(300)
+                os._exit(9)
+            children.append(pid)
+        marker("children", json.dumps(children))
+        sys.stdout.flush(); sys.stderr.flush()
+        time.sleep(300)
         return 0
     if mode == "exit":
         os._exit(0)
@@ -440,6 +465,7 @@ class _Base(unittest.TestCase):
         *,
         audit_objective: bytes | None = None,
         task_excerpt: bytes | None = None,
+        task_budget=None,
     ) -> launch.LaunchAuthority:
         """Mint the verified-committed authority from the actual bytes.
 
@@ -456,6 +482,7 @@ class _Base(unittest.TestCase):
             plan=plan,
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
+            task_budget=task_budget,
         )
 
     def read_json(self, name: str) -> object:
@@ -1722,6 +1749,227 @@ class SupervisionTerminationTests(_Base):
             shutil.rmtree(authority._exec_dir)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Phase 2A task-resource budget enforcement (wall/CPU/output/live, cumulative
+# ledger, accounting-untrusted fail-closed, cleanup, non-success)
+# --------------------------------------------------------------------------
+
+class TaskBudgetEnforcementTests(_Base):
+    """The trusted supervisor enforces the cumulative per-task budget.
+
+    The budget document is the closed ``factory-task-budget/v1`` config the
+    campaign loads (the supervisor trusts the campaign-validated config, so
+    the fixtures use sub-minimum values purely to keep the tests bounded and
+    fast); the ledger is the cumulative ``factory-task-budget-ledger/v1``
+    state bound to (campaign, selected task) under ``.factory-state/``.
+    """
+
+    CAMPAIGN = "budget-test"
+
+    def _budget(self, **overrides):
+        budget = {
+            "schema": "factory-task-budget/v1",
+            "wall_time_seconds": 3600,
+            "cpu_time_seconds": 1800,
+            "output_bytes": 64 * 1024 * 1024,
+            "max_live_processes": 256,
+            "per_command_timeout_seconds": 300,
+        }
+        budget.update(overrides)
+        return budget
+
+    def _ledger(self, campaign: str | None = None):
+        return task_budget.BudgetLedger(
+            campaign_id=campaign or self.CAMPAIGN, task_id=1
+        )
+
+    def _state_dir(self) -> None:
+        (self.workspace / ".factory-state").mkdir(mode=0o700, exist_ok=True)
+
+    def _run(self, mode: str, budget, ledger=None, **behavior):
+        self.set_behavior(mode, **behavior)
+        binding, role, agents, spec, plan = self.make_binding(
+            runtime_limit=30.0, inactivity_limit=20.0
+        )
+        supervisor = LaunchSupervision(
+            binding, kill_grace=0.3, budget=budget, ledger=ledger
+        )
+        result = supervisor.run(
+            self.authorize(binding, role, agents, spec, plan, task_budget=budget)
+        )
+        return supervisor, result
+
+    def test_wall_budget_terminates_and_records_ledger(self) -> None:
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget(wall_time_seconds=1)
+        supervisor, result = self._run("sleep", budget, ledger)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:wall_time")
+        self.assertIn("SIGTERM", result.terminated_by)
+        # The cumulative ledger records the attempt and the exhaustion reason.
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(saved.wall_time_seconds, 1.0)
+        self.assertEqual(saved.exhausted_reason, "wall_time")
+        # The group is fully cleaned up.
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_cpu_budget_terminates_and_records_ledger(self) -> None:
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget(cpu_time_seconds=1)
+        with unittest.mock.patch.object(launch, "BUDGET_SAMPLE_INTERVAL", 0.05):
+            supervisor, result = self._run("burn-cpu", budget, ledger)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:cpu_time")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(saved.cpu_time_seconds, 1.0)
+        self.assertEqual(saved.exhausted_reason, "cpu_time")
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_output_budget_terminates_on_flood(self) -> None:
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget(output_bytes=1)
+        supervisor, result = self._run("spew", budget, ledger, bytes=300 * 1024)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:output_bytes")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(saved.output_bytes, 1)
+        self.assertEqual(saved.exhausted_reason, "output_bytes")
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_live_process_budget_terminates_and_cleans_descendants(self) -> None:
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget(max_live_processes=2)
+        with unittest.mock.patch.object(launch, "BUDGET_SAMPLE_INTERVAL", 0.05):
+            supervisor, result = self._run("fork-many", budget, ledger, count=4)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:live_processes")
+        # The measured descendant closure exceeded the budget and every
+        # measured member is gone after the bounded termination (no escaped
+        # descendant survives).
+        self.assertGreaterEqual(len(supervisor._budget_captured), 2)
+        self.assertEqual(
+            live_scope(supervisor._budget_captured), frozenset()
+        )
+        self.assertEqual(supervisor.live_scope(), frozenset())
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(saved.max_live_processes, 2)
+        self.assertEqual(saved.exhausted_reason, "live_processes")
+
+    def test_exhaustion_is_never_success(self) -> None:
+        # A budget-terminated attempt is a non-success outcome: never
+        # ``completed`` and never a zero returncode, so exhaustion can never
+        # be mistaken for acceptance.
+        self._state_dir()
+        for index, (mode, budget) in enumerate((
+            ("sleep", self._budget(wall_time_seconds=1)),
+            ("burn-cpu", self._budget(cpu_time_seconds=1)),
+            ("spew", self._budget(output_bytes=1)),
+            ("fork-many", self._budget(max_live_processes=2)),
+        )):
+            with self.subTest(mode=mode):
+                campaign = f"budget-test-{index}"
+                with unittest.mock.patch.object(
+                    launch, "BUDGET_SAMPLE_INTERVAL", 0.05
+                ):
+                    _, result = self._run(
+                        mode, budget, self._ledger(campaign)
+                    )
+                self.assertEqual(result.outcome, "terminated")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.reason.startswith("budget:"))
+
+    def test_cumulative_ledger_stops_second_attempt_before_spawn(self) -> None:
+        # Attempt 1 consumes the output budget; the reloaded cumulative
+        # ledger then refuses attempt 2 in the preflight, before any spawn.
+        self._state_dir()
+        budget = self._budget(output_bytes=1)
+        _, result = self._run("spew", budget, self._ledger(), bytes=300 * 1024)
+        self.assertEqual(result.reason, "budget:output_bytes")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertEqual(saved.exhausted_reason, "output_bytes")
+        # Attempt 2: the same budget with the reloaded ledger is refused.
+        self.set_behavior("sleep")
+        binding, role, agents, spec, plan = self.make_binding(
+            runtime_limit=30.0, inactivity_limit=20.0
+        )
+        supervisor = LaunchSupervision(
+            binding, kill_grace=0.3, budget=budget, ledger=saved
+        )
+        with self.assertRaises(launch.BudgetExhaustedError) as caught:
+            supervisor.run(
+                self.authorize(binding, role, agents, spec, plan, task_budget=budget)
+            )
+        self.assertIn("budget exhausted", str(caught.exception))
+        self.assertIsNone(supervisor._child, "no spawn for an exhausted task")
+
+    def test_accounting_untrusted_fails_closed(self) -> None:
+        # Unreadable /proc accounting fails closed as accounting_untrusted
+        # instead of silently under-counting.
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget()
+        self.set_behavior("sleep")
+        binding, role, agents, spec, plan = self.make_binding(
+            runtime_limit=30.0, inactivity_limit=20.0
+        )
+        supervisor = LaunchSupervision(
+            binding, kill_grace=0.3, budget=budget, ledger=ledger
+        )
+
+        def broken_measure(self_):
+            raise launch.BudgetExhaustedError("accounting untrusted")
+
+        with unittest.mock.patch.object(
+            launch.LaunchSupervision, "_measure_tree", broken_measure
+        ), unittest.mock.patch.object(launch, "BUDGET_SAMPLE_INTERVAL", 0.05):
+            result = supervisor.run(
+                self.authorize(binding, role, agents, spec, plan, task_budget=budget)
+            )
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:accounting_untrusted")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertEqual(saved.exhausted_reason, "accounting_untrusted")
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_no_budget_means_no_ledger(self) -> None:
+        # Without a budget/ledger the supervisor enforces nothing and writes
+        # no ledger artifact.
+        self._state_dir()
+        self.set_behavior("record")
+        binding, role, agents, spec, plan = self.make_binding()
+        supervisor = LaunchSupervision(binding, kill_grace=0.3)
+        result = supervisor.run(self.authorize(binding, role, agents, spec, plan))
+        self.assertEqual(result.outcome, "completed")
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(
+            (self.workspace / ".factory-state" / "task-budget-budget-test-task-1.json").exists()
+        )
+
+    def test_ledger_records_usage_monotonically_across_attempts(self) -> None:
+        # Two bounded attempts against the same ledger accumulate usage; the
+        # live-process dimension records the peak, never a sum.
+        self._state_dir()
+        budget = self._budget(output_bytes=64 * 1024 * 1024)
+        ledger = self._ledger()
+        _, first = self._run("record", budget, ledger)
+        self.assertEqual(first.outcome, "completed")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        first_wall = saved.wall_time_seconds
+        self.assertGreater(first_wall, 0.0)
+        # Second attempt with the reloaded ledger accumulates.
+        _, second = self._run("record", budget, saved)
+        self.assertEqual(second.outcome, "completed")
+        saved2 = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(
+            saved2.wall_time_seconds, first_wall
+        )
+        self.assertIsNone(saved2.exhausted_reason)
 
 
 # --------------------------------------------------------------------------

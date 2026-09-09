@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Versioned strict generic task-resource-budget authority (Phase 2A).
 
-The trusted control plane bounds one implementation task/session by
+The trusted control plane bounds one implementation task by
 cumulative wall time, cumulative process CPU time, combined captured output
 bytes, and live/descendant process count across every fresh implementation
 attempt of the selected task, and keeps a per-command timeout as
 defense-in-depth.  The budget replaces the prompt-only three-command
 debugging cap: focused inspect/edit/test/fix cycles may continue while the
-resource budgets remain.
+resource budgets remain.  The committed ``.factory/task-budget.json`` config
+(or the documented defaults) supplies the per-task limits; the trusted
+supervisor enforces them around every developer attempt and records usage
+monotonically into the cumulative per-task ledger.
 
 Trust and data boundaries:
 
@@ -51,6 +54,29 @@ LEDGER_SCHEMA_NAME = "factory-task-budget-ledger/v1"
 SCHEMA_FILE = "factory-task-budget-v1.schema.json"
 MAX_BUDGET_BYTES = 64 * 1024
 MAX_LEDGER_BYTES = 64 * 1024
+
+# The committed per-task budget configuration document (closed schema
+# ``factory-task-budget/v1``) under ``.factory/``.  ``load_budget_config``
+# reads it with the same no-follow/identity-safe open as the committed
+# schema; an absent config uses the documented defaults below, a present
+# but malformed/foreign/oversized config fails closed.
+BUDGET_CONFIG_FILE = "task-budget.json"
+
+# Documented conservative defaults (Phase 2A).  The defaults bound one
+# selected task's cumulative wall time, process-tree CPU time, combined
+# captured output bytes, and live/descendant process peak across every
+# fresh implementation attempt, and keep a per-command timeout as
+# defense-in-depth.  There is no small command-count limit: focused
+# inspect/edit/test/diagnose cycles continue while the resource budgets
+# remain.
+DEFAULT_TASK_BUDGET: Dict[str, object] = {
+    "schema": SCHEMA_NAME,
+    "wall_time_seconds": 3600,
+    "cpu_time_seconds": 1800,
+    "output_bytes": 64 * 1024 * 1024,
+    "max_live_processes": 256,
+    "per_command_timeout_seconds": 300,
+}
 
 # Closed exhaustion-reason enum (Phase 2A): an unknown reason fails closed.
 EXHAUSTION_REASONS = (
@@ -249,6 +275,60 @@ def validate_budget(budget: Mapping[str, object]) -> None:
             raise TaskBudgetMalformedError(
                 f"task-budget {name} must be an integer in [1, {ceiling}]"
             )
+
+
+def load_budget_config(root: Path) -> Dict[str, object]:
+    """Load the trusted per-task budget configuration (config or defaults).
+
+    Reads the committed ``.factory/task-budget.json`` document with the same
+    no-follow/identity-safe open as the committed schema (regular file,
+    current owner, no group/other write bits, bounded) and validates it
+    against the closed ``factory-task-budget/v1`` schema.  An absent config
+    uses the documented :data:`DEFAULT_TASK_BUDGET`; a present but
+    malformed, foreign, or oversized config fails closed, so a drifted or
+    forged budget can never silently widen the boundary.
+    """
+    here = Path(root).absolute() / ".factory" / BUDGET_CONFIG_FILE
+    try:
+        descriptor = os.open(
+            here,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return dict(DEFAULT_TASK_BUDGET)
+    except OSError as exc:
+        raise TaskBudgetError(
+            f"cannot open the task-budget config {here}: {exc}"
+        ) from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise TaskBudgetError(
+                f"the task-budget config {here} is not a regular file"
+            )
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise TaskBudgetError(
+                f"the task-budget config {here} is not owned/private; the "
+                "budget authority fails closed"
+            )
+        if info.st_size > MAX_BUDGET_BYTES:
+            raise TaskBudgetError(
+                f"the task-budget config {here} is oversized"
+            )
+        data = os.read(descriptor, info.st_size + 1)
+        if len(data) > MAX_BUDGET_BYTES:
+            raise TaskBudgetError(
+                f"the task-budget config {here} is oversized"
+            )
+    finally:
+        os.close(descriptor)
+    try:
+        return parse_budget(data)
+    except TaskBudgetMalformedError as exc:
+        raise TaskBudgetError(
+            f"the task-budget config {here} is malformed: {exc}"
+        ) from exc
 
 
 def budget_bytes(budget: Mapping[str, object]) -> bytes:
@@ -540,19 +620,33 @@ def load_ledger(root: Path, campaign_id: str, task_id: int) -> BudgetLedger:
     if raw is None:
         return BudgetLedger(campaign_id=campaign_id, task_id=task_id)
     try:
-        return parse_ledger(raw)
+        parsed = parse_ledger(raw)
     except TaskBudgetMalformedError as exc:
         raise TaskBudgetError(
             f"the task-budget ledger {name} is malformed: {exc}"
         ) from exc
+    if parsed.campaign_id != campaign_id or parsed.task_id != task_id:
+        # The ledger is bound to (campaign, selected task) by both filename
+        # and content; a foreign ledger at the expected name fails closed
+        # (never silently reset), so a tampered cumulative budget can never
+        # be hidden.
+        raise TaskBudgetError(
+            f"the task-budget ledger {name} is foreign "
+            f"(records {parsed.campaign_id!r} task {parsed.task_id})"
+        )
+    return parsed
 
 
 def save_ledger(root: Path, ledger: BudgetLedger) -> None:
-    """Atomically publish the per-task ledger (no-replace, byte-idempotent).
+    """Atomically publish the per-task ledger (no-replace, monotonic).
 
-    A byte-exact re-publication across a crash window is accepted; any other
-    pre-existing content fails closed, so a raced or forged ledger can never
-    be silently replaced.
+    A fresh ledger is published with atomic no-replace semantics.  An
+    update is published only after the existing ledger is verified as a
+    trusted monotonic predecessor: the same (campaign, task) binding, every
+    cumulative dimension non-decreasing, and the exhaustion reason
+    first-wins.  A foreign, malformed, or non-monotonic (tampered) existing
+    ledger fails closed and is never silently replaced, so a forged
+    cumulative budget can never be hidden.
     """
     name = ledger_name(ledger.campaign_id, ledger.task_id)
     raw = ledger_bytes(ledger)
@@ -561,20 +655,66 @@ def save_ledger(root: Path, ledger: BudgetLedger) -> None:
     except ImportError:
         import factory_state_io as _io  # type: ignore[no-redef]
     try:
-        _io.atomic_write(root, name, raw, no_replace=True)
+        existing_raw = _io.read_bytes(
+            root, name, maximum=MAX_LEDGER_BYTES, missing_ok=True
+        )
     except _io.StateIOError as exc:
+        raise TaskBudgetError(
+            f"cannot safely read the task-budget ledger {name}: {exc}"
+        ) from exc
+    if existing_raw is None:
         try:
-            existing = _io.read_bytes(
-                root, name, maximum=MAX_LEDGER_BYTES, missing_ok=False
-            )
-        except _io.StateIOError as read_exc:
+            _io.atomic_write(root, name, raw, no_replace=True)
+        except _io.StateIOError as exc:
             raise TaskBudgetError(
-                f"cannot publish the task-budget ledger {name}: a marker "
-                f"already exists and cannot be safely re-read ({read_exc})"
-            ) from read_exc
-        if existing != raw:
-            raise TaskBudgetError(
-                f"cannot publish the task-budget ledger {name}: a different "
-                "marker already exists; a tampered or foreign ledger fails "
-                "closed"
+                f"cannot publish the task-budget ledger {name}: {exc}"
             ) from exc
+        return
+    try:
+        existing = parse_ledger(existing_raw)
+    except TaskBudgetMalformedError as exc:
+        raise TaskBudgetError(
+            f"cannot update the task-budget ledger {name}: the existing "
+            f"ledger is malformed ({exc}); a tampered ledger fails closed"
+        ) from exc
+    if (
+        existing.campaign_id != ledger.campaign_id
+        or existing.task_id != ledger.task_id
+    ):
+        raise TaskBudgetError(
+            f"cannot update the task-budget ledger {name}: the existing "
+            "ledger is foreign; a tampered ledger fails closed"
+        )
+    if not _monotonic_update(existing, ledger):
+        raise TaskBudgetError(
+            f"cannot update the task-budget ledger {name}: the existing "
+            "ledger is not a monotonic predecessor; a tampered ledger "
+            "fails closed"
+        )
+    try:
+        _io.atomic_write(root, name, raw, no_replace=False)
+    except _io.StateIOError as exc:
+        raise TaskBudgetError(
+            f"cannot publish the task-budget ledger {name}: {exc}"
+        ) from exc
+
+
+def _monotonic_update(
+    existing: BudgetLedger, updated: BudgetLedger
+) -> bool:
+    """True when ``updated`` is a trusted monotonic successor of ``existing``.
+
+    Every cumulative dimension must be non-decreasing and the exhaustion
+    reason must be first-wins (the existing reason is preserved, or a fresh
+    reason is recorded when the existing ledger was not yet exhausted).
+    """
+    if (
+        updated.wall_time_seconds < existing.wall_time_seconds
+        or updated.cpu_time_seconds < existing.cpu_time_seconds
+        or updated.output_bytes < existing.output_bytes
+        or updated.max_live_processes < existing.max_live_processes
+    ):
+        return False
+    if existing.exhausted_reason is not None:
+        return updated.exhausted_reason == existing.exhausted_reason
+    return True

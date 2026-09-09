@@ -88,6 +88,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import selector as selector_module
     from . import state as state_module
     from . import launch as launch_module
+    from . import task_budget as task_budget_module
     from . import workspace_confinement as confinement_authority
     from . import redaction as output_redaction
     from . import readiness as readiness_module
@@ -105,6 +106,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import selector as selector_module  # type: ignore[no-redef]
     import state as state_module  # type: ignore[no-redef]
     import launch as launch_module  # type: ignore[no-redef]
+    import task_budget as task_budget_module  # type: ignore[no-redef]
     import workspace_confinement as confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
     import readiness as readiness_module  # type: ignore[no-redef]
@@ -2032,6 +2034,38 @@ def launch_role_attempt(
             )
         result_write_path = str((root / config.audit_result_path).absolute())
     plan_blob = _blob_at(root, config.plan_path)
+    # Phase 2A: the trusted per-task cumulative resource budget is loaded for
+    # every developer attempt (committed config or documented defaults) and
+    # the cumulative ledger is bound to (campaign, selected task) under the
+    # ignored ``.factory-state/`` namespace, outside every model-writable
+    # path.  The budget is loaded *before* the authority is minted so the
+    # sealed prompt memfd carries the exact budget section the model sees
+    # (the supervisor re-composes the identical prompt and verifies the
+    # digest).  A task whose cumulative budget is already exhausted is never
+    # launched: the attempt is refused as a bounded non-success outcome
+    # (interrupted), so exhaustion can never produce acceptance and never
+    # runs unbounded.  A malformed/foreign config or ledger fails closed as
+    # a campaign error, never an unhandled traceback.
+    budget = None
+    ledger = None
+    if role == "developer" and task_id is not None:
+        try:
+            budget = task_budget_module.load_budget_config(root)
+            ledger = task_budget_module.load_ledger(
+                root, config.campaign_id, task_id
+            )
+        except task_budget_module.TaskBudgetError as exc:
+            raise CampaignPhaseError(
+                f"cannot load the task resource budget for task {task_id}: {exc}"
+            ) from exc
+        exhausted = task_budget_module.exhausted_reason(ledger, budget)
+        if exhausted is not None:
+            return RoleOutcome(
+                role, -1, interrupted=True, signal=None,
+                diagnostic=(
+                    f"task resource budget exhausted: {exhausted}"
+                ),
+            )
     try:
         if role not in config.role_prompt_digests:
             # Task 9 review LOW: a missing committed role-prompt digest is a
@@ -2088,6 +2122,7 @@ def launch_role_attempt(
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings_payload,
+            task_budget=budget,
             _authorization_store=_authorization_store,
             _authorization_token=_authorization_token,
             _authorization_claims=_authorization_claims,
@@ -2099,9 +2134,19 @@ def launch_role_attempt(
         # fail-closed campaign outcome (CampaignPhaseError), never an
         # unhandled InvocationError traceback.
         raise CampaignPhaseError(f"launch refused for {role}: {exc}") from exc
-    supervisor = launch_module.LaunchSupervision(binding)
+    supervisor = launch_module.LaunchSupervision(
+        binding, budget=budget, ledger=ledger
+    )
     try:
         result = supervisor.run(authority)
+    except launch_module.BudgetExhaustedError as exc:
+        # Defense in depth: the supervisor refuses a budget-exhausted attempt
+        # before spawn.  The bounded exhaustion is a non-success task outcome
+        # (interrupted), never a campaign error and never acceptance.
+        return RoleOutcome(
+            role, -1, interrupted=True, signal=None,
+            diagnostic=str(exc)[:512],
+        )
     except launch_module.InvocationError as exc:
         # A bounded supervision fail-closed (invariant, reap, or interrupted
         # group) is a clean campaign fail-closed error, never a traceback.
@@ -4209,6 +4254,26 @@ class Campaign:
             scope_ok=scope_ok,
         )
         self._end_untrusted(tag)
+        # Phase 2A: the cumulative per-task ledger was updated by the trusted
+        # supervisor after the attempt (monotonic, no-replace).  Reload it and
+        # treat a consumed resource budget exactly like the attempt-count
+        # budget: dirty work is preserved (interrupted) and a clean exhaustion
+        # is a deterministic task failure — never a retry and never
+        # acceptance.
+        resource_budget_exhausted = False
+        if task_id is not None:
+            try:
+                budget = task_budget_module.load_budget_config(self._root)
+                ledger = task_budget_module.load_ledger(
+                    self._root, self._config.campaign_id, task_id
+                )
+                resource_budget_exhausted = (
+                    task_budget_module.exhausted_reason(ledger, budget) is not None
+                )
+            except task_budget_module.TaskBudgetError as exc:
+                raise CampaignPhaseError(
+                    f"cannot read the task-budget ledger after the attempt: {exc}"
+                ) from exc
         if outcome == "task_completed":
             allowed = [
                 path for path in dirty
@@ -4240,7 +4305,8 @@ class Campaign:
                     allowed, f"factory-campaign: progress task {task_id}"
                 )
             return self._implementation_outcome(
-                state, attempt, "task_progress", "", dirty_work=False
+                state, attempt, "task_progress", "", dirty_work=False,
+                resource_budget_exhausted=resource_budget_exhausted,
             )
         return self._implementation_outcome(
             state, attempt, outcome,
@@ -4249,6 +4315,7 @@ class Campaign:
                 + (f" diagnostic={role.diagnostic}" if role.diagnostic else "")
             ),
             dirty_work=bool(self._preservable_dirty_paths()),
+            resource_budget_exhausted=resource_budget_exhausted,
         )
 
     def _implementation_outcome(
@@ -4259,8 +4326,17 @@ class Campaign:
         detail: str,
         *,
         dirty_work: bool,
+        resource_budget_exhausted: bool = False,
     ) -> _Step:
-        budget_exhausted = attempt >= self._config.implementation_attempts
+        # Phase 2A: the cumulative resource budget (wall/CPU/output/live
+        # processes) is a second, independent exhaustion bound.  A consumed
+        # resource budget stops retries exactly like the attempt-count budget:
+        # dirty work is preserved (interrupted) and a clean exhaustion is a
+        # deterministic task failure — never acceptance.
+        budget_exhausted = (
+            attempt >= self._config.implementation_attempts
+            or resource_budget_exhausted
+        )
         if outcome == "interrupted":
             if budget_exhausted:
                 if dirty_work or self._preservable_dirty_paths():

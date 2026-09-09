@@ -86,6 +86,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 try:  # package-import mode (the hidden control-plane package)
     from . import workspace_confinement as real_confinement_authority
     from . import redaction as output_redaction
+    from . import task_budget as task_budget_module
     from .gitutil import (
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -112,6 +113,7 @@ try:  # package-import mode (the hidden control-plane package)
 except ImportError:  # flat-import mode used by the hidden harness test suite
     import workspace_confinement as real_confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
+    import task_budget as task_budget_module  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -138,6 +140,11 @@ except ImportError:  # flat-import mode used by the hidden harness test suite
 
 __all__ = [
     "BLOB_READ_CHUNK",
+    "BUDGET_CAPTURE_MINIMUM",
+    "BUDGET_REASON_PREFIX",
+    "BUDGET_SAMPLE_INTERVAL",
+    "BudgetExhaustedError",
+    "BudgetUsage",
     "CONFINE_LAUNCHER",
     "CONFINEMENT_SPEC_SCHEMA",
     "DEFAULT_ALLOWED_TOOLS",
@@ -240,6 +247,24 @@ DEFAULT_INACTIVITY_LIMIT = 7000.0
 # Termination sequence: TERM, INT, and HUP are each delivered to the *full
 # process group* before the bounded grace expires and KILL escalates (§9).
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+# Phase 2A task-resource budget: the supervisor samples the live process
+# tree (CPU seconds and live/descendant count) at this interval and checks
+# the combined captured output bytes after every feed.  The wall-clock
+# dimension is exact (monotonic); CPU/live are real /proc measurements
+# sampled at a bounded frequency, never simulated counters.
+BUDGET_SAMPLE_INTERVAL = 1.0
+# The descendant-capture bound used for budget sampling is at least the
+# existing supervision bound and always above the configured live-process
+# budget, so a tree that exceeds the budget is reported as live-process
+# exhaustion rather than an incomplete snapshot.
+BUDGET_CAPTURE_MINIMUM = 512
+# Budget reason prefix carried in ``LaunchResult.reason``; the suffix is the
+# closed exhaustion-reason enum value (``wall_time``, ``cpu_time``,
+# ``output_bytes``, ``live_processes``, ``accounting_untrusted``).
+BUDGET_REASON_PREFIX = "budget:"
+# Clock ticks per second for /proc stat utime/stime (proc(5) fields 14/15).
+_CLK_TCK = float(os.sysconf("SC_CLK_TCK")) if hasattr(os, "sysconf") else 100.0
 
 # TOCTOU-free verify-to-interpreter (F2): exact committed wrapper/backend
 # bytes are staged in a private mode-0700 directory as non-executable mode-0400
@@ -421,6 +446,18 @@ class SupervisionSignalInterrupt(SupervisionError):
             f"supervisor received {signal.Signals(signum).name} during the "
             "attempt; the process group was bounded-terminated and reaped"
         )
+
+
+class BudgetExhaustedError(SupervisionError):
+    """The task's cumulative resource budget is already exhausted (Phase 2A).
+
+    Raised before a fresh implementation attempt is spawned when the
+    cumulative per-task ledger already consumed the configured budget (or
+    the accounting cannot be trusted).  The attempt is never started, so a
+    budget-exhausted task can never run unbounded; the campaign classifies
+    the bounded exhaustion as a non-success outcome (interrupted with dirty
+    work preserved, or a clean task failure) and never as acceptance.
+    """
 
 
 class ResultSchemaError(LaunchError):
@@ -778,6 +815,7 @@ def compose_prompt(
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
     findings: Optional[bytes] = None,
+    task_budget: Optional[Mapping[str, object]] = None,
 ) -> bytes:
     """Assemble the fresh-context prompt from the allowlisted inputs only.
 
@@ -856,6 +894,44 @@ def compose_prompt(
             + b")"
         )
         sections.append(task_excerpt)
+        if task_budget is not None:
+            # Phase 2A: the trusted cumulative resource budget is explicit
+            # role context.  The model may run as many focused
+            # inspect/edit/test/diagnose cycles as fit these cumulative
+            # limits; the per-command timeout remains a defense-in-depth
+            # floor.  Exhaustion is enforced by the trusted supervisor and
+            # can never produce acceptance.
+            sections.append(b"")
+            sections.append(b"## Task resource budget (cumulative across attempts)")
+            sections.append(
+                b"- Wall-clock: "
+                + str(task_budget["wall_time_seconds"]).encode("ascii")
+                + b" seconds"
+            )
+            sections.append(
+                b"- Process-tree CPU: "
+                + str(task_budget["cpu_time_seconds"]).encode("ascii")
+                + b" seconds"
+            )
+            sections.append(
+                b"- Combined captured output: "
+                + str(task_budget["output_bytes"]).encode("ascii")
+                + b" bytes"
+            )
+            sections.append(
+                b"- Live/descendant processes: "
+                + str(task_budget["max_live_processes"]).encode("ascii")
+            )
+            sections.append(
+                b"- Per-command timeout (defense-in-depth): "
+                + str(task_budget["per_command_timeout_seconds"]).encode("ascii")
+                + b" seconds"
+            )
+            sections.append(
+                b"Your focused runs are diagnostic only; acceptance remains "
+                b"an independently bound exact-commit verifier run by the "
+                b"trusted orchestrator."
+            )
     if binding.role == "auditor":
         if audit_objective is None:
             raise InvocationError(
@@ -1558,6 +1634,25 @@ class _BoundedStream:
 
 
 @dataclass(frozen=True)
+class BudgetUsage:
+    """One attempt's measured resource usage (Phase 2A).
+
+    ``wall_time_seconds`` is the attempt's elapsed wall time, ``cpu_time_seconds``
+    the cumulative user+system CPU of the live process tree sampled from
+    ``/proc`` (real kernel accounting, never a simulated counter),
+    ``output_bytes`` the combined captured stdout+stderr byte count, and
+    ``max_live_processes`` the peak live/descendant process count observed.
+    The supervisor records these monotonically into the per-task cumulative
+    ledger after every attempt.
+    """
+
+    wall_time_seconds: float = 0.0
+    cpu_time_seconds: float = 0.0
+    output_bytes: int = 0
+    max_live_processes: int = 0
+
+
+@dataclass(frozen=True)
 class StreamResult:
     """Bounded per-stream capture (never the raw unbounded stream)."""
 
@@ -1716,11 +1811,33 @@ class LaunchSupervision:
         root: Optional[Path] = None,
         session_dir: Optional[Path] = None,
         kill_grace: float = DEFAULT_KILL_GRACE,
+        budget: Optional[Mapping[str, object]] = None,
+        ledger: Optional[task_budget_module.BudgetLedger] = None,
     ) -> None:
         verify_invocation(binding)
         self.binding = binding
         self.root = Path(root or binding.workspace).absolute()
         self.kill_grace = kill_grace
+        # Phase 2A task-resource budget: ``budget`` is the validated
+        # ``factory-task-budget/v1`` document and ``ledger`` the cumulative
+        # per-task ledger bound to (campaign, selected task).  Both are
+        # supplied by the trusted campaign for developer attempts; ``None``
+        # disables budget enforcement (planner/tester/auditor and the
+        # deterministic driver seam).  The ledger is runtime state under the
+        # ignored ``.factory-state/`` namespace, never model-writable.
+        self._budget: Optional[Mapping[str, object]] = budget
+        self._ledger: Optional[task_budget_module.BudgetLedger] = ledger
+        self._remaining: Optional[Dict[str, float]] = None
+        if budget is not None and ledger is not None:
+            self._remaining = task_budget_module.remaining_limits(ledger, budget)
+        # Measured usage of the current attempt, updated by the monitor loop
+        # and recorded into the ledger after the attempt (monotonic).
+        self._budget_usage = BudgetUsage()
+        self._budget_exhausted_reason: Optional[str] = None
+        self._started: float = 0.0
+        # The last budget-sample descendant closure (identity-pinned), retained
+        # so post-run cleanup can be verified against the exact measured tree.
+        self._budget_captured: frozenset = frozenset()
         self.prompt_fd: Optional[int] = None
         self.session_dir = Path(session_dir) if session_dir else None
         self._child: Optional[subprocess.Popen[bytes]] = None
@@ -1918,6 +2035,102 @@ class LaunchSupervision:
         starttime identity check and is excluded.
         """
         return live_scope(self._captured)
+
+    # -- Phase 2A task-resource budget enforcement -----------------------------
+
+    def _budget_capture_maximum(self) -> int:
+        """The descendant-capture bound for budget sampling.
+
+        At least the existing supervision bound and always above the
+        configured live-process budget, so a tree that exceeds the budget is
+        reported as live-process exhaustion rather than an incomplete
+        snapshot.
+        """
+        if self._budget is None:
+            return BUDGET_CAPTURE_MINIMUM
+        return max(
+            BUDGET_CAPTURE_MINIMUM,
+            int(self._budget["max_live_processes"]) + 1,
+        )
+
+    def _measure_tree(self) -> Tuple[float, int]:
+        """Measure cumulative CPU seconds and live process count of the tree.
+
+        The measurement re-snapshots the full descendant closure of the
+        launched leader (the existing identity-safe capture machinery, never
+        a baseline subtraction) and sums the real user+system CPU ticks of
+        every still-live, identity-matching member from ``/proc/<pid>/stat``.
+        A tree that exceeds the capture bound is reported as the bound (the
+        live-process budget is then exhausted); an unreadable ``/proc`` fails
+        closed with :class:`BudgetExhaustedError` (``accounting_untrusted``)
+        rather than silently under-counting.
+        """
+        child = self._child
+        if child is None or self._leader_exited(child):
+            return 0.0, 0
+        pid = child.pid
+        try:
+            captured = capture_descendants(pid, maximum=self._budget_capture_maximum())
+        except RootLockUnsafeError:
+            # The tree exceeds the capture bound: report the bound as the
+            # live count so the live-process budget is exhausted (never an
+            # incomplete snapshot mistaken for a small tree).
+            return 0.0, self._budget_capture_maximum()
+        self._budget_captured = captured
+        live = live_scope(captured)
+        ticks = 0
+        for member in live:
+            fields = _proc_stat_fields(member)
+            if fields is None or len(fields) < 13:
+                continue
+            try:
+                ticks += int(fields[11]) + int(fields[12])
+            except ValueError:
+                continue
+        return ticks / _CLK_TCK, len(live)
+
+    def _budget_preflight(self) -> None:
+        """Fail closed before spawn when the cumulative budget is exhausted.
+
+        A task whose cumulative ledger already consumed the configured budget
+        (or whose accounting cannot be trusted) is never started: the attempt
+        is refused with :class:`BudgetExhaustedError` so a budget-exhausted
+        task can never run unbounded and exhaustion can never produce
+        acceptance.
+        """
+        if self._budget is None or self._ledger is None:
+            return
+        reason = task_budget_module.exhausted_reason(self._ledger, self._budget)
+        if reason is not None:
+            raise BudgetExhaustedError(
+                f"task resource budget exhausted: {reason}"
+            )
+
+    def _record_budget_usage(self, elapsed: float) -> None:
+        """Record one attempt's measured usage into the cumulative ledger.
+
+        The usage is accumulated monotonically (never replaced, never
+        decreased) and the ledger is published with the no-replace
+        byte-idempotent authority, so a tampered or foreign ledger fails
+        closed.  The first exhausted dimension is recorded with its closed
+        exhaustion reason; the attempt's own budget-termination reason wins
+        over the derived precedence so the actual cause is never masked.
+        """
+        if self._budget is None or self._ledger is None:
+            return
+        usage = self._budget_usage
+        self._ledger.record_attempt(
+            wall_time_seconds=elapsed,
+            cpu_time_seconds=usage.cpu_time_seconds,
+            output_bytes=usage.output_bytes,
+            max_live_processes=usage.max_live_processes,
+        )
+        reason = self._budget_exhausted_reason
+        if reason is None:
+            reason = task_budget_module.exhausted_reason(self._ledger, self._budget)
+        if reason is not None:
+            self._ledger.mark_exhausted(reason)
+        task_budget_module.save_ledger(self.root, self._ledger)
 
     # -- spawning --------------------------------------------------------------
 
@@ -2323,6 +2536,13 @@ class LaunchSupervision:
             selector.register(descriptor, selectors.EVENT_READ)
         last_activity = time.monotonic()
         reason: Optional[str] = None
+        # Phase 2A budget state: the usage snapshot is refreshed on every
+        # sample and on every output feed; the exhausted reason is recorded
+        # when a budget dimension overflows so the ledger records the actual
+        # cause (never a derived guess).
+        self._budget_usage = BudgetUsage()
+        self._budget_exhausted_reason = None
+        last_sample = time.monotonic()
         try:
             while True:
                 if self._pending_signal is not None:
@@ -2332,11 +2552,53 @@ class LaunchSupervision:
                     break
                 now = time.monotonic()
                 if now >= deadline:
-                    reason = "runtime"
+                    # Phase 2A: when the cumulative wall budget is the
+                    # binding constraint on the deadline (smaller than the
+                    # per-attempt runtime limit), the exhaustion is a
+                    # budget:wall_time termination, never a plain runtime
+                    # limit; the ledger records the actual cause.
+                    if (
+                        self._budget is not None
+                        and self._ledger is not None
+                        and float(self._remaining["wall_time_seconds"])
+                        < self.binding.runtime_limit
+                    ):
+                        self._budget_exhausted_reason = "wall_time"
+                        reason = BUDGET_REASON_PREFIX + "wall_time"
+                    else:
+                        reason = "runtime"
                     break
                 if inactivity_limit and now - last_activity > inactivity_limit:
                     reason = "inactivity"
                     break
+                if self._budget is not None and self._ledger is not None:
+                    if now - last_sample >= BUDGET_SAMPLE_INTERVAL:
+                        last_sample = now
+                        try:
+                            cpu, live = self._measure_tree()
+                        except BudgetExhaustedError as exc:
+                            # Accounting cannot be trusted (unreadable
+                            # /proc): fail closed instead of silently
+                            # under-counting.
+                            self._budget_exhausted_reason = "accounting_untrusted"
+                            reason = BUDGET_REASON_PREFIX + "accounting_untrusted"
+                            break
+                        self._budget_usage = BudgetUsage(
+                            wall_time_seconds=now - self._started,
+                            cpu_time_seconds=cpu,
+                            output_bytes=stdout._total + stderr._total,
+                            max_live_processes=max(
+                                self._budget_usage.max_live_processes, live
+                            ),
+                        )
+                        if cpu >= float(self._remaining["cpu_time_seconds"]):
+                            self._budget_exhausted_reason = "cpu_time"
+                            reason = BUDGET_REASON_PREFIX + "cpu_time"
+                            break
+                        if live >= int(self._remaining["max_live_processes"]):
+                            self._budget_exhausted_reason = "live_processes"
+                            reason = BUDGET_REASON_PREFIX + "live_processes"
+                            break
                 if not open_fds:
                     # The leader is still alive with all pipes closed (a
                     # descendant held them and released them): keep bounded
@@ -2374,6 +2636,20 @@ class LaunchSupervision:
                     else:
                         last_activity = time.monotonic()
                         streams[descriptor].feed(chunk)
+                        if self._budget is not None and self._ledger is not None:
+                            total = stdout._total + stderr._total
+                            self._budget_usage = BudgetUsage(
+                                wall_time_seconds=time.monotonic() - self._started,
+                                cpu_time_seconds=self._budget_usage.cpu_time_seconds,
+                                output_bytes=total,
+                                max_live_processes=self._budget_usage.max_live_processes,
+                            )
+                            if total >= int(self._remaining["output_bytes"]):
+                                self._budget_exhausted_reason = "output_bytes"
+                                reason = BUDGET_REASON_PREFIX + "output_bytes"
+                                break
+                if reason is not None:
+                    break
                 if self._leader_exited(child) and not open_fds:
                     break
         finally:
@@ -2897,6 +3173,7 @@ class LaunchSupervision:
             audit_objective=blobs.get("audit_objective"),
             task_excerpt=blobs.get("task_excerpt"),
             findings=blobs.get("findings"),
+            task_budget=self._budget,
         )
         self._prompt_digest = hashlib.sha256(prompt).hexdigest()
         if _prompt_memfd_sha256(self.prompt_fd) != self._prompt_digest:
@@ -2926,15 +3203,32 @@ class LaunchSupervision:
             ) from exc
         try:
             self.install_signal_handlers()
+            # Phase 2A: a task whose cumulative budget is already exhausted
+            # is never started (fail closed before spawn).
+            self._budget_preflight()
             child = self.spawn()
             started = time.monotonic()
+            self._started = started
             try:
                 invariants = verify_child_invariants(
                     child.pid, binding.workspace, binding
                 )
                 snapshot = self.snapshot()
+                # Phase 2A: the wall-clock budget caps the supervisor's own
+                # runtime deadline (the smaller of the two bounds wins), so a
+                # task whose cumulative wall budget is nearly consumed is
+                # bounded by the budget, never by the role runtime limit.
+                wall_budget = (
+                    float(self._remaining["wall_time_seconds"])
+                    if self._remaining is not None else None
+                )
+                deadline = started + (
+                    min(binding.runtime_limit, wall_budget)
+                    if wall_budget is not None
+                    else binding.runtime_limit
+                )
                 out, err, reason, _ = self._monitor(
-                    child, started + binding.runtime_limit, binding.inactivity_limit
+                    child, deadline, binding.inactivity_limit
                 )
                 if reason is None:
                     if child.poll() is None:
@@ -2993,6 +3287,12 @@ class LaunchSupervision:
                     self._publish_credential_return_to_private_home(returned)
                     _persist_private_pi2_auth(Path(self._sanitized_home))
                 elapsed = time.monotonic() - started
+                # Phase 2A: record the attempt's measured usage into the
+                # cumulative per-task ledger (monotonic, no-replace) before
+                # the result is returned, so a tampered or foreign ledger
+                # fails closed and the campaign classifies the bounded
+                # exhaustion from the ledger.
+                self._record_budget_usage(elapsed)
                 result = LaunchResult(
                     role=binding.role,
                     model=binding.model,
@@ -4502,6 +4802,7 @@ def authorize_launch(
     audit_objective: Optional[bytes] = None,
     task_excerpt: Optional[bytes] = None,
     findings: Optional[bytes] = None,
+    task_budget: Optional[Mapping[str, object]] = None,
     _authorization_store: Optional[object] = None,
     _authorization_token: str = "",
     _authorization_claims: Optional[Mapping[str, object]] = None,
@@ -4698,6 +4999,7 @@ def authorize_launch(
             audit_objective=blobs.get("audit_objective"),
             task_excerpt=blobs.get("task_excerpt"),
             findings=blobs.get("findings"),
+            task_budget=task_budget,
         )
         prompt_fd = _sealed_prompt_memfd(prompt)
         session_dir = _session_directory()

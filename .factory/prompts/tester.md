@@ -22,9 +22,10 @@ or completion claim is available or authoritative.
 1. Run bounded focused verification and inspect the exact production/test
    paths. The trusted coordinator runs the configured complete exact-commit
    project gate immediately after your result; do **not** duplicate that full
-   gate or start a nested environment shell inside this confined role. Run at
-   most three focused commands, each under `timeout 120`, in the inherited
-   trusted tool environment. Permitted focused commands are syntax/compile checks that do
+   gate or start a nested environment shell inside this confined role. Run as
+   many focused inspect/diagnose cycles as fit the task's cumulative resource
+   budget stated in your prompt; each command remains under the per-command
+   timeout. Permitted focused commands are syntax/compile checks that do
    not dispatch another executable or write caches (for example `bash -n
    file.sh` and `python3 -c 'import ast; ast.parse(open("file.py").read())'`)
    plus source

@@ -229,6 +229,20 @@ Every model attempt MUST:
 
 A selected task excerpt is derived from the plan and does not constitute another source of truth. Before launch, the harness re-derives its exact bytes from the committed plan blob, records the excerpt digest in the invocation binding, and fails closed if the delivered bytes differ, are paraphrased, or come from another plan revision.
 
+## 9.1 Task-resource budget (cumulative)
+
+Each selected implementation task is bounded by a cumulative resource budget across every fresh developer attempt of that task.  The committed `.factory/task-budget.json` document (closed schema `factory-task-budget/v1`, bounded integers, duplicate-key rejection) supplies the limits; an absent config uses the documented defaults.  The budget bounds:
+
+- cumulative wall-clock time of the attempts;
+- cumulative process-tree CPU time (real `/proc` user+system ticks of the identity-pinned live descendant closure, sampled at a bounded frequency);
+- cumulative combined captured stdout+stderr bytes;
+- the live/descendant process peak of one attempt;
+- a per-command timeout kept as defense-in-depth (there is no small command-count limit: focused inspect/edit/test/diagnose cycles continue while the resource budgets remain).
+
+The trusted supervisor enforces the budget around every fresh developer attempt: it derives the remaining limits before spawn, refuses a task whose cumulative budget is already exhausted (never launched, never accepted), terminates the attempt on overflow through the existing TERM→INT→HUP→KILL group machinery, and records the measured usage monotonically into the cumulative per-task ledger (`factory-task-budget-ledger/v1`) bound to (campaign, selected task) under the ignored private `.factory-state/` namespace, outside every model-writable path.  The ledger is published with no-replace/monotonic tamper handling: a foreign, malformed, or non-monotonic ledger fails closed and is never silently replaced.  If accounting cannot be trusted (unreadable `/proc`), the attempt fails closed as `accounting_untrusted` instead of silently under-counting.
+
+Exhaustion is a bounded non-success outcome and can never produce acceptance: dirty work is preserved (terminal `interrupted`), a clean exhaustion is a deterministic `task_failed` that proceeds to verification/audit at the last coherent commit, and the campaign never retries an exhausted task.  The developer prompt states the budget and that its own runs are diagnostic while acceptance remains an independently bound exact-commit verifier.
+
 ## 10. Ollama usage hook
 
 The existing `scripts/ollama-usage-guard.sh` contract MUST be retained.

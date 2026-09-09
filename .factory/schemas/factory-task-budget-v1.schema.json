@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "factory-task-budget/v1",
   "title": "factory-task-budget",
-  "description": "Versioned strict generic resource-budget configuration for one implementation task/session (Phase 2A). The budget bounds the cumulative wall time, cumulative process CPU time, combined captured output bytes, and live/descendant process count across every fresh implementation attempt of one selected task, and keeps a per-command timeout as defense-in-depth. It replaces the prompt-only three-command debugging cap: focused inspect/edit/test/fix cycles may continue while the resource budgets remain. Every field is a bounded integer, the field set is closed (additionalProperties false), duplicate JSON keys are rejected at parse time, and budget exhaustion is recorded with an explicit closed-enum exhaustion reason and can never produce acceptance.",
+  "description": "Versioned strict generic resource-budget configuration for one implementation task (Phase 2A). The trusted supervisor enforces the budget around every fresh implementation attempt of one selected task: it bounds the cumulative wall time, cumulative process-tree CPU time, combined captured output bytes, and live/descendant process peak, and keeps a per-command timeout as defense-in-depth. The cumulative per-task ledger (factory-task-budget-ledger/v1) is bound to (campaign, selected task) under the ignored .factory-state/ namespace, is updated monotonically after every attempt, and a consumed budget stops further attempts (dirty work is preserved; exhaustion is a non-success outcome and can never produce acceptance). There is no small command-count limit: focused inspect/edit/test/diagnose cycles continue while the resource budgets remain. Every field is a bounded integer, the field set is closed (additionalProperties false), duplicate JSON keys are rejected at parse time, and budget exhaustion is recorded with an explicit closed-enum exhaustion reason.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -28,25 +28,25 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 86400,
-      "description": "Cumulative process CPU budget (user + system across the whole process tree) across all implementation attempts of the selected task, in seconds. Where the platform supports trusted accounting the launch broker counts it; if accounting cannot be trusted in production the campaign fails closed."
+      "description": "Cumulative process CPU budget (user + system across the whole process tree) across all implementation attempts of the selected task, in seconds. The trusted supervisor samples the real /proc utime+stime of the live process tree at a bounded frequency; if accounting cannot be trusted in production the campaign fails closed (accounting_untrusted) instead of running unbounded."
     },
     "output_bytes": {
       "type": "integer",
       "minimum": 1,
       "maximum": 2147483647,
-      "description": "Cumulative combined stdout+stderr byte budget across all implementation attempts of the selected task. The launch broker bounds the combined streams and terminates the attempt on overflow; truncation can never hide a failure because overflow is a structured non-success outcome, never acceptance."
+      "description": "Cumulative combined stdout+stderr byte budget across all implementation attempts of the selected task. The trusted supervisor bounds the combined captured streams and terminates the attempt on overflow; truncation can never hide a failure because overflow is a structured non-success outcome, never acceptance."
     },
     "max_live_processes": {
       "type": "integer",
       "minimum": 1,
       "maximum": 1024,
-      "description": "Maximum live/descendant process count of one implementation attempt. The launch broker terminates the attempt when the live process tree exceeds the bound; the existing subreaper and escaped-descendant cleanup remain authoritative."
+      "description": "Maximum live/descendant process count of one implementation attempt. The trusted supervisor terminates the attempt when the live process tree exceeds the bound; the existing subreaper and escaped-descendant cleanup remain authoritative."
     },
     "per_command_timeout_seconds": {
       "type": "integer",
       "minimum": 1,
       "maximum": 3600,
-      "description": "Defense-in-depth per-command timeout in seconds. The resource budgets replace the old three-command cap; the per-command timeout remains as a bounded backpressure floor."
+      "description": "Defense-in-depth per-command timeout in seconds, delivered to the model as explicit role context. The cumulative resource budgets replace the old three-command cap; the per-command timeout remains as a bounded backpressure floor."
     }
   }
 }

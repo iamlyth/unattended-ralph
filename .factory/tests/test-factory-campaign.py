@@ -75,6 +75,7 @@ import launch as launch_module  # noqa: E402
 import pre_round as pre_round_module  # noqa: E402
 import sidecars as sidecars_module  # noqa: E402
 import state as state_module  # noqa: E402
+import task_budget as task_budget_module  # noqa: E402
 
 GIT = gitutil.GIT_EXECUTABLE
 
@@ -2221,6 +2222,10 @@ class ReviewHardening(_CampaignBase):
         # digest — never a self-claimed or operator-supplied byte set.
         ws = self.make(SUCCESS_SCENARIO)
         config = self._production_config(ws)
+        # Production always has the private state authority before any
+        # launch; the fixture mirrors that so the cumulative task-budget
+        # ledger can be read (a missing state directory fails closed).
+        (ws.root / ".factory-state").mkdir(mode=0o700, exist_ok=True)
         head = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
         plan_blob = campaign_module._blob_at(ws.root, config.plan_path)
         expected_excerpt, expected_digest = launch_module.derive_task_excerpt(
@@ -2236,8 +2241,9 @@ class ReviewHardening(_CampaignBase):
             return object()
 
         class _Supervisor:
-            def __init__(self, binding):
+            def __init__(self, binding, **kwargs):
                 self.binding = binding
+                self.kwargs = kwargs
 
             def run(self, authority):
                 return type("_Result", (), {
@@ -2266,11 +2272,13 @@ class ReviewHardening(_CampaignBase):
     def test_nonzero_role_preserves_only_bounded_redacted_diagnostic(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)
         config = self._production_config(ws)
+        (ws.root / ".factory-state").mkdir(mode=0o700, exist_ok=True)
         head = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
 
         class _Supervisor:
-            def __init__(self, binding):
+            def __init__(self, binding, **kwargs):
                 self.binding = binding
+                self.kwargs = kwargs
 
             def run(self, authority):
                 stream = type("_Stream", (), {"tail": "  Provider not\n configured  "})()
@@ -2290,6 +2298,124 @@ class ReviewHardening(_CampaignBase):
             )
         self.assertEqual(outcome.exit_status, 1)
         self.assertEqual(outcome.diagnostic, "Provider not configured")
+
+    def _seed_exhausted_ledger(self, ws) -> None:
+        """Pre-seed an exhausted cumulative ledger for the fixture campaign.
+
+        The ledger is bound to (campaign, task) by filename under the
+        private ignored ``.factory-state/`` root (the task-budget authority
+        uses the established dirfd/no-follow state I/O directly, never the
+        per-campaign namespace override).
+        """
+        (ws.root / ".factory-state").mkdir(mode=0o700, exist_ok=True)
+        ledger = task_budget_module.BudgetLedger(
+            campaign_id="campaign", task_id=1
+        )
+        ledger.record_attempt(
+            wall_time_seconds=999999.0, cpu_time_seconds=0.0,
+            output_bytes=0, max_live_processes=0,
+        )
+        task_budget_module.save_ledger(ws.root, ledger)
+
+    def _budget_runner(self, ws, config):
+        """A role runner whose developer is refused by the budget preflight.
+
+        The planner writes the committed fixture plan template (like the
+        deterministic driver); the developer returns the exact interrupted
+        outcome ``launch_role_attempt`` returns for an exhausted task; the
+        tester writes the structured pass handoff and the auditor passes.
+        The campaign then reloads the cumulative ledger and classifies the
+        bounded exhaustion itself.
+        """
+        template = ws.root / "fixture" / "templates" / "planner-1.md"
+
+        def runner(role, state, head, task_id, attempt):
+            if role == "planner":
+                shutil.copy2(template, ws.root / config.plan_path)
+                return campaign_module.RoleOutcome("planner", 0)
+            if role == "developer":
+                return campaign_module.RoleOutcome(
+                    "developer", -1, interrupted=True, signal=None,
+                    diagnostic="task resource budget exhausted: wall_time",
+                )
+            if role == "tester":
+                result_path = ws.root / config.phase_result_path
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps({
+                        "schema": "factory-phase-result/v1",
+                        "outcome": "pass",
+                    }),
+                    encoding="utf-8",
+                )
+                return campaign_module.RoleOutcome("tester", 0)
+            if role == "auditor":
+                result_path = ws.root / config.audit_result_path
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps({
+                        "schema": "factory-phase-result/v1",
+                        "outcome": "pass",
+                    }),
+                    encoding="utf-8",
+                )
+                return campaign_module.RoleOutcome("auditor", 0)
+            raise AssertionError(f"unexpected role {role}")
+
+        return runner
+
+    def test_exhausted_task_budget_never_accepts(self) -> None:
+        # A task whose cumulative resource budget is already exhausted is
+        # never launched and can never be accepted: the campaign reloads the
+        # ledger, records a deterministic task failure (no retries), and
+        # proceeds to verification/audit at the last coherent commit.
+        ws = self.make(SUCCESS_SCENARIO)
+        self._seed_exhausted_ledger(ws)
+        config = ws.derive_config()
+        result = campaign_module.Campaign(
+            config, role_runner=self._budget_runner(ws, config)
+        ).run()
+        self.assertEqual(result.terminal_phase, "success")
+        history = [(r.phase, r.outcome) for r in result.phase_history]
+        self.assertEqual(history, [
+            ("planning", "planned"),
+            ("implementation", "task_failed"),
+            ("verification", "pass"),
+            ("audit", "pass"),
+        ])
+        # The developer never launched: no task was ever accepted.
+        self.assertNotIn("task_completed", [o for _, o in history])
+
+    def test_exhausted_task_budget_preserves_dirty_work(self) -> None:
+        # A budget-exhausted attempt that left dirty work preserves it as a
+        # terminal interrupted outcome (never discarded, never accepted).
+        ws = self.make(SUCCESS_SCENARIO)
+        self._seed_exhausted_ledger(ws)
+        config = ws.derive_config()
+        dirty = ws.root / "src" / "dirty-work.txt"
+        base_runner = self._budget_runner(ws, config)
+
+        def runner(role, state, head, task_id, attempt):
+            if role == "developer":
+                # The crashed attempt left dirty work before the budget
+                # preflight refused the next launch.
+                dirty.parent.mkdir(parents=True, exist_ok=True)
+                dirty.write_text("half-written work", encoding="utf-8")
+            return base_runner(role, state, head, task_id, attempt)
+
+        result = campaign_module.Campaign(
+            config, role_runner=runner
+        ).run()
+        self.assertEqual(result.terminal_phase, "interrupted")
+        self.assertEqual(result.terminal_outcome, "interrupted")
+        # The dirty work is preserved on disk.
+        self.assertEqual(
+            dirty.read_text(encoding="utf-8"), "half-written work"
+        )
+        self.assertNotIn(
+            "task_completed",
+            [r.outcome for r in result.phase_history],
+        )
 
     def test_production_auditor_derives_exact_committed_objective_bytes(
         self,
@@ -2315,8 +2441,9 @@ class ReviewHardening(_CampaignBase):
             return object()
 
         class _Supervisor:
-            def __init__(self, binding):
+            def __init__(self, binding, **kwargs):
                 self.binding = binding
+                self.kwargs = kwargs
 
             def run(self, authority):
                 return type("_Result", (), {
@@ -2407,6 +2534,7 @@ class ReviewHardening(_CampaignBase):
         # unhandled traceback.
         ws = self.make(SUCCESS_SCENARIO)
         config = self._production_config(ws)
+        (ws.root / ".factory-state").mkdir(mode=0o700, exist_ok=True)
         head = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
         with unittest.mock.patch.object(
             campaign_module.launch_module, "authorize_launch",
