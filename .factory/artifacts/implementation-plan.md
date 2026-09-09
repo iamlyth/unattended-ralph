@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: dd44e0b84e7bbb83c63a33467c0fb95743e0f6c9
-spec_blob: 29d94b910c58249cb9b9c7bce1fd1c227a742ca4
+spec_blob: 754176c66dffdc63c1859fe1ca1638afe904f494
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -1915,10 +1915,67 @@ Tasks 25-27 plus the pending final audit.
   `docs/FACTORY.md`; `docs/OPERATIONS.md`.
 
 
-## Task 33: Final documentation and specification audit
+## Task 33: Runtime-launch lease binding (Phase 2C2a)
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32
+- Dependencies: Task 32
+- Write scopes: None
+- Scope: Bind the Phase 2C1 task path-lease into the existing signed launch
+  authority as an optional developer-only runtime-launch foundation, without
+  campaign minting. `InvocationBinding` gains optional `campaign_id`,
+  `attempt`, `lease_digest`, `lease_bytes`, and the immutable
+  `audit_required` signal (all defaulted, so the campaign launch path is
+  unchanged without a lease). `authorize_launch` accepts the exact canonical
+  claim bytes and re-validates schema, committed-policy expansion, and
+  context/expiry (campaign/task/attempt/HEAD/plan/policy digest,
+  issued/deadline) before any prompt byte or confinement rule is composed;
+  the claim digest alone is never authoritative — a real-provider launch
+  without the existing signed HMAC/FD launch token fails closed, and a
+  consumed/replayed token fails closed. The exact deny-dominant write
+  candidates (`lease_write_candidates`: granted paths plus pattern static
+  prefixes, deny re-checked, fail closed when empty) are the only paths the
+  workspace confinement may grant, as WRITE-only rules (the lease is
+  write-path scope only, never read/execute/commands/credentials beyond the
+  existing static authority); each candidate is validated dirfd/O_NOFOLLOW
+  (no symlink component, resolved containment, same-device mount-escape
+  check, single-link hardlink check, existing path so a nonexistent path
+  cannot overgrant its parent). The exact claim/context travels in the
+  confinement specification and is re-validated immediately before spawn
+  (supervisor) and inside the confined launcher (staged exact-commit
+  `path_lease` module, F2), so a stale/tampered/replayed/foreign claim and a
+  worktree policy tamper fail closed at every trust edge. CI/security-
+  sensitive scopes set the immutable `audit_required` signal on the verified
+  binding and the launch result for the Phase 2C2b scheduler; the model can
+  never clear it. Default behavior without a lease is unchanged.
+- Acceptance criteria: the focused adversarial suite covers token/lease
+  mismatch, missing HMAC (no signed launch authority), replay/tamper/expiry
+  (at authorize, immediately before spawn, and inside the confined child),
+  worktree policy tamper, symlink/hardlink/mount candidates, deny-zone
+  attempts, no-lease unchanged behavior, exact writable path/prefix vs
+  sibling denied under real Landlock, `audit_required` immutability and
+  result binding, and failed-authorization cleanup; the confinement and
+  launch suites pass with the readiness-store fixtures; the full
+  `./scripts/verify-boilerplate.sh` gate passes serially.
+- Verification: `.factory/tests/test-factory-lease-launch.py`;
+  `.factory/tests/test-factory-confinement.py`;
+  `.factory/tests/test-factory-launch.py`;
+  `.factory/tools/verify-boilerplate.sh`.
+- Evidence: Phase 2C2a slice committed on `boilerplate-develop` with the
+  launch/confinement lease wiring, the schemas (`factory-confinement/v1`
+  `lease` section, `factory-launch-result/v1` `audit_required`), the
+  registered adversarial suite, the updated spec/docs/plan/conformance, and
+  the full boilerplate gate passing. This is implementation evidence for the
+  runtime-launch foundation only; no campaign minting is claimed.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.2, §22, §24
+  LEASE-01); `.factory/schemas/factory-confinement-v1.schema.json`;
+  `.factory/schemas/factory-launch-result-v1.schema.json`;
+  `docs/FACTORY.md`; `docs/OPERATIONS.md`.
+
+
+## Task 34: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32, Task 33
 - Scope: Current checkpoint: the Phase 2B2 runtime wiring is complete: the campaign consumes the trusted scheduler decisions (planning initial/on-demand only with the planner need/reason recorded in the control state; the trusted deterministic verifier runs at each candidate exact commit; the independent tester/auditor run only at milestone/risk boundaries; the audit resolves the next phase and the closed terminal reason), `--rounds` is a finite maximum budget (never an exact count, no exactly-five rejection) capped by the committed `factory-campaign-budget/v1` `max_rounds`, the scheduler-extension state fields (checkpoints, task attempts, progress/no-progress fingerprints, planner need/reason, audit trigger, completed audit objectives, terminal reason) are optional-in-parse and serialized only when active (byte-compatible migration), and the distinct honest terminal reasons (`success`, `software_verified_external_acceptance_blocked`, `blocked`, `no_progress`, `budget_exhausted`, `interrupted`, `infrastructure_failure`) are never mis-mapped to success/findings. The security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the

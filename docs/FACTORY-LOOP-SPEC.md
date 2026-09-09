@@ -591,6 +591,55 @@ Claims (strict DATA, never self-authorizing):
 - security-sensitive leases (a scope marked `audit_required`) mark
   `audit_required` so the independent audit is mandatory.
 
+### 14.2a Runtime-launch lease binding (Phase 2C2a, LEASE-01)
+
+The Phase 2C2a runtime-launch foundation binds the Phase 2C1 claim into the
+existing signed launch authority as an optional developer-only extension;
+no campaign minting happens here.  The claim remains DATA: the claim digest
+alone is never authoritative.
+
+Launch binding (`InvocationBinding` / `authorize_launch`):
+
+- the binding carries optional `campaign_id`, `attempt`, `lease_digest`,
+  `lease_bytes` (the exact canonical claim document), and the immutable
+  `audit_required` signal — all defaulted, so the campaign launch path is
+  byte-identical without a lease;
+- `authorize_launch` re-validates the exact canonical claim bytes against
+  the committed policy (schema, deny-dominant expansion, policy digest) and
+  the trusted launch context (campaign/task/attempt/HEAD/plan/policy
+  digest, issued/deadline) before any prompt byte or confinement rule is
+  composed; a stale, tampered, replayed, or foreign claim fails closed;
+- a real-provider launch still requires the existing signed HMAC/FD launch
+  token (the locked readiness store): a claim without that signed authority
+  never grants, and a consumed/replayed token fails closed;
+- the exact deny-dominant write candidates (`lease_write_candidates`:
+  granted paths plus the static directory prefixes of granted patterns,
+  deny re-checked, fail closed when empty) are the only paths the workspace
+  confinement may grant, as WRITE-only rules — the lease is write-path
+  scope only and never grants read/execute/commands/credentials beyond the
+  existing static authority;
+- each candidate is validated dirfd/O_NOFOLLOW: no symlink component,
+  resolved containment, same-device mount-escape check, single-link
+  hardlink check, and the path must exist (a nonexistent path cannot be
+  granted without overgranting its parent);
+- CI/security-sensitive scopes set the immutable `audit_required` signal on
+  the verified binding and the launch result for the Phase 2C2b scheduler;
+  the model can never clear it (a binding that claims `audit_required`
+  without an authenticated lease is rejected).
+
+Confinement and revalidation:
+
+- the exact claim/context travels in the `factory-confinement/v1`
+  specification (`lease` section) and the launch result carries
+  `audit_required`;
+- the lease is re-validated immediately before spawn (supervisor) and
+  inside the confined launcher (which loads the committed policy through
+  the staged exact-commit `path_lease` module, F2), so a stale/tampered/
+  replayed/foreign claim and a worktree policy tamper fail closed at every
+  trust edge;
+- default behavior without a lease is unchanged: no lease section, no
+  lease write rules, no `audit_required`.
+
 ## 15. Completion predicates
 
 The following predicates MUST remain distinct:
@@ -805,4 +854,4 @@ The stable IDs below are the conformance authority for this specification. Secti
 | MIG-01 | §21 | Generic-first migration preserves code, plan, evidence, blockers, and dirty work without importing Ralph control state | installed |
 | TEST-01 | §22 | The full adversarial conformance suite and documentation synchronization pass | installed |
 | ACCEPT-01 | §23 | Boilerplate acceptance requires all mapped requirements verified and an independent audit without critical findings | installed |
-| LEASE-01 | §14.2, §22, §24 | The task-scoped path-lease foundation is a strict, foundation-only authority: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself; no launch/confinement wiring is claimed | unit |
+| LEASE-01 | §14.2, §14.2a, §22, §24 | The task-scoped path-lease authority is strict and foundation-only: the committed `factory-path-lease-policy/v1` config maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces with absolute non-overridable deny zones (`.factory`, `.factory-state`, `.git`, product spec, credential/key/env authorities, and all goldens/approval/release/human-authority surfaces; no carve-out exists in the schema), deny is dominant over allow, the policy rejects absolute/traversal/backslash/control/symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and `factory-task-path-lease/v1` claims bind campaign/task/attempt/HEAD/plan digest/policy digest/scopes/expanded paths/issued-deadline/nonce with canonical digests, replay/expiry/context fail-closed, no free-form commands, no symlink resolution, and `audit_required` for security-sensitive scopes; the optional plan `Write scopes:` request field is closed-format and grants nothing by itself. The Phase 2C2a runtime-launch foundation binds the claim into the existing signed launch authority as an optional developer-only extension: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher, the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed), the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only), CI/security scopes set the immutable `audit_required` signal on the binding and launch result, and default behavior without a lease is unchanged. No campaign minting is claimed | unit |

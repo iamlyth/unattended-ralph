@@ -4,8 +4,8 @@
   {
    "id": "AUTH-01",
    "spec_sections": [
-    "§5",
-    "§7"
+    "\u00a75",
+    "\u00a77"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -26,8 +26,8 @@
   {
    "id": "CTX-01",
    "spec_sections": [
-    "§5",
-    "§9"
+    "\u00a75",
+    "\u00a79"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -48,8 +48,8 @@
   {
    "id": "CTX-02",
    "spec_sections": [
-    "§5",
-    "§18"
+    "\u00a75",
+    "\u00a718"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -70,7 +70,7 @@
   {
    "id": "ROLE-01",
    "spec_sections": [
-    "§6"
+    "\u00a76"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -93,7 +93,7 @@
   {
    "id": "PLAN-01",
    "spec_sections": [
-    "§7"
+    "\u00a77"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -115,8 +115,8 @@
   {
    "id": "TASK-01",
    "spec_sections": [
-    "§7",
-    "§8"
+    "\u00a77",
+    "\u00a78"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -136,8 +136,8 @@
   {
    "id": "TASK-02",
    "spec_sections": [
-    "§9",
-    "§20"
+    "\u00a79",
+    "\u00a720"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -157,7 +157,7 @@
   {
    "id": "QUOTA-01",
    "spec_sections": [
-    "§10"
+    "\u00a710"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -178,7 +178,7 @@
   {
    "id": "QUOTA-02",
    "spec_sections": [
-    "§10"
+    "\u00a710"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -200,8 +200,8 @@
   {
    "id": "STATE-01",
    "spec_sections": [
-    "§11",
-    "§17"
+    "\u00a711",
+    "\u00a717"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -221,10 +221,10 @@
   {
    "id": "STATE-02",
    "spec_sections": [
-    "§11",
-    "§13",
-    "§14",
-    "§15"
+    "\u00a711",
+    "\u00a713",
+    "\u00a714",
+    "\u00a715"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -246,7 +246,7 @@
   {
    "id": "LOCK-01",
    "spec_sections": [
-    "§12"
+    "\u00a712"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -267,9 +267,9 @@
   {
    "id": "PROC-01",
    "spec_sections": [
-    "§9",
-    "§12",
-    "§17"
+    "\u00a79",
+    "\u00a712",
+    "\u00a717"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -290,8 +290,8 @@
   {
    "id": "GIT-01",
    "spec_sections": [
-    "§12",
-    "§17"
+    "\u00a712",
+    "\u00a717"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -312,8 +312,8 @@
   {
    "id": "PHASE-01",
    "spec_sections": [
-    "§13",
-    "§14"
+    "\u00a713",
+    "\u00a714"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -334,7 +334,7 @@
   {
    "id": "COMPLETE-01",
    "spec_sections": [
-    "§15"
+    "\u00a715"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -354,7 +354,7 @@
   {
    "id": "FIND-01",
    "spec_sections": [
-    "§16"
+    "\u00a716"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -374,7 +374,7 @@
   {
    "id": "CRED-01",
    "spec_sections": [
-    "§18"
+    "\u00a718"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -396,7 +396,7 @@
   {
    "id": "EVID-01",
    "spec_sections": [
-    "§19"
+    "\u00a719"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -418,7 +418,7 @@
   {
    "id": "EVID-02",
    "spec_sections": [
-    "§19"
+    "\u00a719"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -439,7 +439,7 @@
   {
    "id": "VIS-01",
    "spec_sections": [
-    "§19"
+    "\u00a719"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -460,7 +460,7 @@
   {
    "id": "RUNNER-01",
    "spec_sections": [
-    "§19"
+    "\u00a719"
    ],
    "classification": "blocked",
    "evidence_tier": "private_integration",
@@ -484,7 +484,7 @@
   {
    "id": "HIDE-01",
    "spec_sections": [
-    "§3"
+    "\u00a73"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -505,7 +505,7 @@
   {
    "id": "MIG-01",
    "spec_sections": [
-    "§21"
+    "\u00a721"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -526,7 +526,7 @@
   {
    "id": "TEST-01",
    "spec_sections": [
-    "§22"
+    "\u00a722"
    ],
    "classification": "partial",
    "evidence_tier": "private_integration",
@@ -547,7 +547,7 @@
   {
    "id": "ACCEPT-01",
    "spec_sections": [
-    "§23"
+    "\u00a723"
    ],
    "classification": "missing",
    "evidence_tier": "unit",
@@ -562,9 +562,10 @@
   {
    "id": "LEASE-01",
    "spec_sections": [
-    "§14.2",
-    "§22",
-    "§24"
+    "\u00a714.2",
+    "\u00a714.2a",
+    "\u00a722",
+    "\u00a724"
    ],
    "classification": "partial",
    "evidence_tier": "unit",
@@ -574,15 +575,21 @@
    "receipts": [],
    "artifacts": [
     ".factory/loop/path_lease.py",
+    ".factory/loop/launch.py",
+    ".factory/loop/workspace_confinement.py",
+    ".factory/loop/confine_launcher.py",
     ".factory/path-lease-policy.json",
     ".factory/schemas/factory-path-lease-policy-v1.schema.json",
     ".factory/schemas/factory-task-path-lease-v1.schema.json",
-    ".factory/tests/test-factory-path-lease.py"
+    ".factory/schemas/factory-confinement-v1.schema.json",
+    ".factory/schemas/factory-launch-result-v1.schema.json",
+    ".factory/tests/test-factory-path-lease.py",
+    ".factory/tests/test-factory-lease-launch.py"
    ],
    "fact_refs": [
     "FACT-026"
    ],
-   "reason": ""
+   "reason": "Phase 2C1 foundation plus the Phase 2C2a runtime-launch binding: the exact canonical claim bytes are re-validated against the committed policy and the trusted context before spawn and inside the confined launcher; the claim digest alone is never authoritative (a real-provider launch without the signed HMAC/FD launch token fails closed); the exact deny-dominant write candidates are granted as WRITE-only workspace-confinement rules (no-follow, no symlink/hardlink/mount escape, existing paths only); CI/security scopes set the immutable audit_required signal on the binding and launch result; default behavior without a lease is unchanged. No campaign minting is claimed."
   }
  ]
 }

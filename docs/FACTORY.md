@@ -558,6 +558,22 @@ intersection decides.  Phase 2C1 does NOT wire leases into launch or
 confinement behavior; Phase 2C2 binds claims into the existing signed launch
 authority with exact no-follow path grants.
 
+### Runtime-launch lease binding (Phase 2C2a, LEASE-01)
+
+The Phase 2C2a runtime-launch foundation binds the claim into the existing
+signed launch authority as an optional developer-only extension (no campaign
+minting).  The exact canonical claim bytes are re-validated against the
+committed policy and the trusted launch context before any prompt byte or
+confinement rule is composed, immediately before spawn, and inside the
+confined launcher; the claim digest alone is never authoritative — a
+real-provider launch without the existing signed HMAC/FD launch token fails
+closed.  The exact deny-dominant write candidates are granted as WRITE-only
+workspace-confinement rules (no-follow, no symlink/hardlink/mount escape,
+existing paths only).  CI/security-sensitive scopes set the immutable
+`audit_required` signal on the verified binding and the launch result for
+the Phase 2C2b scheduler; the model can never clear it.  Default behavior
+without a lease is unchanged.
+
 ## Maintain one bug
 
 Ordinary defects stay out of `docs/SPEC.md`. Canonical state is tracked in

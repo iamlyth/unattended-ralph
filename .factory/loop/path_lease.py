@@ -290,6 +290,22 @@ def _static_prefix(pattern: str) -> str:
     return pattern
 
 
+def pattern_static_prefix(pattern: str) -> str:
+    """The leading literal directory run of a grant pattern.
+
+    A grant pattern never contains ``**``; its static prefix is the literal
+    text before the first glob metacharacter.  Landlock cannot express glob
+    patterns, so the confinement grants the directory that contains the
+    pattern's matches: the static prefix truncated at its last ``/``.  A
+    pattern whose static prefix has no directory component (a root-level
+    pattern such as ``*.sh``) yields an empty prefix and contributes no
+    directory candidate.
+    """
+    prefix = _static_prefix(pattern)
+    slash = prefix.rfind("/")
+    return prefix[:slash] if slash >= 0 else ""
+
+
 def _rep(segment: str) -> str:
     """A representative literal string a glob segment can match."""
     out: List[str] = []
@@ -1183,6 +1199,47 @@ def validate_claim_context(
         )
     if current > deadline:
         raise PathLeaseContextError("claim has expired (past its deadline)")
+
+
+def lease_write_candidates(
+    claim: TaskPathLease, policy: PathLeasePolicy
+) -> Tuple[str, ...]:
+    """The exact repository-relative write candidates of an authenticated claim.
+
+    Returns the claim's granted paths plus the static directory prefixes of
+    its granted patterns, deduplicated and re-checked deny-dominant: a
+    candidate that is itself a deny path, or a directory candidate that
+    contains an immutable deny path, is removed (deny is dominant at every
+    step).  A claim that grants nothing after the re-check fails closed, so
+    the confinement can never silently overgrant.  The returned candidates
+    are the only paths the workspace confinement may turn into Landlock
+    write rules for this claim; the claim digest alone is never
+    authoritative — the caller must already have validated the claim
+    against the committed policy and the trusted launch context.
+    """
+    if not isinstance(claim, TaskPathLease):
+        raise PathLeaseClaimError(
+            "lease_write_candidates expects a TaskPathLease"
+        )
+    candidates = set(claim.granted_paths)
+    for pattern in claim.granted_patterns:
+        prefix = pattern_static_prefix(pattern)
+        if prefix:
+            candidates.add(prefix)
+    result: List[str] = []
+    for rel in sorted(candidates):
+        if _path_in_deny(rel, policy):
+            continue
+        if any(deny_path.startswith(rel + "/") for deny_path in policy.deny_paths):
+            continue
+        result.append(rel)
+    if not result:
+        raise PathLeaseClaimError(
+            "the claim grants no write candidates after the deny-dominant "
+            "confinement re-check (deny zones override at every step; fail "
+            "closed)"
+        )
+    return tuple(result)
 
 
 def _cli(argv: Sequence[str]) -> int:

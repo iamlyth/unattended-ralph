@@ -40,6 +40,7 @@ The access-bit table must match the canonical table in
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import errno
 import fcntl
@@ -261,6 +262,64 @@ def stat_regular(info: object) -> bool:
     import stat
 
     return stat.S_ISREG(info.st_mode)
+
+
+def _validate_lease(spec: Mapping[str, object]) -> None:
+    """Revalidate the authenticated task path-lease inside the confined child.
+
+    Phase 2C2a: the exact canonical claim bytes and the trusted context
+    travel in the confinement specification; the committed path-lease policy
+    is re-loaded from the workspace through the exact no-follow authority
+    (the staged ``path_lease`` sibling is the exact bound-commit module, F2).
+    Schema, deny-dominant expansion, policy digest, and context/expiry
+    (campaign/task/attempt/HEAD/plan/policy digest, issued/deadline) are
+    re-derived before any Landlock rule is applied, so a stale, tampered,
+    replayed, or foreign claim — including a worktree policy tamper — fails
+    closed.  The claim digest alone is never authoritative.
+    """
+    lease = spec.get("lease")
+    if lease is None:
+        return
+    if not isinstance(lease, Mapping):
+        raise ConfineLaunchError("the confinement lease section is malformed")
+    claim_text = lease.get("claim")
+    context = lease.get("context")
+    if not isinstance(claim_text, str) or not isinstance(context, Mapping):
+        raise ConfineLaunchError(
+            "the confinement lease claim/context is malformed"
+        )
+    try:
+        claim_bytes = base64.b64decode(claim_text, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ConfineLaunchError(
+            f"the confinement lease claim is not base64: {exc}"
+        ) from exc
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import path_lease  # staged exact-commit sibling (F2)
+    except ImportError as exc:
+        raise ConfineLaunchError(
+            "the staged path-lease authority is unavailable"
+        ) from exc
+    try:
+        claim = path_lease.parse_claim(claim_bytes)
+        policy = path_lease.load_policy_config(Path(str(spec.get("workspace"))))
+        path_lease.validate_claim(claim, policy)
+        path_lease.validate_claim_context(
+            claim,
+            campaign_id=context.get("campaign_id"),
+            task_id=context.get("task_id"),
+            attempt=context.get("attempt"),
+            head_commit=context.get("head_commit"),
+            plan_digest=context.get("plan_digest"),
+            policy_digest=context.get("policy_digest"),
+        )
+    except path_lease.PathLeaseError as exc:
+        raise ConfineLaunchError(
+            f"the task path-lease fails closed: {exc}"
+        ) from exc
 
 
 def _landlock_abi() -> int:
@@ -1842,6 +1901,7 @@ def main(argv: Sequence[str]) -> int:
                 )
             os.fstat(supervision_fd)
         spec = _read_spec(spec_path)
+        _validate_lease(spec)
         status, escaped = _launch_with_exec_broker(
             spec, rule_fds, command, supervision_fd, target_only_fds
         )

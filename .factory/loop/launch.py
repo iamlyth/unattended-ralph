@@ -60,6 +60,7 @@ is the deterministic Task-6 deliverable:
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import fcntl
 import functools
@@ -88,6 +89,7 @@ try:  # package-import mode (the hidden control-plane package)
     from . import workspace_confinement as real_confinement_authority
     from . import redaction as output_redaction
     from . import task_budget as task_budget_module
+    from . import path_lease as lease_authority
     from .gitutil import (
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -115,6 +117,7 @@ except ImportError:  # flat-import mode used by the hidden harness test suite
     import workspace_confinement as real_confinement_authority  # type: ignore[no-redef]
     import redaction as output_redaction  # type: ignore[no-redef]
     import task_budget as task_budget_module  # type: ignore[no-redef]
+    import path_lease as lease_authority  # type: ignore[no-redef]
     from gitutil import (  # type: ignore[no-redef]
         GIT_ENV_STRIP,
         GitBoundaryError,
@@ -531,6 +534,19 @@ class InvocationBinding:
     # Exact transient result channel bound into the canonical confinement
     # specification. Empty for roles/attempts with no structured handoff.
     result_write_path: str = ""
+    # Phase 2C2a: the optional authenticated task path-lease.  Developer-only;
+    # when present, ``lease_bytes`` is the exact canonical
+    # ``factory-task-path-lease/v1`` claim document and ``lease_digest`` its
+    # claim digest; ``campaign_id``/``attempt`` bind the trusted launch
+    # context the claim is re-validated against (replay/expiry fail closed).
+    # ``audit_required`` is the immutable security-sensitive signal derived
+    # from the validated claim — the model can never clear it, and it is
+    # carried into the launch result for the Phase 2C2b scheduler.
+    campaign_id: str = ""
+    attempt: int = 0
+    lease_digest: str = ""
+    lease_bytes: bytes = b""
+    audit_required: bool = False
     runtime_limit: float = DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = DEFAULT_INACTIVITY_LIMIT
 
@@ -714,6 +730,70 @@ def verify_invocation(binding: InvocationBinding) -> None:
         ) from exc
     if not stat.S_ISDIR(info.st_mode):
         raise InvocationError(f"`workspace` {workspace} is not a directory")
+    if binding.campaign_id:
+        if not lease_authority.CAMPAIGN_ID_RE.fullmatch(binding.campaign_id):
+            raise InvocationError(
+                f"`campaign_id` {binding.campaign_id!r} must match "
+                "`^[A-Za-z0-9._-]{1,128}$`"
+            )
+    if binding.attempt:
+        if (
+            isinstance(binding.attempt, bool)
+            or not isinstance(binding.attempt, int)
+            or binding.attempt < 1
+        ):
+            raise InvocationError(
+                f"`attempt` must be a positive integer, got {binding.attempt!r}"
+            )
+    has_lease = bool(binding.lease_digest or binding.lease_bytes)
+    if has_lease:
+        # Phase 2C2a: a task path-lease is developer-only and binds the exact
+        # canonical claim bytes plus their claim digest.  The claim digest
+        # alone is never authoritative — the trusted launch authority
+        # re-validates schema, committed-policy expansion, and context/expiry
+        # before spawn and inside the confinement launcher.
+        if binding.role != "developer":
+            raise InvocationError(
+                "a task path-lease is allowed only for the developer role"
+            )
+        if not binding.lease_digest or not binding.lease_bytes:
+            raise InvocationError(
+                "`lease_digest` and `lease_bytes` must be present together"
+            )
+        if not SHA256_RE.fullmatch(binding.lease_digest):
+            raise InvocationError(
+                "`lease_digest` must be a 64-hex SHA-256 digest"
+            )
+        if (
+            not isinstance(binding.lease_bytes, (bytes, bytearray))
+            or not binding.lease_bytes
+        ):
+            raise InvocationError(
+                "`lease_bytes` must be the exact canonical claim bytes"
+            )
+        if len(binding.lease_bytes) > lease_authority.MAX_CLAIM_BYTES:
+            raise InvocationError(
+                f"`lease_bytes` exceeds the {lease_authority.MAX_CLAIM_BYTES}-byte "
+                "claim bound"
+            )
+        if not binding.campaign_id:
+            raise InvocationError(
+                "a task path-lease requires the trusted `campaign_id` binding"
+            )
+        if not binding.attempt:
+            raise InvocationError(
+                "a task path-lease requires the trusted `attempt` binding"
+            )
+        if binding.task_id is None:
+            raise InvocationError(
+                "a task path-lease requires the developer `task_id` binding"
+            )
+    else:
+        if binding.audit_required:
+            raise InvocationError(
+                "`audit_required` is set only by an authenticated task "
+                "path-lease; the model cannot clear or claim it"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1812,6 +1892,11 @@ class LaunchResult:
     descendants_snapshot: int
     live_descendants: int
     invariants: Tuple[str, ...]
+    # Phase 2C2a: the immutable security-sensitive audit signal derived from
+    # an authenticated task path-lease (CI/security scopes).  The model can
+    # never clear it; the Phase 2C2b scheduler consumes it to make the
+    # independent audit mandatory.
+    audit_required: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -1829,6 +1914,7 @@ class LaunchResult:
             "descendants_snapshot": self.descendants_snapshot,
             "live_descendants": self.live_descendants,
             "invariants": list(self.invariants),
+            "audit_required": self.audit_required,
         }
 
 
@@ -2363,6 +2449,76 @@ class LaunchSupervision:
         self._credential_return_write_fd = write_fd
         self._credential_return_stop = threading.Event()
 
+    def _revalidate_lease(self) -> None:
+        """Revalidate the authenticated task path-lease immediately before spawn.
+
+        The exact canonical claim bytes and the trusted context travel in the
+        confinement specification; the committed path-lease policy is
+        re-loaded from the workspace through the exact no-follow authority.
+        Schema, deny-dominant expansion, policy digest, and context/expiry
+        (campaign/task/attempt/HEAD/plan/policy digest, issued/deadline) are
+        re-derived at the last trust edge before the child exists, so a
+        stale, tampered, replayed, or foreign claim — including a worktree
+        policy tamper — fails closed.  The immutable ``audit_required``
+        signal must still match the binding; the model can never clear it.
+        """
+        spec = self._confinement_spec
+        if spec is None:
+            return
+        lease = spec.get("lease")
+        if lease is None:
+            return
+        if not isinstance(lease, Mapping):
+            raise SupervisionError(
+                "the confinement lease section is malformed (fail closed)"
+            )
+        claim_text = lease.get("claim")
+        context = lease.get("context")
+        if not isinstance(claim_text, str) or not isinstance(context, Mapping):
+            raise SupervisionError(
+                "the confinement lease claim/context is malformed (fail closed)"
+            )
+        try:
+            claim_bytes = base64.b64decode(claim_text, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise SupervisionError(
+                f"the confinement lease claim is not base64: {exc}"
+            ) from exc
+        if not self.binding.lease_bytes or bytes(claim_bytes) != self.binding.lease_bytes:
+            raise SupervisionError(
+                "the confinement lease claim differs from the bound canonical "
+                "claim bytes (fail closed)"
+            )
+        try:
+            claim = lease_authority.parse_claim(bytes(claim_bytes))
+            policy = lease_authority.load_policy_config(
+                Path(self.binding.workspace).absolute()
+            )
+            lease_authority.validate_claim(claim, policy)
+            lease_authority.validate_claim_context(
+                claim,
+                campaign_id=self.binding.campaign_id,
+                task_id=self.binding.task_id,
+                attempt=self.binding.attempt,
+                head_commit=self.binding.bound_commit,
+                plan_digest=self.binding.plan_digest,
+                policy_digest=lease_authority.policy_digest(policy),
+            )
+        except lease_authority.PathLeaseError as exc:
+            raise SupervisionError(
+                f"the task path-lease fails closed at spawn: {exc}"
+            ) from exc
+        if claim.claim_digest != self.binding.lease_digest:
+            raise SupervisionError(
+                "the lease claim digest does not match the bound digest at "
+                "spawn (fail closed)"
+            )
+        if claim.audit_required != self.binding.audit_required:
+            raise SupervisionError(
+                "the lease audit_required signal drifted from the binding; "
+                "the model cannot clear it (fail closed)"
+            )
+
     def _zero_credential_return(self) -> None:
         """Zero and drop any buffered credential-return bytes.
 
@@ -2554,6 +2710,13 @@ class LaunchSupervision:
                     "(fail closed)"
                 )
             try:
+                # Phase 2C2a: revalidate the authenticated task path-lease
+                # immediately before spawn — schema, committed-policy
+                # expansion, and context/expiry are re-derived from the exact
+                # canonical claim bytes and the committed policy, so a stale,
+                # tampered, replayed, or foreign claim fails closed at the
+                # last trust edge before the child exists.
+                self._revalidate_lease()
                 real_confinement_authority.validate_rule_anchors(
                     self._confinement_spec, self._confinement_rule_fds
                 )
@@ -3545,6 +3708,7 @@ class LaunchSupervision:
                     descendants_snapshot=len(self._captured),
                     live_descendants=len(self.live_scope()),
                     invariants=invariants,
+                    audit_required=binding.audit_required,
                 )
             except BaseException:
                 # F1: any exception, KeyboardInterrupt, or signal received
@@ -3833,6 +3997,27 @@ def _add_common_binding(parser: argparse.ArgumentParser) -> None:
         "--findings-digest", metavar="HEX", default=None,
         help="(optional, planner only) claimed findings-payload digest; "
         "verified against the re-derived payload bytes, never authoritative",
+    )
+    # Phase 2C2a: the optional authenticated task path-lease (developer only).
+    # The claim is DATA — the digest alone is never authoritative; the launch
+    # authority re-validates schema, committed-policy expansion, and
+    # context/expiry before spawn and inside the confinement launcher.
+    parser.add_argument(
+        "--campaign-id", metavar="ID", default="",
+        help="(lease) trusted campaign id the claim is re-validated against",
+    )
+    parser.add_argument(
+        "--attempt", type=int, default=0,
+        help="(lease) trusted attempt number the claim is re-validated against",
+    )
+    parser.add_argument(
+        "--lease", metavar="FILE", default=None,
+        help="(developer only) the exact canonical factory-task-path-lease/v1 "
+        "claim document; the claim digest alone is never authoritative",
+    )
+    parser.add_argument(
+        "--lease-digest", metavar="HEX", default=None,
+        help="(developer only) the bound claim digest of the exact lease bytes",
     )
     # Quota credentials and controls are deliberately absent from this model-
     # side interface. The campaign parent runs QUOTA-01 for each invocation.
@@ -5041,6 +5226,7 @@ def authorize_launch(
     findings: Optional[bytes] = None,
     task_budget: Optional[Mapping[str, object]] = None,
     verifier_failure: Optional[Mapping[str, object]] = None,
+    lease: Optional[bytes] = None,
     _authorization_store: Optional[object] = None,
     _authorization_token: str = "",
     _authorization_claims: Optional[Mapping[str, object]] = None,
@@ -5100,6 +5286,87 @@ def authorize_launch(
                                          _authorization_claims)
         except _readiness.AuthorizationError as exc:
             raise InvocationError(f"real-provider authorization refused: {exc}") from exc
+    # Phase 2C2a: the optional authenticated task path-lease.  The claim is
+    # DATA — the claim digest alone is never authoritative.  The trusted
+    # launch authority re-validates the exact canonical claim bytes against
+    # the committed path-lease policy (schema, deny-dominant expansion,
+    # policy digest) and against the trusted launch context
+    # (campaign/task/attempt/HEAD/plan/policy digest, issued/deadline), so a
+    # stale, tampered, replayed, or foreign claim fails closed before any
+    # prompt byte is composed or any confinement rule is built.  The exact
+    # deny-dominant write candidates are the only paths the workspace
+    # confinement may grant, and a security-sensitive claim sets the
+    # immutable ``audit_required`` signal the model can never clear.
+    lease_claim: Optional[Dict[str, object]] = None
+    lease_write_candidates: Tuple[str, ...] = ()
+    if lease is not None:
+        if binding.role != "developer":
+            raise InvocationError(
+                "a task path-lease is allowed only for the developer role"
+            )
+        if not isinstance(lease, (bytes, bytearray)) or not lease:
+            raise InvocationError(
+                "the task path-lease must be the exact canonical claim bytes"
+            )
+        if bytes(lease) != binding.lease_bytes:
+            raise InvocationError(
+                "the delivered lease bytes differ from the bound canonical "
+                "claim bytes (substituted or foreign claim)"
+            )
+        try:
+            claim = lease_authority.parse_claim(bytes(lease))
+        except lease_authority.PathLeaseError as exc:
+            raise InvocationError(
+                f"the task path-lease claim is malformed or forged: {exc}"
+            ) from exc
+        if claim.claim_digest != binding.lease_digest:
+            raise InvocationError(
+                "the lease claim digest does not match the bound digest; a "
+                "tampered or substituted claim fails closed"
+            )
+        try:
+            policy = lease_authority.load_policy_config(
+                Path(binding.workspace).absolute()
+            )
+        except lease_authority.PathLeaseError as exc:
+            raise InvocationError(
+                f"cannot load the committed path-lease policy: {exc}"
+            ) from exc
+        try:
+            lease_authority.validate_claim(claim, policy)
+            lease_authority.validate_claim_context(
+                claim,
+                campaign_id=binding.campaign_id,
+                task_id=binding.task_id,
+                attempt=binding.attempt,
+                head_commit=binding.bound_commit,
+                plan_digest=binding.plan_digest,
+                policy_digest=lease_authority.policy_digest(policy),
+            )
+        except lease_authority.PathLeaseError as exc:
+            raise InvocationError(
+                f"the task path-lease claim fails closed: {exc}"
+            ) from exc
+        try:
+            lease_write_candidates = lease_authority.lease_write_candidates(
+                claim, policy
+            )
+        except lease_authority.PathLeaseError as exc:
+            raise InvocationError(
+                f"the task path-lease grants no confinement candidates: {exc}"
+            ) from exc
+        lease_claim = {
+            "claim": base64.b64encode(bytes(lease)).decode("ascii"),
+            "context": {
+                "campaign_id": binding.campaign_id,
+                "task_id": binding.task_id,
+                "attempt": binding.attempt,
+                "head_commit": binding.bound_commit,
+                "plan_digest": binding.plan_digest,
+                "policy_digest": lease_authority.policy_digest(policy),
+            },
+        }
+        binding = replace(binding, audit_required=claim.audit_required)
     _verify_input_digest("role prompt", role_prompt, binding.role_prompt_digest)
     _verify_input_digest("operational policy", agents, binding.policy_digest)
     _verify_input_digest("specification", spec, binding.specification_digest)
@@ -5232,6 +5499,8 @@ def authorize_launch(
                     [binding.result_write_path]
                     if binding.result_write_path else []
                 ),
+                lease_write_paths=lease_write_candidates,
+                lease=lease_claim,
                 _rule_descriptors=rule_fd_list,
             )
         except real_confinement_authority.ConfinementError as exc:
@@ -5261,6 +5530,24 @@ def authorize_launch(
         staged_digests[str(confined_launcher)] = hashlib.sha256(
             launcher_bytes
         ).hexdigest()
+        if lease_claim is not None:
+            # Phase 2C2a: the confined launcher re-validates the authenticated
+            # lease claim inside the child, so the exact committed path-lease
+            # authority is staged beside it from the bound-commit blob (F2).
+            lease_module_source = (
+                Path(binding.workspace).absolute()
+                / ".factory/loop/path_lease.py"
+            )
+            lease_module_bytes = _read_committed_blob(
+                str(lease_module_source), Path(binding.workspace).absolute(),
+                binding.bound_commit, "path-lease authority", PROMPT_INPUT_MAX,
+            )
+            lease_module_path = _stage_bytes(
+                exec_dir, "path_lease.py", lease_module_bytes
+            )
+            staged_digests[str(lease_module_path)] = hashlib.sha256(
+                lease_module_bytes
+            ).hexdigest()
         prompt = compose_prompt(
             binding,
             role_prompt=blobs["role_prompt"],
@@ -5661,6 +5948,27 @@ def _run_cli(args: argparse.Namespace) -> int:
                 "findings", hashlib.sha256(findings).hexdigest(),
                 args.findings_digest,
             )
+        # Phase 2C2a: the optional authenticated task path-lease (developer
+        # only).  The exact canonical claim bytes are read anchored and
+        # bounded; the claim digest alone is never authoritative — the
+        # launch authority re-validates schema, committed-policy expansion,
+        # and context/expiry before spawn and inside the confinement launcher.
+        lease_bytes = b""
+        if args.lease or args.lease_digest:
+            if args.role != "developer":
+                raise InvocationError(
+                    "--lease/--lease-digest are allowed only for the "
+                    "developer role"
+                )
+            if not args.lease or not args.lease_digest:
+                raise InvocationError(
+                    "the task path-lease requires both --lease and "
+                    "--lease-digest"
+                )
+            lease_bytes = _read_blob_anchored(
+                args.lease, "task path-lease claim",
+                lease_authority.MAX_CLAIM_BYTES,
+            )
         binding = InvocationBinding(
             role=args.role,
             model=args.model,
@@ -5678,6 +5986,10 @@ def _run_cli(args: argparse.Namespace) -> int:
             task_excerpt_digest=task_excerpt_digest,
             audit_objective_digest=audit_objective_digest,
             findings_digest=findings_digest,
+            campaign_id=args.campaign_id,
+            attempt=args.attempt,
+            lease_digest=args.lease_digest or "",
+            lease_bytes=lease_bytes,
             runtime_limit=args.runtime_limit,
             inactivity_limit=args.inactivity_limit,
         )
@@ -5701,6 +6013,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings,
+            lease=lease_bytes or None,
         )
         supervisor = LaunchSupervision(binding)
         result = supervisor.run(authority)

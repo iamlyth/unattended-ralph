@@ -2355,6 +2355,33 @@ class ProductionLaunchConfinementTests(_Base):
                 "confinement launch path cannot run (fail closed)"
             )
 
+    def _locked_authorization_store(self):
+        """A real campaign-lock-bound readiness store fixture.
+
+        Real providers require a fresh one-use mint from the exclusively
+        locked Campaign (readiness machinery); the fixture replicates the
+        campaign's locked store so the ollama confinement path is exercised
+        honestly instead of being skipped.
+        """
+        import readiness
+
+        root = Path(tempfile.mkdtemp(prefix="factory-conf-auth.", dir=str(ROOT)))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "state" / "campaign").mkdir(parents=True, mode=0o700)
+        lock_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, lock_fd)
+        nonce = "a" * 64
+        document = readiness.result_document(
+            campaign_id="fixture-campaign", nonce=nonce, status="complete",
+            bindings={}, results={"aggregate": "1" * 64},
+        )
+        store = readiness.AuthorizationStore(
+            root, "state/campaign", "fixture-campaign", nonce, lock_fd,
+            document,
+        )
+        self.addCleanup(store.close)
+        return store
+
     def _authorize(self, binding, **kwargs):
         authority = launch.authorize_launch(
             binding,
@@ -2504,7 +2531,15 @@ class ProductionLaunchConfinementTests(_Base):
         """Ollama launch keeps real confinement but opens no quota channel."""
         binding = self.binding(role="planner", provider="ollama")
         self.assertFalse(hasattr(launch, "usage_guard"))
-        authority = self._authorize(binding)
+        store = self._locked_authorization_store()
+        claims = {"fixture": "ollama-confinement"}
+        token = store.mint(claims)
+        authority = self._authorize(
+            binding,
+            _authorization_store=store,
+            _authorization_token=token,
+            _authorization_claims=claims,
+        )
         self.assertFalse(hasattr(authority._confinement_proof, "synthetic"))
         self.assertEqual(
             {c.to_tuple() for c in authority._confinement_proof.credential_channels},
@@ -2591,23 +2626,54 @@ class ProductionLaunchConfinementTests(_Base):
             )
 
     def test_every_provider_and_direct_api_requires_real_confinement(self) -> None:
-        """Every programmatic provider receives internally minted real confinement."""
+        """Every programmatic provider receives internally minted real
+        confinement; a real provider without the locked readiness store fails
+        closed (standalone/programmatic launch is synthetic-only)."""
         for provider in ("synthetic", "ollama"):
             with self.subTest(provider=provider):
                 binding = self.binding(role="planner", provider=provider)
-                authority = self._authorize(binding)
+                kwargs = {}
+                if provider != "synthetic":
+                    store = self._locked_authorization_store()
+                    claims = {"fixture": "provider-confinement"}
+                    token = store.mint(claims)
+                    kwargs = {
+                        "_authorization_store": store,
+                        "_authorization_token": token,
+                        "_authorization_claims": claims,
+                    }
+                authority = self._authorize(binding, **kwargs)
                 self.assertFalse(hasattr(authority._confinement_proof, "synthetic"))
                 self.assertTrue(authority._confinement_rule_fds)
+
+    def test_real_provider_without_signed_authority_fails_closed(self) -> None:
+        """A real provider without the locked readiness store (HMAC/FD signed
+        launch authority) fails closed — no claim can self-authorize."""
+        binding = self.binding(role="planner", provider="ollama")
+        with self.assertRaises(launch.InvocationError) as caught:
+            self._authorize(binding)
+        self.assertIn("readiness", str(caught.exception).lower())
 
     def test_direct_api_with_real_spec_mints_real_proof(self) -> None:
         """The programmatic (non-CLI) authorize API applies real confinement
         and mints a real (never synthetic) proof for every provider — the
-        confinement is not CLI-only (finding 5).
+        confinement is not CLI-only (finding 5).  A real provider requires
+        the locked readiness store.
         """
         for provider in ("synthetic", "ollama"):
             with self.subTest(provider=provider):
                 binding = self.binding(role="planner", provider=provider)
-                authority = self._authorize(binding)
+                kwargs = {}
+                if provider != "synthetic":
+                    store = self._locked_authorization_store()
+                    claims = {"fixture": "direct-api-confinement"}
+                    token = store.mint(claims)
+                    kwargs = {
+                        "_authorization_store": store,
+                        "_authorization_token": token,
+                        "_authorization_claims": claims,
+                    }
+                authority = self._authorize(binding, **kwargs)
                 self.assertIsInstance(authority, launch.LaunchAuthority)
                 proof = authority._confinement_proof
                 self.assertIsNotNone(

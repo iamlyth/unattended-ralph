@@ -607,6 +607,50 @@ def _assert_single_link_allowlisted_file(path_text: str) -> None:
         )
 
 
+def _lease_write_path(path: Path, workspace: Path) -> None:
+    """Validate one authenticated lease write candidate (fail closed).
+
+    The candidate is an exact repository-relative path/prefix from the
+    authenticated claim's deny-dominant expansion (Phase 2C2a).  It must
+    exist — a nonexistent path cannot be granted without overgranting its
+    parent directory — carry no symlink component (the dirfd/O_NOFOLLOW
+    walk), resolve back inside the canonical workspace, stay on the
+    workspace's device (no mount escape), and, for a regular file, be a
+    single-link file (no hardlink alias risk).  The lease is write-path
+    scope only: the rule grants WRITE and never read/execute/commands or
+    credentials beyond the existing static authority.
+    """
+    path_text = str(path.absolute())
+    _validate_allowlist_path(path_text, workspace, "lease write path")
+    try:
+        info = os.lstat(path_text)
+    except OSError as exc:
+        raise ConfinementError(
+            f"lease write path {path_text} does not exist; granting its "
+            "parent would overgrant every sibling (fail closed)"
+        ) from exc
+    try:
+        workspace_info = os.lstat(str(workspace))
+    except OSError as exc:
+        raise ConfinementError(
+            f"cannot inspect the canonical workspace {workspace}: {exc} "
+            "(fail closed)"
+        ) from exc
+    if info.st_dev != workspace_info.st_dev:
+        raise ConfinementError(
+            f"lease write path {path_text} is on a different device than the "
+            "workspace; a mount escape is never granted (fail closed)"
+        )
+    if stat.S_ISREG(info.st_mode):
+        _assert_single_link_allowlisted_file(path_text)
+    elif not stat.S_ISDIR(info.st_mode):
+        raise ConfinementError(
+            f"lease write path {path_text} is neither a regular file nor a "
+            "directory; only exact product paths/prefixes are granted (fail "
+            "closed)"
+        )
+
+
 def _workspace_read_entries(workspace: Path) -> List[str]:
     """Deterministic top-level workspace entries the model may read.
 
@@ -1258,6 +1302,8 @@ def confinement_spec(
     sanitized_home: Path,
     extra_read: Sequence[str] = (),
     extra_write: Sequence[str] = (),
+    lease_write_paths: Sequence[str] = (),
+    lease: Optional[Mapping[str, object]] = None,
     _rule_descriptors: Optional[List[int]] = None,
 ) -> Dict[str, object]:
     """The deterministic per-launch confinement specification.
@@ -1265,10 +1311,16 @@ def confinement_spec(
     ``binding`` is the ``launch.InvocationBinding``; ``sanitized_home`` is
     the fresh private home directory created by the control plane;
     ``extra_read``/``extra_write`` are absolute paths added for the backend
-    and tooling.  The returned specification (schema
-    ``factory-confinement/v1``) is a pure function of the binding, the
-    committed workspace state, and the given extras; the proof's
-    specification digest binds exactly these bytes.
+    and tooling.  ``lease_write_paths`` (Phase 2C2a) are the exact
+    repository-relative write candidates of an already-authenticated task
+    path-lease claim; each becomes a WRITE-only rule (the lease is
+    write-path scope only, never read/execute/commands/credentials beyond
+    the existing static authority) and is validated like every other
+    allowlist entry.  ``lease`` is the exact claim/context section the
+    confined launcher re-validates before applying Landlock.  The returned
+    specification (schema ``factory-confinement/v1``) is a pure function of
+    the binding, the committed workspace state, and the given extras; the
+    proof's specification digest binds exactly these bytes.
     """
     workspace = Path(binding.workspace).absolute()
     role = binding.role
@@ -1371,6 +1423,19 @@ def confinement_spec(
         _assert_single_link_allowlisted_file(path)
         add_rule(path, (ACCESS_READ, ACCESS_WRITE))
 
+    for rel in lease_write_paths:
+        # Phase 2C2a: the exact policy-expanded product paths/prefixes of
+        # the already-authenticated task path-lease claim.  Each candidate
+        # is validated like every other allowlist entry (no symlink
+        # component, resolved containment, no mount escape, no hardlink
+        # alias, existing path) and becomes a WRITE-only rule: the lease is
+        # write-path scope only and never grants read/execute/commands or
+        # credentials beyond the existing static authority.  Immutable deny
+        # zones were already re-checked by the claim authority; a candidate
+        # that cannot be granted exactly fails closed here.
+        _lease_write_path(workspace / rel, workspace)
+        add_rule(str((workspace / rel).absolute()), (ACCESS_WRITE,))
+
     # The exact per-launch private home (Task 8 review, finding 4): the
     # model receives no broad ``/tmp`` grant — only this launch's own
     # mode-0700 private home (with its scratch subdirectories) is granted
@@ -1410,6 +1475,14 @@ def confinement_spec(
         "env": dict(sorted(home_environment(sanitized_home).items())),
         "rules": rules,
     }
+    if lease is not None:
+        # Phase 2C2a: the exact authenticated lease claim/context travels in
+        # the specification so the confined launcher re-validates schema,
+        # committed-policy expansion, and context/expiry before applying any
+        # Landlock rule.  The proof's specification digest binds these bytes.
+        if not isinstance(lease, Mapping):
+            raise ConfinementError("the confinement lease section must be an object")
+        spec["lease"] = dict(lease)
     return spec
 
 
@@ -1580,6 +1653,42 @@ def validate_confinement_spec(
         for right in access:
             if right not in (ACCESS_READ, ACCESS_WRITE, ACCESS_EXECUTE):
                 raise ConfinementError(f"rule {path} has unknown right {right!r}")
+    lease = spec.get("lease")
+    if lease is not None:
+        # Phase 2C2a: the authenticated lease section is structurally bound
+        # (the full claim/context revalidation happens immediately before
+        # spawn and inside the confined launcher).  A malformed section
+        # fails closed here.
+        if not isinstance(lease, Mapping):
+            raise ConfinementError("the confinement lease section must be an object")
+        if set(lease) != {"claim", "context"}:
+            raise ConfinementError(
+                "the confinement lease section must carry exactly claim/context"
+            )
+        claim = lease.get("claim")
+        context = lease.get("context")
+        if not isinstance(claim, str) or not claim:
+            raise ConfinementError(
+                "the confinement lease claim must be a non-empty string"
+            )
+        if not isinstance(context, Mapping):
+            raise ConfinementError(
+                "the confinement lease context must be an object"
+            )
+        for key in ("campaign_id", "head_commit", "plan_digest", "policy_digest"):
+            if not isinstance(context.get(key), str) or not context[key]:
+                raise ConfinementError(
+                    f"the confinement lease context {key} must be a non-empty string"
+                )
+        for key in ("task_id", "attempt"):
+            if (
+                isinstance(context.get(key), bool)
+                or not isinstance(context.get(key), int)
+                or context[key] < 1
+            ):
+                raise ConfinementError(
+                    f"the confinement lease context {key} must be a positive integer"
+                )
 
 
 def _channel_covered_by_spec(channel: CredentialChannel, spec: Mapping[str, object]) -> bool:

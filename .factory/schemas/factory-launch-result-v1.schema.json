@@ -58,6 +58,10 @@
     },
     "descendants_snapshot": { "type": "integer", "minimum": 0 },
     "live_descendants": { "type": "integer", "minimum": 0 },
-    "invariants": { "type": "array", "items": { "type": "string" } }
+    "invariants": { "type": "array", "items": { "type": "string" } },
+    "audit_required": {
+      "type": "boolean",
+      "description": "Phase 2C2a: the immutable security-sensitive audit signal derived from an authenticated task path-lease (CI/security scopes). The model can never clear it; the Phase 2C2b scheduler consumes it to make the independent audit mandatory."
+    }
   }
 }

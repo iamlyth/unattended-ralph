@@ -59,6 +59,31 @@
           }
         }
       }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "context"],
+      "description": "Phase 2C2a: the exact authenticated task path-lease claim/context the confined launcher re-validates (schema, committed-policy expansion, context/expiry) before applying any Landlock rule. The claim digest alone is never authoritative.",
+      "properties": {
+        "claim": { "type": "string", "minLength": 1 },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "campaign_id", "task_id", "attempt", "head_commit",
+            "plan_digest", "policy_digest"
+          ],
+          "properties": {
+            "campaign_id": { "type": "string", "minLength": 1 },
+            "task_id": { "type": "integer", "minimum": 1 },
+            "attempt": { "type": "integer", "minimum": 1 },
+            "head_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "plan_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      }
     }
   }
 }
