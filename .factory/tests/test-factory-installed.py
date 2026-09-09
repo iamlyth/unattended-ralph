@@ -101,6 +101,7 @@ import evidence as evidence_module  # noqa: E402
 import footprint  # noqa: E402
 import gitutil  # noqa: E402
 import installer as installer_module  # noqa: E402
+import substance  # noqa: E402
 
 sys.path.insert(0, str(SMOKE_DIR))
 import evidence_smoke_common as smoke_common  # noqa: E402
@@ -1120,6 +1121,28 @@ class InstalledTierSuite(unittest.TestCase):
         # The installed copy is byte-identical after the campaign.
         after = self.installed_inventory(self.external, self.manifest_ext)
         self.assertEqual(after["errors"], [], after["errors"])
+        # Regression: the evidence-smoke planner revision must be a genuine
+        # semantic planning change (the smoke note revises the smoke task's
+        # ``Scope`` field), so the meaningful-substance boundary commits the
+        # planner output exactly once instead of rejecting it as metadata-
+        # only prose.  The committed plan is the old revision; the planner
+        # revision is the new one.
+        old_plan = _run(
+            [gitutil.GIT_EXECUTABLE, "-C", str(fixture), "show",
+             f"{head}:.factory/artifacts/implementation-plan.md"],
+            cwd=str(fixture),
+        ).stdout.encode("utf-8")
+        new_plan = smoke_common.plan_with_smoke_marker(old_plan)
+        self.assertTrue(
+            substance.plan_change_is_semantic(old_plan, new_plan),
+            "the evidence-smoke planner revision must be a semantic planning "
+            "change (Scope edit), never metadata-only prose",
+        )
+        self.assertIn(
+            smoke_common.SMOKE_MARKER,
+            new_plan.decode("utf-8"),
+            "the smoke note must be present in the planner revision",
+        )
 
     def test_clean_committed_install_never_double_stages(self) -> None:
         """H1 regression: once the Task-20 authorities are committed, a
