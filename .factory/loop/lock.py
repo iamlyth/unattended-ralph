@@ -127,6 +127,19 @@ import threading
 import time
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+# Phase 2D1 security remediation A: the lock validates the composite plan
+# binding digest (active plan + archive/history sidecar digests) for a v2
+# plan, so a change to the plan or to either sidecar breaks the sole-writer
+# lock binding.  v1/v2 is detected by the parsed front-matter schema (never
+# a substring heuristic).  These imports are stdlib-only and do not import
+# this module, so there is no import cycle.
+try:
+    from . import plan_parser  # type: ignore[no-redef]
+    from . import plan_sidecars  # type: ignore[no-redef]
+except ImportError:  # flat import used by the hidden `.factory/tests/` suite
+    import plan_parser  # type: ignore[no-redef]
+    import plan_sidecars  # type: ignore[no-redef]
+
 # Lock metadata keys carried in the trusted holder's environment (and in the
 # environment of any pre-exec helper that must *assert* the lock before
 # exec).  Every key with the ``ENV_PREFIX`` prefix — plus every legacy
@@ -767,7 +780,48 @@ class RootLock:
         raw = self._git_bytes(["cat-file", "blob", blob.stdout.strip()])
         if raw.returncode != 0:
             raise RootLockBindingError("cannot read the committed plan blob")
-        digest = hashlib.sha256(raw.stdout).hexdigest()
+        # Phase 2D1 security remediation A: a v2 plan binds the composite
+        # plan+archive+history digest, so a change to the plan or to either
+        # sidecar breaks the sole-writer lock binding.  v1/v2 is detected by
+        # the parsed front-matter schema (never a substring heuristic); a v1
+        # plan keeps the plain plan-file digest.  The sidecar blobs are read
+        # at the same bound base commit, so a stale or forged sidecar fails
+        # closed exactly like a stale plan.
+        try:
+            schema = plan_parser.detect_schema(raw.stdout)
+        except plan_parser.PlanError:
+            schema = plan_parser.SCHEMA_V1
+        if schema == plan_parser.SCHEMA_NAME:
+            archive_blob = self._git_run([
+                "rev-parse",
+                f"{plan.base_commit}:{plan_sidecars.ARTIFACTS_DIR}/"
+                f"{plan_sidecars.ARCHIVE_FILE}",
+            ])
+            history_blob = self._git_run([
+                "rev-parse",
+                f"{plan.base_commit}:{plan_sidecars.ARTIFACTS_DIR}/"
+                f"{plan_sidecars.HISTORY_FILE}",
+            ])
+            if archive_blob.returncode != 0 or history_blob.returncode != 0:
+                raise RootLockBindingError(
+                    "a v2 plan requires the committed archive/history sidecars "
+                    f"at {plan.base_commit}"
+                )
+            archive_raw = self._git_bytes([
+                "cat-file", "blob", archive_blob.stdout.strip()
+            ])
+            history_raw = self._git_bytes([
+                "cat-file", "blob", history_blob.stdout.strip()
+            ])
+            if archive_raw.returncode != 0 or history_raw.returncode != 0:
+                raise RootLockBindingError(
+                    "cannot read the committed archive/history sidecar blobs"
+                )
+            digest = plan_sidecars.plan_binding_digest(
+                raw.stdout, archive_raw.stdout, history_raw.stdout
+            )
+        else:
+            digest = hashlib.sha256(raw.stdout).hexdigest()
         if digest != plan.digest:
             raise RootLockBindingError(
                 f"plan digest binding mismatch: committed {digest!r} != "

@@ -74,6 +74,8 @@ LOOP = ROOT / ".factory" / "loop"
 sys.path.insert(0, str(LOOP))
 import gitutil  # noqa: E402
 import lock as lock_module  # noqa: E402
+import plan_parser  # noqa: E402
+import plan_sidecars  # noqa: E402
 import state as state_module  # noqa: E402
 from lock import (  # noqa: E402
     ENV_KEYS,
@@ -445,6 +447,132 @@ class MandatoryBindings(LockConformanceCase):
         )
         with self.assertRaisesRegex(RootLockBindingError, "does not match the plan base"):
             self.acquire(root, plan=binding)
+
+    def _v2_plan_binding(self, root: Path) -> PlanBinding:
+        """Commit a v2 plan + sidecars and return its composite binding."""
+        commit = run([GIT, "-C", str(root), "rev-parse", "HEAD"]).stdout.strip()
+        archive_records = [plan_sidecars.ArchiveRecord(
+            schema=plan_sidecars.ARCHIVE_SCHEMA, task_id=99,
+            title="Archived task", priority=99, dependencies=(),
+            status="complete", scope="s", acceptance="a",
+            verification="v", documentation_impact="d", evidence="e",
+            evidence_refs=(), archived_commit=commit, provenance="campaign",
+        )]
+        archive_bytes = plan_sidecars.serialize_archive(archive_records)
+        history_bytes = plan_sidecars.serialize_history([
+            plan_sidecars.HistoryRecord(
+                schema=plan_sidecars.HISTORY_SCHEMA, commit=commit,
+                event="migrated", detail="d", plan_digest="0" * 64,
+                task_id=None,
+            )
+        ])
+        plan_bytes = (
+            "---\n"
+            f"schema: {plan_parser.SCHEMA_NAME}\n"
+            "spec_path: docs/SPEC.md\n"
+            f"spec_commit: {commit}\n"
+            f"spec_blob: {run([GIT, '-C', str(root), 'rev-parse', 'HEAD:docs/SPEC.md']).stdout.strip()}\n"
+            f"base_commit: {commit}\n"
+            "status: active\n"
+            f'sidecars: {{"archive":"{plan_sidecars.sidecar_digest(archive_bytes)}",'
+            f'"history":"{plan_sidecars.sidecar_digest(history_bytes)}"}}\n'
+            "---\n"
+            "\n"
+            "# Implementation Plan\n"
+            "\n"
+            "## Goal and non-goals\n"
+            "\n"
+            "Goal: fixture goal.\n"
+            "\n"
+            "## Architecture and constraints\n"
+            "\n"
+            "- Fixture constraint.\n"
+            "\n"
+            "## Task 1: Fixture task\n"
+            "\n"
+            "- Status: pending\n"
+            "- Dependencies: none\n"
+            "- Priority: 1\n"
+            "- Scope: fixture scope\n"
+            "- Acceptance criteria: fixture acceptance\n"
+            "- Verification: fixture verification\n"
+            "- Documentation impact: fixture docs\n"
+            "\n"
+            "## Task 2: Final documentation and specification audit\n"
+            "\n"
+            "- Status: pending\n"
+            "- Dependencies: Task 1, Task 99\n"
+            "- Priority: 2\n"
+            "- Scope: audit scope\n"
+            "- Acceptance criteria: audit acceptance\n"
+            "- Verification: audit verification\n"
+            "- Documentation impact: audit docs\n"
+        ).encode("utf-8")
+        (root / ".factory" / "artifacts" / "implementation-plan.md").write_bytes(
+            plan_bytes
+        )
+        (root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE).write_bytes(
+            archive_bytes
+        )
+        (root / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE).write_bytes(
+            history_bytes
+        )
+        run([GIT, "add", "."], root)
+        run(
+            [
+                GIT, "-C", str(root), "-c", "user.name=lock-test",
+                "-c", "user.email=lock-test@example.invalid",
+                "commit", "-qm", "v2 plan and sidecars",
+            ]
+        )
+        head = run([GIT, "-C", str(root), "rev-parse", "HEAD"]).stdout.strip()
+        return PlanBinding(
+            path=".factory/artifacts/implementation-plan.md",
+            base_commit=head,
+            digest=plan_sidecars.plan_binding_digest(
+                plan_bytes, archive_bytes, history_bytes
+            ),
+        )
+
+    def test_v2_plan_binding_is_composite_and_fails_closed(self) -> None:
+        # Phase 2D1 security remediation A: a v2 plan binds the composite
+        # plan+archive+history digest, so a change to the plan or to either
+        # sidecar breaks the sole-writer lock binding.
+        root = self.make_repo()
+        binding = self._v2_plan_binding(root)
+        with self.acquire(root, plan=binding):
+            pass
+        # The plain plan digest is NOT the composite binding for a v2 plan.
+        raw = (root / ".factory" / "artifacts" / "implementation-plan.md").read_bytes()
+        plain = PlanBinding(
+            path=binding.path, base_commit=binding.base_commit,
+            digest=hashlib.sha256(raw).hexdigest(),
+        )
+        with self.assertRaisesRegex(RootLockBindingError, "plan digest binding mismatch"):
+            self.acquire(root, plan=plain)
+        # A forged composite digest fails closed.
+        forged = PlanBinding(
+            path=binding.path, base_commit=binding.base_commit, digest="0" * 64
+        )
+        with self.assertRaisesRegex(RootLockBindingError, "plan digest binding mismatch"):
+            self.acquire(root, plan=forged)
+        # An uncommitted worktree sidecar change breaks the composite binding:
+        # the campaign computes the digest from the worktree bytes, the lock
+        # validates the committed blobs at the same base commit, and the
+        # mismatch fails closed (a stale or forged sidecar can never ride
+        # into the sole-writer lock).
+        archive_rel = root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+        archive_rel.write_bytes(archive_rel.read_bytes() + b"\n")
+        drifted = PlanBinding(
+            path=binding.path, base_commit=binding.base_commit,
+            digest=plan_sidecars.plan_binding_digest(
+                (root / ".factory" / "artifacts" / "implementation-plan.md").read_bytes(),
+                archive_rel.read_bytes(),
+                (root / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE).read_bytes(),
+            ),
+        )
+        with self.assertRaisesRegex(RootLockBindingError, "plan digest binding mismatch"):
+            self.acquire(root, plan=drifted)
 
     def test_traversal_and_unsafe_binding_paths_fail_closed(self) -> None:
         root = self.make_repo()
