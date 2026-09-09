@@ -193,6 +193,14 @@ def classify_commit(
             "administrative-only commit with no plan change is metadata-only "
             "progress"
         )
+    if not old_plan_bytes.strip():
+        # The first plan commit (no committed plan at HEAD) creates the plan
+        # from nothing: every task is added, which is a genuine semantic
+        # planning change, never metadata-only progress.
+        return True, (
+            "administrative-only commit creating the first plan is a semantic "
+            "planning change"
+        )
     try:
         semantic = plan_change_is_semantic(
             old_plan_bytes, new_plan_bytes, archive_records=archive_records

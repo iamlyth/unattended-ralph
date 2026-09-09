@@ -2438,7 +2438,8 @@ def launch_role_attempt(
         if role == "developer":
             if task_excerpt is None:
                 task_excerpt, _ = launch_module.derive_task_excerpt(
-                    plan_blob, task_id
+                    plan_blob, task_id,
+                    archive_records=_archive_records_at(root, commit=head),
                 )
         elif role == "auditor":
             if audit_objective is None:
@@ -3502,7 +3503,12 @@ class Campaign:
                 self._root, plan_blob, commit=head, git=self._git
             ),
             "task_excerpt_digest": (
-                plan_sha256(launch_module.task_excerpt_bytes(plan_blob, task_id))
+                plan_sha256(launch_module.task_excerpt_bytes(
+                    plan_blob, task_id,
+                    archive_records=_archive_records_at(
+                        self._root, commit=head, git=self._git
+                    ),
+                ))
                 if role == "developer" else ""
             ),
             "verifier_failure_digest": (

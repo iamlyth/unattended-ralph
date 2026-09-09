@@ -586,7 +586,7 @@ class InstalledTierSuite(unittest.TestCase):
                 "gate-launch-excerpt",
                 [
                     sys.executable, "-m", "factory.loop.launch", "excerpt",
-                    "--plan", str(plan_path), "--task-id", "20",
+                    "--plan", str(plan_path), "--task-id", "28",
                 ],
             ),
             (

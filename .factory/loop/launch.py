@@ -800,7 +800,9 @@ def verify_invocation(binding: InvocationBinding) -> None:
 # Task-excerpt derivation (TASK-02, §9, §20)
 # --------------------------------------------------------------------------
 
-def task_excerpt_bytes(plan_bytes: bytes, task_id: int) -> bytes:
+def task_excerpt_bytes(
+    plan_bytes: bytes, task_id: int, archive_records=None
+) -> bytes:
     """Re-derive the exact committed bytes of ``## Task <task_id>:``.
 
     The excerpt is a verbatim byte slice of the committed ``factory-plan/v1``
@@ -809,6 +811,9 @@ def task_excerpt_bytes(plan_bytes: bytes, task_id: int) -> bytes:
     own trailing blank lines), taken from the parsed block model so no
     re-rendering can change a byte.  The parser already guarantees unique,
     contiguous task ids, so a missing or duplicated task fails closed.
+    Phase 2D1: a v2 plan is parsed against the bound archive sidecar records
+    (the final-audit dependency closure references archived completed
+    tasks); ``archive_records`` supplies them when the caller has them.
     """
     if (
         isinstance(task_id, bool)
@@ -823,7 +828,7 @@ def task_excerpt_bytes(plan_bytes: bytes, task_id: int) -> bytes:
     except UnicodeDecodeError as exc:
         raise InvocationError(f"plan bytes are not valid UTF-8: {exc}") from exc
     try:
-        plan = parse_plan(text)
+        plan = parse_plan(text, archive_records=archive_records)
     except PlanError as exc:
         raise InvocationError(f"cannot parse the committed plan: {exc}") from exc
     target = None
@@ -857,14 +862,22 @@ def task_excerpt_bytes(plan_bytes: bytes, task_id: int) -> bytes:
     return section.encode("utf-8")
 
 
-def task_excerpt_digest(plan_bytes: bytes, task_id: int) -> str:
+def task_excerpt_digest(
+    plan_bytes: bytes, task_id: int, archive_records=None
+) -> str:
     """SHA-256 digest of the exact committed Task ``task_id`` section bytes."""
-    return hashlib.sha256(task_excerpt_bytes(plan_bytes, task_id)).hexdigest()
+    return hashlib.sha256(
+        task_excerpt_bytes(plan_bytes, task_id, archive_records=archive_records)
+    ).hexdigest()
 
 
-def derive_task_excerpt(plan_bytes: bytes, task_id: int) -> Tuple[bytes, str]:
+def derive_task_excerpt(
+    plan_bytes: bytes, task_id: int, archive_records=None
+) -> Tuple[bytes, str]:
     """Derive the committed task bytes and their digest in one call."""
-    excerpt = task_excerpt_bytes(plan_bytes, task_id)
+    excerpt = task_excerpt_bytes(
+        plan_bytes, task_id, archive_records=archive_records
+    )
     return excerpt, hashlib.sha256(excerpt).hexdigest()
 
 
@@ -6063,7 +6076,25 @@ def _excerpt_cli(args: argparse.Namespace) -> int:
         plan = _read_blob_anchored(
             args.plan, "implementation plan", PROMPT_INPUT_MAX
         )
-        excerpt, digest = derive_task_excerpt(plan, args.task_id)
+        # Phase 2D1: a v2 plan is parsed against the bound archive sidecar
+        # records; resolve them from the plan's sibling artifacts directory
+        # when present (a v1 plan ignores them).
+        archive_records = None
+        try:
+            from . import plan_sidecars  # deferred: avoids an import cycle
+        except ImportError:  # flat-import mode used by the hidden suite
+            import plan_sidecars  # type: ignore[no-redef]
+        sidecar = Path(args.plan).parent / plan_sidecars.ARCHIVE_FILE
+        if sidecar.is_file():
+            try:
+                archive_records = plan_sidecars.parse_archive(
+                    sidecar.read_bytes()
+                )
+            except plan_sidecars.PlanSidecarError:
+                archive_records = None
+        excerpt, digest = derive_task_excerpt(
+            plan, args.task_id, archive_records=archive_records
+        )
     except InvocationError as exc:
         print(f"factory-launch: {exc}", file=sys.stderr)
         return EXIT_INVOCATION
