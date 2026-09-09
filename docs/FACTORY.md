@@ -24,7 +24,14 @@ The canonical bound specification (this cycle: `docs/FACTORY-LOOP-SPEC.md`, per
 `.factory/config.toml` `[project].spec`; `docs/SPEC.md` stays the adopting-product
 placeholder and is never planned against) is the source of truth.
 `.factory/artifacts/implementation-plan.md`
-tracks task status and verification evidence.
+tracks task status and verification evidence. The concise active plan
+(`factory-plan/v2`, Phase 2D1) carries only the unfinished tasks; completed
+tasks and the plan acceptance/evidence history live in the strict committed
+machine sidecars `.factory/artifacts/plan-archive.jsonl`
+(`factory-plan-archive/v1`) and `.factory/artifacts/plan-history.jsonl`
+(`factory-plan-history/v1`), content-addressed by the plan's `sidecars:`
+binding. The conformance matrix stays in the machine conformance sidecar
+`.factory/artifacts/conformance.json`.
 
 ## Operating model
 

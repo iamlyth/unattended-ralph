@@ -56,6 +56,74 @@ cd -- "$PROJECT_ROOT"
 # (spaces, newlines) is handled exactly.
 mapfile -d '' -t STAGED < <(git diff --cached --name-only -z)
 
+# Phase 2D1: the shared commit-substance classifier.  An administrative-only
+# staged set (implementation plan, plan sidecars, bug ledgers, campaign
+# audit/evidence sidecars) is valid exactly when the plan carries a genuine
+# semantic planning change (task add/remove/reorder or a title/priority/
+# dependencies/Scope/Acceptance/blocker/latest-failure edit); evidence/status/
+# prose/timestamp edits are metadata-only progress and are rejected.  The
+# classifier is the same module the model command layer uses, so both layers
+# agree on every staged set.
+if python3 - "${STAGED[@]}" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str((Path.cwd() / '.factory' / 'loop').resolve()))
+from substance import classify_commit, is_administrative_only
+
+staged = [path for path in sys.argv[1:] if path]
+if not staged:
+    raise SystemExit(0)  # empty staged set: let the guard's own check reject it
+if not is_administrative_only(staged):
+    raise SystemExit(0)  # substantive commit: the guard's normal path allows it
+
+# Administrative-only: compare the committed HEAD plan against the staged
+# plan.  The staged plan bytes are read from the index (never the worktree),
+# so the classification is exactly the commit's content.
+old_plan = subprocess.run(
+    ["git", "show", "HEAD:.factory/artifacts/implementation-plan.md"],
+    capture_output=True, check=False,
+)
+new_plan = subprocess.run(
+    ["git", "show", ":.factory/artifacts/implementation-plan.md"],
+    capture_output=True, check=False,
+)
+if new_plan.returncode != 0:
+    # The staged set is administrative-only but does not stage the plan
+    # itself (e.g. a sidecar-only or bug-ledger-only commit): no plan change
+    # can be semantic, so it is metadata-only progress.
+    print(
+        "git-commit-guard: administrative-only commit without a staged plan "
+        "change is metadata-only progress",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+old_bytes = old_plan.stdout if old_plan.returncode == 0 else b""
+archive = Path('.factory/artifacts/plan-archive.jsonl')
+archive_records = None
+if archive.is_file():
+    try:
+        from plan_sidecars import parse_archive
+        archive_records = parse_archive(archive.read_bytes())
+    except Exception:
+        archive_records = None
+allowed, reason = classify_commit(
+    staged, old_bytes, new_plan.stdout, archive_records=archive_records,
+)
+if not allowed:
+    print(f"git-commit-guard: {reason}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"git-commit-guard: {reason}")
+raise SystemExit(0)
+PY
+then
+    :  # substantive or semantic administrative commit: continue to the guard
+else
+    exit 1
+fi
+
 SUBSTANTIVE=false
 METADATA_BEYOND_SCRATCHPAD=false
 for path in "${STAGED[@]}"; do

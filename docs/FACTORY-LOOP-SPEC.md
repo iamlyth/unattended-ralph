@@ -199,6 +199,19 @@ A `blocked` task MUST name the unresolved fact or required human/external eviden
 
 Newly discovered work MUST be recorded by the next planner revision. A developer MAY record a finding against the selected task, but MUST NOT independently create a second task ledger.
 
+## 7.1 Concise active plan and committed sidecars (Phase 2D1)
+
+The canonical plan may be `factory-plan/v1` (legacy, readable until migrated) or `factory-plan/v2` (concise active plan). A v2 plan carries only the genuinely unfinished tasks — active/pending/in_progress/blocked — with stable IDs, titles, priorities, dependencies, concise Scope/Acceptance, the current blocker, and the latest actionable failure. Completed/cancelled tasks and the plan acceptance/evidence history live in two strict committed machine sidecars:
+
+- `.factory/artifacts/plan-archive.jsonl` (`factory-plan-archive/v1`) — one JSONL record per archived completed/cancelled task, preserving every task/status/acceptance/evidence datum losslessly for audit; exact commit/evidence references are data;
+- `.factory/artifacts/plan-history.jsonl` (`factory-plan-history/v1`) — one JSONL record per plan acceptance/evidence event.
+
+Both sidecars are content-addressed: the plan front matter `sidecars:` binding carries their exact SHA-256 digests, and the composite plan binding digest `sha256(sha256(plan) | 0x00 | sha256(archive) | 0x00 | sha256(history))` binds the active plan plus both required sidecar digests. The campaign's `plan_digest` (state, launch binding, lease claims) is the composite digest for a v2 plan, so a change to the active plan or to either sidecar changes the binding and same-commit tamper is detected. Sidecars are bounded (1 MiB file / 64 KiB record / 10000 records), reject duplicate keys, and are append-only (or deterministically migrated); they are queryable by trusted tools but excluded from routine role prompts and never interpreted as task/command authority. The existing `.factory/artifacts/conformance.json`, blocked facts, and audit receipts remain the authorities.
+
+Archived dependency satisfaction uses the trusted completed-ID index bound to the archive sidecar digest: a missing/conflicting/reopened ID fails closed. Reopening an archived task is an explicit semantic migration with provenance, never model prose. The final audit task must be last in document order and must depend on every other task — active and archived — and no others; a v2 plan cannot be parsed without the bound archive records.
+
+Migration v1→v2 is an explicit deterministic tool (`.factory/loop/plan_migration.py`): lossless for audit, idempotent, atomic (sidecars written before the plan, so any partial pair fails closed on the plan's binding), crash-safe, and never a silent auto-mutation. Legacy v1 plans remain readable until migrated. The trusted campaign archives a completed task only after the independent verification + audit pass (provenance `campaign`); planner/developer roles can never mutate the sidecars. The injected plan text is the concise v2 plan plus the current latest failure — never the archive/history/matrix.
+
 ## 8. Deterministic task selection
 
 The trusted control plane selects the next task from the plan. The model does not choose among multiple tasks.
@@ -213,6 +226,8 @@ Selection order:
 6. if none are runnable, classify the implementation phase as `work_exhausted` or `blocked`, as defined below.
 
 Selection MUST be deterministic and covered by fixtures. No `.ralph/agent/tasks.jsonl` or equivalent runtime queue participates.
+
+For a v2 plan, the selector binds the trusted completed-ID index from the archive sidecar: a dependency on an archived completed task is satisfied through the index, archived tasks are leaves of the plan graph, and a conflict (an archived ID that reappears active) or a reopened ID fails closed. The selector never selects an archived task.
 
 ## 9. Fresh-context execution
 
@@ -919,6 +934,23 @@ The generic implementation is not acceptable until tests prove:
     new commit is superseded), blocks success while any trigger is
     pending, and keeps the trusted verifier independent so leased
     modifications to scripts/nix/packaging/ci cannot self-certify.
+31. the concise active plan and committed sidecars (Phase 2D1) hold: v1
+    plans stay readable until migrated; migration is lossless for audit,
+    idempotent, atomic (sidecars-then-plan ordering makes every partial
+    pair fail closed), and never a silent auto-mutation; the archive/
+    history sidecars reject duplicate keys, unknown fields, malformed
+    lines, and size/count/record overflow; the completed-ID index binds to
+    the archive digest and missing/conflicting/reopened IDs fail closed;
+    the composite plan binding digest changes when the plan or either
+    sidecar changes (same-commit tamper detected); the prompt excludes
+    archive/history/matrix content; the parser stays bounded; the selector
+    never selects archived tasks; the plan+sidecar binding is verified at
+    launch/state/freshness; administrative-only commits require a genuine
+    semantic planning change (task add/remove/reorder or a title/priority/
+    dependencies/Scope/Acceptance/blocker/latest-failure edit) while
+    evidence/status/prose edits are metadata-only; no task is lost in
+    migration; malformed/injection inputs are inert; and the plan size
+    ceiling holds.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -948,7 +980,7 @@ The stable IDs below are the conformance authority for this specification. Secti
 | CTX-01 | §5, §9 | Every role uses a fresh process with only allowlisted current inputs and no semantic memory/session resume | installed |
 | CTX-02 | §5, §18 | Legacy task, memory, scratch, event, and state paths are unavailable to model tools | installed |
 | ROLE-01 | §6 | Planner, developer, tester, and auditor are distinct static roles; tester/auditor are independent and no adaptive model roles run | installed |
-| PLAN-01 | §7 | `factory-plan/v1` binds spec/base/tasks/requirements/interactions/conformance and parses unambiguously | unit |
+| PLAN-01 | §7, §7.1 | `factory-plan/v1` binds spec/base/tasks/requirements/interactions/conformance and parses unambiguously; `factory-plan/v2` is the concise active plan (unfinished tasks only) bound to the committed archive/history sidecars by the composite plan binding digest, with the final audit closing over active + archived tasks and archived dependency satisfaction through the trusted completed-ID index | unit |
 | TASK-01 | §7, §8 | Task transitions and deterministic priority-plus-ID selection are trusted and plan-derived | unit |
 | TASK-02 | §9, §20 | Delivered task bytes and digest exactly match the committed plan | installed |
 | QUOTA-01 | §10 | Ollama check/wait behavior runs before each invocation and fails closed by documented exit table | private_integration |

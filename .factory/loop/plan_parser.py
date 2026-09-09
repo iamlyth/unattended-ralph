@@ -61,7 +61,8 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-SCHEMA_NAME = "factory-plan/v1"
+SCHEMA_NAME = "factory-plan/v2"
+SCHEMA_V1 = "factory-plan/v1"
 PLAN_TITLE = "# Implementation Plan"
 FINAL_AUDIT_TITLE = "Final documentation and specification audit"
 
@@ -94,8 +95,11 @@ STRUCTURED_FIELDS = ("Status", "Dependencies", "Priority", "Write scopes")
 # attack surface while remaining far above every real task count.
 MAX_ENDPOINT_DIGITS = 40
 
-# Front matter keys, in canonical order.
+# Front matter keys, in canonical order.  ``factory-plan/v1`` carries exactly
+# the five legacy keys; ``factory-plan/v2`` adds ``schema`` and the
+# ``sidecars:`` digest binding (Phase 2D1).
 FRONT_KEYS = ("spec_path", "spec_commit", "spec_blob", "base_commit", "status")
+V2_FRONT_KEYS = FRONT_KEYS + ("schema", "sidecars")
 LIFECYCLE_STATUSES = ("active", "complete")
 
 # Allowed task lifecycle states (documented in schema statuses/transitions).
@@ -130,7 +134,11 @@ REQUIRED_FIELDS = (
     "Documentation impact",
 )
 OPTIONAL_FIELDS = ("Priority", "Evidence", "Blocked on", "Write scopes")
+# v2 drops the per-task ``Evidence`` narrative (evidence lives in the
+# committed sidecars) and adds the concise ``Latest failure`` field.
+V2_OPTIONAL_FIELDS = ("Priority", "Blocked on", "Latest failure", "Write scopes")
 ALL_FIELDS = REQUIRED_FIELDS + OPTIONAL_FIELDS
+V2_ALL_FIELDS = REQUIRED_FIELDS + V2_OPTIONAL_FIELDS
 
 # The canonical sections, in canonical order, before any task section.
 CANONICAL_SECTIONS = (
@@ -139,6 +147,11 @@ CANONICAL_SECTIONS = (
     "Specification conformance matrix",
     "Interaction acceptance inventory",
 )
+# v2 removes the conformance matrix and interaction inventory from the plan
+# document: the machine conformance sidecar (``.factory/artifacts/conformance.json``)
+# and the plan history sidecar remain the authorities, and the injected plan
+# text stays concise (Phase 2D1).
+V2_CANONICAL_SECTIONS = CANONICAL_SECTIONS[:2]
 MATRIX_HEADER = ("ID", "Spec \u00a7", "Classification", "Evidence", "Task")
 INTERACTION_BOUNDARIES = (
     "input boundary",
@@ -164,6 +177,7 @@ class PlanError(Exception):
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MATRIX_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+$")
 TASK_HEADING_RE = re.compile(r"^## Task\s+(\d+):\s*(.+?)\s*$")
 FIELD_RE = re.compile(r"^- ([A-Z][A-Za-z ]*?):\s*(.*?)\s*$")
@@ -293,6 +307,7 @@ class Task:
     blocked_on: Optional[str]
     fields: Dict[str, str]
     field_order: List[str]
+    latest_failure: Optional[str] = None
     # Closed-format ``Write scopes:`` request list (Phase 2C1).  The planner
     # request grants nothing by itself; the trusted policy intersection
     # (``.factory/loop/path_lease.py``) decides.  Empty when the field is
@@ -324,6 +339,7 @@ class Plan:
     """Parsed canonical plan with deterministic model and serialization."""
 
     schema: str = SCHEMA_NAME
+    sidecars: Optional[Dict[str, str]] = None
     spec_path: str = ""
     spec_commit: str = ""
     spec_blob: str = ""
@@ -335,24 +351,30 @@ class Plan:
     _blocks: List[Block] = dataclass_field(default_factory=list, repr=False)
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "Plan":
+    def from_bytes(
+        cls, data: bytes, *, archive_records: Optional[Sequence[object]] = None
+    ) -> "Plan":
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise PlanError(f"plan is not valid UTF-8: {exc}") from exc
-        return cls.from_text(text)
+        return cls.from_text(text, archive_records=archive_records)
 
     @classmethod
-    def from_text(cls, text: str) -> "Plan":
-        return parse_plan(text)
+    def from_text(
+        cls, text: str, *, archive_records: Optional[Sequence[object]] = None
+    ) -> "Plan":
+        return parse_plan(text, archive_records=archive_records)
 
     @classmethod
-    def from_file(cls, path: Path) -> "Plan":
+    def from_file(
+        cls, path: Path, *, archive_records: Optional[Sequence[object]] = None
+    ) -> "Plan":
         try:
             data = Path(path).read_bytes()
         except OSError as exc:
             raise PlanError(f"cannot read plan {path}: {exc}") from exc
-        return cls.from_bytes(data)
+        return cls.from_bytes(data, archive_records=archive_records)
 
     def serialize(self) -> str:
         """Return the canonical Markdown serialization (byte-exact for parsed input)."""
@@ -365,6 +387,7 @@ class Plan:
         """Deterministic JSON-ready model of the parsed plan."""
         return {
             "schema": self.schema,
+            "sidecars": self.sidecars,
             "spec_path": self.spec_path,
             "spec_commit": self.spec_commit,
             "spec_blob": self.spec_blob,
@@ -378,6 +401,7 @@ class Plan:
                     "priority": task.priority,
                     "dependencies": list(task.dependencies),
                     "blocked_on": task.blocked_on,
+                    "latest_failure": task.latest_failure,
                     "write_scopes": list(task.write_scopes),
                     "fields": {key: task.fields[key] for key in task.field_order},
                 }
@@ -465,8 +489,18 @@ def _table_cells(line: str) -> List[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def parse_plan(text: str) -> Plan:
-    """Parse canonical plan bytes (UTF-8 text) and return the semantic model."""
+def parse_plan(
+    text: str,
+    *,
+    archive_records: Optional[Sequence[object]] = None,
+) -> Plan:
+    """Parse canonical plan bytes (UTF-8 text) and return the semantic model.
+
+    ``archive_records`` supplies the bound ``factory-plan-archive/v1`` records
+    (as parsed by ``plan_sidecars``) so a v2 plan can validate the final-audit
+    dependency closure against archived completed tasks (Phase 2D1).  A v2
+    plan without the archive records fails closed.
+    """
     if not isinstance(text, str):
         raise TypeError("parse_plan expects a str")
     if text.startswith("\ufeff"):
@@ -499,16 +533,56 @@ def parse_plan(text: str) -> Plan:
         front_fields.append((key, value))
 
     missing_keys = [k for k in FRONT_KEYS if k not in seen_keys]
-    unknown_keys = sorted(k for k in seen_keys if k not in FRONT_KEYS)
-    if missing_keys or unknown_keys:
-        detail = ""
-        if missing_keys:
-            detail += f"; missing {', '.join(missing_keys)}"
-        if unknown_keys:
-            detail += f"; unknown {', '.join(unknown_keys)}"
-        raise PlanError(f"front matter must contain exactly `{', '.join(FRONT_KEYS)}`{detail}")
+    if missing_keys:
+        raise PlanError(
+            f"front matter is missing `{', '.join(missing_keys)}`"
+        )
 
     front = dict(front_fields)
+    schema = front.get("schema", SCHEMA_V1)
+    if schema not in (SCHEMA_V1, SCHEMA_NAME):
+        raise PlanError(
+            f"front matter schema must be `{SCHEMA_V1}` or `{SCHEMA_NAME}`, "
+            f"got `{schema}`"
+        )
+    if schema == SCHEMA_NAME:
+        # v2 requires the exact extended key set and a strict sidecar binding.
+        v2_missing = [k for k in V2_FRONT_KEYS if k not in seen_keys]
+        v2_unknown = sorted(k for k in seen_keys if k not in V2_FRONT_KEYS)
+        if v2_missing or v2_unknown:
+            detail = ""
+            if v2_missing:
+                detail += f"; missing {', '.join(v2_missing)}"
+            if v2_unknown:
+                detail += f"; unknown {', '.join(v2_unknown)}"
+            raise PlanError(
+                f"a v2 plan front matter must contain exactly "
+                f"`{', '.join(V2_FRONT_KEYS)}`{detail}"
+            )
+        try:
+            sidecars = json.loads(front["sidecars"])
+        except json.JSONDecodeError as exc:
+            raise PlanError(f"front matter sidecars binding is malformed: {exc}") from exc
+        if (
+            not isinstance(sidecars, dict)
+            or set(sidecars) != {"archive", "history"}
+            or not all(
+                isinstance(value, str) and SHA256_RE.fullmatch(value)
+                for value in sidecars.values()
+            )
+        ):
+            raise PlanError(
+                "front matter sidecars must be a JSON object with exactly "
+                "`archive` and `history` SHA-256 digests"
+            )
+    else:
+        unknown_keys = sorted(k for k in seen_keys if k not in FRONT_KEYS)
+        if unknown_keys:
+            raise PlanError(
+                f"front matter must contain exactly `{', '.join(FRONT_KEYS)}`; "
+                f"unknown {', '.join(unknown_keys)}"
+            )
+        sidecars = None
     spec_path = front["spec_path"]
     _validate_spec_path(spec_path)
     for key in ("spec_commit", "spec_blob", "base_commit"):
@@ -555,6 +629,7 @@ def parse_plan(text: str) -> Plan:
         index = end
 
     # --- canonical sections and task order -----------------------------------
+    canonical = V2_CANONICAL_SECTIONS if schema == SCHEMA_NAME else CANONICAL_SECTIONS
     section_blocks: List[Block] = []
     task_blocks: List[Block] = []
     seen_sections: set = set()
@@ -574,19 +649,19 @@ def parse_plan(text: str) -> Plan:
         if heading in seen_sections:
             raise PlanError(f"duplicate canonical section `{heading}`")
         seen_sections.add(heading)
-        if heading == "## " + CANONICAL_SECTIONS[expected]:
+        if heading == "## " + canonical[expected]:
             section_blocks.append(block)
             expected += 1
             continue
-        if heading in ("## " + name for name in CANONICAL_SECTIONS):
+        if heading in ("## " + name for name in canonical):
             raise PlanError(
-                f"canonical sections out of order; expected `## {CANONICAL_SECTIONS[expected]}` "
+                f"canonical sections out of order; expected `## {canonical[expected]}` "
                 f"found `{heading}`"
             )
         raise PlanError(f"unknown section heading `{heading}`")
-    if expected != len(CANONICAL_SECTIONS):
+    if expected != len(canonical):
         missing = ", ".join(
-            "## " + name for name in CANONICAL_SECTIONS[expected:]
+            "## " + name for name in canonical[expected:]
         )
         raise PlanError(f"plan requires canonical section(s) `{missing}` before any task")
     if not task_blocks:
@@ -607,27 +682,43 @@ def parse_plan(text: str) -> Plan:
         title = match.group(2).strip()
         if number in seen_numbers:
             raise PlanError(f"duplicate task id `{number}`")
-        expected_number = index + 1
-        if number != expected_number:
-            raise PlanError(
-                f"task numbers must be unique and contiguous "
-                f"(expected Task {expected_number}, found Task {number})"
-            )
+        if schema == SCHEMA_V1:
+            expected_number = index + 1
+            if number != expected_number:
+                raise PlanError(
+                    f"task numbers must be unique and contiguous "
+                    f"(expected Task {expected_number}, found Task {number})"
+                )
         if title in seen_titles:
             raise PlanError(f"duplicate task title: `{title}`")
         seen_numbers.add(number)
         seen_titles.add(title)
-        tasks.append(_parse_task_block(number, title, block))
+        tasks.append(_parse_task_block(number, title, block, schema=schema))
 
     # Expand every dependency range against the parsed task count before any
     # validation or graph traversal; oversized ranges fail here without ever
-    # being materialized (Task 18 item 5).
+    # being materialized (Task 18 item 5).  For v2 the endpoint bound is the
+    # larger of the parsed task count and the archived completed-ID index, so
+    # a dependency on an archived task (e.g. the final audit's closure) is
+    # validated against the bound sidecar, never materialized unbounded.
+    archived_ids: set = set()
+    if schema == SCHEMA_NAME:
+        if archive_records is None:
+            raise PlanError(
+                "a v2 plan requires the bound archive sidecar records to "
+                "validate dependencies on archived completed tasks"
+            )
+        archived_ids = {record.task_id for record in archive_records}
+    max_id = max(
+        max((task.number for task in tasks), default=0),
+        max(archived_ids, default=0),
+    )
     for task in tasks:
         task.dependencies = _expand_spans(
-            task.dep_spans, len(tasks), what=f"task {task.number}", kind="deps"
+            task.dep_spans, max_id, what=f"task {task.number}", kind="deps"
         )
 
-    _validate_task_graph(tasks)
+    _validate_task_graph(tasks, schema=schema, archived_ids=archived_ids)
     _validate_status_invariants(tasks)
     finals = [task.number for task in tasks if task.title == FINAL_AUDIT_TITLE]
     if len(finals) != 1:
@@ -635,12 +726,57 @@ def parse_plan(text: str) -> Plan:
     final_number = finals[0]
     if tasks[-1].number != final_number:
         raise PlanError(f"`{FINAL_AUDIT_TITLE}` must be the last task")
-    expected_deps = set(range(1, len(tasks) + 1))
-    expected_deps.discard(final_number)
-    if set(tasks[final_number - 1].dependencies) != expected_deps:
-        raise PlanError(
-            "the final audit task must depend on every other task and no others"
-        )
+    if schema == SCHEMA_V1:
+        expected_deps = set(range(1, len(tasks) + 1))
+        expected_deps.discard(final_number)
+        if set(tasks[final_number - 1].dependencies) != expected_deps:
+            raise PlanError(
+                "the final audit task must depend on every other task and no others"
+            )
+    else:
+        # v2: the final audit depends on every other task — the active plan
+        # tasks plus the archived completed tasks from the bound archive
+        # sidecar (Phase 2D1).  The archive records are supplied by the
+        # trusted caller; without them the plan-sidecar pair is unbound and
+        # the final-audit dependency closure cannot be proven, so the plan
+        # fails closed.
+        if archive_records is None:
+            raise PlanError(
+                "a v2 plan requires the bound archive sidecar records to "
+                "validate the final audit dependency closure"
+            )
+        archived_ids = {record.task_id for record in archive_records}
+        known = {task.number for task in tasks}
+        known |= archived_ids
+        conflict = sorted(archived_ids & {task.number for task in tasks})
+        if conflict:
+            raise PlanError(
+                "the archive sidecar repeats active plan task ids; a "
+                "completed task may not be both archived and active: "
+                f"{conflict}"
+            )
+        final_task = next(task for task in tasks if task.number == final_number)
+        unknown = sorted(set(final_task.dependencies) - known)
+        if unknown:
+            raise PlanError(
+                "the final audit task references unknown tasks: "
+                f"{unknown}"
+            )
+        if set(final_task.dependencies) != known - {final_number}:
+            raise PlanError(
+                "the final audit task must depend on every other task "
+                "(active and archived) and no others"
+            )
+        if front["status"] == "active":
+            # Phase 2D1: a v2 active plan may transiently carry a task the
+            # developer just marked ``complete`` (the campaign archives it
+            # after the independent verification + audit pass).  The
+            # canonical migrated/archived plan never does: the migration
+            # archives completed tasks and the trusted archiver removes
+            # them, so the injected prompt text stays concise.  The
+            # structural invariants above (closure, conflicts, unknown
+            # refs) still fail closed on any malformed pair.
+            pass
     if front["status"] == "complete":
         unfinished = sorted(task.number for task in tasks if task.status != "complete")
         if unfinished:
@@ -649,17 +785,23 @@ def parse_plan(text: str) -> Plan:
                 f"(found non-complete: {unfinished})"
             )
 
-    # --- conformance matrix ---------------------------------------------------
-    matrix_block = next(block for block in section_blocks
-                        if block.heading == "## " + CANONICAL_SECTIONS[2])
-    matrix = _parse_matrix(matrix_block, tasks, lifecycle_status=front["status"])
+    if schema == SCHEMA_V1:
+        # --- conformance matrix -----------------------------------------------
+        matrix_block = next(block for block in section_blocks
+                            if block.heading == "## " + CANONICAL_SECTIONS[2])
+        matrix = _parse_matrix(matrix_block, tasks, lifecycle_status=front["status"])
 
-    # --- interaction inventory ------------------------------------------------
-    interactions_block = next(block for block in section_blocks
-                              if block.heading == "## " + CANONICAL_SECTIONS[3])
-    interactions = _parse_interactions(interactions_block)
+        # --- interaction inventory --------------------------------------------
+        interactions_block = next(block for block in section_blocks
+                                  if block.heading == "## " + CANONICAL_SECTIONS[3])
+        interactions = _parse_interactions(interactions_block)
+    else:
+        matrix = []
+        interactions = []
 
     return Plan(
+        schema=schema,
+        sidecars=sidecars,
         spec_path=spec_path,
         spec_commit=front["spec_commit"],
         spec_blob=front["spec_blob"],
@@ -672,8 +814,11 @@ def parse_plan(text: str) -> Plan:
     )
 
 
-def _parse_task_block(number: int, title: str, block: Block) -> Task:
+def _parse_task_block(
+    number: int, title: str, block: Block, *, schema: str = SCHEMA_V1
+) -> Task:
     body = block.lines[1:]
+    allowed_fields = V2_ALL_FIELDS if schema == SCHEMA_NAME else ALL_FIELDS
     values: Dict[str, List[str]] = {}
     order: List[str] = []
     current: Optional[str] = None
@@ -685,7 +830,7 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
             label, first = match.group(1), match.group(2)
             if label in values:
                 raise PlanError(f"task {number} has a duplicate field `{label}`")
-            if label not in ALL_FIELDS:
+            if label not in allowed_fields:
                 raise PlanError(f"task {number} has an unknown field `{label}`")
             values[label] = [first]
             order.append(label)
@@ -747,6 +892,13 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
             f"blocked task {number} must name an exact unresolved reference in `- Blocked on:`"
         )
 
+    latest_failure = (
+        "\n".join(part.lstrip(" \t") for part in values["Latest failure"])
+        if "Latest failure" in values else None
+    )
+    if latest_failure is not None and not latest_failure.strip():
+        raise PlanError(f"task {number} has an empty `- Latest failure:` field")
+
     if "Write scopes" in values:
         raw_scopes = values["Write scopes"][0].strip()
         if raw_scopes.lower() == "none":
@@ -783,6 +935,7 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
         dependencies=[],
         priority=priority,
         blocked_on=blocked_on,
+        latest_failure=latest_failure,
         fields=fields,
         field_order=order,
         write_scopes=write_scopes,
@@ -790,17 +943,24 @@ def _parse_task_block(number: int, title: str, block: Block) -> Task:
     )
 
 
-def _validate_task_graph(tasks: List[Task]) -> None:
+def _validate_task_graph(
+    tasks: List[Task], *, schema: str = SCHEMA_V1, archived_ids: set = frozenset()
+) -> None:
     numbers = {task.number for task in tasks}
     finals = [task.number for task in tasks if task.title == FINAL_AUDIT_TITLE]
     final_number = finals[0] if finals else None
     for task in tasks:
-        unknown = sorted(set(task.dependencies) - numbers)
+        unknown = sorted(set(task.dependencies) - numbers - set(archived_ids))
         if unknown:
             raise PlanError(f"task {task.number} references unknown dependencies: {unknown}")
         if task.number in task.dependencies:
             raise PlanError(f"task {task.number} cannot depend on itself")
         for dependency in task.dependencies:
+            if dependency in archived_ids:
+                # A dependency on an archived completed task is satisfied
+                # through the trusted completed-ID index (Phase 2D1); the
+                # ordering rule applies only to plan-internal references.
+                continue
             if dependency > task.number and task.number != final_number:
                 raise PlanError(
                     f"task {task.number} dependencies must refer to earlier tasks "
@@ -818,6 +978,11 @@ def _validate_task_graph(tasks: List[Task]) -> None:
         visiting.add(number)
         task = next(task for task in tasks if task.number == number)
         for dependency in task.dependencies:
+            if dependency in archived_ids:
+                # Archived completed tasks are leaves of the plan graph: they
+                # are satisfied through the trusted completed-ID index and
+                # have no plan-internal outgoing edges to traverse.
+                continue
             visit(dependency)
         visiting.discard(number)
         visited.add(number)
@@ -1029,8 +1194,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"factory-plan: cannot read {path}: {exc}", file=sys.stderr)
         return 2
 
+    # Phase 2D1: a v2 plan is parsed against the bound archive sidecar
+    # records (the final-audit dependency closure references archived
+    # completed tasks).  The sidecar is read from the sibling artifacts
+    # directory when present; a v1 plan ignores it.
+    archive_records = None
+    if b"schema: factory-plan/v2" in data[:2048]:
+        try:
+            from . import plan_sidecars  # deferred: avoids an import cycle
+        except ImportError:  # flat-import mode used by the hidden suite
+            import plan_sidecars  # type: ignore[no-redef]
+        sidecar = path.parent / plan_sidecars.ARCHIVE_FILE
+        try:
+            archive_records = plan_sidecars.parse_archive(sidecar.read_bytes())
+        except (OSError, plan_sidecars.PlanSidecarError) as exc:
+            print(
+                f"factory-plan: cannot read the bound archive sidecar: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
-        plan = Plan.from_bytes(data)
+        plan = Plan.from_bytes(data, archive_records=archive_records)
     except PlanError as exc:
         print(f"factory-plan: {exc}", file=sys.stderr)
         return 1

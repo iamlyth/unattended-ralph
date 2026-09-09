@@ -3,7 +3,7 @@ Progress/evidence live in `.factory/artifacts/implementation-plan.md`.
 ## Sources of truth
 
 - Canonical specification: `docs/FACTORY-LOOP-SPEC.md` (`.factory/config.toml` `[project].spec`); `docs/SPEC.md` is the adopting placeholder, never planned.
-- Canonical plan and sole task ledger: `.factory/artifacts/implementation-plan.md`
+- Canonical plan and sole task ledger: `.factory/artifacts/implementation-plan.md` (concise `factory-plan/v2` active plan; completed tasks and plan history live in the committed sidecars `.factory/artifacts/plan-archive.jsonl` and `.factory/artifacts/plan-history.jsonl`, content-addressed by the plan's `sidecars:` binding; the conformance matrix stays in `.factory/artifacts/conformance.json`).
   (schema `factory-plan/v1`, parser `.factory/loop/plan_parser.py`).
 - Single mutable control-state file: `.factory-state/factory-loop.json` (ignored).
   Canonical state-v1 is extended explicitly by `factory-state/v2` under

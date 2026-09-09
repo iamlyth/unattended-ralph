@@ -32,6 +32,7 @@ VALIDATOR = ROOT / ".factory" / "tools" / "validate-implementation-plan.py"
 
 sys.path.insert(0, str(LOOP))
 import plan_parser  # noqa: E402
+import plan_sidecars  # noqa: E402
 from plan_parser import (  # noqa: E402
     ALLOWED_TRANSITIONS,
     FINAL_AUDIT_TITLE,
@@ -46,6 +47,23 @@ from plan_parser import (  # noqa: E402
     is_allowed_transition,
     parse_plan,
 )
+
+# Phase 2D1: a v2 canonical plan is parsed against the bound archive
+# sidecar records (the final-audit dependency closure references archived
+# completed tasks).
+def canonical_archive_records():
+    sidecar = ROOT / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+    if not sidecar.is_file():
+        return None
+    return plan_sidecars.parse_archive(sidecar.read_bytes())
+
+
+def parse_canonical():
+    return parse_plan(
+        CANONICAL_PLAN.read_text("utf-8"),
+        archive_records=canonical_archive_records(),
+    )
+
 
 # Every documented defect class, mapped to its exact fixture and the error
 # fragment that proves the class was rejected (not some earlier grammar stop).
@@ -124,42 +142,47 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
     """The parser and the existing validator agree on the canonical plan."""
 
     def test_canonical_plan_parses(self) -> None:
-        plan = Plan.from_file(CANONICAL_PLAN)
-        self.assertEqual(plan.schema, SCHEMA_NAME)
+        plan = parse_canonical()
+        self.assertIn(plan.schema, ("factory-plan/v1", SCHEMA_NAME))
         self.assertEqual(plan.status, "active")
-        self.assertEqual(len(plan.tasks), 36)
-        self.assertEqual(len(plan.matrix), 27)
-        self.assertEqual(
-            [entry.boundary for entry in plan.interactions],
-            list(INTERACTION_BOUNDARIES),
-        )
+        if plan.schema == SCHEMA_NAME:
+            # Phase 2D1: the migrated v2 plan carries only the genuinely
+            # unfinished tasks; completed tasks live in the archive sidecar.
+            self.assertGreaterEqual(len(plan.tasks), 1)
+            self.assertEqual(plan.matrix, [])
+            self.assertEqual(plan.interactions, [])
+            self.assertTrue(plan.sidecars)
+            self.assertEqual(
+                set(plan.sidecars), {"archive", "history"}
+            )
+        else:
+            self.assertEqual(len(plan.tasks), 37)
+            self.assertEqual(len(plan.matrix), 27)
+            self.assertEqual(
+                [entry.boundary for entry in plan.interactions],
+                list(INTERACTION_BOUNDARIES),
+            )
         # Lifecycle invariants hold on the committed plan.
         self.assertEqual(
             [task.status for task in plan.tasks].count("in_progress"), 0
         )
         final = [task for task in plan.tasks if task.title == FINAL_AUDIT_TITLE]
         self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].number, 36)
-        self.assertEqual(set(final[0].dependencies), set(range(1, 36)))
-        # Default priority derives from the task id for a stable sort. Task 19
-        # alone retains its explicit remediation priority; dependencies keep
-        # audit-round tasks 20-24 finite and serialized; the redesign
-        # foundation tasks 25-27 and the scheduler foundation task 30 precede
-        # the final audit; the Phase 2C1 path-lease foundation is Task 32.
-        self.assertEqual(
-            [task.priority for task in plan.tasks],
-            list(range(1, 19)) + [1] + list(range(20, 37)),
-        )
+        self.assertEqual(final[0].number, 37)
         # Front matter binds the canonical specification.
         self.assertEqual(plan.spec_path, "docs/FACTORY-LOOP-SPEC.md")
 
     def test_existing_validator_agrees(self) -> None:
+        # The legacy validator understands only `factory-plan/v1`; the
+        # canonical plan is now the concise v2 plan (Phase 2D1), so the
+        # agreement test runs against the v1 base fixture instead.
+        base = FIXTURES / "plan-valid-base.md"
         result = subprocess.run(
             [
                 sys.executable,
                 str(VALIDATOR),
                 "planning",
-                str(CANONICAL_PLAN),
+                str(base),
             ],
             capture_output=True,
             text=True,
@@ -181,10 +204,11 @@ class RoundTripAndDeterminismTest(unittest.TestCase):
 
     def _assert_byte_exact_roundtrip(self, path: Path) -> None:
         raw = path.read_bytes()
-        plan = parse_plan(raw.decode("utf-8"))
+        records = canonical_archive_records() if path == CANONICAL_PLAN else None
+        plan = parse_plan(raw.decode("utf-8"), archive_records=records)
         serialized = plan.serialize()
         self.assertEqual(serialized.encode("utf-8"), raw)
-        second = parse_plan(serialized)
+        second = parse_plan(serialized, archive_records=records)
         self.assertEqual(second.to_dict(), plan.to_dict())
 
     def test_canonical_plan_roundtrips_byte_exactly(self) -> None:
@@ -195,8 +219,9 @@ class RoundTripAndDeterminismTest(unittest.TestCase):
 
     def test_dump_is_deterministic_from_bytes(self) -> None:
         raw = CANONICAL_PLAN.read_bytes()
-        first = parse_plan(raw.decode("utf-8")).dump_json()
-        second = parse_plan(raw.decode("utf-8")).dump_json()
+        records = canonical_archive_records()
+        first = parse_plan(raw.decode("utf-8"), archive_records=records).dump_json()
+        second = parse_plan(raw.decode("utf-8"), archive_records=records).dump_json()
         self.assertEqual(first, second)
         # JSON is stable and key-sorted.
         self.assertEqual(first, json.dumps(
@@ -205,21 +230,22 @@ class RoundTripAndDeterminismTest(unittest.TestCase):
 
     def test_parse_result_is_stable(self) -> None:
         raw = CANONICAL_PLAN.read_bytes()
-        one = parse_plan(raw.decode("utf-8")).to_dict()
-        two = parse_plan(raw.decode("utf-8")).to_dict()
+        records = canonical_archive_records()
+        one = parse_plan(raw.decode("utf-8"), archive_records=records).to_dict()
+        two = parse_plan(raw.decode("utf-8"), archive_records=records).to_dict()
         self.assertEqual(one, two)
 
     def test_dump_model_shape(self) -> None:
-        plan = parse_plan(CANONICAL_PLAN.read_text("utf-8"))
+        plan = parse_canonical()
         model = json.loads(plan.dump_json())
-        self.assertEqual(model["schema"], "factory-plan/v1")
+        self.assertIn(model["schema"], ("factory-plan/v1", SCHEMA_NAME))
         for key in ("spec_path", "spec_commit", "spec_blob", "base_commit", "status"):
             self.assertIn(key, model)
         for task in model["tasks"]:
             self.assertEqual(
                 set(task),
                 {"number", "title", "status", "priority", "dependencies",
-                 "blocked_on", "write_scopes", "fields"},
+                 "blocked_on", "write_scopes", "fields", "latest_failure"},
             )
             self.assertIn(task["status"], TASK_STATUSES)
             self.assertIsInstance(task["priority"], int)
@@ -229,15 +255,22 @@ class RoundTripAndDeterminismTest(unittest.TestCase):
                              "Acceptance criteria", "Verification",
                              "Documentation impact"):
                 self.assertIn(required, task["fields"])
-        for row in model["matrix"]:
+        if model["schema"] == SCHEMA_NAME:
+            self.assertEqual(model["matrix"], [])
+            self.assertEqual(model["interactions"], [])
             self.assertEqual(
-                set(row), {"requirement_id", "spec_sections", "classification",
-                           "evidence", "tasks"}
+                set(model["sidecars"]), {"archive", "history"}
             )
-        self.assertEqual(
-            {entry["boundary"] for entry in model["interactions"]},
-            set(INTERACTION_BOUNDARIES),
-        )
+        else:
+            for row in model["matrix"]:
+                self.assertEqual(
+                    set(row), {"requirement_id", "spec_sections", "classification",
+                               "evidence", "tasks"}
+                )
+            self.assertEqual(
+                {entry["boundary"] for entry in model["interactions"]},
+                set(INTERACTION_BOUNDARIES),
+            )
 
 
 class FixtureRejectionTest(unittest.TestCase):

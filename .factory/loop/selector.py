@@ -94,7 +94,7 @@ class Selection:
         return self.classification == "selected"
 
 
-def _validate_model(plan: Plan) -> None:
+def _validate_model(plan: Plan, completed_ids: frozenset) -> None:
     """Defense in depth on the parsed plan model at the selection boundary.
 
     The parser already guarantees these invariants for parsed input; this
@@ -105,10 +105,10 @@ def _validate_model(plan: Plan) -> None:
     It independently re-checks the full structural contract a valid
     ``factory-plan/v1`` model satisfies: a non-empty, uniquely numbered task
     list; every task status in the lifecycle set; dependencies that reference
-    existing tasks only, never the task itself, and never in a cycle; a
-    ``blocked`` task that names an exact unresolved reference; at most one
-    ``in_progress`` task; and an ``in_progress`` task whose dependencies are
-    all ``complete``.
+    existing tasks only (plan tasks or the trusted archived completed-ID
+    index), never the task itself, and never in a cycle; a ``blocked`` task
+    that names an exact unresolved reference; at most one ``in_progress``
+    task; and an ``in_progress`` task whose dependencies are all satisfied.
     """
     if not plan.tasks:
         raise SelectorError("invalid plan: plan has no tasks")
@@ -124,13 +124,23 @@ def _validate_model(plan: Plan) -> None:
                 f"{task.status!r}"
             )
 
+    # A completed-ID index that collides with an active plan task is a
+    # missing/conflicting/reopened-id defect and fails closed: a task may be
+    # archived or active, never both (Phase 2D1).
+    conflict = sorted(completed_ids & numbers)
+    if conflict:
+        raise SelectorError(
+            "invalid plan: the completed-ID index collides with active plan "
+            f"tasks {conflict}; a task may not be both archived and active"
+        )
+
     statuses = {task.number: task.status for task in plan.tasks}
     for task in plan.tasks:
         if task.number in task.dependencies:
             raise SelectorError(
                 f"invalid plan: task {task.number} cannot depend on itself"
             )
-        unknown = sorted(set(task.dependencies) - numbers)
+        unknown = sorted(set(task.dependencies) - numbers - set(completed_ids))
         if unknown:
             raise SelectorError(
                 f"invalid plan: task {task.number} references unknown "
@@ -144,7 +154,8 @@ def _validate_model(plan: Plan) -> None:
 
     # A valid plan's dependency graph is acyclic; reject any cycle a
     # caller-built model could smuggle in so selection never mis-classifies a
-    # structurally invalid graph.
+    # structurally invalid graph.  Archived completed tasks are leaves of the
+    # graph (satisfied through the trusted index, no outgoing edges).
     visiting: set = set()
     visited: set = set()
 
@@ -158,6 +169,8 @@ def _validate_model(plan: Plan) -> None:
         visiting.add(number)
         task = next(task for task in plan.tasks if task.number == number)
         for dependency in task.dependencies:
+            if dependency in completed_ids:
+                continue
             visit(dependency)
         visiting.discard(number)
         visited.add(number)
@@ -174,41 +187,56 @@ def _validate_model(plan: Plan) -> None:
             f"{in_progress}"
         )
     # A lifecycle may never reach `in_progress` before every dependency is
-    # `complete` (`pending -> in_progress` only after selection, which
-    # requires complete dependencies).  An `in_progress` task with an
+    # satisfied (`pending -> in_progress` only after selection, which
+    # requires satisfied dependencies).  An `in_progress` task with an
     # unsatisfied dependency is an ambiguous plan and fails closed here.
     for task in plan.tasks:
         if task.status == "in_progress":
             incomplete = sorted(
-                dep for dep in task.dependencies if statuses[dep] != "complete"
+                dep for dep in task.dependencies
+                if statuses.get(dep) != "complete" and dep not in completed_ids
             )
             if incomplete:
                 raise SelectorError(
                     "ambiguous plan: in_progress task "
-                    f"{task.number} has dependencies that are not complete: "
+                    f"{task.number} has dependencies that are not satisfied: "
                     f"{incomplete}"
                 )
 
 
-def select_task(plan: Plan, *, bound_base_commit: Optional[str] = None) -> Selection:
+def _dependency_satisfied(
+    dependency: int, statuses: dict, completed_ids: frozenset
+) -> bool:
+    """A dependency is satisfied by a complete plan task or the archived index."""
+    return statuses.get(dependency) == "complete" or dependency in completed_ids
+
+
+def select_task(
+    plan: Plan,
+    *,
+    bound_base_commit: Optional[str] = None,
+    completed_ids: frozenset = frozenset(),
+) -> Selection:
     """Select exactly one plan task, or classify the empty-work phase.
 
     Pure function of ``plan`` (and, optionally, the bound ``base_commit`` of
-    the committed plan blob as the ``state`` half of the contract): it reads
-    no file, ledger, environment, or process state.
+    the committed plan blob as the ``state`` half of the contract, plus the
+    trusted archived completed-ID index bound to the archive sidecar digest):
+    it reads no file, ledger, environment, or process state.
 
     Selection follows the FACTORY-LOOP-SPEC \u00a78 order exactly: reject a
     stale or ambiguous plan, resume the sole ``in_progress`` task, otherwise
-    sort runnable ``pending`` tasks (dependencies complete) by explicit
-    numeric priority then lexicographic task identifier, select exactly one,
-    and classify empty work as ``work_exhausted`` or ``blocked``.
+    sort runnable ``pending`` tasks (dependencies satisfied by a complete plan
+    task or the archived completed-ID index) by explicit numeric priority then
+    lexicographic task identifier, select exactly one, and classify empty work
+    as ``work_exhausted`` or ``blocked``.
     """
     if bound_base_commit is not None and plan.base_commit != bound_base_commit:
         raise SelectorError(
             f"stale plan: base_commit {plan.base_commit} does not match the "
             f"bound base commit {bound_base_commit}"
         )
-    _validate_model(plan)
+    _validate_model(plan, completed_ids)
 
     in_progress = [task for task in plan.tasks if task.status == "in_progress"]
     if in_progress:
@@ -219,7 +247,10 @@ def select_task(plan: Plan, *, bound_base_commit: Optional[str] = None) -> Selec
         task
         for task in plan.tasks
         if task.status == "pending"
-        and all(statuses[dep] == "complete" for dep in task.dependencies)
+        and all(
+            _dependency_satisfied(dep, statuses, completed_ids)
+            for dep in task.dependencies
+        )
     ]
     if runnable:
         chosen = min(runnable, key=lambda task: (task.priority, str(task.number)))
@@ -265,13 +296,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     assert args.command == "select"
     try:
-        plan = Plan.from_file(Path(args.path))
+        # Phase 2D1: a v2 plan is parsed against the bound archive sidecar
+        # records and the selector binds the trusted completed-ID index.
+        from . import plan_sidecars  # deferred: avoids an import cycle
+    except ImportError:  # flat-import mode used by the hidden suite
+        import plan_sidecars  # type: ignore[no-redef]
+    path = Path(args.path)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        print(f"factory-selector: cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    archive_records = None
+    completed_ids = frozenset()
+    if b"schema: factory-plan/v2" in data[:2048]:
+        sidecar = path.parent / plan_sidecars.ARCHIVE_FILE
+        try:
+            archive_records = plan_sidecars.parse_archive(sidecar.read_bytes())
+            completed_ids = plan_sidecars.completed_ids(archive_records)
+        except (OSError, plan_sidecars.PlanSidecarError) as exc:
+            print(
+                f"factory-selector: cannot read the bound archive sidecar: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    try:
+        plan = Plan.from_bytes(data, archive_records=archive_records)
     except PlanError as exc:
         print(f"factory-selector: {exc}", file=sys.stderr)
         return 1
     try:
         selection = select_task(
-            plan, bound_base_commit=args.bound_base_commit
+            plan, bound_base_commit=args.bound_base_commit,
+            completed_ids=completed_ids,
         )
     except SelectorError as exc:
         print(f"factory-selector: {exc}", file=sys.stderr)

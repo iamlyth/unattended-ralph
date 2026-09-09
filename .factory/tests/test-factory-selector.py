@@ -58,43 +58,74 @@ def parse_fixture(name: str) -> "Plan":
     return Plan.from_file(path)
 
 
+def parse_canonical() -> "Plan":
+    """The canonical plan parsed against its bound archive sidecar records."""
+    import plan_sidecars
+
+    sidecar = ROOT / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+    records = None
+    if sidecar.is_file():
+        records = plan_sidecars.parse_archive(sidecar.read_bytes())
+    return Plan.from_file(CANONICAL_PLAN, archive_records=records)
+
+
+def canonical_completed_ids():
+    """The trusted completed-ID index bound to the canonical archive sidecar."""
+    import plan_sidecars
+
+    sidecar = ROOT / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+    if not sidecar.is_file():
+        return frozenset()
+    return plan_sidecars.completed_ids(
+        plan_sidecars.parse_archive(sidecar.read_bytes())
+    )
+
+
 class CanonicalPlanSelectionTest(unittest.TestCase):
     """The committed canonical plan deterministically selects its next task."""
 
     def test_canonical_plan_selects_next_runnable_task(self) -> None:
-        plan = Plan.from_file(CANONICAL_PLAN)
-        selection = select_task(plan)
+        plan = parse_canonical()
+        completed = canonical_completed_ids()
+        selection = select_task(plan, completed_ids=completed)
         self.assertTrue(selection.selected)
         self.assertEqual(selection.classification, "selected")
-        # Tasks 1-27 are complete/blocked; the pending Phase 2A task 28,
-        # the pending Phase 2C1 path-lease foundation task 32, and the
-        # pending Phase 2C2b-A campaign minting task 34 depend only on
-        # complete tasks and are the next runnable tasks (28 wins on the
-        # priority-then-id sort).  Task 35 (2C2b-B) is complete, so it is no
-        # longer runnable.
+        # Phase 2D1: the v2 plan carries only the unfinished tasks; the
+        # archived completed tasks satisfy dependencies through the trusted
+        # completed-ID index.  The pending Phase 2A task 28, the pending
+        # Phase 2C1 path-lease foundation task 32, the pending Phase 2C2b-A
+        # campaign minting task 34 (archived), the pending migration task 36,
+        # and the final audit 37 are runnable; 28 wins on the
+        # priority-then-id sort.
         self.assertEqual(selection.task_id, 28)
         statuses = {task.number: task.status for task in plan.tasks}
         runnable = sorted(
             task.number
             for task in plan.tasks
             if task.status == "pending"
-            and all(statuses[dep] == "complete" for dep in task.dependencies)
+            and all(
+                statuses.get(dep) == "complete" or dep in completed
+                for dep in task.dependencies
+            )
         )
         self.assertEqual(runnable, [28, 32])
-        self.assertEqual(plan.tasks[18].status, "complete")
-        self.assertEqual(plan.tasks[18].priority, 1)
-        self.assertEqual(plan.tasks[12].priority, 13)
-        self.assertEqual(plan.tasks[2].status, "complete")
-        self.assertEqual(plan.tasks[3].status, "complete")
+        self.assertEqual(plan.tasks[0].status, "blocked")
+        self.assertEqual(plan.tasks[0].priority, 21)
+        self.assertEqual(plan.tasks[2].priority, 28)
+        self.assertEqual(plan.tasks[1].status, "blocked")
+        self.assertEqual(plan.tasks[2].status, "pending")
 
     def test_canonical_bound_base_commit_matches(self) -> None:
-        plan = Plan.from_file(CANONICAL_PLAN)
-        selection = select_task(plan, bound_base_commit=plan.base_commit)
+        plan = parse_canonical()
+        selection = select_task(
+            plan, bound_base_commit=plan.base_commit,
+            completed_ids=canonical_completed_ids(),
+        )
         self.assertEqual(selection.classification, "selected")
         self.assertEqual(selection.task_id, 28)
 
     def test_bound_base_commit_mismatch_is_stale(self) -> None:
-        plan = Plan.from_file(CANONICAL_PLAN)
+        plan = parse_canonical()
         wrong = "0" * 40 if plan.base_commit != "0" * 40 else "1" * 40
         with self.assertRaises(SelectorError) as caught:
             select_task(plan, bound_base_commit=wrong)
@@ -226,7 +257,7 @@ class StaleAndAmbiguousRejectionTest(unittest.TestCase):
         with self.assertRaises(SelectorError) as caught:
             select_task(plan)
         self.assertIn("ambiguous plan", str(caught.exception))
-        self.assertIn("not complete", str(caught.exception))
+        self.assertIn("not satisfied", str(caught.exception))
 
     def test_invalid_plan_never_reaches_selection(self) -> None:
         # The parser is the first rejection boundary: a defect fixture raises
@@ -299,21 +330,25 @@ class SingleTaskGuaranteeTest(unittest.TestCase):
 
     def test_every_fixture_selects_at_most_one_task(self) -> None:
         plans = [parse_fixture(name) for name in SELECTOR_FIXTURES]
-        plans.append(Plan.from_file(CANONICAL_PLAN))
+        plans.append(parse_canonical())
         for plan in plans:
             with self.subTest(fixture=plan.base_commit[:8]):
+                completed = (
+                    canonical_completed_ids()
+                    if plan.schema == "factory-plan/v2" else frozenset()
+                )
                 if any(task.status == "in_progress" and any(
                     dep not in {
                         t.number for t in plan.tasks if t.status == "complete"
-                    }
+                    } and dep not in completed
                     for dep in task.dependencies
                 ) for task in plan.tasks):
                     # The inconsistent-in-progress fixture is rejected by the
                     # selector (tested in StaleAndAmbiguousRejectionTest).
                     with self.assertRaises(SelectorError):
-                        select_task(plan)
+                        select_task(plan, completed_ids=completed)
                     continue
-                selection = select_task(plan)
+                selection = select_task(plan, completed_ids=completed)
                 self.assertIn(selection.classification, CLASSIFICATIONS)
                 if selection.classification == "selected":
                     self.assertIsNotNone(selection.task_id)
@@ -329,10 +364,13 @@ class PurityAndLedgerBoundaryTest(unittest.TestCase):
     """The selector is a pure function and never consults a runtime ledger."""
 
     def test_selection_is_a_pure_function(self) -> None:
-        plan = Plan.from_file(CANONICAL_PLAN)
-        first = select_task(plan)
+        plan = parse_canonical()
+        completed = canonical_completed_ids()
+        first = select_task(plan, completed_ids=completed)
         for _ in range(50):
-            self.assertEqual(select_task(plan), first)
+            self.assertEqual(
+                select_task(plan, completed_ids=completed), first
+            )
 
     def test_selection_performs_no_io(self) -> None:
         # `select_task` runs on an in-memory plan model with no file access:
@@ -350,9 +388,14 @@ class PurityAndLedgerBoundaryTest(unittest.TestCase):
             "os.",             # no process/OS state in the selection path
         ):
             self.assertNotIn(forbidden, source, forbidden)
-        plan = Plan.from_file(CANONICAL_PLAN)
-        self.assertEqual(select_task(plan).classification, "selected")
-        self.assertEqual(select_task(plan).task_id, 28)
+        plan = parse_canonical()
+        completed = canonical_completed_ids()
+        self.assertEqual(
+            select_task(plan, completed_ids=completed).classification, "selected"
+        )
+        self.assertEqual(
+            select_task(plan, completed_ids=completed).task_id, 28
+        )
 
     def test_selection_result_is_immutable(self) -> None:
         plan = parse_fixture("plan-select-priority-order.md")

@@ -1,83 +1,72 @@
 {
- "schema": "ralph-conformance/v1",
  "requirements": [
   {
-   "id": "AUTH-01",
-   "spec_sections": [
-    "\u00a75",
-    "\u00a77"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/plan_parser.py",
     ".factory/loop/selector.py",
     ".factory/artifacts/implementation-plan.md"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-001"
    ],
-   "reason": ""
-  },
-  {
-   "id": "CTX-01",
+   "id": "AUTH-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
    "spec_sections": [
     "\u00a75",
-    "\u00a79"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+    "\u00a77"
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/launch.py",
     ".factory/loop/confine_launcher.py",
     ".factory/tests/test-factory-launch.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-002"
    ],
-   "reason": ""
-  },
-  {
-   "id": "CTX-02",
+   "id": "CTX-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
    "spec_sections": [
     "\u00a75",
-    "\u00a718"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+    "\u00a79"
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/workspace_confinement.py",
     ".factory/loop/confinement.py",
     ".factory/tests/test-factory-confinement.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-003"
    ],
-   "reason": ""
+   "id": "CTX-02",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a75",
+    "\u00a718"
+   ]
   },
   {
-   "id": "ROLE-01",
-   "spec_sections": [
-    "\u00a76"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/prompts/planner.md",
     ".factory/prompts/developer.md",
@@ -85,494 +74,500 @@
     ".factory/prompts/auditor.md",
     ".factory/loop/promptset.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-004"
    ],
-   "reason": ""
+   "id": "ROLE-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a76"
+   ]
   },
   {
-   "id": "PLAN-01",
-   "spec_sections": [
-    "\u00a77"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/plan_parser.py",
-    ".factory/schemas/factory-plan-v1.schema.json",
-    ".factory/schemas/factory-plan-v1.requirements.json",
-    ".factory/tests/test-factory-plan-parser.py"
+    ".factory/loop/plan_sidecars.py",
+    ".factory/loop/plan_migration.py",
+    ".factory/loop/selector.py",
+    ".factory/loop/substance.py",
+    ".factory/schemas/factory-plan-v2.schema.md",
+    ".factory/schemas/factory-plan-archive-v1.schema.md",
+    ".factory/schemas/factory-plan-history-v1.schema.md",
+    ".factory/tests/test-factory-plan-parser.py",
+    ".factory/tests/test-factory-plan-sidecars.py",
+    ".factory/tests/test-factory-plan-migration.py",
+    ".factory/tests/test-factory-substance.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-005"
    ],
-   "reason": ""
-  },
-  {
-   "id": "TASK-01",
+   "id": "PLAN-01",
+   "reason": "factory-plan/v2 concise active plan bound to committed archive/history sidecars by the composite plan binding digest; archived dependency satisfaction through the trusted completed-ID index; deterministic lossless migration; administrative commit substance rules",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
    "spec_sections": [
     "\u00a77",
-    "\u00a78"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+    "\u00a77.1"
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/selector.py",
     ".factory/tests/test-factory-selector.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-006"
    ],
-   "reason": ""
+   "id": "TASK-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
+   "spec_sections": [
+    "\u00a77",
+    "\u00a78"
+   ]
   },
   {
-   "id": "TASK-02",
-   "spec_sections": [
-    "\u00a79",
-    "\u00a720"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/launch.py",
     ".factory/tests/test-factory-launch.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-007"
    ],
-   "reason": ""
+   "id": "TASK-02",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a79",
+    "\u00a720"
+   ]
   },
   {
-   "id": "QUOTA-01",
-   "spec_sections": [
-    "\u00a710"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/tools/ollama-usage-guard.sh",
     ".factory/loop/usage.py",
     ".factory/tests/legacy/test-pi2-ollama-wrapper.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-008"
    ],
-   "reason": ""
-  },
-  {
-   "id": "QUOTA-02",
+   "id": "QUOTA-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
    "spec_sections": [
     "\u00a710"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/usage.py",
     ".factory/loop/usage_fetch.py",
     ".factory/tests/test-factory-usage.py",
     ".factory/tests/test-factory-redaction.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-009"
    ],
-   "reason": ""
+   "id": "QUOTA-02",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
+   "spec_sections": [
+    "\u00a710"
+   ]
   },
   {
-   "id": "STATE-01",
-   "spec_sections": [
-    "\u00a711",
-    "\u00a717"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/state.py",
     ".factory/tests/test-factory-state.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-010"
    ],
-   "reason": ""
-  },
-  {
-   "id": "STATE-02",
+   "id": "STATE-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
    "spec_sections": [
     "\u00a711",
-    "\u00a713",
-    "\u00a714",
-    "\u00a715"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
-   "receipts": [],
+    "\u00a717"
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/state.py",
     ".factory/loop/campaign.py",
     ".factory/tests/test-factory-state.py",
     ".factory/tests/test-factory-campaign.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-024"
    ],
-   "reason": ""
+   "id": "STATE-02",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
+   "spec_sections": [
+    "\u00a711",
+    "\u00a713",
+    "\u00a714",
+    "\u00a715"
+   ]
   },
   {
-   "id": "LOCK-01",
-   "spec_sections": [
-    "\u00a712"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/lock.py",
     ".factory/tests/test-factory-lock.py",
     ".factory/tests/legacy/test-factory-lock.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-011"
    ],
-   "reason": ""
+   "id": "LOCK-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
+   "spec_sections": [
+    "\u00a712"
+   ]
   },
   {
-   "id": "PROC-01",
-   "spec_sections": [
-    "\u00a79",
-    "\u00a712",
-    "\u00a717"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/launch.py",
     ".factory/tests/test-factory-launch.py",
     ".factory/tests/test-factory-supervision.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-012"
    ],
-   "reason": ""
-  },
-  {
-   "id": "GIT-01",
+   "id": "PROC-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
    "spec_sections": [
+    "\u00a79",
     "\u00a712",
     "\u00a717"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+   ]
+  },
+  {
    "artifacts": [
     ".factory/tools/git-commit-guard.sh",
     ".factory/tools/install-git-commit-guard.sh",
     ".factory/tests/legacy/test-git-commit-guard.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-013"
    ],
-   "reason": ""
+   "id": "GIT-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a712",
+    "\u00a717"
+   ]
   },
   {
-   "id": "PHASE-01",
-   "spec_sections": [
-    "\u00a713",
-    "\u00a714"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/campaign.py",
     ".factory/loop/launch.py",
     ".factory/tests/test-factory-campaign.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-014"
    ],
-   "reason": ""
+   "id": "PHASE-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
+   "spec_sections": [
+    "\u00a713",
+    "\u00a714"
+   ]
   },
   {
-   "id": "COMPLETE-01",
-   "spec_sections": [
-    "\u00a715"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/campaign.py",
     ".factory/tests/test-factory-campaign.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-015"
    ],
-   "reason": ""
+   "id": "COMPLETE-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
+   "spec_sections": [
+    "\u00a715"
+   ]
   },
   {
-   "id": "FIND-01",
-   "spec_sections": [
-    "\u00a716"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/findings.py",
     ".factory/tests/test-factory-findings.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-016"
    ],
-   "reason": ""
+   "id": "FIND-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
+   "spec_sections": [
+    "\u00a716"
+   ]
   },
   {
-   "id": "CRED-01",
-   "spec_sections": [
-    "\u00a718"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "private_integration",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/tools/credential-guard.py",
     ".factory/tools/pi2-secure-exec.py",
     ".factory/tests/legacy/test-credential-guard.sh",
     ".factory/tests/legacy/test-credential-extension.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-017"
    ],
-   "reason": ""
+   "id": "CRED-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "private_integration",
+   "spec_sections": [
+    "\u00a718"
+   ]
   },
   {
-   "id": "EVID-01",
-   "spec_sections": [
-    "\u00a719"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/tools/machine-receipt.py",
     ".factory/loop/evidence.py",
     ".factory/tests/test-factory-evidence.py",
     ".factory/tests/legacy/test-audit-receipts.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-018"
    ],
-   "reason": ""
-  },
-  {
-   "id": "EVID-02",
+   "id": "EVID-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
    "spec_sections": [
     "\u00a719"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
-   "receipts": [],
+   ]
+  },
+  {
    "artifacts": [
     ".factory/loop/verifier_failure.py",
     ".factory/schemas/factory-verifier-failure-v1.schema.json",
     ".factory/tests/test-factory-verifier-failure.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "2a06ba71906a41afda5299ec04f63847db8b5bc6",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-025"
    ],
-   "reason": ""
-  },
-  {
-   "id": "VIS-01",
+   "id": "EVID-02",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
    "spec_sections": [
     "\u00a719"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+   ]
+  },
+  {
    "artifacts": [
     ".factory/tools/visual-audit-provenance.py",
     ".factory/tools/check-visual-audit.py",
     ".factory/tests/legacy/test-visual-audit.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-019"
    ],
-   "reason": ""
-  },
-  {
-   "id": "RUNNER-01",
+   "id": "VIS-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
    "spec_sections": [
     "\u00a719"
-   ],
-   "classification": "blocked",
-   "evidence_tier": "private_integration",
-   "required_tier": "real_system",
-   "required_capabilities": [
-    "hardware-runner"
-   ],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
+   ]
+  },
+  {
    "artifacts": [
     ".factory/tools/run-factory-runners.py",
     ".factory/tools/check-factory-runner-evidence.py",
     ".factory/tests/legacy/test-factory-runner.sh",
     ".factory/tests/legacy/test-runner-signer.sh"
    ],
+   "classification": "blocked",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-020"
    ],
-   "reason": "real_system evidence requires a declared, provisioned, signed hardware-runner capability; .factory/environment.toml declares no runner and .factory/signer-trust.json provisions no signer, so the required evidence is unavailable until a human provisions and declares the runner (FACT-020)."
+   "id": "RUNNER-01",
+   "reason": "real_system evidence requires a declared, provisioned, signed hardware-runner capability; .factory/environment.toml declares no runner and .factory/signer-trust.json provisions no signer, so the required evidence is unavailable until a human provisions and declares the runner (FACT-020).",
+   "receipts": [],
+   "required_capabilities": [
+    "hardware-runner"
+   ],
+   "required_tier": "real_system",
+   "spec_sections": [
+    "\u00a719"
+   ]
   },
   {
-   "id": "HIDE-01",
-   "spec_sections": [
-    "\u00a73"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/tests/test-factory-footprint.py",
     ".factory/tests/test-factory-footprint.sh",
     ".factory/tools/check-generic-leakage.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-021"
    ],
-   "reason": ""
+   "id": "HIDE-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a73"
+   ]
   },
   {
-   "id": "MIG-01",
-   "spec_sections": [
-    "\u00a721"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/migration.py",
     ".factory/tests/test-factory-migration.py",
     ".factory/tests/test-factory-migration.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-023"
    ],
-   "reason": ""
+   "id": "MIG-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a721"
+   ]
   },
   {
-   "id": "TEST-01",
-   "spec_sections": [
-    "\u00a722"
-   ],
-   "classification": "partial",
-   "evidence_tier": "private_integration",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
-   "receipts": [],
    "artifacts": [
     ".factory/tests/adversarial-manifest.json",
     ".factory/tests/test-factory-adversarial.py",
     ".factory/tests/test-factory-adversarial.sh"
    ],
+   "classification": "partial",
+   "evidence_commit": "11a4f8e98497fefcff1c5917568e663c1ab48350",
+   "evidence_tier": "private_integration",
    "fact_refs": [
     "FACT-022"
    ],
-   "reason": ""
+   "id": "TEST-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
+   "spec_sections": [
+    "\u00a722"
+   ]
   },
   {
+   "artifacts": [],
+   "classification": "missing",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "unit",
+   "fact_refs": [],
    "id": "ACCEPT-01",
+   "reason": "",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "installed",
    "spec_sections": [
     "\u00a723"
-   ],
-   "classification": "missing",
-   "evidence_tier": "unit",
-   "required_tier": "installed",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
-   "artifacts": [],
-   "fact_refs": [],
-   "reason": ""
+   ]
   },
   {
-   "id": "LEASE-01",
-   "spec_sections": [
-    "\u00a714.2",
-    "\u00a714.2a",
-    "\u00a722",
-    "\u00a724"
-   ],
-   "classification": "partial",
-   "evidence_tier": "unit",
-   "required_tier": "unit",
-   "required_capabilities": [],
-   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
-   "receipts": [],
    "artifacts": [
     ".factory/loop/path_lease.py",
     ".factory/loop/launch.py",
@@ -592,10 +587,24 @@
     ".factory/tests/test-factory-state.py",
     ".factory/tests/test-factory-campaign.py"
    ],
+   "classification": "partial",
+   "evidence_commit": "1b430ddb43f44d3b41dea64927e7a32bf39cf245",
+   "evidence_tier": "unit",
    "fact_refs": [
     "FACT-026"
    ],
-   "reason": "Phase 2C1 foundation plus the Phase 2C2a runtime-launch binding and the Phase 2C2b-A campaign minting/delivery are implemented (see the plan matrix row). Phase 2C2b-B wires the immutable audit_required signal into the adaptive scheduler/state and final acceptance: a developer attempt whose authenticated lease returned audit_required records a sticky trusted pending lease-audit trigger bound to campaign/task/attempt/lease digest and the exact resulting candidate commit (no secret/nonce/claim bytes in state/results); the trigger forces the independent tester/auditor milestone regardless of the configured interval; only a passing audit at that exact commit consumes the matching trigger (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay cannot clear; a same-task trigger whose bound commit is a verified ancestor of a new commit is superseded so convergence/resume never deadlocks); any pending trigger blocks success and the success validator independently rejects it; the trusted verifier still runs independently and leased modifications to scripts/nix/packaging/ci cannot self-certify. The row remains partial only because the plan is active and the full \u00a724 acceptance (installed-tier receipts, runner evidence, human approval) is not claimed."
+   "id": "LEASE-01",
+   "reason": "Phase 2C1 foundation plus the Phase 2C2a runtime-launch binding and the Phase 2C2b-A campaign minting/delivery are implemented (see the plan matrix row). Phase 2C2b-B wires the immutable audit_required signal into the adaptive scheduler/state and final acceptance: a developer attempt whose authenticated lease returned audit_required records a sticky trusted pending lease-audit trigger bound to campaign/task/attempt/lease digest and the exact resulting candidate commit (no secret/nonce/claim bytes in state/results); the trigger forces the independent tester/auditor milestone regardless of the configured interval; only a passing audit at that exact commit consumes the matching trigger (findings/blocked/skipped/infrastructure/interrupted/stale/foreign/replay cannot clear; a same-task trigger whose bound commit is a verified ancestor of a new commit is superseded so convergence/resume never deadlocks); any pending trigger blocks success and the success validator independently rejects it; the trusted verifier still runs independently and leased modifications to scripts/nix/packaging/ci cannot self-certify. The row remains partial only because the plan is active and the full \u00a724 acceptance (installed-tier receipts, runner evidence, human approval) is not claimed.",
+   "receipts": [],
+   "required_capabilities": [],
+   "required_tier": "unit",
+   "spec_sections": [
+    "\u00a714.2",
+    "\u00a714.2a",
+    "\u00a722",
+    "\u00a724"
+   ]
   }
- ]
+ ],
+ "schema": "ralph-conformance/v1"
 }

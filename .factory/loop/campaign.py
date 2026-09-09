@@ -87,6 +87,8 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import installer as installer_module
     from . import lock as lock_module
     from . import plan_parser
+    from . import plan_sidecars
+    from . import plan_migration as plan_migration_module
     from . import pre_round as pre_round_module
     from . import scheduler as scheduler_module
     from . import selector as selector_module
@@ -108,6 +110,8 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import installer as installer_module  # type: ignore[no-redef]
     import lock as lock_module  # type: ignore[no-redef]
     import plan_parser  # type: ignore[no-redef]
+    import plan_sidecars  # type: ignore[no-redef]
+    import plan_migration as plan_migration_module  # type: ignore[no-redef]
     import pre_round as pre_round_module  # type: ignore[no-redef]
     import scheduler as scheduler_module  # type: ignore[no-redef]
     import selector as selector_module  # type: ignore[no-redef]
@@ -1185,9 +1189,24 @@ class TrustedGit:
         return raw.stdout
 
     def plan_at(self, commit: str):
-        """Parsed committed plan at ``commit`` (fail-closed on any violation)."""
+        """Parsed committed plan at ``commit`` (fail-closed on any violation).
+
+        Phase 2D1: a v2 plan is parsed against the archive records bound at
+        the same commit (the final-audit dependency closure references
+        archived completed tasks); a v1 plan ignores them.
+        """
         try:
-            return plan_parser.Plan.from_bytes(self.blob_at(commit, self._plan_path))
+            plan_bytes = self.blob_at(commit, self._plan_path)
+            try:
+                archive_bytes = self.blob_at(
+                    commit, plan_sidecars.ARCHIVE_FILE
+                )
+                archive_records = plan_sidecars.parse_archive(archive_bytes)
+            except (CampaignGitError, plan_sidecars.PlanSidecarError):
+                archive_records = []
+            return plan_parser.Plan.from_bytes(
+                plan_bytes, archive_records=archive_records
+            )
         except plan_parser.PlanError as exc:
             raise CampaignGitError(
                 f"the committed plan at {commit} does not parse: {exc}"
@@ -1362,6 +1381,64 @@ def plan_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _plan_binding_digest(
+    root, plan_blob: bytes, *, commit: Optional[str] = None, git=None
+) -> str:
+    """Composite plan binding digest (active plan + required sidecar digests).
+
+    A v1 plan (no sidecar binding) keeps the plain plan-file digest; a v2
+    plan binds the active plan plus the archive/history sidecar digests
+    (Phase 2D1), so a change to either sidecar changes the binding.  A v2
+    plan whose sidecars are missing or unreadable fails closed through the
+    blob authority.
+    """
+    if b"schema: factory-plan/v2" not in plan_blob[:2048]:
+        return plan_sha256(plan_blob)
+
+    def blob(relpath: str) -> bytes:
+        if git is not None:
+            return git.blob_at(commit, relpath)
+        return _blob_at(root, relpath, revision=commit)
+
+    archive_bytes = blob(plan_sidecars.ARCHIVE_FILE)
+    history_bytes = blob(plan_sidecars.HISTORY_FILE)
+    return plan_sidecars.plan_binding_digest(
+        plan_blob, archive_bytes, history_bytes
+    )
+
+
+def _archive_records_at(
+    root, *, commit: Optional[str] = None, git=None, worktree: bool = False
+):
+    """The bound archive records for plan parsing (empty for v1 plans).
+
+    A v2 plan requires the archive records to validate dependencies on
+    archived completed tasks; a v1 plan ignores them.  A missing sidecar
+    (a v1 repository) yields an empty index; a malformed sidecar fails
+    closed as a campaign error, never an unhandled traceback.
+    """
+    try:
+        if worktree:
+            data = _bounded_read(
+                root, plan_sidecars.ARCHIVE_FILE, "archive sidecar",
+                plan_sidecars.SIDECAR_MAX_BYTES,
+            )
+        elif git is not None:
+            data = git.blob_at(commit, plan_sidecars.ARCHIVE_FILE)
+        else:
+            data = _blob_at(
+                root, plan_sidecars.ARCHIVE_FILE, revision=commit
+            )
+    except (CampaignError, CampaignGitError):
+        return []
+    try:
+        return plan_sidecars.parse_archive(data)
+    except plan_sidecars.PlanSidecarError as exc:
+        raise CampaignError(
+            f"the committed archive sidecar is not usable: {exc}"
+        ) from exc
+
+
 def _unsafe_repo_relative(path: str) -> Tuple[Optional[str], Optional[str]]:
     """``(unsafe_render, reason)`` for a path that is not repo-relative-safe.
 
@@ -1510,15 +1587,18 @@ def validate_plan_worktree(
     spec_commit: str,
     spec_blob: str,
     base_commit: str,
+    archive_records=None,
 ) -> Tuple[bool, Optional[str]]:
     """``(valid, reason)``: the worktree plan parses and keeps the binding.
 
     A plan that changes the specification path/commit/blob binding or the
     cycle base commit is rejected as unbound — the plan contract (PLAN-01)
     is part of the acceptance boundary and free-form prose cannot alter it.
+    Phase 2D1: a v2 worktree plan is parsed against the bound archive
+    records (the final-audit dependency closure references archived tasks).
     """
     try:
-        plan = plan_parser.Plan.from_bytes(data)
+        plan = plan_parser.Plan.from_bytes(data, archive_records=archive_records)
     except plan_parser.PlanError as exc:
         return False, f"worktree plan does not parse: {exc}"
     if plan.spec_path != spec_path:
@@ -2306,7 +2386,7 @@ def launch_role_attempt(
             bound_commit=head,
             role_prompt_digest=config.role_prompt_digests[role],
             prompt_set_digest=config.prompt_set_digest,
-            plan_digest=plan_sha256(plan_blob),
+            plan_digest=_plan_binding_digest(root, plan_blob, commit=head),
             policy_digest=plan_sha256(_blob_at(root, "AGENTS.md")),
             specification_digest=config.specification_digest,
             allowed_tools=launch_module.DEFAULT_ALLOWED_TOOLS[role],
@@ -2839,7 +2919,10 @@ class Campaign:
         git = self._git
         try:
             plan = plan_parser.Plan.from_bytes(
-                git.blob_at(head, self._config.plan_path)
+                git.blob_at(head, self._config.plan_path),
+                archive_records=_archive_records_at(
+                    self._root, commit=head, git=git
+                ),
             )
         except plan_parser.PlanError as exc:
             raise CampaignRecoveryError(
@@ -3010,6 +3093,9 @@ class Campaign:
             spec_commit=self._config.spec_commit,
             spec_blob=self._config.spec_blob,
             base_commit=base_plan.base_commit,
+            archive_records=_archive_records_at(
+                self._root, commit=head, git=git
+            ),
         )
         if not valid:
             raise CampaignRecoveryError(
@@ -3018,7 +3104,9 @@ class Campaign:
         self._planning_attempts_used = 0
         state2 = state_module.advance(
             state, "planned",
-            plan_digest=plan_sha256(plan_data),
+            plan_digest=_plan_binding_digest(
+                self._root, plan_data, commit=head, git=self._git
+            ),
             phase_base_commit=head,
         )
         return state2, self._record(state, 1, "planned", "")
@@ -3033,7 +3121,12 @@ class Campaign:
                 "HEAD advanced during implementation but no task was selected"
             )
         try:
-            plan = plan_parser.Plan.from_bytes(git.blob_at(head, self._config.plan_path))
+            plan = plan_parser.Plan.from_bytes(
+                git.blob_at(head, self._config.plan_path),
+                archive_records=_archive_records_at(
+                    self._root, commit=head, git=git
+                ),
+            )
         except plan_parser.PlanError as exc:
             raise CampaignRecoveryError(
                 f"the committed plan at {head} does not parse: {exc}"
@@ -3142,7 +3235,12 @@ class Campaign:
         if task_id is None:
             return None, "", False
         try:
-            plan = plan_parser.Plan.from_bytes(plan_blob)
+            plan = plan_parser.Plan.from_bytes(
+                plan_blob,
+                archive_records=_archive_records_at(
+                    self._root, commit=head, git=self._git
+                ),
+            )
         except plan_parser.PlanError as exc:
             raise CampaignPhaseError(
                 f"cannot parse the committed plan to derive the task write "
@@ -3164,7 +3262,9 @@ class Campaign:
             raise CampaignPhaseError(
                 f"the committed path-lease policy at HEAD is not usable: {exc}"
             ) from exc
-        plan_digest = plan_sha256(plan_blob)
+        plan_digest = _plan_binding_digest(
+            self._root, plan_blob, commit=head, git=self._git
+        )
         policy_digest = lease_authority.policy_digest(policy)
         # The lease deadline is no later than the remaining attempt/task/
         # campaign budget: the campaign wall-clock deadline is the trusted
@@ -3317,7 +3417,9 @@ class Campaign:
             "accepted_commit": bounded.accepted_commit,
             "current_tree": self._git.text(["show", "-s", "--format=%T", head]).strip(),
             "accepted_tree": self._git.text(["show", "-s", "--format=%T", bounded.accepted_commit]).strip(),
-            "plan_digest": plan_sha256(plan_blob),
+            "plan_digest": _plan_binding_digest(
+                self._root, plan_blob, commit=head, git=self._git
+            ),
             "task_excerpt_digest": (
                 plan_sha256(launch_module.task_excerpt_bytes(plan_blob, task_id))
                 if role == "developer" else ""
@@ -4590,7 +4692,12 @@ class Campaign:
         plan_committed = self._git.blob_at(head, self._config.plan_path)
         plan_changed = plan_worktree != plan_committed
         try:
-            committed_plan = plan_parser.Plan.from_bytes(plan_committed)
+            committed_plan = plan_parser.Plan.from_bytes(
+                plan_committed,
+                archive_records=_archive_records_at(
+                    self._root, commit=head, git=self._git
+                ),
+            )
             base_commit = committed_plan.base_commit
         except plan_parser.PlanError as exc:
             raise CampaignGitError(
@@ -4602,6 +4709,9 @@ class Campaign:
             spec_commit=self._config.spec_commit,
             spec_blob=self._config.spec_blob,
             base_commit=base_commit,
+            archive_records=_archive_records_at(
+                self._root, worktree=True
+            ),
         )
         dirty = self._git.role_dirty_paths()
         violation = scope_violation(
@@ -4824,6 +4934,9 @@ class Campaign:
                 spec_commit=self._config.spec_commit,
                 spec_blob=self._config.spec_blob,
                 base_commit=plan.base_commit,
+                archive_records=_archive_records_at(
+                    self._root, worktree=True
+                ),
             )
             violation = scope_violation(
                 dirty, phase="implementation",
@@ -4831,7 +4944,12 @@ class Campaign:
                 allow_paths=self._implementation_allow_paths(),
             )
             if valid and violation is None:
-                work_plan = plan_parser.Plan.from_bytes(plan_worktree)
+                work_plan = plan_parser.Plan.from_bytes(
+                    plan_worktree,
+                    archive_records=_archive_records_at(
+                        self._root, worktree=True
+                    ),
+                )
                 resumed_task = next(
                     (t for t in work_plan.tasks if t.number == task_id), None
                 )
@@ -4921,6 +5039,9 @@ class Campaign:
             spec_commit=self._config.spec_commit,
             spec_blob=self._config.spec_blob,
             base_commit=plan.base_commit,
+            archive_records=_archive_records_at(
+                self._root, worktree=True
+            ),
         )
         dirty = self._git.role_dirty_paths()
         violation = scope_violation(
@@ -4932,7 +5053,12 @@ class Campaign:
         had_changes = bool(dirty)
         task_complete = False
         if valid:
-            work_plan = plan_parser.Plan.from_bytes(plan_worktree)
+            work_plan = plan_parser.Plan.from_bytes(
+                plan_worktree,
+                archive_records=_archive_records_at(
+                    self._root, worktree=True
+                ),
+            )
             task = next((t for t in work_plan.tasks if t.number == task_id), None)
             task_complete = bool(task is not None and task.status == "complete")
         acceptance_pass = False
@@ -5498,6 +5624,59 @@ class Campaign:
             state=state2,
         )
 
+    def _archive_verified_completions(
+        self, state: state_module.FactoryState, head: str
+    ) -> Optional[str]:
+        """Trusted archive of independently verified completed tasks.
+
+        Phase 2D1: after the independent audit passes at the exact candidate
+        commit, the coordinator archives every completed task that is not yet
+        archived.  The task is appended to the committed archive sidecar
+        (append-only, provenance ``campaign``) and removed from the active
+        plan, and the plan's ``sidecars:`` binding is rewritten; the pair is
+        committed with the orchestrator identity.  Planner/developer roles
+        can never mutate the archive: the sidecar paths are outside every
+        role's allowed scope, and the archive is written only here, after
+        the trusted verification + audit pass.  Returns the new HEAD, or
+        ``None`` when nothing was archived.
+        """
+        plan = self._git.plan_at(head)
+        if plan.schema != plan_parser.SCHEMA_NAME:
+            return None  # v1 plans have no archive sidecar
+        try:
+            archived = plan_sidecars.completed_ids(
+                plan_sidecars.read_archive(self._root)
+            )
+        except plan_sidecars.PlanSidecarError as exc:
+            raise CampaignPhaseError(
+                f"the committed archive sidecar is not usable: {exc}"
+            ) from exc
+        completed = sorted(
+            task.number for task in plan.tasks
+            if task.status == "complete" and task.number not in archived
+        )
+        if not completed:
+            return None
+        for task_id in completed:
+            try:
+                plan_migration_module.archive_task(
+                    self._root, task_id, commit=head,
+                )
+            except plan_migration_module.PlanMigrationError as exc:
+                raise CampaignPhaseError(
+                    f"cannot archive verified completed task {task_id}: {exc}"
+                ) from exc
+        new_head = self._git.commit(
+            [
+                self._config.plan_path,
+                plan_sidecars.ARCHIVE_FILE,
+                plan_sidecars.HISTORY_FILE,
+            ],
+            "factory-campaign: archive verified completed tasks "
+            + ",".join(str(task_id) for task_id in completed),
+        )
+        return new_head
+
     def _step_audit(self, state: state_module.FactoryState) -> _Step:
         head = self._git.head()
         # One fresh retry absorbs a transient/malformed/missing auditor process
@@ -5645,6 +5824,18 @@ class Campaign:
                     role, exit_status=-1,
                     diagnostic="runner evidence integrity failure",
                 )
+        # Phase 2D1: a task whose completion passed the independent
+        # verification (tester) and audit (auditor) at the exact candidate
+        # commit is archived by the trusted coordinator — appended to the
+        # committed archive sidecar and removed from the active plan — before
+        # the scheduler resolves the next phase.  The archive commit is a
+        # trusted orchestrator commit; planner/developer roles can never
+        # mutate the sidecars.  A v1 plan (no sidecars) is untouched.
+        if outcome == "pass" and verification_outcome == "pass":
+            try:
+                self._archive_verified_completions(state, head)
+            except CampaignPhaseError:
+                raise
         # The deterministic progress fingerprint and the no-progress streak
         # are monotonic and recorded in the trusted state.  The fingerprint
         # binds only trusted monotonic evidence — the coherent checkpoint
@@ -6240,7 +6431,10 @@ def derive_campaign_config(
     head = _live_head(root)
     plan_data = _blob_at(root, plan_path)
     try:
-        plan = plan_parser.Plan.from_bytes(plan_data)
+        plan = plan_parser.Plan.from_bytes(
+            plan_data,
+            archive_records=_archive_records_at(root, commit=head),
+        )
     except plan_parser.PlanError as exc:
         raise CampaignConfigError(f"the canonical plan does not parse: {exc}") from exc
     spec_path = plan.spec_path
@@ -6301,7 +6495,7 @@ def derive_campaign_config(
         planning_attempts=planning_attempts,
         implementation_attempts=implementation_attempts,
         specification_digest=plan_sha256(spec_data),
-        plan_digest=plan_sha256(plan_data),
+        plan_digest=_plan_binding_digest(root, plan_data, commit=head),
         role_prompt_digests=prompt_digests,
         prompt_set_digest=prompt_set.hexdigest(),
         audit_objectives_digest=audit_digest,

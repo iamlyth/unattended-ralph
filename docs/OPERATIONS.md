@@ -49,7 +49,11 @@ file fails closed. The §11 transition table is enforced edge for edge,
 campaign-scoped bindings are write-once, round/attempt counters are
 monotonic, and a terminal phase accepts no further transition. `plan_digest`
 (Task 19 S8) is the SHA-256 of the exact bytes of the committed
-`factory-plan/v1` plan document at the bound `phase_base_commit`; it binds only
+`factory-plan/v1` plan document at the bound `phase_base_commit`; for a v2
+plan it is the composite binding digest
+`sha256(sha256(plan) | 0x00 | sha256(archive) | 0x00 | sha256(history))`,
+so a change to the active plan or to either sidecar changes the binding and
+same-commit tamper is detected. It binds only
 on the `planning -> implementation` edge and is write-once until the next
 round's binding, so a round's plan can never silently change. A zeroed epoch
 monotonic marker is rejected as tamper, an active attempt can never precede

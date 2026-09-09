@@ -204,6 +204,60 @@ if [[ "$ACTUAL_COMMIT" != "$RECORDED_COMMIT" || "$ACTUAL_BLOB" != "$RECORDED_BLO
     exit 1
 fi
 
+# -- plan sidecar binding (Phase 2D1) ----------------------------------------
+# A v2 plan's ``sidecars:`` front matter binds the archive/history sidecar
+# digests.  The sidecars are committed history (never model-writable): the
+# clean-tree gate above already guarantees the worktree matches HEAD, and
+# this check additionally verifies that the bound sidecar files exist, are
+# tracked, and byte-match the plan's binding — a tampered, stale, or missing
+# sidecar fails closed exactly like a stale plan.
+"$PY" - "$PLAN" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+plan_path = Path(sys.argv[1])
+root = plan_path.parent.parent.parent
+lines = plan_path.read_text(encoding='utf-8').splitlines()
+if not lines or lines[0].strip() != '---':
+    raise SystemExit('plan-freshness: plan has no metadata front matter')
+meta = {}
+for line in lines[1:]:
+    if line.strip() == '---':
+        break
+    if ':' in line:
+        key, value = line.split(':', 1)
+        meta[key.strip()] = value.strip()
+if 'sidecars' not in meta:
+    raise SystemExit(0)  # v1 plan: no sidecar binding
+binding = json.loads(meta['sidecars'])
+if set(binding) != {'archive', 'history'}:
+    raise SystemExit('plan-freshness: sidecars binding must name archive and history')
+for name in ('archive', 'history'):
+    digest = binding[name]
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        c not in '0123456789abcdef' for c in digest
+    ):
+        raise SystemExit(f'plan-freshness: sidecar {name} digest is malformed')
+    path = root / '.factory' / 'artifacts' / f'plan-{name}.jsonl'
+    if not path.is_file():
+        raise SystemExit(f'plan-freshness: bound sidecar plan-{name}.jsonl is missing')
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != digest:
+        raise SystemExit(
+            f'plan-freshness: plan-{name}.jsonl digest {actual[:12]} does not '
+            f'match the plan binding {digest[:12]}'
+        )
+raise SystemExit(0)
+PY
+[[ $? -eq 0 ]] || exit 1
+for sidecar in plan-archive.jsonl plan-history.jsonl; do
+    if [[ -f "$PROJECT_ROOT/.factory/artifacts/$sidecar" ]]; then
+        if ! "$PINNED_GIT" ls-files --error-unmatch -- ".factory/artifacts/$sidecar" >/dev/null 2>&1; then
+            echo "plan-freshness: sidecar '$sidecar' is not tracked at HEAD" >&2
+            exit 1
+        fi
+    fi
+done
+
 # -- harness freshness scope --------------------------------------------------
 # The plan contract includes the hidden control-plane namespaces (`.factory/`,
 # `.pi/`) and the policy/checker/receipt tools.  The clean-tree gate above
