@@ -1699,6 +1699,12 @@ class CaseAdversarialSuite(_AdversarialBase):
                      root / ".factory/loop/gitutil.py")
         shutil.copy2(ROOT / ".factory/loop/lock.py",
                      root / ".factory/loop/lock.py")
+        # lock.py validates the composite plan binding for v2 plans and
+        # imports the plan parser/sidecar authorities from its own tree.
+        shutil.copy2(ROOT / ".factory/loop/plan_parser.py",
+                     root / ".factory/loop/plan_parser.py")
+        shutil.copy2(ROOT / ".factory/loop/plan_sidecars.py",
+                     root / ".factory/loop/plan_sidecars.py")
         shutil.copy2(ROOT / ".factory/loop/footprint.py",
                      root / ".factory/loop/footprint.py")
         shutil.copy2(ROOT / ".factory/campaign-receipt-policy.json",

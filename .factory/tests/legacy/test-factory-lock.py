@@ -278,6 +278,12 @@ def test_coordinator_env_stripped_from_untrusted_leaf() -> None:
         # in turn loads the pinned Git runner from the same loop namespace).
         shutil.copy2(SOURCE / ".factory" / "loop" / "lock.py",
                      root / ".factory" / "loop" / "lock.py")
+        # lock.py validates the composite plan binding for v2 plans and
+        # imports the plan parser/sidecar authorities from its own tree.
+        shutil.copy2(SOURCE / ".factory" / "loop" / "plan_parser.py",
+                     root / ".factory" / "loop" / "plan_parser.py")
+        shutil.copy2(SOURCE / ".factory" / "loop" / "plan_sidecars.py",
+                     root / ".factory" / "loop" / "plan_sidecars.py")
         shutil.copy2(SOURCE / ".factory" / "loop" / "gitutil.py",
                      root / ".factory" / "loop" / "gitutil.py")
         runtime = root / ".factory-state"

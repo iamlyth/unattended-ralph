@@ -296,6 +296,12 @@ class RuntimeReceiptTests(unittest.TestCase):
                      root / ".factory" / "loop" / "evidence.py")
         shutil.copy2(ROOT / ".factory" / "loop" / "lock.py",
                      root / ".factory" / "loop" / "lock.py")
+        # lock.py validates the composite plan binding for v2 plans and
+        # imports the plan parser/sidecar authorities from its own tree.
+        shutil.copy2(ROOT / ".factory" / "loop" / "plan_parser.py",
+                     root / ".factory" / "loop" / "plan_parser.py")
+        shutil.copy2(ROOT / ".factory" / "loop" / "plan_sidecars.py",
+                     root / ".factory" / "loop" / "plan_sidecars.py")
         shutil.copy2(ROOT / ".factory" / "tools" / "machine-receipt.py",
                      root / ".factory" / "tools" / "machine-receipt.py")
         self.state_dir = root / ".factory-state"
