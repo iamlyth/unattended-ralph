@@ -731,7 +731,7 @@ def verify_invocation(binding: InvocationBinding) -> None:
     if not stat.S_ISDIR(info.st_mode):
         raise InvocationError(f"`workspace` {workspace} is not a directory")
     if binding.campaign_id:
-        if not lease_authority.CAMPAIGN_ID_RE.fullmatch(binding.campaign_id):
+        if not lease_authority.is_campaign_id(binding.campaign_id):
             raise InvocationError(
                 f"`campaign_id` {binding.campaign_id!r} must match "
                 "`^[A-Za-z0-9._-]{1,128}$`"

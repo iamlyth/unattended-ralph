@@ -186,6 +186,15 @@ def _reject_duplicate_keys_claim(pairs: List[tuple]) -> Dict[str, object]:
     return _reject_duplicate_keys(pairs, PathLeaseClaimError)
 
 
+def is_campaign_id(value: object) -> bool:
+    """True for a closed-format campaign ID (``^[A-Za-z0-9._-]{1,128}$``)."""
+    return (
+        isinstance(value, str)
+        and bool(CAMPAIGN_ID_RE.fullmatch(value))
+        and len(value) <= MAX_CAMPAIGN_ID_LENGTH
+    )
+
+
 def is_scope_id(value: object) -> bool:
     """True for a closed-format scope ID (``^[a-z][a-z0-9_-]*$``)."""
     return (
