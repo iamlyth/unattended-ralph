@@ -30,7 +30,13 @@ tasks and the plan acceptance/evidence history live in the strict committed
 machine sidecars `.factory/artifacts/plan-archive.jsonl`
 (`factory-plan-archive/v1`) and `.factory/artifacts/plan-history.jsonl`
 (`factory-plan-history/v1`), content-addressed by the plan's `sidecars:`
-binding. The conformance matrix stays in the machine conformance sidecar
+binding. Each archive record preserves the full v1 Evidence narrative
+verbatim (`evidence`, bounded inert data) plus the curated safe inert
+references extracted from it (`evidence_refs`); v1/v2 is detected by the
+parsed front-matter schema, never a substring heuristic, and the plan-sidecar
+binding is verified against the actual sidecar bytes at worktree validation
+and crash reconciliation. The conformance matrix stays in the machine
+conformance sidecar
 `.factory/artifacts/conformance.json`.
 
 ## Operating model

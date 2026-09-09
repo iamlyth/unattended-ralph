@@ -19,9 +19,15 @@ module is the trusted migration/compaction authority:
   migration never runs silently during a campaign.
 * :func:`archive_task` moves one independently verified completed task from
   the active v2 plan into the archive sidecar (append-only, provenance
-  ``campaign``) and rewrites the plan without it.  Reopening an archived task
-  is an explicit semantic migration back into the active plan with
-  provenance, never model prose.
+  ``campaign``) and rewrites the plan without it, after verifying the
+  current plan-sidecar binding against the actual sidecar bytes (a forged or
+  stale binding fails closed).  Reopening an archived task is an explicit
+  semantic migration back into the active plan with provenance, never model
+  prose; :func:`reopen_task` rejects it unambiguously in this slice.
+* :func:`migrate_archive_evidence` deterministically regenerates the archive
+  sidecar with the lossless ``evidence`` field from the exact pre-migration
+  v1 plan bytes and rehashes the plan binding (Phase 2D1 security
+  remediation A).
 * :func:`rehash_plan` recomputes the sidecar digests and rewrites the plan's
   ``sidecars:`` front-matter binding so a planner edit that adds/removes
   active tasks keeps the plan-sidecar pair consistent.
@@ -130,22 +136,64 @@ def _condense(text: str, *, maximum: int = CONCISE_FIELD_MAX) -> str:
     return cut.rstrip() + " …"
 
 
+# Backtick-quoted tokens inside an Evidence narrative (Phase 2D1 security
+# remediation A).  Only safe reference-like tokens are extracted into
+# ``evidence_refs``; command-shaped prose (tokens with whitespace) and
+# markers stay in the ``evidence`` narrative and are never refs.
+EVIDENCE_TOKEN_RE = re.compile(r"`([^`]+)`")
+# A reference-like token: a path with a separator or a dot, or a hex
+# commit/blob reference (optionally truncated with an ellipsis).
+EVIDENCE_REF_LIKE_RE = re.compile(r"^[0-9a-f]{7,40}(…)?$", re.I)
+
+
+def _looks_like_evidence_ref(token: str) -> bool:
+    if "/" in token or "." in token:
+        return True
+    return bool(EVIDENCE_REF_LIKE_RE.fullmatch(token))
+
+
+def _extract_evidence_refs(evidence: str) -> List[str]:
+    """Safe inert references extracted from the full Evidence narrative.
+
+    A token is kept only when it is backtick-quoted, reference-like (a path
+    with a separator/dot or a hex commit/blob), and passes the safe
+    inert-reference grammar (no whitespace/control/backslash, not absolute,
+    no empty/``.``/``..`` segments).  Command-shaped prose (e.g. ``git diff
+    HEAD -- docs/SPEC.md``) contains whitespace and stays in the narrative;
+    it is never a ref and never authority.
+    """
+    refs: List[str] = []
+    seen: set = set()
+    for raw in EVIDENCE_TOKEN_RE.findall(evidence):
+        token = raw.strip()
+        if not token or any(ch.isspace() for ch in token):
+            continue
+        if not _looks_like_evidence_ref(token):
+            continue
+        try:
+            plan_sidecars.validate_evidence_ref(token)
+        except plan_sidecars.PlanSidecarError:
+            continue
+        if token not in seen:
+            seen.add(token)
+            refs.append(token)
+    return refs
+
+
 def _task_to_archive_record(
     task: plan_parser.Task, *, archived_commit: str, provenance: str
 ) -> plan_sidecars.ArchiveRecord:
     """Lossless archive record for one completed v1 task.
 
     Every field of the v1 task — including the full Scope/Acceptance/
-    Verification/Documentation impact and the Evidence narrative — is
-    preserved verbatim; exact commit/evidence references are data.
+    Verification/Documentation impact and the complete Evidence narrative —
+    is preserved verbatim in the record; the curated safe inert references
+    are extracted into ``evidence_refs`` (Phase 2D1 security remediation A).
+    Exact commit/evidence references are data, never authority.
     """
     fields = task.fields
     evidence = fields.get("Evidence", "")
-    evidence_refs: List[str] = []
-    for line in evidence.splitlines():
-        token = line.strip().strip("`")
-        if token and not any(ch in token for ch in " \t"):
-            evidence_refs.append(token)
+    evidence_refs = _extract_evidence_refs(evidence)
     return plan_sidecars.ArchiveRecord(
         schema=plan_sidecars.ARCHIVE_SCHEMA,
         task_id=task.number,
@@ -157,6 +205,7 @@ def _task_to_archive_record(
         acceptance=fields.get("Acceptance criteria", ""),
         verification=fields.get("Verification", ""),
         documentation_impact=fields.get("Documentation impact", ""),
+        evidence=evidence,
         evidence_refs=tuple(evidence_refs),
         archived_commit=archived_commit,
         provenance=provenance,
@@ -391,8 +440,10 @@ def archive_task(
     transient developer worktree state) or be moved from the plan verbatim;
     it is appended to the archive sidecar with provenance ``campaign`` and
     removed from the plan, and the plan's ``sidecars:`` binding is rewritten.
-    Reopening an archived task is an explicit semantic migration back into
-    the active plan, never model prose.
+    Before any rewrite the current plan-sidecar binding is verified against
+    the actual sidecar bytes, so a forged or stale binding fails closed
+    (Phase 2D1 security remediation A).  Reopening an archived task is an
+    explicit semantic migration back into the active plan, never model prose.
     """
     root = _as_root(root)
     if not plan_sidecars.SHA40_RE.fullmatch(commit):
@@ -401,8 +452,14 @@ def archive_task(
     archive_file = root / archive_path
     history_file = root / history_path
     plan_bytes = _read_bounded(plan_file, plan_sidecars.SIDECAR_MAX_BYTES, "plan")
+    archive_bytes = _read_bounded(
+        archive_file, plan_sidecars.SIDECAR_MAX_BYTES, "archive sidecar"
+    )
+    history_bytes = _read_bounded(
+        history_file, plan_sidecars.SIDECAR_MAX_BYTES, "history sidecar"
+    )
     try:
-        archive_records = plan_sidecars.read_archive(root)
+        archive_records = plan_sidecars.parse_archive(archive_bytes)
     except plan_sidecars.PlanSidecarError as exc:
         raise PlanMigrationError(
             f"the archive sidecar is not usable: {exc}"
@@ -417,6 +474,19 @@ def archive_task(
         raise PlanMigrationError(
             "archive_task requires a factory-plan/v2 plan; migrate first"
         )
+    # Phase 2D1 security remediation A: the current plan-sidecar binding must
+    # match the actual sidecar bytes before any rewrite.  A forged binding
+    # (the plan declares digests that do not match the committed sidecars) or
+    # a stale pair fails closed here, never silently rewritten.
+    try:
+        plan_sidecars.verify_sidecar_binding(
+            plan_bytes, archive_bytes, history_bytes,
+            archive_records=archive_records,
+        )
+    except plan_sidecars.PlanSidecarError as exc:
+        raise PlanMigrationError(
+            f"the plan-sidecar binding is inconsistent; refusing to rewrite: {exc}"
+        ) from exc
     existing = archive_records
     if any(record.task_id == task_id for record in existing):
         raise PlanMigrationError(f"task {task_id} is already archived")
@@ -435,7 +505,7 @@ def archive_task(
     archive_bytes = plan_sidecars.serialize_archive([*existing, record])
     archive_digest = plan_sidecars.sidecar_digest(archive_bytes)
 
-    history = plan_sidecars.read_history(root)
+    history = plan_sidecars.parse_history(history_bytes)
     history_records = [
         *history,
         plan_sidecars.HistoryRecord(
@@ -473,6 +543,133 @@ def archive_task(
         "remaining_tasks": [t.number for t in remaining],
         "archive_digest": archive_digest,
         "history_digest": history_digest,
+    }
+
+
+def reopen_task(
+    root,
+    task_id: int,
+    *,
+    plan_path: str = DEFAULT_PLAN_PATH,
+    archive_path: str = DEFAULT_ARCHIVE_PATH,
+    history_path: str = DEFAULT_HISTORY_PATH,
+    commit: str,
+) -> Dict[str, object]:
+    """Reopen an archived task — explicitly rejected in this slice.
+
+    Phase 2D1 security remediation A: reopening is not yet used by any
+    campaign, so rather than deadlock or confuse dependency closure the
+    operation is rejected unambiguously.  A reopened ID must be reverified
+    and rearchived before it is counted completed again; active/archive
+    conflicts already fail closed at parse time (a v2 plan whose task id
+    reappears in the archive sidecar cannot parse).  The rejection is
+    unconditional and documented; no tombstone is written because no
+    reopen has ever occurred.
+    """
+    root = _as_root(root)
+    if not plan_sidecars.SHA40_RE.fullmatch(commit):
+        raise PlanMigrationError("commit must be a 40-hex commit")
+    raise PlanMigrationError(
+        f"reopening archived task {task_id} is not supported in this slice; "
+        "a reopened task must be reverified and rearchived before it is "
+        "counted completed again, and an active/archive conflict fails closed "
+        "at parse time"
+    )
+
+
+def _read_legacy_archive(root) -> List[plan_sidecars.ArchiveRecord]:
+    """Read the pre-remediation archive (records without the evidence field).
+
+    Phase 2D1 security remediation A: the committed archive predates the
+    ``evidence`` field, so the strict parser rejects it.  This one-time
+    migration path reads the raw sidecar and parses each record with the
+    missing ``evidence`` defaulted to ``""``; every other field is validated
+    strictly, so a malformed legacy record still fails closed.
+    """
+    data = plan_sidecars._read_sidecar(root, plan_sidecars.ARCHIVE_FILE)
+    records: List[plan_sidecars.ArchiveRecord] = []
+    for line_no, line in enumerate(data.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise plan_sidecars.PlanSidecarError(
+                f"legacy archive line {line_no} is not JSON: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise plan_sidecars.PlanSidecarError(
+                f"legacy archive line {line_no} is not a JSON object"
+            )
+        if "evidence" not in value:
+            value = dict(value)
+            value["evidence"] = ""
+        records.append(plan_sidecars.parse_archive_record(value))
+    return records
+
+
+def migrate_archive_evidence(
+    root,
+    *,
+    v1_plan_bytes: bytes,
+    archived_commit: str,
+    plan_path: str = DEFAULT_PLAN_PATH,
+    archive_path: str = DEFAULT_ARCHIVE_PATH,
+    history_path: str = DEFAULT_HISTORY_PATH,
+) -> Dict[str, object]:
+    """Deterministically regenerate the archive with the lossless Evidence field.
+
+    Phase 2D1 security remediation A: the v1 archive records predate the
+    ``evidence`` field (and carried a broken whitespace-free ref extraction).
+    This tool rebuilds every record from the exact pre-migration v1 plan
+    bytes the migration consumed, preserving each record's archived commit
+    and provenance, writes the new archive sidecar, and rehashes the plan's
+    ``sidecars:`` binding.  The history sidecar is untouched (its records do
+    not reference the archive digest).  The v1 plan must cover every archived
+    task id; a mismatch fails closed.
+    """
+    root = _as_root(root)
+    if not plan_sidecars.SHA40_RE.fullmatch(archived_commit):
+        raise PlanMigrationError("archived_commit must be a 40-hex commit")
+    try:
+        v1_plan = plan_parser.Plan.from_bytes(v1_plan_bytes)
+    except plan_parser.PlanError as exc:
+        raise PlanMigrationError(f"the v1 plan does not parse: {exc}") from exc
+    if v1_plan.schema != plan_parser.SCHEMA_V1:
+        raise PlanMigrationError(
+            "migrate_archive_evidence requires the pre-migration v1 plan"
+        )
+    existing = _read_legacy_archive(root)
+    by_id = {record.task_id: record for record in existing}
+    records: List[plan_sidecars.ArchiveRecord] = []
+    for task in v1_plan.tasks:
+        record = by_id.get(task.number)
+        if record is None:
+            continue
+        records.append(
+            _task_to_archive_record(
+                task,
+                archived_commit=record.archived_commit,
+                provenance=record.provenance,
+            )
+        )
+    if len(records) != len(existing):
+        raise PlanMigrationError(
+            f"the v1 plan covers {len(records)} of {len(existing)} archived "
+            "tasks; refusing a partial regeneration"
+        )
+    archive_bytes = plan_sidecars.serialize_archive(records)
+    plan_sidecars._atomic_write_committed(root / archive_path, archive_bytes)
+    rehash = rehash_plan(
+        root,
+        plan_path=plan_path,
+        archive_path=archive_path,
+        history_path=history_path,
+    )
+    return {
+        "migrated_records": len(records),
+        "archive_digest": plan_sidecars.sidecar_digest(archive_bytes),
+        "rehashed": rehash["rehashed"],
     }
 
 
@@ -567,6 +764,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_archive.add_argument("--archive-path", default=DEFAULT_ARCHIVE_PATH)
     p_archive.add_argument("--history-path", default=DEFAULT_HISTORY_PATH)
 
+    p_reopen = sub.add_parser(
+        "reopen-task",
+        help="reopen an archived task (explicitly rejected in this slice)",
+    )
+    p_reopen.add_argument("task_id", type=int)
+    p_reopen.add_argument("--commit", required=True)
+    p_reopen.add_argument("--plan-path", default=DEFAULT_PLAN_PATH)
+    p_reopen.add_argument("--archive-path", default=DEFAULT_ARCHIVE_PATH)
+    p_reopen.add_argument("--history-path", default=DEFAULT_HISTORY_PATH)
+
+    p_evidence = sub.add_parser(
+        "migrate-archive-evidence",
+        help="regenerate the archive with the lossless evidence field",
+    )
+    p_evidence.add_argument("--v1-plan", required=True, help="pre-migration v1 plan file")
+    p_evidence.add_argument("--archived-commit", required=True)
+    p_evidence.add_argument("--plan-path", default=DEFAULT_PLAN_PATH)
+    p_evidence.add_argument("--archive-path", default=DEFAULT_ARCHIVE_PATH)
+    p_evidence.add_argument("--history-path", default=DEFAULT_HISTORY_PATH)
+
     p_rehash = sub.add_parser(
         "rehash", help="rewrite the plan sidecars binding to the current digests"
     )
@@ -593,6 +810,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 archive_path=args.archive_path,
                 history_path=args.history_path,
                 commit=args.commit,
+            )
+        elif args.command == "reopen-task":
+            report = reopen_task(
+                root,
+                args.task_id,
+                plan_path=args.plan_path,
+                archive_path=args.archive_path,
+                history_path=args.history_path,
+                commit=args.commit,
+            )
+        elif args.command == "migrate-archive-evidence":
+            report = migrate_archive_evidence(
+                root,
+                v1_plan_bytes=Path(args.v1_plan).read_bytes(),
+                archived_commit=args.archived_commit,
+                plan_path=args.plan_path,
+                archive_path=args.archive_path,
+                history_path=args.history_path,
             )
         else:
             report = rehash_plan(

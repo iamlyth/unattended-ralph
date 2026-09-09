@@ -485,6 +485,52 @@ def _validate_spec_path(spec_path: str) -> None:
         )
 
 
+def detect_schema(data: bytes) -> str:
+    """The plan schema declared by the parsed front matter (v1 default).
+
+    v1/v2 is detected by the parsed front-matter ``schema:`` key — never by
+    a substring heuristic — so a v1 plan whose body merely mentions
+    ``factory-plan/v2`` (e.g. in a task title or prose) is still v1, and a
+    forged ``schema:`` value fails closed.  Raises ``PlanError`` on
+    malformed front matter (missing delimiters, malformed or duplicate
+    fields, an unknown schema value).
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PlanError(f"plan is not valid UTF-8: {exc}") from exc
+    if text.startswith("\ufeff"):
+        raise PlanError("plan must not start with a UTF-8 byte order mark")
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        raise PlanError("front matter must start on the first line")
+    close = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            close = index
+            break
+    if close is None:
+        raise PlanError("front matter must be terminated by a closing `---` line")
+    seen: set = set()
+    schema = SCHEMA_V1
+    for raw in lines[1:close]:
+        match = FRONT_RE.fullmatch(raw)
+        if not match:
+            raise PlanError(f"front matter has a malformed field line: {raw!r}")
+        key, value = match.group(1), match.group(2)
+        if key in seen:
+            raise PlanError(f"front matter has duplicate key `{key}`")
+        seen.add(key)
+        if key == "schema":
+            if value not in (SCHEMA_V1, SCHEMA_NAME):
+                raise PlanError(
+                    f"front matter schema must be `{SCHEMA_V1}` or `{SCHEMA_NAME}`, "
+                    f"got `{value}`"
+                )
+            schema = value
+    return schema
+
+
 def _table_cells(line: str) -> List[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
@@ -1197,9 +1243,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Phase 2D1: a v2 plan is parsed against the bound archive sidecar
     # records (the final-audit dependency closure references archived
     # completed tasks).  The sidecar is read from the sibling artifacts
-    # directory when present; a v1 plan ignores it.
+    # directory when present; a v1 plan ignores it.  v1/v2 is detected by
+    # the parsed front-matter schema (never a substring heuristic), so a
+    # v1 plan whose body merely mentions ``factory-plan/v2`` stays v1.
+    try:
+        schema = detect_schema(data)
+    except PlanError as exc:
+        print(f"factory-plan: {exc}", file=sys.stderr)
+        return 1
     archive_records = None
-    if b"schema: factory-plan/v2" in data[:2048]:
+    if schema == SCHEMA_NAME:
         try:
             from . import plan_sidecars  # deferred: avoids an import cycle
         except ImportError:  # flat-import mode used by the hidden suite

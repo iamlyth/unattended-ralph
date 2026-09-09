@@ -502,6 +502,75 @@ class TransitionTableTest(unittest.TestCase):
         )
 
 
+class SchemaDetectionTest(unittest.TestCase):
+    """v1/v2 detection is parsed front-matter schema, never a substring."""
+
+    def _front(self, schema: str) -> bytes:
+        return (
+            "---\n"
+            f"schema: {schema}\n"
+            "status: active\n"
+            "spec_path: docs/FACTORY-LOOP-SPEC.md\n"
+            "spec_commit: " + "a" * 40 + "\n"
+            "spec_blob: " + "b" * 64 + "\n"
+            "base_commit: " + "c" * 40 + "\n"
+            "---\n"
+            "# Plan\n"
+        ).encode("utf-8")
+
+    def test_detects_v1_and_v2_by_parsed_schema(self) -> None:
+        self.assertEqual(
+            plan_parser.detect_schema(self._front("factory-plan/v1")),
+            plan_parser.SCHEMA_V1,
+        )
+        self.assertEqual(
+            plan_parser.detect_schema(self._front(SCHEMA_NAME)),
+            plan_parser.SCHEMA_NAME,
+        )
+
+    def test_malicious_v1_body_mention_is_not_v2(self) -> None:
+        # A v1 plan whose body merely mentions the v2 schema string must stay
+        # v1 (the old substring heuristic would misclassify it and demand
+        # sidecars that do not exist).
+        data = self._front("factory-plan/v1") + (
+            b"## Task 1: placeholder\n\n"
+            b"- Status: pending\n"
+            b"- Evidence: the body mentions `schema: factory-plan/v2` "
+            b"inside a backtick, which is not front matter.\n"
+        )
+        self.assertEqual(plan_parser.detect_schema(data), plan_parser.SCHEMA_V1)
+
+    def test_malformed_front_matter_fails_closed(self) -> None:
+        # A duplicate schema key or an unknown schema value is a PlanError,
+        # never a silent v1 fallback that would skip sidecar verification.
+        dup = self._front("factory-plan/v1").replace(
+            b"schema: factory-plan/v1\n",
+            b"schema: factory-plan/v1\nschema: factory-plan/v1\n",
+            1,
+        )
+        with self.assertRaises(PlanError):
+            plan_parser.detect_schema(dup)
+        unknown = self._front("factory-plan/v9")
+        with self.assertRaises(PlanError):
+            plan_parser.detect_schema(unknown)
+
+    def test_front_matter_without_schema_key_defaults_v1(self) -> None:
+        # A v1 plan has no schema key; the parsed front matter defaults v1.
+        data = (
+            "---\n"
+            "status: active\n"
+            "spec_path: docs/FACTORY-LOOP-SPEC.md\n"
+            "---\n"
+            "# Plan\n"
+        ).encode("utf-8")
+        self.assertEqual(plan_parser.detect_schema(data), plan_parser.SCHEMA_V1)
+
+    def test_missing_front_matter_fails_closed(self) -> None:
+        # A plan with no front matter at all is malformed, not silently v1.
+        with self.assertRaises(PlanError):
+            plan_parser.detect_schema(b"# Plan\n## Task 1\n")
+
+
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)

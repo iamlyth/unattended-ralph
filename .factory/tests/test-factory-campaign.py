@@ -4626,7 +4626,9 @@ class PlanBindingDigestTest(unittest.TestCase):
                 ["git", "show", f"{commit}:.factory/artifacts/implementation-plan.md"],
                 capture_output=True, check=True,
             ).stdout
-            if b"schema: factory-plan/v2" not in candidate[:2048]:
+            # v1/v2 is detected by the parsed front-matter schema, never a
+            # substring heuristic (a v1 body may mention the v2 schema).
+            if plan_parser.detect_schema(candidate) == plan_parser.SCHEMA_V1:
                 v1 = candidate
                 break
         self.assertIsNotNone(v1)
@@ -4664,6 +4666,205 @@ class PlanBindingDigestTest(unittest.TestCase):
         self.assertEqual(
             len(campaign_module._archive_records_at(ROOT)), 30
         )
+
+
+class SidecarBindingSecurityTest(_CampaignBase):
+    """Phase 2D1 security remediation A: forged/stale sidecar bindings.
+
+    The fixture planner emits v1 plans, so these tests build a committed v2
+    plan + sidecars directly and exercise the campaign's binding authority
+    at the function level: worktree validation, crash reconciliation, and
+    the trusted archive mutation all fail closed on a forged declared
+    digest or a stale/diverging worktree sidecar.
+    """
+
+    def _v2_plan_bytes(
+        self, spec_commit: str, spec_blob: str, base_commit: str,
+        archive_digest: str, history_digest: str,
+    ) -> bytes:
+        return (
+            "---\n"
+            f"schema: {plan_parser.SCHEMA_NAME}\n"
+            "spec_path: docs/SPEC.md\n"
+            f"spec_commit: {spec_commit}\n"
+            f"spec_blob: {spec_blob}\n"
+            f"base_commit: {base_commit}\n"
+            "status: active\n"
+            f'sidecars: {{"archive":"{archive_digest}",'
+            f'"history":"{history_digest}"}}\n'
+            "---\n"
+            "\n"
+            "# Implementation Plan\n"
+            "\n"
+            "## Goal and non-goals\n"
+            "\n"
+            "Goal: fixture goal.\n"
+            "\n"
+            "## Architecture and constraints\n"
+            "\n"
+            "- Fixture constraint.\n"
+            "\n"
+            "## Task 1: Fixture task\n"
+            "\n"
+            "- Status: pending\n"
+            "- Dependencies: none\n"
+            "- Priority: 1\n"
+            "- Scope: fixture scope\n"
+            "- Acceptance criteria: fixture acceptance\n"
+            "- Verification: fixture verification\n"
+            "- Documentation impact: fixture docs\n"
+            "\n"
+            "## Task 2: Final documentation and specification audit\n"
+            "\n"
+            "- Status: pending\n"
+            "- Dependencies: Task 1, Task 99\n"
+            "- Priority: 2\n"
+            "- Scope: audit scope\n"
+            "- Acceptance criteria: audit acceptance\n"
+            "- Verification: audit verification\n"
+            "- Documentation impact: audit docs\n"
+        ).encode("utf-8")
+
+    def _v2_workspace(self):
+        """A fixture workspace whose committed plan is v2 + sidecars."""
+        ws = self.make(SUCCESS_SCENARIO)
+        spec_commit = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
+        spec_blob = _git(
+            ws.root, "rev-parse", "HEAD:docs/SPEC.md"
+        ).stdout.strip()
+        archive_records = [plan_sidecars.ArchiveRecord(
+            schema=plan_sidecars.ARCHIVE_SCHEMA, task_id=99,
+            title="Archived fixture task", priority=99, dependencies=(),
+            status="complete", scope="s", acceptance="a",
+            verification="v", documentation_impact="d", evidence="e",
+            evidence_refs=(), archived_commit=spec_commit,
+            provenance="campaign",
+        )]
+        archive_bytes = plan_sidecars.serialize_archive(archive_records)
+        history_bytes = plan_sidecars.serialize_history([
+            plan_sidecars.HistoryRecord(
+                schema=plan_sidecars.HISTORY_SCHEMA, commit=spec_commit,
+                event="migrated", detail="d", plan_digest="0" * 64,
+                task_id=None,
+            )
+        ])
+        plan_bytes = self._v2_plan_bytes(
+            spec_commit, spec_blob, spec_commit,
+            plan_sidecars.sidecar_digest(archive_bytes),
+            plan_sidecars.sidecar_digest(history_bytes),
+        )
+        (ws.root / PLAN_REL).write_bytes(plan_bytes)
+        (ws.root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE).write_bytes(
+            archive_bytes
+        )
+        (ws.root / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE).write_bytes(
+            history_bytes
+        )
+        _git(ws.root, "add", "-A")
+        _git(ws.root, "commit", "-qm", "v2 plan and sidecars")
+        return ws
+
+    def test_forged_sidecar_binding_fails_closed(self) -> None:
+        # A v2 plan whose declared archive digest does not match the actual
+        # sidecar bytes is rejected by worktree validation (forged binding).
+        ws = self._v2_workspace()
+        plan_bytes = (ws.root / PLAN_REL).read_bytes()
+        archive_bytes = (
+            ws.root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+        ).read_bytes()
+        history_bytes = (
+            ws.root / ".factory" / "artifacts" / plan_sidecars.HISTORY_FILE
+        ).read_bytes()
+        forged = plan_bytes.replace(
+            plan_sidecars.sidecar_digest(archive_bytes).encode("ascii"),
+            b"0" * 64, 1,
+        )
+        self.assertNotEqual(forged, plan_bytes)
+        valid, reason = campaign_module.validate_plan_worktree(
+            forged,
+            spec_path="docs/SPEC.md",
+            spec_commit=_git(ws.root, "rev-parse", "HEAD").stdout.strip(),
+            spec_blob=_git(
+                ws.root, "rev-parse", "HEAD:docs/SPEC.md"
+            ).stdout.strip(),
+            base_commit=_git(ws.root, "rev-parse", "HEAD").stdout.strip(),
+            archive_records=plan_sidecars.parse_archive(archive_bytes),
+            archive_bytes=archive_bytes,
+            history_bytes=history_bytes,
+        )
+        self.assertFalse(valid)
+        self.assertIn("binding mismatch", reason)
+
+    def test_v2_plan_without_sidecar_bytes_fails_closed(self) -> None:
+        # A v2 worktree plan whose sidecar bytes are unavailable is
+        # unverifiable and fails closed (never silently accepted).
+        ws = self._v2_workspace()
+        plan_bytes = (ws.root / PLAN_REL).read_bytes()
+        archive_bytes = (
+            ws.root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+        ).read_bytes()
+        valid, reason = campaign_module.validate_plan_worktree(
+            plan_bytes,
+            spec_path="docs/SPEC.md",
+            spec_commit=_git(ws.root, "rev-parse", "HEAD").stdout.strip(),
+            spec_blob=_git(
+                ws.root, "rev-parse", "HEAD:docs/SPEC.md"
+            ).stdout.strip(),
+            base_commit=_git(ws.root, "rev-parse", "HEAD").stdout.strip(),
+            archive_records=plan_sidecars.parse_archive(archive_bytes),
+            archive_bytes=None,
+            history_bytes=None,
+        )
+        self.assertFalse(valid)
+        self.assertIn("requires the archive/history sidecar bytes", reason)
+
+    def test_stale_worktree_sidecar_fails_closed(self) -> None:
+        # The trusted archive mutation anchors to the committed blobs at the
+        # exact head; a worktree sidecar that diverges (stale or forged) is
+        # refused before any coordinator mutation.
+        ws = self._v2_workspace()
+        config = ws.derive_config()
+        campaign = campaign_module.Campaign(config)
+        campaign._acquire()
+        try:
+            archive_rel = (
+                ws.root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+            )
+            archive_rel.write_bytes(archive_rel.read_bytes() + b"\n")
+            head = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
+            with self.assertRaises(campaign_module.CampaignPhaseError) as caught:
+                campaign._archive_verified_completions(None, head)
+            self.assertIn("diverge", str(caught.exception))
+        finally:
+            campaign._lock.release()
+
+    def test_crash_reconciliation_verifies_committed_binding(self) -> None:
+        # Crash reconciliation validates the recovered committed plan against
+        # the committed sidecar blobs; a forged declared digest fails closed.
+        ws = self._v2_workspace()
+        config = ws.derive_config()
+        campaign = campaign_module.Campaign(config)
+        campaign._acquire()
+        try:
+            plan_rel = ws.root / PLAN_REL
+            archive_bytes = (
+                ws.root / ".factory" / "artifacts" / plan_sidecars.ARCHIVE_FILE
+            ).read_bytes()
+            forged = plan_rel.read_bytes().replace(
+                plan_sidecars.sidecar_digest(archive_bytes).encode("ascii"),
+                b"0" * 64, 1,
+            )
+            self.assertNotEqual(forged, plan_rel.read_bytes())
+            plan_rel.write_bytes(forged)
+            _git(ws.root, "add", PLAN_REL)
+            _git(ws.root, "commit", "-qm", "forged sidecar binding")
+            head = _git(ws.root, "rev-parse", "HEAD").stdout.strip()
+            base = _git(ws.root, "rev-parse", "HEAD~1").stdout.strip()
+            with self.assertRaises(campaign_module.CampaignRecoveryError) as caught:
+                campaign._reconcile_planning(None, base, head)
+            self.assertIn("invalid", str(caught.exception))
+        finally:
+            campaign._lock.release()
 
 
 if __name__ == "__main__":

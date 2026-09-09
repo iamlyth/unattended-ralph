@@ -64,7 +64,8 @@ def make_archive_record(task_id: int = 1, **overrides) -> ArchiveRecord:
         acceptance="acceptance",
         verification="verification",
         documentation_impact="docs",
-        evidence_refs=["abc123"],
+        evidence="`docs/SPEC.md` verified by `git diff HEAD -- docs/SPEC.md`",
+        evidence_refs=["docs/SPEC.md"],
         archived_commit=COMMIT,
         provenance="migration",
     )
@@ -127,6 +128,55 @@ class ArchiveRecordValidationTest(unittest.TestCase):
         with self.assertRaises(PlanSidecarError):
             serialize_archive([make_archive_record(provenance="hacker")])
 
+    def test_evidence_narrative_roundtrips_losslessly(self) -> None:
+        narrative = (
+            "`docs/FACTORY-LOOP-SPEC.md` bound at commit `2d6a4fd`; "
+            "`git diff HEAD -- docs/SPEC.md` is empty and the placeholder is "
+            "byte-unchanged.\n"
+            "Second paragraph with `ca2334ab…` blob ref."
+        )
+        record = make_archive_record(evidence=narrative, evidence_refs=[
+            "docs/FACTORY-LOOP-SPEC.md", "2d6a4fd", "ca2334ab…",
+        ])
+        data = serialize_archive([record])
+        parsed = parse_archive(data)
+        self.assertEqual(parsed[0].evidence, narrative)
+        self.assertEqual(parsed[0].evidence_refs, tuple(record.evidence_refs))
+
+    def test_unsafe_evidence_refs_fail_closed(self) -> None:
+        for unsafe in (
+            "/etc/passwd",          # absolute
+            "../escape",             # dotdot segment
+            "a/../b",                # dotdot segment
+            "a//b",                  # empty segment
+            "a/./b",                 # dot segment
+            "has\\backslash",        # backslash
+            "has\tcontrol",          # control character
+            "has space",             # whitespace
+        ):
+            with self.assertRaises(PlanSidecarError) as caught:
+                serialize_archive([make_archive_record(evidence_refs=[unsafe])])
+            self.assertIn(
+                "evidence ref", str(caught.exception),
+                msg=f"ref {unsafe!r} was not rejected",
+            )
+        # An empty ref is rejected by the non-empty list rule.
+        with self.assertRaises(PlanSidecarError) as caught:
+            serialize_archive([make_archive_record(evidence_refs=[""])])
+        self.assertIn("non-empty", str(caught.exception))
+
+    def test_safe_evidence_refs_accepted(self) -> None:
+        for safe in (
+            "docs/SPEC.md",
+            ".factory/tools/check-plan-freshness.sh",
+            "2d6a4fd",
+            "ca2334ab…",
+            "src/main.c",
+        ):
+            record = make_archive_record(evidence_refs=[safe])
+            parsed = parse_archive(serialize_archive([record]))
+            self.assertEqual(parsed[0].evidence_refs, (safe,))
+
     def test_duplicate_task_id_rejected(self) -> None:
         data = serialize_archive([make_archive_record(1), make_archive_record(1)])
         with self.assertRaises(PlanSidecarError) as caught:
@@ -159,7 +209,8 @@ class ArchiveRecordValidationTest(unittest.TestCase):
                      + ',"title":"t","priority":1,"dependencies":[],'
                      '"status":"complete","scope":"","acceptance":"",'
                      '"verification":"","documentation_impact":"",'
-                     '"evidence_refs":[],"archived_commit":"' + "a" * 40 + '",'
+                     '"evidence":"","evidence_refs":[],'
+                     '"archived_commit":"' + "a" * 40 + '",'
                      '"provenance":"migration"}').encode("utf-8")
                 )
             data = b"\n".join(lines) + b"\n"

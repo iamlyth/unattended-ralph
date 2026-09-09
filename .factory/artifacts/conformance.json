@@ -111,7 +111,7 @@
     "FACT-005"
    ],
    "id": "PLAN-01",
-   "reason": "factory-plan/v2 concise active plan bound to committed archive/history sidecars by the composite plan binding digest; archived dependency satisfaction through the trusted completed-ID index; deterministic lossless migration; administrative commit substance rules",
+   "reason": "factory-plan/v2 concise active plan bound to committed archive/history sidecars by the composite plan binding digest; v1/v2 detected by parsed front-matter schema (never substring); archive records carry the lossless Evidence narrative plus safe inert evidence refs; plan-sidecar binding verified against actual sidecar bytes at worktree validation and crash reconciliation; trusted archiver anchors to committed blobs at exact head and fails closed on stale/forged worktree sidecars; deterministic lossless migration (154230-byte v1 plan to 18352-byte v2 plan, 88.1% reduction); administrative commit substance rules",
    "receipts": [],
    "required_capabilities": [],
    "required_tier": "unit",

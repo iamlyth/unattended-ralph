@@ -29,8 +29,10 @@ from plan_migration import (  # noqa: E402
     PLAN_SIZE_CEILING,
     PlanMigrationError,
     archive_task,
+    migrate_archive_evidence,
     migrate_plan,
     rehash_plan,
+    reopen_task,
 )
 from plan_sidecars import (  # noqa: E402
     ARCHIVE_FILE,
@@ -57,7 +59,8 @@ def _make_v1_plan() -> str:
     """
     import subprocess
 
-    # Walk history to the most recent commit whose plan is still v1.
+    # Walk history to the most recent commit whose plan is still v1 (detected
+    # by the parsed front-matter schema, never a substring heuristic).
     commits = subprocess.run(
         ["git", "log", "--format=%H", "--", ".factory/artifacts/implementation-plan.md"],
         capture_output=True, text=True, check=True,
@@ -68,7 +71,7 @@ def _make_v1_plan() -> str:
             ["git", "show", f"{commit}:.factory/artifacts/implementation-plan.md"],
             capture_output=True, text=True, check=True,
         ).stdout
-        if "schema: factory-plan/v2" not in candidate:
+        if plan_parser.detect_schema(candidate.encode("utf-8")) == plan_parser.SCHEMA_V1:
             text = candidate
             break
     assert text is not None, "no committed v1 plan found in history"
@@ -227,6 +230,153 @@ class MigrationTest(unittest.TestCase):
         with self.assertRaises(PlanMigrationError) as caught:
             archive_task(self.root, 28, commit=COMMIT)
         self.assertIn("already archived", str(caught.exception))
+
+    def test_archive_task_verifies_binding_before_rewrite(self) -> None:
+        # A forged plan-sidecar binding (the plan declares digests that do
+        # not match the actual sidecar bytes) must fail closed before any
+        # rewrite, even when the task is complete and unarchived.
+        migrate_plan(self.root, archived_commit=COMMIT)
+        text = self.plan_path.read_text("utf-8").replace(
+            "## Task 28: Cumulative task-resource budget (Phase 2A)\n"
+            "\n"
+            "- Status: pending",
+            "## Task 28: Cumulative task-resource budget (Phase 2A)\n"
+            "\n"
+            "- Status: complete",
+        )
+        forged = text.replace(
+            "sidecars: {", "sidecars: {",
+        )
+        # Rewrite the declared archive digest to a forged value.
+        import re as _re
+        forged = _re.sub(
+            r'("archive":")[0-9a-f]{64}(")',
+            r"\g<1>" + "0" * 64 + r"\g<2>",
+            forged,
+            count=1,
+        )
+        self.plan_path.write_text(forged, encoding="utf-8")
+        with self.assertRaises(PlanMigrationError) as caught:
+            archive_task(self.root, 28, commit=COMMIT)
+        self.assertIn("binding is inconsistent", str(caught.exception))
+        # The sidecars were not mutated by the rejected attempt.
+        records = read_archive(self.root)
+        self.assertEqual(len(records), 30)
+
+    def test_reopen_task_rejected_unambiguously(self) -> None:
+        migrate_plan(self.root, archived_commit=COMMIT)
+        with self.assertRaises(PlanMigrationError) as caught:
+            reopen_task(self.root, 1, commit=COMMIT)
+        message = str(caught.exception)
+        self.assertIn("not supported", message)
+        self.assertIn("reverified and rearchived", message)
+
+    def test_evidence_narrative_is_lossless(self) -> None:
+        # The full Evidence narrative of every completed task is preserved
+        # verbatim in the archive record (bounded inert data), and the refs
+        # are the curated safe inert references extracted from it.
+        report = migrate_plan(self.root, archived_commit=COMMIT)
+        self.assertTrue(report["migrated"])
+        records = read_archive(self.root)
+        self.assertEqual(len(records), 30)
+        first = records[0]
+        self.assertIn("docs/FACTORY-LOOP-SPEC.md", first.evidence)
+        self.assertIn("docs/FACTORY-LOOP-SPEC.md", first.evidence_refs)
+        self.assertIn("2d6a4fd", first.evidence_refs)
+        # Command-shaped prose stays in the narrative, never a ref.
+        self.assertNotIn("git diff HEAD -- docs/SPEC.md", first.evidence_refs)
+        self.assertIn("git diff HEAD -- docs/SPEC.md", first.evidence)
+        # Every record carries the full narrative and safe refs only.
+        for record in records:
+            self.assertIsInstance(record.evidence, str)
+            for ref in record.evidence_refs:
+                plan_sidecars.validate_evidence_ref(ref)
+
+    def test_unsafe_refs_never_extracted(self) -> None:
+        # A task whose Evidence narrative contains traversal/absolute/control
+        # tokens must not leak them into evidence_refs; the narrative itself
+        # is preserved verbatim as inert data.
+        migrate_plan(self.root, archived_commit=COMMIT)
+        text = self.plan_path.read_text("utf-8")
+        # The v2 plan has no Evidence field; rebuild a v1 plan with a hostile
+        # Evidence narrative and re-migrate in a fresh root.
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".factory").mkdir()
+            (root / ".factory" / "artifacts").mkdir()
+            plan_file = root / ".factory" / "artifacts" / "implementation-plan.md"
+            v1 = _make_v1_plan()
+            hostile = v1.replace(
+                "- Evidence: `.factory/config.toml [project].spec` now binds the redesign",
+                "- Evidence: `../../etc/passwd` and `/etc/shadow` and `a\\b` "
+                "and `has\tcontrol` and `git diff HEAD -- docs/SPEC.md` "
+                "and `docs/SPEC.md` now bind the redesign",
+            )
+            plan_file.write_text(hostile, encoding="utf-8")
+            migrate_plan(root, archived_commit=COMMIT)
+            records = read_archive(root)
+            first = records[0]
+            self.assertIn("../../etc/passwd", first.evidence)
+            self.assertNotIn("../../etc/passwd", first.evidence_refs)
+            self.assertNotIn("/etc/shadow", first.evidence_refs)
+            self.assertNotIn("a\\\\b", first.evidence_refs)
+            self.assertNotIn("git diff HEAD -- docs/SPEC.md", first.evidence_refs)
+            self.assertIn("docs/SPEC.md", first.evidence_refs)
+
+    def test_migrate_archive_evidence_regenerates_records(self) -> None:
+        # The deterministic regeneration of the existing archive records with
+        # the lossless evidence field preserves every record and rehashes the
+        # plan binding.
+        migrate_plan(self.root, archived_commit=COMMIT)
+        before = read_archive(self.root)
+        # Tasks 22/25/26/27 have no Evidence narrative in the v1 plan; the
+        # field is preserved verbatim (empty stays empty).
+        self.assertTrue(all("evidence" in record.to_dict() for record in before))
+        self.assertEqual(
+            [r.task_id for r in before if not r.evidence],
+            [22, 25, 26, 27],
+        )
+        # Simulate the pre-remediation archive: strip the evidence field.
+        stripped = [
+            plan_sidecars.ArchiveRecord(
+                schema=record.schema, task_id=record.task_id,
+                title=record.title, priority=record.priority,
+                dependencies=record.dependencies, status=record.status,
+                scope=record.scope, acceptance=record.acceptance,
+                verification=record.verification,
+                documentation_impact=record.documentation_impact,
+                evidence="", evidence_refs=record.evidence_refs,
+                archived_commit=record.archived_commit,
+                provenance=record.provenance,
+            )
+            for record in before
+        ]
+        plan_sidecars.write_archive(self.root, stripped)
+        rehash_plan(self.root)
+        report = migrate_archive_evidence(
+            self.root,
+            v1_plan_bytes=_make_v1_plan().encode("utf-8"),
+            archived_commit=COMMIT,
+        )
+        self.assertEqual(report["migrated_records"], 30)
+        after = read_archive(self.root)
+        self.assertEqual(len(after), 30)
+        self.assertEqual(
+            [record.task_id for record in after],
+            [record.task_id for record in before],
+        )
+        self.assertEqual(
+            [record.evidence for record in after],
+            [record.evidence for record in before],
+        )
+        # The plan binding verifies against the regenerated sidecar.
+        verify_sidecar_binding(
+            self.plan_path.read_bytes(),
+            (self.root / ".factory" / "artifacts" / ARCHIVE_FILE).read_bytes(),
+            (self.root / ".factory" / "artifacts" / HISTORY_FILE).read_bytes(),
+            archive_records=after,
+        )
 
     def test_rehash_is_deterministic(self) -> None:
         migrate_plan(self.root, archived_commit=COMMIT)

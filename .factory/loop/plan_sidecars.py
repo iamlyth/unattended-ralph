@@ -9,8 +9,9 @@ under ``.factory/artifacts/``:
 
 * ``plan-archive.jsonl`` (``factory-plan-archive/v1``) — one JSONL record per
   archived completed/cancelled task, preserving every task/status/acceptance/
-  evidence datum losslessly for audit (exact commit/evidence references are
-  treated as data, never interpreted as authority);
+  evidence datum losslessly for audit (the full Evidence narrative is kept
+  verbatim in ``evidence``; exact commit/evidence references are extracted
+  into ``evidence_refs`` as safe inert data, never interpreted as authority);
 * ``plan-history.jsonl`` (``factory-plan-history/v1``) — one JSONL record per
   plan acceptance/evidence event (migration, archive, reopen, acceptance).
 
@@ -65,12 +66,55 @@ EVENT_VALUES = ("migrated", "archived", "reopened", "accepted", "plan_revised")
 ARCHIVE_STATUSES = ("complete", "cancelled")
 
 # The exact field set of one archive record (strict; unknown or repeated keys
-# fail closed).
+# fail closed).  ``evidence`` is the full v1 Evidence narrative preserved
+# verbatim (bounded inert data, never authority); ``evidence_refs`` is the
+# curated list of safe inert references extracted from it (Phase 2D1
+# security remediation A).
 ARCHIVE_FIELDS = (
     "schema", "task_id", "title", "priority", "dependencies", "status",
     "scope", "acceptance", "verification", "documentation_impact",
-    "evidence_refs", "archived_commit", "provenance",
+    "evidence", "evidence_refs", "archived_commit", "provenance",
 )
+
+# Safe inert-reference grammar for archive evidence refs.  A ref is inert
+# data (never task/command authority) but must still be a safe
+# repository-relative reference: non-empty, free of whitespace, control
+# characters, and backslashes, not absolute, and free of empty/``.``/``..``
+# segments.  Command-shaped prose (e.g. ``git diff HEAD -- …``) is rejected
+# by the whitespace rule and stays in the ``evidence`` narrative.
+EVIDENCE_REF_RE = re.compile(r"^[^\s/\\][^\s\\]*$")
+
+
+def validate_evidence_ref(ref: str) -> None:
+    """Fail closed when ``ref`` is not a safe inert reference.
+
+    Rejects empty, whitespace, control characters, backslashes, absolute
+    paths, and empty/``.``/``..`` segments.  The reference is inert data;
+    this check only guarantees it can never be misread as a traversal or
+    an absolute path by any consumer.
+    """
+    if not isinstance(ref, str) or not ref:
+        raise PlanSidecarError("an evidence ref must be a non-empty string")
+    if any(ch.isspace() for ch in ref):
+        raise PlanSidecarError(
+            f"evidence ref {ref!r} must not contain whitespace"
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in ref):
+        raise PlanSidecarError(
+            f"evidence ref {ref!r} must not contain control characters"
+        )
+    if "\\" in ref:
+        raise PlanSidecarError(
+            f"evidence ref {ref!r} must not contain a backslash"
+        )
+    if ref.startswith("/"):
+        raise PlanSidecarError(
+            f"evidence ref {ref!r} must be repository-relative (not absolute)"
+        )
+    if any(segment in ("", ".", "..") for segment in ref.split("/")):
+        raise PlanSidecarError(
+            f"evidence ref {ref!r} must not contain empty, `.`, or `..` segments"
+        )
 HISTORY_FIELDS = (
     "schema", "event", "task_id", "commit", "plan_digest", "detail",
 )
@@ -195,7 +239,13 @@ def _atomic_write_committed(path: Path, data: bytes) -> None:
 
 @dataclass(frozen=True)
 class ArchiveRecord:
-    """One archived completed/cancelled task, lossless for audit."""
+    """One archived completed/cancelled task, lossless for audit.
+
+    ``evidence`` preserves the full v1 Evidence narrative verbatim (bounded
+    inert data, never authority); ``evidence_refs`` is the curated list of
+    safe inert references extracted from it (Phase 2D1 security remediation
+    A).  Command-shaped prose stays in the narrative and is never a ref.
+    """
 
     schema: str
     task_id: int
@@ -207,6 +257,7 @@ class ArchiveRecord:
     acceptance: str
     verification: str
     documentation_impact: str
+    evidence: str
     evidence_refs: Tuple[str, ...]
     archived_commit: str
     provenance: str
@@ -223,6 +274,7 @@ class ArchiveRecord:
             "acceptance": self.acceptance,
             "verification": self.verification,
             "documentation_impact": self.documentation_impact,
+            "evidence": self.evidence,
             "evidence_refs": list(self.evidence_refs),
             "archived_commit": self.archived_commit,
             "provenance": self.provenance,
@@ -266,6 +318,10 @@ def _validate_archive_record(value: object) -> None:
         isinstance(ref, str) and ref for ref in refs
     ):
         raise PlanSidecarError("archive evidence_refs must be a list of non-empty strings")
+    for ref in refs:
+        validate_evidence_ref(ref)
+    if not isinstance(value.get("evidence"), str):
+        raise PlanSidecarError("archive evidence must be a string")
     if not isinstance(value.get("archived_commit"), str) or not SHA40_RE.fullmatch(
         str(value["archived_commit"])
     ):
@@ -291,6 +347,7 @@ def parse_archive_record(data: object) -> ArchiveRecord:
         acceptance=str(data["acceptance"]),
         verification=str(data["verification"]),
         documentation_impact=str(data["documentation_impact"]),
+        evidence=str(data["evidence"]),
         evidence_refs=tuple(str(ref) for ref in data["evidence_refs"]),
         archived_commit=str(data["archived_commit"]),
         provenance=str(data["provenance"]),

@@ -24,10 +24,29 @@ treated as data, never interpreted as task/command authority.
 - `status`: `complete` | `cancelled`
 - `scope`, `acceptance`, `verification`, `documentation_impact`: strings
   (full v1 text preserved verbatim)
-- `evidence_refs`: list of non-empty strings (exact commit/evidence
-  references as data)
+- `evidence`: string — the full v1 Evidence narrative preserved verbatim
+  (bounded inert data, never authority; command-shaped prose stays in the
+  narrative and is never a ref)
+- `evidence_refs`: list of non-empty safe inert references extracted from
+  the Evidence narrative (exact commit/blob IDs and repository-relative
+  paths as data).  Each ref must satisfy the safe inert-reference grammar:
+  non-empty, no whitespace/control characters, no backslash, not absolute,
+  and no empty/`.`/`..` path segments — an unsafe ref fails closed at
+  serialization and is never emitted by the migration tool
 - `archived_commit`: 40-hex commit at which the task was verified
 - `provenance`: `migration` | `campaign` | `reopen`
+
+## 2a. Evidence narrative and refs (Phase 2D1 security remediation A)
+
+The `evidence` field is the lossless audit narrative: the full v1 Evidence
+paragraph is preserved byte-for-byte (bounded inert data).  `evidence_refs`
+is the curated list of safe inert references extracted from it — backtick-
+quoted tokens that are either a repository-relative path (contains `/` or
+`.`) or a hex commit/blob ID (`[0-9a-f]{7,40}(…)?`).  Command-shaped prose
+(e.g. ``git diff HEAD -- docs/SPEC.md``) stays in the narrative and is never
+a ref.  Refs are data for audit display, never interpreted as task/command
+authority; the safe grammar is enforced by `validate_evidence_ref` at
+serialization and by the migration tool at extraction.
 
 ## 3. Trusted completed-ID index
 
@@ -36,4 +55,7 @@ is bound to the archive sidecar digest by the plan's `sidecars:` front-matter
 binding; a missing/conflicting/reopened ID fails closed at every caller that
 binds the index to the digest. Only the trusted campaign archiver (or the
 explicit migration tool) appends records; planner/developer roles can never
-mutate the archive.
+mutate the archive.  The trusted archiver anchors to the committed
+archive/history blobs at the exact head and requires the worktree bytes to
+equal them; a stale or forged worktree sidecar fails closed before any
+mutation.

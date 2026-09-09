@@ -1391,9 +1391,17 @@ def _plan_binding_digest(
     plan binds the active plan plus the archive/history sidecar digests
     (Phase 2D1), so a change to either sidecar changes the binding.  A v2
     plan whose sidecars are missing or unreadable fails closed through the
-    blob authority.
+    blob authority.  v1/v2 is detected by the parsed front-matter schema
+    (never a substring heuristic), so a v1 plan whose body merely mentions
+    ``factory-plan/v2`` keeps the plain digest; an unparsable front matter
+    falls back to the plain digest (the caller's parse validation fails
+    closed separately).
     """
-    if b"schema: factory-plan/v2" not in plan_blob[:2048]:
+    try:
+        schema = plan_parser.detect_schema(plan_blob)
+    except plan_parser.PlanError:
+        return plan_sha256(plan_blob)
+    if schema != plan_parser.SCHEMA_NAME:
         return plan_sha256(plan_blob)
 
     def blob(relpath: str) -> bytes:
@@ -1445,6 +1453,37 @@ def _archive_records_at(
         raise CampaignError(
             f"the committed archive sidecar is not usable: {exc}"
         ) from exc
+
+
+def _worktree_sidecar_bytes(root):
+    """``(archive_bytes, history_bytes)`` from the worktree, bounded no-follow.
+
+    A v1 repository (neither sidecar present) yields ``(None, None)``; a
+    half-present pair is a broken state and fails closed.  The bytes are
+    used to verify a v2 plan's declared ``sidecars:`` binding against the
+    actual worktree sidecars before commit/acceptance (Phase 2D1 security
+    remediation A).
+    """
+    archive_rel = f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}"
+    history_rel = f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.HISTORY_FILE}"
+    try:
+        archive = _bounded_read(
+            root, archive_rel, "archive sidecar", plan_sidecars.SIDECAR_MAX_BYTES
+        )
+    except CampaignError:
+        archive = None
+    try:
+        history = _bounded_read(
+            root, history_rel, "history sidecar", plan_sidecars.SIDECAR_MAX_BYTES
+        )
+    except CampaignError:
+        history = None
+    if (archive is None) != (history is None):
+        raise CampaignError(
+            "the worktree carries only one of the archive/history sidecars; "
+            "a half-present sidecar pair is a broken state"
+        )
+    return archive, history
 
 
 def _unsafe_repo_relative(path: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1596,6 +1635,8 @@ def validate_plan_worktree(
     spec_blob: str,
     base_commit: str,
     archive_records=None,
+    archive_bytes: Optional[bytes] = None,
+    history_bytes: Optional[bytes] = None,
 ) -> Tuple[bool, Optional[str]]:
     """``(valid, reason)``: the worktree plan parses and keeps the binding.
 
@@ -1603,12 +1644,29 @@ def validate_plan_worktree(
     cycle base commit is rejected as unbound — the plan contract (PLAN-01)
     is part of the acceptance boundary and free-form prose cannot alter it.
     Phase 2D1: a v2 worktree plan is parsed against the bound archive
-    records (the final-audit dependency closure references archived tasks).
+    records (the final-audit dependency closure references archived tasks)
+    and its declared ``sidecars:`` digests are verified against the actual
+    sidecar bytes, so a forged binding fails closed before commit or
+    acceptance (security remediation A).  A v2 plan without the sidecar
+    bytes is unverifiable and fails closed.
     """
     try:
         plan = plan_parser.Plan.from_bytes(data, archive_records=archive_records)
     except plan_parser.PlanError as exc:
         return False, f"worktree plan does not parse: {exc}"
+    if plan.schema == plan_parser.SCHEMA_NAME:
+        if archive_bytes is None or history_bytes is None:
+            return False, (
+                "a v2 worktree plan requires the archive/history sidecar bytes "
+                "to verify its binding"
+            )
+        try:
+            plan_sidecars.verify_sidecar_binding(
+                data, archive_bytes, history_bytes,
+                archive_records=archive_records,
+            )
+        except plan_sidecars.PlanSidecarError as exc:
+            return False, f"worktree plan-sidecar binding mismatch: {exc}"
     if plan.spec_path != spec_path:
         return False, f"plan spec_path {plan.spec_path!r} != bound {spec_path!r}"
     if plan.spec_commit != spec_commit:
@@ -2588,10 +2646,14 @@ class Campaign:
         )
         spec.validate()
         head = _live_head(self._root)
+        plan_blob = _blob_at(self._root, self._config.plan_path)
+        # Phase 2D1: the lock binds the composite plan binding digest (active
+        # plan + archive/history sidecar digests) for a v2 plan, so a change
+        # to the plan or to either sidecar breaks the lock binding.
         plan = lock_module.PlanBinding(
             self._config.plan_path,
             head,
-            plan_sha256(_blob_at(self._root, self._config.plan_path)),
+            _plan_binding_digest(self._root, plan_blob, commit=head),
         )
         plan.validate()
         self._lock = lock_module.RootLock(
@@ -3095,6 +3157,15 @@ class Campaign:
         # anchor ``_step_planning`` validates the worktree against); the
         # recovered plan must keep that spec/base binding exactly.
         base_plan = git.plan_at(base)
+        try:
+            archive_bytes = git.blob_at(
+                head, f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}"
+            )
+            history_bytes = git.blob_at(
+                head, f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.HISTORY_FILE}"
+            )
+        except CampaignGitError:
+            archive_bytes = history_bytes = None
         valid, reason = validate_plan_worktree(
             plan_data,
             spec_path=self._config.spec_path,
@@ -3104,6 +3175,8 @@ class Campaign:
             archive_records=_archive_records_at(
                 self._root, commit=head, git=git
             ),
+            archive_bytes=archive_bytes,
+            history_bytes=history_bytes,
         )
         if not valid:
             raise CampaignRecoveryError(
@@ -4444,7 +4517,10 @@ class Campaign:
     ) -> PhaseRecord:
         head = self._git.head() if self._git is not None else "0" * 40
         try:
-            digest = plan_sha256(self._git.blob_at(head, self._config.plan_path))
+            plan_blob = self._git.blob_at(head, self._config.plan_path)
+            digest = _plan_binding_digest(
+                self._root, plan_blob, commit=head, git=self._git
+            )
         except CampaignGitError:
             digest = "0" * 64
         if result_digest and not SHA256_RE.fullmatch(result_digest):
@@ -4699,6 +4775,7 @@ class Campaign:
         plan_worktree = _bounded_read(self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX)
         plan_committed = self._git.blob_at(head, self._config.plan_path)
         plan_changed = plan_worktree != plan_committed
+        worktree_archive, worktree_history = _worktree_sidecar_bytes(self._root)
         try:
             committed_plan = plan_parser.Plan.from_bytes(
                 plan_committed,
@@ -4720,6 +4797,8 @@ class Campaign:
             archive_records=_archive_records_at(
                 self._root, worktree=True
             ),
+            archive_bytes=worktree_archive,
+            history_bytes=worktree_history,
         )
         dirty = self._git.role_dirty_paths()
         violation = scope_violation(
@@ -4736,7 +4815,11 @@ class Campaign:
                 [self._config.plan_path],
                 f"factory-campaign: planning round {state.current_round}",
             )
-            plan_digest = plan_sha256(self._git.blob_at(new_head, self._config.plan_path))
+            plan_digest = _plan_binding_digest(
+                self._root,
+                self._git.blob_at(new_head, self._config.plan_path),
+                commit=new_head, git=self._git,
+            )
             state2 = state_module.advance(
                 state, "planned",
                 plan_digest=plan_digest,
@@ -4936,6 +5019,7 @@ class Campaign:
             plan_worktree = _bounded_read(
                 self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX
             )
+            worktree_archive, worktree_history = _worktree_sidecar_bytes(self._root)
             valid, reason = validate_plan_worktree(
                 plan_worktree,
                 spec_path=self._config.spec_path,
@@ -4945,6 +5029,8 @@ class Campaign:
                 archive_records=_archive_records_at(
                     self._root, worktree=True
                 ),
+                archive_bytes=worktree_archive,
+                history_bytes=worktree_history,
             )
             violation = scope_violation(
                 dirty, phase="implementation",
@@ -5041,6 +5127,7 @@ class Campaign:
         plan_worktree = _bounded_read(
             self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX
         )
+        worktree_archive, worktree_history = _worktree_sidecar_bytes(self._root)
         valid, reason = validate_plan_worktree(
             plan_worktree,
             spec_path=self._config.spec_path,
@@ -5050,6 +5137,8 @@ class Campaign:
             archive_records=_archive_records_at(
                 self._root, worktree=True
             ),
+            archive_bytes=worktree_archive,
+            history_bytes=worktree_history,
         )
         dirty = self._git.role_dirty_paths()
         violation = scope_violation(
@@ -5647,13 +5736,43 @@ class Campaign:
         role's allowed scope, and the archive is written only here, after
         the trusted verification + audit pass.  Returns the new HEAD, or
         ``None`` when nothing was archived.
+
+        Security remediation A: the completed-ID index and the mutation are
+        anchored to the committed archive/history blobs at the exact head;
+        the worktree bytes must equal those committed blobs before any
+        coordinator mutation, and any divergence (a stale or forged worktree
+        sidecar) fails closed.
         """
         plan = self._git.plan_at(head)
         if plan.schema != plan_parser.SCHEMA_NAME:
             return None  # v1 plans have no archive sidecar
+        archive_rel = f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.ARCHIVE_FILE}"
+        history_rel = f"{plan_sidecars.ARTIFACTS_DIR}/{plan_sidecars.HISTORY_FILE}"
+        try:
+            archive_committed = self._git.blob_at(head, archive_rel)
+            history_committed = self._git.blob_at(head, history_rel)
+        except CampaignGitError as exc:
+            raise CampaignPhaseError(
+                f"the committed archive/history sidecars are not readable at "
+                f"{head}: {exc}"
+            ) from exc
+        archive_worktree = _bounded_read(
+            self._root, archive_rel, "archive sidecar",
+            plan_sidecars.SIDECAR_MAX_BYTES,
+        )
+        history_worktree = _bounded_read(
+            self._root, history_rel, "history sidecar",
+            plan_sidecars.SIDECAR_MAX_BYTES,
+        )
+        if archive_worktree != archive_committed or history_worktree != history_committed:
+            raise CampaignPhaseError(
+                "the worktree archive/history sidecars diverge from the "
+                f"committed blobs at {head}; refusing to mutate a stale or "
+                "forged sidecar"
+            )
         try:
             archived = plan_sidecars.completed_ids(
-                plan_sidecars.read_archive(self._root)
+                plan_sidecars.parse_archive(archive_committed)
             )
         except plan_sidecars.PlanSidecarError as exc:
             raise CampaignPhaseError(
