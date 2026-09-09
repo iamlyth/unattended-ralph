@@ -171,6 +171,7 @@ class SmokeWorkspace:
             ".factory/schemas",
             ".factory/smoke",
             ".factory/loop",
+            ".factory/tools",
         ):
             (ws / rel).mkdir(parents=True)
         # The complete hidden loop package (the campaign runs as a script).
@@ -260,40 +261,48 @@ class SmokeWorkspace:
             "the adversarial suite is .factory/tests/test-factory-adversarial.sh.\n",
             encoding="utf-8",
         )
-        (ws / "scripts" / "verify-boilerplate.sh").write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "# Fixture generic verifier stub: the documentation gate is part "
-            "of the generic verifier.\n"
-            "docs_gate=scripts/check-docs-sync.sh\n"
-            "echo 'fixture verifier stub'\n",
-            encoding="utf-8",
-        )
+        for forwarder in (
+            "verify-boilerplate.sh", "check-docs-sync.sh",
+            "check-generic-leakage.sh", "ollama-usage-guard.sh",
+        ):
+            shutil.copy2(
+                ROOT / "scripts" / forwarder, ws / "scripts" / forwarder
+            )
         os.chmod(ws / "scripts" / "verify-boilerplate.sh", 0o755)
+        shutil.copy2(
+            ROOT / ".factory" / "tools" / "verify-boilerplate.sh",
+            ws / ".factory" / "tools" / "verify-boilerplate.sh",
+        )
+        os.chmod(ws / ".factory" / "tools" / "verify-boilerplate.sh", 0o755)
         shutil.copy2(
             ROOT / "docs/FACTORY-LOOP-SPEC.md", ws / "docs/FACTORY-LOOP-SPEC.md"
         )
         for script in (
-            "factory_state_io.py",
             "credential-guard.py",
             "check-plan-freshness.sh",
             "check-generic-leakage.sh",
             "check-docs-sync.sh",
         ):
-            shutil.copy2(ROOT / ".factory" / "tools" / script, ws / "scripts" / script)
+            shutil.copy2(ROOT / ".factory" / "tools" / script, ws / ".factory" / "tools" / script)
+        shutil.copy2(
+            ROOT / ".factory" / "loop" / "factory_state_io.py",
+            ws / ".factory" / "tools" / "factory_state_io.py",
+        )
         # The fixture installs the *real* tracked Git commit boundary: the
         # exact `git-commit-guard.sh` and its installer are committed and the
         # six launcher hooks are installed, so every campaign commit (and
-        # every fixture commit) runs through the production guard.
+        # every fixture commit) runs through the production guard.  The
+        # installer derives the project root from its own location
+        # (``.factory/tools/``), so the guard scripts live there.
         shutil.copy2(
             ROOT / ".factory" / "tools" / "git-commit-guard.sh",
-            ws / "scripts" / "git-commit-guard.sh",
+            ws / ".factory" / "tools" / "git-commit-guard.sh",
         )
         shutil.copy2(
             ROOT / ".factory" / "tools" / "install-git-commit-guard.sh",
-            ws / "scripts" / "install-git-commit-guard.sh",
+            ws / ".factory" / "tools" / "install-git-commit-guard.sh",
         )
-        os.chmod(ws / "scripts" / "git-commit-guard.sh", 0o755)
+        os.chmod(ws / ".factory" / "tools" / "git-commit-guard.sh", 0o755)
         shutil.copy2(
             ROOT / ".factory" / "generic-leak-allowlist",
             ws / ".factory" / "generic-leak-allowlist",
@@ -339,7 +348,7 @@ class SmokeWorkspace:
         # the fixture provably runs every commit (including the campaign's)
         # behind the production Git boundary.
         run(
-            ["bash", str(ws / "scripts" / "install-git-commit-guard.sh")],
+            ["bash", str(ws / ".factory" / "tools" / "install-git-commit-guard.sh")],
             cwd=str(ws),
         )
         _git(ws, "add", "-A")
@@ -504,8 +513,8 @@ class EvidenceSmokeUnit(_SmokeBase):
         self.assertEqual(parsed.serialize().encode("utf-8"), completed)
         task22 = next(t for t in parsed.tasks if t.number == 22)
         self.assertEqual(task22.status, "complete")
-        task25 = next(t for t in parsed.tasks if t.number == 25)
-        self.assertEqual(task25.status, "pending")
+        task28 = next(t for t in parsed.tasks if t.number == 28)
+        self.assertEqual(task28.status, "pending")
         # The selector picks exactly the evidence task from the planner revision.
         import selector as selector_module  # noqa: PLC0415
 
@@ -546,7 +555,10 @@ class EvidenceSmokeRound(_SmokeBase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(summary["ok"], True)
         self.assertEqual(summary["campaign_id"], campaign_id)
-        self.assertEqual(summary["terminal_phase"], "success")
+        # Phase 2B2: the evidence round completes exactly the designated
+        # smoke task and leaves the final audit task pending, so the honest
+        # terminal is budget_exhausted (the plan is not complete).
+        self.assertEqual(summary["terminal_phase"], "budget_exhausted")
         self.assertEqual(summary["rounds_completed"], 1)
         # Exact one-round phase history.
         history = [
@@ -556,8 +568,9 @@ class EvidenceSmokeRound(_SmokeBase):
         self.assertEqual(history, common.expected_phase_history())
         # State fields: write-once bindings, digests, terminal.
         state = ws.state(campaign_id)
-        self.assertEqual(state.current_phase, "success")
-        self.assertEqual(state.last_outcome, "success")
+        self.assertEqual(state.current_phase, "budget_exhausted")
+        self.assertEqual(state.last_outcome, "budget_exhausted")
+        self.assertEqual(state.terminal_reason, "budget_exhausted")
         self.assertEqual(state.rounds_requested, 1)
         self.assertEqual(state.current_round, 1)
         self.assertEqual(state.branch, BRANCH)
@@ -959,7 +972,7 @@ class EvidenceSmokeAdversarial(_SmokeBase):
         with self.assertRaises(state_module.StateTamperError):
             state_module.load_state(ws.root)
         state_dict = json.loads(state_path.read_text(encoding="utf-8"))
-        state_dict["last_outcome"] = "success"
+        state_dict["last_outcome"] = "budget_exhausted"
         state_dict["plan_digest"] = "1" * 64
         state_path.write_text(
             json.dumps(state_dict, sort_keys=True), encoding="utf-8"

@@ -449,16 +449,22 @@ capability, human/external, and tester-finding failures never converge: they
 keep the existing `findings`/`blocked`/`infrastructure_failure` flow with no
 planner/tester/auditor ceremony skipped.
 
-For the final round:
+For the final round (or the scheduler-resolved terminal boundary, §14.1):
 
-- complete product acceptance and audit pass produce campaign `success`;
+- complete product acceptance and audit pass produce campaign `success`
+  (verified completion may terminate the campaign early, before the maximum
+  round budget);
 - any unresolved software, test, documentation, security, or audit defect produces terminal nonzero `findings`;
 - if there are no such defects and every unresolved mandatory item exclusively requires unavailable external, hardware, declared-capability, or human authority, the result is terminal nonzero `blocked`;
 - a verification outcome of `software_verified_external_acceptance_blocked` (software fully verified while external release acceptance remains blocked) can never produce `success`: even a final-round audit `pass` resolves to the terminal `blocked` state;
 - if both categories exist, `findings` takes precedence;
+- repeated/no meaningful progress (consecutive audits reproducing the same
+  progress fingerprint) terminates honestly as `no_progress`;
+- the maximum round/checkpoint budget without verified completion
+  terminates honestly as `budget_exhausted`;
 - state and evidence are preserved for a later campaign after circumstances change.
 
-Planning-attempt exhaustion produces `failed`; dirty implementation-attempt exhaustion or operator/process interruption produces `interrupted`; untrusted verifier/control-plane failure produces `infrastructure_failure`. A finite campaign therefore always terminates as success, findings, blocked, failed, infrastructure failure, or interruption. It never spins because there is no runnable task.
+Planning-attempt exhaustion produces `failed`; dirty implementation-attempt exhaustion or operator/process interruption produces `interrupted`; untrusted verifier/control-plane failure produces `infrastructure_failure`. A finite campaign therefore always terminates as success, findings, blocked, failed, infrastructure failure, interruption, no progress, or budget exhaustion. It never spins because there is no runnable task.
 
 ### 14.1 Campaign budget (adaptive scheduler authority)
 

@@ -320,7 +320,8 @@ def main() -> int:
                 "verifier_failure_digest": verifier_failure_digest,
             }
             evidence_rel = (
-                f"src/.factory-test-output/developer-evidence-round-{round_no}.json"
+                f"src/.factory-test-output/developer-evidence-round-"
+                f"{round_no}-task-{task_id}.json"
             )
             evidence_path = os.path.join(root, evidence_rel)
             os.makedirs(os.path.dirname(evidence_path), exist_ok=True)

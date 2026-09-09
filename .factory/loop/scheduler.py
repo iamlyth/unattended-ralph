@@ -313,6 +313,36 @@ def default_budget() -> CampaignBudget:
     )
 
 
+def budget_digest(budget: CampaignBudget) -> str:
+    """Deterministic SHA-256 of the canonical budget document.
+
+    The canonical encoding is the exact committed document field set in the
+    same sorted JSON encoding the committed config uses, so the digest is a
+    deterministic function of the budget model and any semantic change to the
+    budget (a weakened bound, a removed security path, a dropped mandatory
+    objective) changes it.  The campaign binds this digest in the control
+    state so the model can never weaken the budget.
+    """
+    payload = json.dumps(
+        {
+            "schema": SCHEMA_NAME,
+            "max_rounds": budget.max_rounds,
+            "max_checkpoints": budget.max_checkpoints,
+            "max_wall_seconds": budget.max_wall_seconds,
+            "max_task_attempts": budget.max_task_attempts,
+            "audit_interval": budget.audit_interval,
+            "security_sensitive_paths": list(budget.security_sensitive_paths),
+            "mandatory_audit_objectives": list(
+                budget.mandatory_audit_objectives
+            ),
+            "no_progress_limit": budget.no_progress_limit,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def load_budget_config(root: object) -> CampaignBudget:
     """Load the committed campaign budget or the documented defaults.
 

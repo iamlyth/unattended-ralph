@@ -132,6 +132,11 @@ import sys
 import time
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
+try:  # package import (the hidden `.factory/loop/` package)
+    from . import scheduler as scheduler_module  # adaptive scheduler authority (Phase 2B2)
+except ImportError:  # flat import used by the hidden `.factory/tests/` suite
+    import scheduler as scheduler_module  # type: ignore[no-redef]
+
 SCHEMA_NAME = "factory-state/v1"
 LEGACY_SCHEMA_NAME = "factory-state/v2"
 STATE_FILE_NAME = "factory-loop.json"
@@ -150,6 +155,10 @@ PHASES = ("planning", "implementation", "verification", "audit")
 TERMINAL_PHASES = (
     "success", "findings", "blocked", "failed", "interrupted",
     "infrastructure_failure",
+    # Phase 2B2 scheduler terminals: repeated/no meaningful progress and
+    # task/checkpoint/round/wall budget exhaustion are distinct honest
+    # terminal reasons, never mapped to success/findings incorrectly.
+    "no_progress", "budget_exhausted",
 )
 PHASE_VALUES = PHASES + TERMINAL_PHASES
 
@@ -171,6 +180,11 @@ PHASE_VALUES = PHASES + TERMINAL_PHASES
 # when the deterministic software verifier failed and the convergence
 # conditions hold; every other verification failure keeps the existing
 # ``findings``/``blocked``/``infrastructure_failure`` flow.
+#
+# ``no_progress`` and ``budget_exhausted`` are the Phase 2B2 scheduler
+# terminal outcomes: repeated/no meaningful progress and task/checkpoint/
+# round/wall budget exhaustion terminate the campaign honestly and are never
+# mapped to success/findings incorrectly.
 OUTCOMES = (
     "planned", "failed", "interrupted",
     "task_completed", "task_progress", "task_failed",
@@ -179,6 +193,7 @@ OUTCOMES = (
     "software_verified_external_acceptance_blocked",
     "verifier_failure",
     "success",
+    "no_progress", "budget_exhausted",
 )
 
 # The §11 transition table: (source phase, trusted outcome) -> target phase.
@@ -234,7 +249,10 @@ PHASE_OUTCOMES: Dict[str, frozenset] = {
     "planning": frozenset({"interrupted", "pass", "findings", "blocked"}),
     "implementation": frozenset(
         {"planned", "task_progress", "task_failed", "interrupted",
-         "verifier_failure"}
+         "verifier_failure",
+         # Phase 2B2: a passing verification with no audit milestone returns
+         # to implementation (the scheduler reuses the valid selected task).
+         "pass"}
     ),
     "verification": frozenset(
         {"task_completed", "work_exhausted", "blocked", "task_failed"}
@@ -262,10 +280,58 @@ CONVERGENCE_FIELDS: Tuple[str, ...] = (
     "convergence_retries", "last_failure_fingerprint",
 )
 
+# Phase 2B2 scheduler-extension fields (optional in parse, serialized only
+# when active): the trusted adaptive scheduler persists its trusted
+# control-plane bookkeeping in canonical state so a resumed campaign replays
+# the exact milestone/objective/no-progress decisions deterministically.
+# ``campaign_budget_digest`` binds the committed ``factory-campaign-budget/v1``
+# document the campaign launched under (the model can never weaken it);
+# ``checkpoints`` is the monotonic coherent-task-checkpoint count;
+# ``task_attempts`` is the monotonic cumulative implementation-attempt count;
+# ``progress_fingerprint``/``no_progress_streak`` record the deterministic
+# audit-boundary progress fingerprint and the consecutive identical-audit
+# streak; ``last_planner_need``/``last_planner_reason`` record the trusted
+# reason the planner ran (or was skipped); ``last_audit_checkpoint`` and
+# ``audit_risk_trigger`` record the checkpoint count and the trusted closed
+# trigger of the last independent audit; ``completed_audit_objectives`` is the
+# sorted set of objective IDs the independent audits have covered;
+# ``terminal_reason`` is the closed scheduler terminal-reason enum of the
+# campaign end.  A state with inactive scheduler fields serializes
+# byte-identically to a pre-Phase-2B2 state (migration compatibility).
+SCHEDULER_FIELDS: Tuple[str, ...] = (
+    "campaign_budget_digest", "checkpoints", "task_attempts",
+    "progress_fingerprint", "no_progress_streak",
+    "last_planner_need", "last_planner_reason",
+    "last_audit_checkpoint", "audit_risk_trigger",
+    "completed_audit_objectives", "terminal_reason",
+)
+
+# Closed trusted planner-need enum (STATE-01 scheduler extension): the reason
+# the trusted scheduler required (or skipped) the planner.  ``initial`` is
+# round-1 planning; ``findings``/``blocked`` follow a non-final audit that
+# reported findings/blockers; ``replan`` follows a passing audit that left no
+# runnable task with an incomplete plan; ``none`` records a scheduler skip.
+PLANNER_NEEDS = ("initial", "findings", "blocked", "replan", "none")
+
+# Closed trusted audit-risk-trigger enum (STATE-01 scheduler extension): the
+# milestone/risk boundary that scheduled the last independent audit.
+# ``failure`` is a task-failure/work-exhaustion/blocked boundary (no coherent
+# checkpoint progress) that forces the independent audit.
+AUDIT_RISK_TRIGGERS = (
+    "final", "checkpoint_budget", "security", "verifier_risk", "interval",
+    "failure",
+)
+
+# Bounded trusted planner-reason prose (never model prose).
+PLANNER_REASON_MAX = 512
+
 # The exact §11 field set (FACTORY-LOOP-SPEC §11): no wall-clock timestamp,
 # model prose, task description, memory, evidence claim, or copy of the plan
 # is accepted.  Pre-round hook and readiness extension data live in strict
-# sidecars (``.factory/loop/sidecars.py``), never in canonical state.
+# sidecars (``.factory/loop/sidecars.py``), never in canonical state.  The
+# Phase 2B1 convergence-extension and Phase 2B2 scheduler-extension fields
+# are optional in parse and serialized only while active (migration
+# compatibility).
 FIELD_NAMES: Tuple[str, ...] = (
     "schema", "repository_identity", "branch", "campaign_id",
     "rounds_requested", "current_round", "current_phase",
@@ -273,10 +339,11 @@ FIELD_NAMES: Tuple[str, ...] = (
     "audit_objectives_digest", "phase_base_commit", "selected_task_id",
     "attempt_number", "phase_started_at_monotonic",
     "attempt_started_at_monotonic", "last_outcome",
-) + CONVERGENCE_FIELDS
+) + CONVERGENCE_FIELDS + SCHEDULER_FIELDS
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+OBJECTIVE_ID_RE = re.compile(r"^AUD-[0-9]{2}$")
 IDENTITY_RE = re.compile(r"^[0-9a-f]+:[0-9a-f]+$")
 SAFE_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Orphaned artifacts of the established atomic writer (Task 19 S2): a mode-0600
@@ -493,14 +560,28 @@ class FactoryState:
     verifier_failure_digest: str = ""
     convergence_retries: int = 0
     last_failure_fingerprint: str = ""
+    # Phase 2B2 scheduler-extension fields (inactive defaults; serialized
+    # only when active so a pre-Phase-2B2 state round-trips byte-identically).
+    campaign_budget_digest: str = ""
+    checkpoints: int = 0
+    task_attempts: int = 0
+    progress_fingerprint: str = ""
+    no_progress_streak: int = 0
+    last_planner_need: str = ""
+    last_planner_reason: str = ""
+    last_audit_checkpoint: int = 0
+    audit_risk_trigger: str = ""
+    completed_audit_objectives: Tuple[str, ...] = ()
+    terminal_reason: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         """Deterministic JSON-ready dict (role digests sorted by role).
 
-        The Phase 2B1 convergence-extension fields are serialized only when
-        active, so a state with an inactive convergence cycle serializes
-        byte-identically to a pre-Phase-2B1 state (migration compatibility:
-        the state digest of an in-flight campaign never changes on upgrade).
+        The Phase 2B1 convergence-extension and Phase 2B2 scheduler-extension
+        fields are serialized only when active, so a state with an inactive
+        extension serializes byte-identically to a pre-extension state
+        (migration compatibility: the state digest of an in-flight campaign
+        never changes on upgrade).
         """
         result: Dict[str, object] = {
             "schema": self.schema,
@@ -529,6 +610,30 @@ class FactoryState:
             result["convergence_retries"] = self.convergence_retries
         if self.last_failure_fingerprint:
             result["last_failure_fingerprint"] = self.last_failure_fingerprint
+        if self.campaign_budget_digest:
+            result["campaign_budget_digest"] = self.campaign_budget_digest
+        if self.checkpoints:
+            result["checkpoints"] = self.checkpoints
+        if self.task_attempts:
+            result["task_attempts"] = self.task_attempts
+        if self.progress_fingerprint:
+            result["progress_fingerprint"] = self.progress_fingerprint
+        if self.no_progress_streak:
+            result["no_progress_streak"] = self.no_progress_streak
+        if self.last_planner_need:
+            result["last_planner_need"] = self.last_planner_need
+        if self.last_planner_reason:
+            result["last_planner_reason"] = self.last_planner_reason
+        if self.last_audit_checkpoint:
+            result["last_audit_checkpoint"] = self.last_audit_checkpoint
+        if self.audit_risk_trigger:
+            result["audit_risk_trigger"] = self.audit_risk_trigger
+        if self.completed_audit_objectives:
+            result["completed_audit_objectives"] = list(
+                self.completed_audit_objectives
+            )
+        if self.terminal_reason:
+            result["terminal_reason"] = self.terminal_reason
         return result
 
     def validate(self) -> None:
@@ -780,6 +885,87 @@ def _validate_state(state: FactoryState) -> None:
             "`last_failure_fingerprint` requires at least one convergence "
             "retry"
         )
+    # Phase 2B2 scheduler-extension invariants: the trusted scheduler
+    # bookkeeping is bounded, monotonic where applicable, and closed-enum;
+    # a forged/rewound/foreign scheduler field fails closed exactly like
+    # every other state field.
+    if state.campaign_budget_digest and not SHA256_RE.fullmatch(
+        state.campaign_budget_digest
+    ):
+        raise StateTamperError(
+            "`campaign_budget_digest` must be a 64-hex SHA-256 digest or "
+            "empty"
+        )
+    for name, value in (
+        ("checkpoints", state.checkpoints),
+        ("task_attempts", state.task_attempts),
+        ("no_progress_streak", state.no_progress_streak),
+        ("last_audit_checkpoint", state.last_audit_checkpoint),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise StateTamperError(
+                f"`{name}` must be a non-negative integer"
+            )
+    if state.progress_fingerprint and not SHA256_RE.fullmatch(
+        state.progress_fingerprint
+    ):
+        raise StateTamperError(
+            "`progress_fingerprint` must be a 64-hex SHA-256 digest or empty"
+        )
+    if state.no_progress_streak > 0 and not state.progress_fingerprint:
+        raise StateTamperError(
+            "`no_progress_streak` requires a recorded `progress_fingerprint`"
+        )
+    if state.last_planner_need and state.last_planner_need not in PLANNER_NEEDS:
+        raise StateTamperError(
+            "`last_planner_need` must be one of "
+            + ", ".join(PLANNER_NEEDS)
+            + f", got {state.last_planner_need!r}"
+        )
+    if state.last_planner_reason and (
+        not isinstance(state.last_planner_reason, str)
+        or len(state.last_planner_reason) > PLANNER_REASON_MAX
+    ):
+        raise StateTamperError(
+            "`last_planner_reason` must be a bounded trusted string"
+        )
+    if state.audit_risk_trigger and state.audit_risk_trigger not in AUDIT_RISK_TRIGGERS:
+        raise StateTamperError(
+            "`audit_risk_trigger` must be one of "
+            + ", ".join(AUDIT_RISK_TRIGGERS)
+            + f", got {state.audit_risk_trigger!r}"
+        )
+    if state.completed_audit_objectives:
+        if not isinstance(state.completed_audit_objectives, tuple):
+            raise StateTamperError(
+                "`completed_audit_objectives` must be a sorted tuple"
+            )
+        seen: List[str] = []
+        for objective_id in state.completed_audit_objectives:
+            if (
+                not isinstance(objective_id, str)
+                or not OBJECTIVE_ID_RE.fullmatch(objective_id)
+            ):
+                raise StateTamperError(
+                    "`completed_audit_objectives` entries must match "
+                    "AUD-<NN>"
+                )
+            if objective_id in seen:
+                raise StateTamperError(
+                    f"duplicate completed audit objective {objective_id!r}"
+                )
+            seen.append(objective_id)
+        if seen != sorted(seen):
+            raise StateTamperError(
+                "`completed_audit_objectives` must be sorted"
+            )
+    if state.terminal_reason and state.terminal_reason not in (
+        scheduler_module.TERMINAL_REASONS
+    ):
+        raise StateTamperError(
+            "`terminal_reason` must be a closed scheduler terminal reason "
+            f"or empty, got {state.terminal_reason!r}"
+        )
 
 
 def migrate_offline_state(data: object) -> Dict[str, object]:
@@ -837,12 +1023,15 @@ def parse_state(data: object) -> FactoryState:
     # Runtime parsing is deliberately migration-free.  Legacy/offline callers
     # must opt in through ``migrate_offline_state``; production recovery can
     # therefore never synthesize a readiness authority at the old version.
-    # The Phase 2B1 convergence-extension fields are optional in parse: a
-    # pre-Phase-2B1 state (or a state with an inactive convergence cycle)
-    # loads with the inactive defaults, so an in-flight campaign never fails
-    # closed on upgrade (migration compatibility).
+    # The Phase 2B1 convergence-extension and Phase 2B2 scheduler-extension
+    # fields are optional in parse: a pre-extension state (or a state with an
+    # inactive extension) loads with the inactive defaults, so an in-flight
+    # campaign never fails closed on upgrade (migration compatibility).
     extra = sorted(set(data) - set(FIELD_NAMES))
-    missing = sorted(set(FIELD_NAMES) - set(data) - set(CONVERGENCE_FIELDS))
+    missing = sorted(
+        set(FIELD_NAMES) - set(data) - set(CONVERGENCE_FIELDS)
+        - set(SCHEDULER_FIELDS)
+    )
     if extra or missing:
         raise StateTamperError(
             "control state must contain exactly the §11 field set"
@@ -888,6 +1077,19 @@ def parse_state(data: object) -> FactoryState:
         verifier_failure_digest=data.get("verifier_failure_digest", ""),
         convergence_retries=data.get("convergence_retries", 0),
         last_failure_fingerprint=data.get("last_failure_fingerprint", ""),
+        campaign_budget_digest=data.get("campaign_budget_digest", ""),
+        checkpoints=data.get("checkpoints", 0),
+        task_attempts=data.get("task_attempts", 0),
+        progress_fingerprint=data.get("progress_fingerprint", ""),
+        no_progress_streak=data.get("no_progress_streak", 0),
+        last_planner_need=data.get("last_planner_need", ""),
+        last_planner_reason=data.get("last_planner_reason", ""),
+        last_audit_checkpoint=data.get("last_audit_checkpoint", 0),
+        audit_risk_trigger=data.get("audit_risk_trigger", ""),
+        completed_audit_objectives=tuple(
+            data.get("completed_audit_objectives", ())
+        ),
+        terminal_reason=data.get("terminal_reason", ""),
     )
     _validate_state(state)
     return state
@@ -917,6 +1119,8 @@ def advance(
     phase_base_commit: Optional[str] = None,
     verifier_failure_digest: Optional[str] = None,
     failure_fingerprint: Optional[str] = None,
+    scheduler_target: Optional[str] = None,
+    scheduler: Optional[Mapping[str, object]] = None,
 ) -> FactoryState:
     """Apply exactly one §11 transition and return the new trusted state.
 
@@ -930,8 +1134,7 @@ def advance(
       records software fully verified while external release acceptance
       remains blocked; the independent audit still runs, but an audit
       ``pass`` entered from this outcome resolves to the terminal ``blocked``
-      state in the final round (never ``success``) and to the next round's
-      ``planning`` in a non-final round;
+      state (never ``success``);
     * ``verification --verifier_failure--> implementation`` is the Phase 2B1
       inner same-task convergence edge: a trusted deterministic software
       verifier failure returns to implementation for the SAME task
@@ -939,15 +1142,27 @@ def advance(
       (``verifier_failure_digest``/``failure_fingerprint`` required there),
       preserving the convergence cycle and incrementing ``convergence_retries``
       without planner/tester/auditor ceremony;
-    * ``audit`` resolves finality from ``rounds_requested``:
-      ``current_round < rounds_requested`` advances to the next round's
-      ``planning`` (``current_round`` increments); the final round ends the
-      campaign in the terminal state named by the outcome
-      (``pass -> success``, ``findings -> findings``, ``blocked -> blocked``).
-      An interrupted audit (``interrupted``) and an untrusted audit
-      (``infrastructure_failure``) are terminal fail-closed closes with no
-      nonfinal edge: the round never advances and the campaign ends in the
-      named terminal (Task 9 review B1);
+    * ``verification --pass--> implementation`` is the Phase 2B2 scheduler
+      edge: a passing trusted verifier at a non-milestone checkpoint returns
+      to implementation (``scheduler_target="implementation"``) so the
+      tester/auditor run only at milestone/risk boundaries;
+    * ``audit`` resolves finality from the trusted scheduler when
+      ``scheduler_target`` is given (the Phase 2B2 authority): the target is
+      validated against the closed per-outcome whitelist
+      (``pass -> planning | implementation | success | no_progress |
+      budget_exhausted | blocked``, ``findings -> planning | findings``,
+      ``blocked -> planning | blocked``), a ``pass`` may resolve to
+      ``blocked`` only from ``software_verified_external_acceptance_blocked``
+      and can never resolve to ``success`` from it, and the round increments
+      only on the ``planning`` target.  Without ``scheduler_target`` the
+      legacy finality rule applies: ``current_round < rounds_requested``
+      advances to the next round's ``planning`` (``current_round``
+      increments); the final round ends the campaign in the terminal state
+      named by the outcome (``pass -> success``, ``findings -> findings``,
+      ``blocked -> blocked``).  An interrupted audit (``interrupted``) and an
+      untrusted audit (``infrastructure_failure``) are terminal fail-closed
+      closes with no nonfinal edge: the round never advances and the
+      campaign ends in the named terminal (Task 9 review B1);
     * every other row is the §11 table verbatim; a terminal state accepts no
       further transition.
 
@@ -959,7 +1174,9 @@ def advance(
     (``implementation --task_completed--> verification`` binds the task being
     verified; ``verification --verifier_failure--> implementation`` carries
     the cycle forward), so a convergence cycle can never leak across a task
-    or phase boundary.
+    or phase boundary.  The Phase 2B2 scheduler-extension fields are updated
+    from the validated ``scheduler`` mapping (``record_scheduler`` semantics)
+    and ``checkpoints`` increments on every coherent task completion.
     """
     state.validate()
     if state.current_phase in TERMINAL_PHASES:
@@ -979,6 +1196,46 @@ def advance(
             raise StateTransitionError(
                 f"no §11 audit transition with outcome {outcome!r}"
             )
+        elif scheduler_target is not None:
+            # Phase 2B2: the trusted scheduler resolved the target.  The
+            # state machine validates the target against the closed
+            # per-outcome whitelist and the software-verified-external-
+            # acceptance-blocked constraint; the scheduler (never model
+            # prose) owns the semantic resolution.
+            allowed = {
+                "pass": (
+                    "planning", "implementation", "success",
+                    "no_progress", "budget_exhausted", "blocked",
+                ),
+                "findings": ("planning", "findings"),
+                "blocked": ("planning", "blocked"),
+            }[outcome]
+            if scheduler_target not in allowed:
+                raise StateTransitionError(
+                    f"scheduler target {scheduler_target!r} is not a valid "
+                    f"audit target for outcome {outcome!r}"
+                )
+            if (
+                outcome == "pass"
+                and scheduler_target == "blocked"
+                and state.last_outcome
+                != "software_verified_external_acceptance_blocked"
+            ):
+                raise StateTransitionError(
+                    "an audit pass may resolve to blocked only from "
+                    "software_verified_external_acceptance_blocked"
+                )
+            if (
+                outcome == "pass"
+                and scheduler_target == "success"
+                and state.last_outcome
+                == "software_verified_external_acceptance_blocked"
+            ):
+                raise StateTransitionError(
+                    "software_verified_external_acceptance_blocked can "
+                    "never produce campaign success"
+                )
+            target = scheduler_target
         else:
             final = state.current_round >= state.rounds_requested
             if (
@@ -994,6 +1251,15 @@ def advance(
                 target = "blocked" if final else "planning"
             else:
                 target = AUDIT_FINAL_TARGETS[outcome] if final else "planning"
+    elif (
+        state.current_phase == "verification"
+        and outcome == "pass"
+        and scheduler_target == "implementation"
+    ):
+        # Phase 2B2: a passing trusted verifier at a non-milestone
+        # checkpoint returns to implementation (the scheduler reuses the
+        # valid selected task; no tester/auditor ceremony runs).
+        target = "implementation"
     else:
         target = TRANSITIONS.get((state.current_phase, outcome))
         if target is None:
@@ -1071,6 +1337,25 @@ def advance(
         if state.current_phase == "audit" and target == "planning"
         else state.current_round
     )
+    # Phase 2B2: the coherent-task-checkpoint counter is monotonic and
+    # increments exactly on a trusted task completion (never on a retry, a
+    # progress checkpoint, or a failure).
+    next_checkpoints = state.checkpoints
+    if state.current_phase == "implementation" and outcome == "task_completed":
+        next_checkpoints = state.checkpoints + 1
+    # Phase 2B2 scheduler-extension updates (validated exactly like
+    # ``record_scheduler``; the campaign never passes model prose).
+    scheduler_changes: Dict[str, object] = {}
+    if scheduler:
+        unknown = set(scheduler) - set(SCHEDULER_FIELDS)
+        if unknown:
+            raise StateTamperError(
+                f"unknown scheduler-extension field(s) "
+                f"{sorted(unknown)!r}"
+            )
+        _validate_scheduler_values(scheduler)
+        scheduler_changes = dict(scheduler)
+    scheduler_changes["checkpoints"] = next_checkpoints
     result = _checked_replace(
         state,
         current_phase=target,
@@ -1086,7 +1371,123 @@ def advance(
         verifier_failure_digest=next_verifier_failure_digest,
         convergence_retries=next_convergence_retries,
         last_failure_fingerprint=next_last_failure_fingerprint,
+        **scheduler_changes,
     )
+    result.validate()
+    return result
+
+
+def _validate_scheduler_values(changes: Mapping[str, object]) -> None:
+    """Validate one scheduler-extension update mapping (trusted control plane).
+
+    Every value is checked against the same bounded/closed-enum invariants
+    ``_validate_state`` enforces, so a forged, unbounded, or foreign
+    scheduler update fails closed before it can reach the state model.
+    """
+    for name, value in changes.items():
+        if name == "campaign_budget_digest":
+            if not isinstance(value, str) or (
+                value and not SHA256_RE.fullmatch(value)
+            ):
+                raise StateTamperError(
+                    "`campaign_budget_digest` must be a 64-hex SHA-256 "
+                    "digest or empty"
+                )
+        elif name in ("checkpoints", "task_attempts", "no_progress_streak",
+                      "last_audit_checkpoint"):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise StateTamperError(
+                    f"`{name}` must be a non-negative integer"
+                )
+        elif name == "progress_fingerprint":
+            if not isinstance(value, str) or (
+                value and not SHA256_RE.fullmatch(value)
+            ):
+                raise StateTamperError(
+                    "`progress_fingerprint` must be a 64-hex SHA-256 digest "
+                    "or empty"
+                )
+        elif name == "last_planner_need":
+            if not isinstance(value, str) or (
+                value and value not in PLANNER_NEEDS
+            ):
+                raise StateTamperError(
+                    "`last_planner_need` must be one of "
+                    + ", ".join(PLANNER_NEEDS)
+                    + f", got {value!r}"
+                )
+        elif name == "last_planner_reason":
+            if not isinstance(value, str) or len(value) > PLANNER_REASON_MAX:
+                raise StateTamperError(
+                    "`last_planner_reason` must be a bounded trusted string"
+                )
+        elif name == "audit_risk_trigger":
+            if not isinstance(value, str) or (
+                value and value not in AUDIT_RISK_TRIGGERS
+            ):
+                raise StateTamperError(
+                    "`audit_risk_trigger` must be one of "
+                    + ", ".join(AUDIT_RISK_TRIGGERS)
+                    + f", got {value!r}"
+                )
+        elif name == "completed_audit_objectives":
+            if not isinstance(value, (tuple, list)):
+                raise StateTamperError(
+                    "`completed_audit_objectives` must be a sorted sequence"
+                )
+            seen: List[str] = []
+            for objective_id in value:
+                if (
+                    not isinstance(objective_id, str)
+                    or not OBJECTIVE_ID_RE.fullmatch(objective_id)
+                ):
+                    raise StateTamperError(
+                        "`completed_audit_objectives` entries must match "
+                        "AUD-<NN>"
+                    )
+                if objective_id in seen:
+                    raise StateTamperError(
+                        f"duplicate completed audit objective {objective_id!r}"
+                    )
+                seen.append(objective_id)
+            if seen != sorted(seen):
+                raise StateTamperError(
+                    "`completed_audit_objectives` must be sorted"
+                )
+        elif name == "terminal_reason":
+            if not isinstance(value, str) or (
+                value and value not in scheduler_module.TERMINAL_REASONS
+            ):
+                raise StateTamperError(
+                    "`terminal_reason` must be a closed scheduler terminal "
+                    f"reason or empty, got {value!r}"
+                )
+        else:
+            raise StateTamperError(
+                f"unknown scheduler-extension field {name!r}"
+            )
+
+
+def record_scheduler(
+    state: FactoryState, **changes: object
+) -> FactoryState:
+    """Apply validated Phase 2B2 scheduler-extension updates without a
+    transition (trusted control plane only).
+
+    The campaign records trusted scheduler bookkeeping (planner need/reason,
+    audit trigger, budget digest binding) between phases; every value is
+    validated through :func:`_validate_scheduler_values` and the resulting
+    state re-validated, so a forged, unbounded, or foreign update fails
+    closed exactly like a transition.
+    """
+    state.validate()
+    unknown = set(changes) - set(SCHEDULER_FIELDS)
+    if unknown:
+        raise StateTamperError(
+            f"unknown scheduler-extension field(s) {sorted(unknown)!r}"
+        )
+    _validate_scheduler_values(changes)
+    result = _checked_replace(state, **changes)
     result.validate()
     return result
 
@@ -1146,11 +1547,14 @@ def begin_attempt(
         if state.selected_task_id == task_id
         else 1
     )
+    # Phase 2B2: the cumulative implementation-attempt counter is monotonic
+    # and increments on every trusted attempt (including convergence retries).
     result = _checked_replace(
         state,
         selected_task_id=task_id,
         attempt_number=attempt,
         attempt_started_at_monotonic=now,
+        task_attempts=state.task_attempts + 1,
     )
     result.validate()
     return result
@@ -1200,6 +1604,7 @@ def init_state(
     branch: Optional[str] = None,
     now: Optional[int] = None,
     identity: Optional[str] = None,
+    campaign_budget_digest: str = "",
 ) -> FactoryState:
     """Create the initial ``factory-state/v1`` control state (round 1).
 
@@ -1209,6 +1614,11 @@ def init_state(
     state.  Round-zero readiness runs *before* this call and is recorded in
     the coordinator-owned readiness sidecar (``.factory/loop/sidecars.py``);
     canonical state always starts at round 1 planning per §11.
+
+    Phase 2B2: ``campaign_budget_digest`` binds the committed
+    ``factory-campaign-budget/v1`` document the campaign launched under (the
+    model can never weaken it); it is recorded as a scheduler-extension
+    field and verified on every load.
     """
     root = _as_root(root)
     if branch is None:
@@ -1235,6 +1645,10 @@ def init_state(
     if not isinstance(phase_base_commit, str) or not SHA40_RE.fullmatch(phase_base_commit):
         raise StateTamperError(
             "`phase_base_commit` must be a 40-character Git commit hash"
+        )
+    if campaign_budget_digest and not SHA256_RE.fullmatch(campaign_budget_digest):
+        raise StateTamperError(
+            "`campaign_budget_digest` must be a 64-hex SHA-256 digest or empty"
         )
     if (
         not isinstance(role_prompt_digests, Mapping)
@@ -1279,6 +1693,7 @@ def init_state(
         phase_started_at_monotonic=now,
         attempt_started_at_monotonic=0,
         last_outcome=None,
+        campaign_budget_digest=campaign_budget_digest,
     )
     state.validate()
     # Deterministic crash-window/orphan recovery first (Task 19 S2): a torn
@@ -1717,6 +2132,7 @@ def load_state(
     expected_plan_digest: Optional[str] = None,
     expected_audit_objectives_digest: Optional[str] = None,
     expected_role_prompt_digests: Optional[Mapping[str, str]] = None,
+    expected_campaign_budget_digest: Optional[str] = None,
     _expected_uid: Optional[int] = None,
 ) -> FactoryState:
     """Securely reopen, validate, and bind the control-state file.
@@ -1726,6 +2142,13 @@ def load_state(
     field set and invariants, and then fails closed when the recorded
     ``repository_identity`` does not match the canonical root directory or
     when any expected campaign binding differs.
+
+    Phase 2B2: ``expected_campaign_budget_digest`` binds the committed
+    campaign budget the campaign launched under.  A state that already
+    records a budget digest must match it exactly (a weakened/foreign
+    budget fails closed); a pre-Phase-2B2 state that records none is
+    accepted and the campaign binds the digest on its first scheduler
+    update (migration compatibility).
 
     ``_expected_uid`` is the underscore-private *internal* owner expectation
     that defaults to the current user (Task 19 S7): production never passes
@@ -1755,6 +2178,14 @@ def load_state(
     _expect_binding(state, "plan_digest", expected_plan_digest)
     _expect_binding(state, "audit_objectives_digest", expected_audit_objectives_digest)
     _expect_binding(state, "role_prompt_digests", expected_role_prompt_digests)
+    if expected_campaign_budget_digest is not None:
+        if state.campaign_budget_digest and (
+            state.campaign_budget_digest != expected_campaign_budget_digest
+        ):
+            raise StateBindingError(
+                "state `campaign_budget_digest` does not match the campaign "
+                "budget binding"
+            )
     return state
 
 

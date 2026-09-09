@@ -2507,7 +2507,7 @@ class CampaignVerifierIntegrationTests(unittest.TestCase):
 
     def _workspace(self, scenario: dict):
         return self.tfc.FixtureWorkspace(
-            self.tmp / "ws", scenario=scenario)
+            self.tmp / "ws", scenario=scenario, rounds=3)
 
     def _commit_verifier(self, ws, content: bytes = b"#!/bin/sh\nexit 0\n") -> None:
         # The verifier lives under ``src/`` (product scope), never the

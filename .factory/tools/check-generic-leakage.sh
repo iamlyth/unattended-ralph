@@ -2,7 +2,18 @@
 # Reject adopting-product vocabulary everywhere except the canonical spec's
 # three explicitly historical migration statements.
 set -eu
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+# The trusted verifier runs this gate through the retained descriptor
+# authority (``/proc/self/fd/<fd>``), so ``$0`` names the fd path, never the
+# canonical repository path.  The trusted parent pins the canonical root into
+# the child environment as FACTORY_VERIFIER_ROOT exactly like the sibling
+# documentation gates; when that is absent (direct invocation) the legacy
+# ``$0``-derived resolution is used, and when neither resolves the gate fails
+# closed instead of resolving the wrong root.
+if [ -n "${FACTORY_VERIFIER_ROOT:-}" ]; then
+    root=${FACTORY_VERIFIER_ROOT%/}
+else
+    root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fi
 cd "$root"
 python3 - <<'PY'
 from pathlib import Path
@@ -14,7 +25,7 @@ terms = [
     "licensed-"+"diagram", r"\bs"+r"dl2?\b", r"\bu"+r"input\b",
 ]
 rx=re.compile("|".join(terms),re.I)
-allowed_spec_lines={35,615,682}
+allowed_spec_lines={35,621,688}
 failures=[]
 names=[x.decode() for x in subprocess.check_output(["git","ls-files","-z"]).split(b"\0") if x]
 allowed_forwarders={"scripts/verify-boilerplate.sh","scripts/check-docs-sync.sh","scripts/check-generic-leakage.sh","scripts/ollama-usage-guard.sh"}

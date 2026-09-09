@@ -423,9 +423,16 @@ class FieldSetTest(StateConformanceCase):
                 # serialized only when active).
                 "convergence_task_id", "verifier_failure_digest",
                 "convergence_retries", "last_failure_fingerprint",
+                # Phase 2B2 scheduler-extension fields (optional in parse,
+                # serialized only when active).
+                "campaign_budget_digest", "checkpoints", "task_attempts",
+                "progress_fingerprint", "no_progress_streak",
+                "last_planner_need", "last_planner_reason",
+                "last_audit_checkpoint", "audit_risk_trigger",
+                "completed_audit_objectives", "terminal_reason",
             ),
         )
-        self.assertEqual(len(FIELD_NAMES), 21)
+        self.assertEqual(len(FIELD_NAMES), 32)
 
     def test_extra_field_is_rejected(self) -> None:
         data = json.loads(self.fixture("state-field-extra.json").read_text("utf-8"))
@@ -561,7 +568,10 @@ class CounterTest(StateConformanceCase):
         self.assertEqual(
             PHASE_OUTCOMES["implementation"], frozenset(
                 {"planned", "task_progress", "task_failed", "interrupted",
-                 "verifier_failure"}
+                 "verifier_failure",
+                 # Phase 2B2: a passing verification with no audit milestone
+                 # returns to implementation (scheduler reuse).
+                 "pass"}
             )
         )
         self.assertEqual(
@@ -590,6 +600,9 @@ class CounterTest(StateConformanceCase):
             (
                 "success", "findings", "blocked", "failed", "interrupted",
                 "infrastructure_failure",
+                # Phase 2B2 scheduler terminals: repeated/no meaningful
+                # progress and budget exhaustion are distinct honest reasons.
+                "no_progress", "budget_exhausted",
             ),
         )
         self.assertEqual(
@@ -598,6 +611,7 @@ class CounterTest(StateConformanceCase):
                 "planning", "implementation", "verification", "audit",
                 "success", "findings", "blocked", "failed", "interrupted",
                 "infrastructure_failure",
+                "no_progress", "budget_exhausted",
             ),
         )
 
@@ -720,6 +734,7 @@ class OutcomeTest(StateConformanceCase):
                 "software_verified_external_acceptance_blocked",
                 "verifier_failure",
                 "success",
+                "no_progress", "budget_exhausted",
             ),
         )
 

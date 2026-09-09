@@ -33,7 +33,9 @@
         "blocked",
         "failed",
         "interrupted",
-        "infrastructure_failure"
+        "infrastructure_failure",
+        "no_progress",
+        "budget_exhausted"
       ]
     },
     "terminal_outcome": {
@@ -51,8 +53,25 @@
         "findings",
         "infrastructure_failure",
         "readiness_complete",
-        "success"
+        "success",
+        "no_progress",
+        "budget_exhausted"
       ]
+    },
+    "terminal_reason": {
+      "type": "string",
+      "enum": [
+        "success",
+        "findings",
+        "blocked",
+        "failed",
+        "interrupted",
+        "infrastructure_failure",
+        "budget_exhausted",
+        "no_progress",
+        "software_verified_external_acceptance_blocked"
+      ],
+      "description": "Phase 2B2 closed scheduler terminal-reason enum; present only when the trusted scheduler resolved the terminal."
     },
     "head_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "exit_code": { "type": "integer" },

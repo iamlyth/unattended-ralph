@@ -47,13 +47,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPTS = ROOT / "scripts"
+SCRIPTS = ROOT / ".factory" / "tools"
 FIXTURES = ROOT / ".factory" / "tests" / "fixtures" / "conformance"
 
 VALIDATOR = SCRIPTS / "validate-conformance.py"
 FACTS_VALIDATOR = SCRIPTS / "validate-blocked-facts.py"
 CAPABILITY_CHECKER = SCRIPTS / "check-capability-evidence.py"
 CONTRACT_CHECKER = SCRIPTS / "check-capability-contracts.py"
+RUNNER_CHECKER = SCRIPTS / "check-factory-runner-evidence.py"
 
 
 def run(argv, cwd: Path, check: bool = False,
@@ -74,10 +75,17 @@ class ConformanceFixture:
     def __init__(self, root: Path) -> None:
         self.root = root
         for rel in (".factory/artifacts", ".factory/schemas", ".factory/loop",
-                    ".factory-state", ".factory/tests/legacy/fixtures", "docs", "scripts"):
+                    ".factory/tools", ".factory-state",
+                    ".factory/tests/legacy/fixtures", "docs", "scripts",
+                    "tests/fixtures"):
             (root / rel).mkdir(parents=True, exist_ok=True)
-        for script in (VALIDATOR, FACTS_VALIDATOR, CAPABILITY_CHECKER, CONTRACT_CHECKER):
+        for script in (VALIDATOR, FACTS_VALIDATOR, CAPABILITY_CHECKER,
+                        CONTRACT_CHECKER, RUNNER_CHECKER):
             shutil.copy2(script, root / ".factory" / "tools" / script.name)
+        shutil.copy2(
+            SCRIPTS / "factory_runner_artifacts.py",
+            root / ".factory" / "tools" / "factory_runner_artifacts.py",
+        )
         # The validators run every trusted Git call through the committed
         # pinned-Git authority (.factory/loop/gitutil.py).  The fixture
         # receives the exact committed module (never a weakened stub): the
@@ -154,11 +162,12 @@ class ConformanceFixture:
         ), encoding="utf-8")
 
     def seed_refs(self) -> None:
-        (self.root / "tests" / "fixtures" / "runner-manifest.json").write_text(
+        (self.root / ".factory" / "tests" / "legacy" / "fixtures" /
+         "runner-manifest.json").write_text(
             json.dumps({"schema": "factory-runner-receipt/v1", "result": "pass", "exit_code": 0}),
             encoding="utf-8",
         )
-        (self.root / "tests" / "probe.c").write_text(
+        (self.root / ".factory" / "tests" / "legacy" / "probe.c").write_text(
             "int probe(void){return 0;}\n", encoding="utf-8",
         )
 
@@ -925,7 +934,7 @@ class GitBoundaryTests(unittest.TestCase):
     def test_replace_refs_cannot_substitute_evidence(self) -> None:
         head = git(self.fixture.root, "rev-parse", "HEAD")
         # Tampered commit that deletes the evidenced artifact from its tree.
-        (self.fixture.root / "tests" / "probe.c").unlink()
+        (self.fixture.root / ".factory" / "tests" / "legacy" / "probe.c").unlink()
         git(self.fixture.root, "add", "-A")
         git(self.fixture.root, "commit", "-qm", "tamper: drop probe.c")
         tamper = git(self.fixture.root, "rev-parse", "HEAD")

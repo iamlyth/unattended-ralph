@@ -1191,7 +1191,7 @@ class FindingsCampaignFlow(_FindingsCampaign):
             "tester": {"behavior": {"1": "findings", "2": "pass",
                                     "default": "pass"}},
             "auditor": {"behavior": "pass"},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -1203,6 +1203,9 @@ class FindingsCampaignFlow(_FindingsCampaign):
             (1, "verification", "findings"),
             (1, "audit", "pass"),
             (2, "planning", "planned"),
+            (2, "implementation", "task_completed"),
+            (2, "verification", "pass"),
+            (2, "audit", "pass"),
             (2, "implementation", "task_completed"),
             (2, "verification", "pass"),
             (2, "audit", "pass"),
@@ -1259,7 +1262,7 @@ class FindingsCampaignFlow(_FindingsCampaign):
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": {"1": "findings", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -1289,7 +1292,7 @@ class FindingsCampaignFlow(_FindingsCampaign):
                                     "default": "pass"}},
             "auditor": {"behavior": {"1": "findings", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -1316,10 +1319,17 @@ class FindingsCampaignFlow(_FindingsCampaign):
             "tester": {"behavior": {"1": "blocked", "2": "pass",
                                     "default": "pass"}},
             "auditor": {"behavior": "pass"},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli(
             extra=["--capability-command", str(FALSE_EXECUTABLE)])
-        self.assertEqual(rc, 0)
+        # Phase 2B2: the declared capability stays unavailable in every
+        # round, so the campaign honestly exhausts its round budget without
+        # verified completion (never success).  The round-1 blocked receipt
+        # and the round-2 revised plan are the flow under test.
+        self.assertEqual(rc, 8)
+        assert_terminal(self, data, terminal_phase="budget_exhausted",
+                        terminal_outcome="pass", exit_code=8,
+                        rounds_completed=3)
         receipt = self._receipt(ws, 1, "verification")
         self.assertEqual(receipt["outcome"], "blocked")
         self.assertEqual(receipt["blocked_on"], ["external-capability-required"])
@@ -1348,7 +1358,7 @@ class FindingsCampaignFlow(_FindingsCampaign):
             "tester": {"behavior": {"1": "findings", "2": "pass",
                                     "default": "pass"}},
             "auditor": {"behavior": "pass"},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         revised_plan = self._plan_at_commit(
@@ -1446,8 +1456,11 @@ class FindingsCrashWindow(_FindingsCampaign):
         }, rounds=1)
         config = self._crash_verification_advance(ws)
         result, calls = self._count_role_runs(config)
-        self.assertEqual(result.terminal_phase, "success")
+        # Phase 2B2: the maximum round budget ends the campaign honestly as
+        # budget_exhausted (the plan is not complete — never success).
+        self.assertEqual(result.terminal_phase, "budget_exhausted")
         self.assertEqual(result.terminal_outcome, "pass")
+        self.assertEqual(result.terminal_reason, "budget_exhausted")
         self.assertEqual(result.rounds_completed, 1)
         # The verification transition was reconciled from the published
         # receipt: the untrusted tester never re-ran (only the audit ran).
@@ -1563,7 +1576,9 @@ class FindingsCrashWindow(_FindingsCampaign):
         # The rerun re-runs the campaign from the verification phase; the
         # tester runs again and the phase completes normally.
         result, calls = self._count_role_runs(config)
-        self.assertEqual(result.terminal_phase, "success")
+        # Phase 2B2: the maximum round budget ends the campaign honestly as
+        # budget_exhausted (the plan is not complete — never success).
+        self.assertEqual(result.terminal_phase, "budget_exhausted")
         self.assertEqual(result.terminal_outcome, "pass")
         self.assertEqual(calls, ["tester", "auditor"])
         self.assertTrue((ws.root / receipt_rel(1, "verification")).exists())
@@ -1653,8 +1668,15 @@ class FindingsCampaignFailClosed(_FindingsCampaign):
 
     def test_preplanted_synthetic_receipt_fails_consumption_closed(self) -> None:
         # A forged receipt for a phase that will record a pass: round 1 runs
-        # clean, round 2 planning consumption rejects the synthetic receipt.
-        ws = self.make(SUCCESS_SCENARIO, rounds=2)
+        # clean (the audit findings force round 2), and round 2 planning
+        # consumption rejects the synthetic receipt.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=3)
         planted = findings_module.build_receipt(
             campaign_id="campaign", round_number=1, phase="verification",
             phase_tag="r1.verification.1.a1", phase_base_commit="0" * 40,
@@ -1668,7 +1690,13 @@ class FindingsCampaignFailClosed(_FindingsCampaign):
         self.assertIsNone(data)
 
     def test_malformed_receipt_fails_consumption_closed(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO, rounds=2)
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=3)
         self._write_marker(
             ws, "factory-findings-receipt-round-1-verification.json",
             b"{not valid json")
@@ -1677,7 +1705,13 @@ class FindingsCampaignFailClosed(_FindingsCampaign):
         self.assertIsNone(data)
 
     def test_oversized_receipt_fails_closed(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO, rounds=2)
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=3)
         planted = findings_module.build_receipt(
             campaign_id="campaign", round_number=1, phase="verification",
             phase_tag="r1.verification.1.a1", phase_base_commit="0" * 40,
@@ -1692,7 +1726,13 @@ class FindingsCampaignFailClosed(_FindingsCampaign):
         self.assertIsNone(data)
 
     def test_symlinked_receipt_fails_closed(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO, rounds=2)
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=3)
         directory = ws.root / STATE_DIR
         directory.mkdir(mode=0o700, exist_ok=True)
         target = directory / "elsewhere.json"

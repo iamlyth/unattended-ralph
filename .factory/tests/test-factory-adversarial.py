@@ -493,7 +493,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # exactly the allowlist + invocation fields (no session/memory/legacy
         # keys), and the campaign drives each static role through the driver
         # seam as a separate fresh process.
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         probe = ws.root / "backend-probe.py"
         marker = ws.root / "src" / ".factory-test-output" / "probe-1.json"
         probe.write_text(
@@ -690,7 +690,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # subprocess invocations on the same committed plan must select the
         # identical task, and two identical campaigns must produce
         # byte-identical phase histories.
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         plan = ws.root / PLAN_REL
         # The selector is bound to the plan's own authoritative front-matter
         # base (the same anchor the campaign derives from the committed plan
@@ -726,7 +726,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # outcome) triples are byte-identical (the raw records also carry
         # per-repository commit hashes, which legitimately differ across
         # workspaces).
-        ws2 = self.make(SUCCESS_SCENARIO)
+        ws2 = self.make(SUCCESS_SCENARIO, rounds=3)
         rc1, data1 = ws.run_cli()
         rc2, data2 = ws2.run_cli()
         self.assertEqual(rc1, 0)
@@ -738,7 +738,7 @@ class CaseAdversarialSuite(_AdversarialBase):
     # -- case 4: no runtime task ledger is read or created -------------------
 
     def test_case_04_no_runtime_task_ledger(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -826,7 +826,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                                     "default": "pass"}},
             "auditor": {"behavior": {"1": "findings", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2, workspace_cls=FindingsWorkspace)
+        }, rounds=3, workspace_cls=FindingsWorkspace)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0, "the findings-revised round must complete")
         assert_terminal(self, data, terminal_phase="success",
@@ -840,6 +840,9 @@ class CaseAdversarialSuite(_AdversarialBase):
              (1, "verification", "findings"),
              (1, "audit", "findings"),
              (2, "planning", "planned"),
+             (2, "implementation", "task_completed"),
+             (2, "verification", "pass"),
+             (2, "audit", "pass"),
              (2, "implementation", "task_completed"),
              (2, "verification", "pass"),
              (2, "audit", "pass")],
@@ -941,7 +944,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # absence of any findings channel — verified by the trusted suite,
         # never asserted by the model.
         evidence_path = (ws.root / "src" / ".factory-test-output" /
-                         "developer-evidence-round-2.json")
+                         "developer-evidence-round-2-task-2.json")
         self.assertTrue(evidence_path.is_file(),
                         "the round-2 developer evidence must be preserved")
         evidence = json.loads(evidence_path.read_bytes())
@@ -997,7 +1000,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                                     "default": "pass"}},
             "auditor": {"behavior": {"1": "findings", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2, workspace_cls=FindingsWorkspace)
+        }, rounds=3, workspace_cls=FindingsWorkspace)
         rc, gdata = generic.run_cli()
         self.assertEqual(rc, 0)
         g_planning2 = next(
@@ -1015,7 +1018,7 @@ class CaseAdversarialSuite(_AdversarialBase):
                          "a generic planner never consumes the findings")
         g_evidence = json.loads(
             (generic.root / "src" / ".factory-test-output" /
-             "developer-evidence-round-2.json").read_bytes())
+             "developer-evidence-round-2-task-2.json").read_bytes())
         self.assertEqual(
             g_evidence["plan_digest"],
             sha256(g_plan),
@@ -2098,7 +2101,7 @@ class CaseAdversarialSuite(_AdversarialBase):
         # The campaign outcome is decided by the harness gates, never by a
         # token in the model output: a driver that prints the completion token
         # on every phase still reaches the deterministic terminal.
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         driver = ws.root / "token-driver.py"
         source = (FIXTURES / "campaign_driver.py").read_text(encoding="utf-8")
         source = source.replace(
@@ -2118,31 +2121,43 @@ class CaseAdversarialSuite(_AdversarialBase):
     # -- case 17: finite campaigns terminate within bounds -------------------
 
     def test_case_17_finite_five_round_campaigns(self) -> None:
-        # Five-round success: every runnable task completes and the campaign
-        # terminates at round 5 within the configured bound.
+        # Phase 2B2: ``--rounds`` is a maximum budget.  A five-task plan
+        # completes every runnable task within one planning cycle (the
+        # scheduler reuses the valid selected task) and terminates early on
+        # verified completion; a findings audit forces the next round's
+        # planner, so five rounds of findings end the campaign in the
+        # findings terminal within the configured bound.
         success = self.make(SUCCESS_SCENARIO, workspace_cls=FiveRoundWorkspace,
                             rounds=5)
         rc, data = success.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
-                        terminal_outcome="pass", exit_code=0, rounds_completed=5)
+                        terminal_outcome="pass", exit_code=0, rounds_completed=1)
         assert_history(self, data, [
-            (round_no, phase, outcome)
-            for round_no in range(1, 6)
+            (1, "planning", "planned"),
+        ] + [
+            (1, phase, outcome)
+            for _ in range(5)
             for phase, outcome in (
-                ("planning", "planned"),
                 ("implementation", "task_completed"),
                 ("verification", "pass"),
                 ("audit", "pass"),
             )
         ])
-        # Five-round final findings: the last round's audit findings end the
-        # campaign in the findings terminal, never a spin.
+        # Five-round final findings: findings in every round force the next
+        # round's planner; the fifth round's audit findings end the campaign
+        # in the findings terminal, never a spin.
         findings = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": "complete"},
-            "tester": {"behavior": {"5": "findings", "default": "pass"}},
-            "auditor": {"behavior": {"5": "findings", "default": "pass"}},
+            "tester": {"behavior": {
+                "1": "findings", "2": "findings", "3": "findings",
+                "4": "findings", "5": "findings", "default": "findings",
+            }},
+            "auditor": {"behavior": {
+                "1": "findings", "2": "findings", "3": "findings",
+                "4": "findings", "5": "findings", "default": "findings",
+            }},
         }, workspace_cls=FiveRoundWorkspace, rounds=5)
         rc, data = findings.run_cli()
         self.assertEqual(rc, 1)
@@ -2174,7 +2189,7 @@ class CaseAdversarialSuite(_AdversarialBase):
               "developer": {"behavior": "exit1"},
               "tester": {"behavior": "pass"},
               "auditor": {"behavior": "pass"}},
-             0, "success", "pass", 1, [],
+             8, "budget_exhausted", "pass", 1, [],
              [(1, "planning", "planned"),
               (1, "implementation", "task_failed"),
               (1, "implementation", "task_failed"),
@@ -2328,7 +2343,8 @@ class CaseAdversarialSuite(_AdversarialBase):
         # unsafe marker fails closed (exit 2) instead of silently unfreezing.
         fixture = Path(tempfile.mkdtemp(prefix="adversarial-freeze.", dir=self.tmp))
         (fixture / ".factory" / "loop").mkdir(parents=True)
-        for module in ("migration", "gitutil", "plan_parser", "state", "factory_state_io"):
+        for module in ("migration", "gitutil", "plan_parser", "state",
+                        "factory_state_io", "scheduler"):
             shutil.copy2(LOOP / f"{module}.py", fixture / ".factory" / "loop" / f"{module}.py")
         marker = fixture / ".factory" / "ralph-freeze"
         guard = [PY, str(fixture / ".factory" / "loop" / "migration.py"),
@@ -2527,7 +2543,7 @@ class CaseAdversarialSuite(_AdversarialBase):
     # -- case 21: the task excerpt is byte-bound to the committed plan -------
 
     def test_case_21_task_excerpt_byte_bound(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         plan = ws.root / PLAN_REL
         excerpt1 = run(
             [PY, str(LOOP / "launch.py"), "excerpt", "--plan", str(plan),
@@ -2756,12 +2772,12 @@ class CaseAdversarialSuite(_AdversarialBase):
         # Campaign-option / branch mismatch fails closed at the campaign
         # boundary: a campaign bound to a different campaign id or rounds
         # count cannot resume the recorded state.
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         mismatch = run(
             [PY, str(LOOP / "campaign.py"), "--root", str(ws.root), "run",
-             "--campaign-id", "campaign", "--rounds", "3", "--branch", BRANCH,
+             "--campaign-id", "campaign", "--rounds", "2", "--branch", BRANCH,
              "--role-driver", DRIVER_REL, "--scenario", "scenario.json",
              "--verification-command", str(TRUE_EXECUTABLE)],
             check=False,

@@ -595,9 +595,14 @@ def _assert_state(
         expected_campaign_id=campaign_id,
         expected_rounds_requested=rounds,
     )
-    if state.current_phase != "success" or state.last_outcome != "success":
+    if state.current_phase not in ("success", "budget_exhausted") or (
+        state.current_phase == "success" and state.last_outcome != "success"
+    ) or (
+        state.current_phase == "budget_exhausted"
+        and state.last_outcome != "budget_exhausted"
+    ):
         _fail(
-            "the terminal state is not `success`: "
+            "the terminal state is not `success`/`budget_exhausted`: "
             f"{state.current_phase}/{state.last_outcome}"
         )
     state_path = root / ".factory-state" / state_module.STATE_FILE_NAME
@@ -1123,10 +1128,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         role_timeout=args.role_timeout, gate_timeout=args.gate_timeout,
     )
     rc, data = _run_campaign(argv, root, campaign_id)
-    if str(data.get("terminal_phase")) != "success" or rc != 0:
+    # Phase 2B2: ``--rounds`` is a maximum budget.  The evidence round
+    # completes exactly the designated smoke task and leaves the final audit
+    # task pending, so the honest terminal is ``budget_exhausted`` (the plan
+    # is not complete — never success).  The exact one-round phase history
+    # and every binding below still prove the campaign ran end-to-end.
+    if str(data.get("terminal_phase")) not in ("success", "budget_exhausted") \
+            or rc not in (0, 8):
         _fail(
             f"the evidence round terminated {data.get('terminal_phase')} "
-            f"(rc={rc}); the honest round outcome is not success"
+            f"(rc={rc}); the honest round outcome is not success/"
+            "budget_exhausted"
         )
     _assert_phase_history(data)
     planning_head = str(data["phase_history"][0]["head_commit"])

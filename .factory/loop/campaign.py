@@ -85,6 +85,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import lock as lock_module
     from . import plan_parser
     from . import pre_round as pre_round_module
+    from . import scheduler as scheduler_module
     from . import selector as selector_module
     from . import state as state_module
     from . import launch as launch_module
@@ -104,6 +105,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import lock as lock_module  # type: ignore[no-redef]
     import plan_parser  # type: ignore[no-redef]
     import pre_round as pre_round_module  # type: ignore[no-redef]
+    import scheduler as scheduler_module  # type: ignore[no-redef]
     import selector as selector_module  # type: ignore[no-redef]
     import state as state_module  # type: ignore[no-redef]
     import launch as launch_module  # type: ignore[no-redef]
@@ -128,6 +130,10 @@ PHASES = ("planning", "implementation", "verification", "audit")
 TERMINAL_PHASES = (
     "success", "readiness_complete", "findings", "blocked", "failed",
     "interrupted", "infrastructure_failure",
+    # Phase 2B2 scheduler terminals: repeated/no meaningful progress and
+    # task/checkpoint/round/wall budget exhaustion are distinct honest
+    # terminal reasons, never mapped to success/findings incorrectly.
+    "no_progress", "budget_exhausted",
 )
 
 # §13 phase-outcome classification sets (subsets of the trusted outcome enum).
@@ -155,6 +161,11 @@ VERIFICATION_OUTCOMES = (
 AUDIT_OUTCOMES = (
     "pass", "findings", "blocked",
     "interrupted", "infrastructure_failure",
+    # Phase 2B2 scheduler terminal reasons recorded as the audit step's
+    # outcome in the phase history (the audit itself passed; the scheduler
+    # resolved the terminal reason).
+    "no_progress", "budget_exhausted",
+    "software_verified_external_acceptance_blocked",
 )
 
 PHASE_OUTCOME_SETS: Mapping[str, frozenset] = {
@@ -173,6 +184,10 @@ EXIT_INTERRUPTED = 4
 EXIT_INFRASTRUCTURE_FAILURE = 5
 # Fail-closed control-plane code (never a campaign outcome).
 EXIT_ERROR = 6
+# Phase 2B2 scheduler terminals: repeated/no meaningful progress and budget
+# exhaustion are distinct honest nonzero exits, never success/findings.
+EXIT_NO_PROGRESS = 7
+EXIT_BUDGET_EXHAUSTED = 8
 
 TERMINAL_EXIT_CODES: Mapping[str, int] = {
     "success": EXIT_SUCCESS,
@@ -182,6 +197,8 @@ TERMINAL_EXIT_CODES: Mapping[str, int] = {
     "failed": EXIT_FAILED,
     "interrupted": EXIT_INTERRUPTED,
     "infrastructure_failure": EXIT_INFRASTRUCTURE_FAILURE,
+    "no_progress": EXIT_NO_PROGRESS,
+    "budget_exhausted": EXIT_BUDGET_EXHAUSTED,
 }
 
 # The campaign phase context passed to an embedded/fixture role driver.
@@ -381,7 +398,15 @@ class PhaseRecord:
 
 @dataclass(frozen=True)
 class CampaignResult:
-    """Machine-readable terminal result (``factory-campaign-result/v1``)."""
+    """Machine-readable terminal result (``factory-campaign-result/v1``).
+
+    ``terminal_reason`` is the Phase 2B2 closed scheduler terminal-reason
+    enum (``scheduler.TERMINAL_REASONS``) when the trusted scheduler resolved
+    the terminal (``no_progress``, ``budget_exhausted``,
+    ``software_verified_external_acceptance_blocked``, ``success``,
+    ``findings``, ``blocked``); it is empty for the legacy terminals
+    (``failed``/``interrupted``/``infrastructure_failure``/readiness).
+    """
 
     campaign_id: str
     rounds_requested: int
@@ -390,9 +415,10 @@ class CampaignResult:
     terminal_outcome: str
     head_commit: str
     phase_history: Tuple[PhaseRecord, ...] = ()
+    terminal_reason: str = ""
 
     def to_dict(self) -> Dict[str, object]:
-        return {
+        result: Dict[str, object] = {
             "schema": SCHEMA_NAME,
             "campaign_id": self.campaign_id,
             "rounds_requested": self.rounds_requested,
@@ -403,6 +429,9 @@ class CampaignResult:
             "exit_code": TERMINAL_EXIT_CODES[self.terminal_phase],
             "phase_history": [record.to_dict() for record in self.phase_history],
         }
+        if self.terminal_reason:
+            result["terminal_reason"] = self.terminal_reason
+        return result
 
     def validate(self) -> None:
         if self.terminal_phase not in TERMINAL_PHASES:
@@ -437,10 +466,17 @@ class CampaignResult:
             if self.terminal_outcome != "readiness_complete" or self.rounds_completed != 0 or self.phase_history:
                 raise CampaignResultError("readiness-only cannot impersonate campaign success")
         if self.terminal_phase == "success":
-            if self.rounds_completed != self.rounds_requested:
-                raise CampaignResultError("campaign success requires every requested round")
+            # Phase 2B2: ``rounds_requested`` is a maximum budget, never an
+            # exact count; verified completion may terminate the campaign
+            # early, before the maximum.  Success still requires every round
+            # that actually ran to have a complete passing audit history.
+            if self.rounds_completed < 1 or self.rounds_completed > self.rounds_requested:
+                raise CampaignResultError(
+                    "campaign success requires at least one completed round "
+                    "within the round budget"
+                )
             completed_audits = {record.round for record in self.phase_history if record.phase == "audit"}
-            if completed_audits != set(range(1, self.rounds_requested + 1)):
+            if completed_audits != set(range(1, self.rounds_completed + 1)):
                 raise CampaignResultError("campaign success requires complete passing phase history")
             if any(
                 record.phase == "verification"
@@ -452,6 +488,12 @@ class CampaignResult:
                     "campaign success is impossible when verification history "
                     "contains software_verified_external_acceptance_blocked"
                 )
+        if self.terminal_reason and self.terminal_reason not in (
+            scheduler_module.TERMINAL_REASONS
+        ):
+            raise CampaignResultError(
+                "terminal_reason must be a closed scheduler terminal reason"
+            )
         for record in self.phase_history:
             if record.round < 1 or record.round > self.rounds_requested:
                 raise CampaignResultError(
@@ -549,6 +591,13 @@ class CampaignConfig:
     runtime_limit: float = launch_module.DEFAULT_RUNTIME_LIMIT
     inactivity_limit: float = launch_module.DEFAULT_INACTIVITY_LIMIT
     readiness_only: bool = False
+    # Phase 2B2: the trusted committed campaign budget (``factory-campaign-
+    # budget/v1``) and its deterministic digest.  ``rounds_requested`` is the
+    # effective maximum round budget (the operator's ``--rounds``, capped by
+    # the committed budget's ``max_rounds``); the model can never weaken the
+    # committed budget.
+    campaign_budget: Optional[scheduler_module.CampaignBudget] = None
+    campaign_budget_digest: str = ""
 
     def __post_init__(self) -> None:
         # Fail closed at construction: an invalid campaign contract can never
@@ -806,6 +855,27 @@ class CampaignConfig:
         if self.campaign_timeout > MAX_CAMPAIGN_TIMEOUT:
             raise CampaignConfigError(
                 f"campaign_timeout must not exceed {MAX_CAMPAIGN_TIMEOUT:g} seconds"
+            )
+        if not isinstance(self.campaign_budget, scheduler_module.CampaignBudget):
+            raise CampaignConfigError(
+                "campaign_budget must be the trusted parsed campaign budget"
+            )
+        if not isinstance(self.campaign_budget_digest, str) or not SHA256_RE.fullmatch(
+            self.campaign_budget_digest
+        ):
+            raise CampaignConfigError(
+                "campaign_budget_digest must be a 64-hex SHA-256 digest"
+            )
+        if self.campaign_budget_digest != scheduler_module.budget_digest(
+            self.campaign_budget
+        ):
+            raise CampaignConfigError(
+                "campaign_budget_digest does not match the parsed campaign budget"
+            )
+        if self.rounds_requested > self.campaign_budget.max_rounds:
+            raise CampaignConfigError(
+                "--rounds may not exceed the committed campaign budget "
+                f"max_rounds ({self.campaign_budget.max_rounds})"
             )
 
 
@@ -1574,6 +1644,47 @@ def classify_verification(
     return "pass"
 
 
+def classify_verifier_only(
+    *,
+    gate_ran: bool,
+    gate_exit: int,
+    verification_skipped: bool,
+    capability_available: bool,
+    capability_ran: bool = True,
+    capability_exit: int = 0,
+    capability_skipped: bool = False,
+) -> str:
+    """Pure Phase 2B2 classification when the independent tester is skipped.
+
+    At a non-milestone checkpoint the tester/auditor do not run; the trusted
+    deterministic verifier's evidence alone classifies the candidate exact
+    commit.  ``pass`` when the deterministic gate passed cleanly and the
+    declared capability is available; ``findings`` when a deterministic
+    check failed or was skipped (an unavailable capability can never
+    disappear behind an absent tester handoff); ``infrastructure_failure``
+    when the verifier itself cannot be trusted (unrun gate, 126/127, or a
+    negative supervisor/binding status).  The outcome is a pure function of
+    the trusted gate evidence — never of model prose.
+    """
+    if not gate_ran:
+        return "infrastructure_failure"
+    if gate_exit < 0 or gate_exit in (126, 127):
+        return "infrastructure_failure"
+    if capability_ran and (
+        capability_exit < 0 or capability_exit in (126, 127)
+    ):
+        return "infrastructure_failure"
+    if verification_skipped:
+        return "findings"
+    if capability_skipped:
+        return "findings"
+    if gate_exit != 0:
+        return "findings"
+    if not capability_available or (capability_ran and capability_exit != 0):
+        return "findings"
+    return "pass"
+
+
 def classify_audit(
     *,
     role: RoleOutcome,
@@ -2217,6 +2328,11 @@ class _Step:
     state: Optional[state_module.FactoryState] = None
     terminal: Optional[str] = None
     retry: bool = False
+    # Phase 2B2: the closed scheduler terminal-reason enum when the trusted
+    # scheduler resolved the terminal (``no_progress``, ``budget_exhausted``,
+    # ``software_verified_external_acceptance_blocked``, ``success``,
+    # ``findings``, ``blocked``); empty for the legacy terminals.
+    terminal_reason: str = ""
 
 
 class Campaign:
@@ -2492,7 +2608,16 @@ class Campaign:
                 expected_specification_digest=self._config.specification_digest,
                 expected_audit_objectives_digest=self._config.audit_objectives_digest,
                 expected_role_prompt_digests=dict(self._config.role_prompt_digests),
+                expected_campaign_budget_digest=self._config.campaign_budget_digest,
             )
+            if state.campaign_budget_digest != self._config.campaign_budget_digest:
+                # A pre-Phase-2B2 state records no budget digest; bind the
+                # committed budget digest now (the model can never weaken it).
+                state = state_module.record_scheduler(
+                    state,
+                    campaign_budget_digest=self._config.campaign_budget_digest,
+                )
+                state_module.write_state(self._root, state)
             return self._reconcile_head(state)
         state = state_module.init_state(
             self._root,
@@ -2504,6 +2629,7 @@ class Campaign:
             audit_objectives_digest=self._config.audit_objectives_digest,
             phase_base_commit=self._config.phase_base_commit,
             branch=self._config.branch,
+            campaign_budget_digest=self._config.campaign_budget_digest,
         )
         # Publish the coordinator-owned pre-round hook sidecar (never a
         # canonical state field) bound to this campaign.
@@ -4055,7 +4181,109 @@ class Campaign:
         sidecars_module.write_pre_round(self._root, completed)
         return state, None
 
+    def _planner_need(
+        self, state: state_module.FactoryState
+    ) -> Tuple[str, str]:
+        """The trusted scheduler's planner decision for this planning phase.
+
+        The planner runs initially (round 1) and on demand: after a non-final
+        audit that reported findings/blockers, or after a passing audit that
+        left no runnable task with an incomplete plan.  The decision is a
+        pure function of the trusted state (never model prose); the recorded
+        need/reason are persisted in the control state so a resumed campaign
+        replays the exact decision deterministically.
+        """
+        last = state.last_outcome
+        if last is None or last == "interrupted":
+            # Round-1 initial planning (or a retry of it after an interrupted
+            # attempt).
+            return "initial", "round 1 initial planning"
+        if last == "findings":
+            return "findings", "previous audit reported findings"
+        if last == "blocked":
+            return "blocked", "previous audit reported blockers"
+        if last == "pass":
+            return "replan", "no runnable task with an incomplete plan"
+        raise CampaignPhaseError(
+            f"planning entered with unexpected last_outcome {last!r}"
+        )
+
+    def _task_statuses(self, plan: object) -> str:
+        """Deterministic ``"<id>:<status>,..."`` string of the committed plan.
+
+        The scheduler's progress fingerprint binds this string so two audits
+        that reproduce the same plan task statuses (plus the same
+        verification/audit outcomes and covered objective set) are
+        recognized as no meaningful progress.  The string is a pure function
+        of the committed plan — never of model prose.
+        """
+        return ",".join(
+            f"{task.number}:{task.status}" for task in plan.tasks
+        )
+
+    def _plan_complete(self, plan: object) -> bool:
+        """True when every committed plan task is complete."""
+        return all(task.status == "complete" for task in plan.tasks)
+
+    def _more_tasks(
+        self, plan: object, state: state_module.FactoryState
+    ) -> bool:
+        """True when the trusted selector finds a runnable task.
+
+        The selector is bound to the authoritative plan base (never the
+        plan's own self-declared base); a stale/ambiguous plan fails closed
+        as "no more tasks", which forces the final milestone audit rather
+        than silently continuing.
+        """
+        try:
+            selection = selector_module.select_task(
+                plan, bound_base_commit=self._authoritative_plan_base(state)
+            )
+        except selector_module.SelectorError:
+            return False
+        return selection.selected
+
+    def _audit_trigger(
+        self,
+        *,
+        checkpoint: int,
+        security_changed: bool,
+        verifier_risk: bool,
+        more_tasks: bool,
+        no_checkpoint_progress: bool = False,
+    ) -> str:
+        """The closed milestone/risk trigger that scheduled this audit.
+
+        Mirrors the trusted scheduler's ``should_audit`` decision order so
+        the recorded ``audit_risk_trigger`` is the exact deterministic
+        reason the independent audit ran (never model prose).  A task
+        failure/work-exhaustion/blocked boundary (no coherent checkpoint
+        progress) forces the audit first; the remaining triggers mirror
+        ``should_audit``.
+        """
+        if no_checkpoint_progress:
+            return "failure"
+        if not more_tasks:
+            return "final"
+        if checkpoint >= self._config.campaign_budget.max_checkpoints:
+            return "checkpoint_budget"
+        if security_changed:
+            return "security"
+        if verifier_risk:
+            return "verifier_risk"
+        return "interval"
+
     def _step_planning(self, state: state_module.FactoryState) -> _Step:
+        # Phase 2B2: the planner runs initially or only when the trusted
+        # scheduler says it is required; the need/reason are recorded in the
+        # control state (never model requests).
+        planner_need, planner_reason = self._planner_need(state)
+        state = state_module.record_scheduler(
+            state,
+            last_planner_need=planner_need,
+            last_planner_reason=planner_reason,
+        )
+        state_module.write_state(self._root, state)
         state, hook_terminal = self._run_pre_round_hooks(state)
         if hook_terminal is not None:
             return hook_terminal
@@ -4505,65 +4733,16 @@ class Campaign:
                 "the explicit verification command is not held at the "
                 "pre-planning exact-commit boundary"
             )
-        # A successful tester process can still omit its mandatory handoff.
-        # Retry that one infrastructure-only case once in a fresh role process
-        # before running the expensive trusted gates. Scope violations and
-        # nonzero/interrupted roles do not retry; absent or malformed JSON gets
-        # one fresh serialization attempt. Each attempt has its own state-digest tag and exact empty
-        # pre-created channel; no prior prose/session is carried forward.
-        attempt = 1
-        while True:
-            tag = self._begin_untrusted(state, attempt)
-            self._prepare_phase_result_file(
-                self._config.phase_result_path, "verification"
-            )
-            role = self._run_role("tester", state, head, attempt=attempt)
-            dirty = self._git.role_dirty_paths()
-            allow_paths = (
-                [self._config.phase_result_path]
-                if self._config.phase_result_path else []
-            )
-            violation = scope_violation(
-                dirty, phase="verification",
-                plan_path=self._config.plan_path, spec_path=self._config.spec_path,
-                allow_paths=allow_paths,
-            )
-            result_error: Optional[CampaignResultError] = None
-            try:
-                result = read_phase_result(
-                    self._root, self._config.phase_result_path, "verification"
-                )
-            except CampaignResultError as exc:
-                # The secure reader already removed the malformed channel.
-                # One fresh retry may replace model serialization corruption;
-                # a second malformed result remains a fail-closed campaign
-                # error and is never interpreted or preserved as evidence.
-                result = None
-                result_error = exc
-            self._end_untrusted(tag)
-            if result_error is not None and attempt >= 2:
-                raise result_error
-            if (
-                result is not None or attempt >= 2 or violation is not None
-                or role.interrupted or role.exit_status != 0
-            ):
-                break
-            attempt += 1
+        # Phase 2B2: the trusted deterministic verifier runs at each
+        # candidate exact commit (the acceptance gate).  The independent
+        # tester/auditor are milestone-boundary roles: they run only when the
+        # trusted scheduler says a milestone/risk boundary was reached.
         gate_ran, gate_exit, gate_detail, verification_skipped = self._run_gate(
             self._config.verification_command, "verification"
         )
         if verification_skipped and gate_exit == 0:
             gate_exit = 1
             gate_detail = gate_detail or "verification gate reported a skip"
-        result_data = result[0] if result is not None else None
-        result_digest = result[1] if result is not None else ""
-        result_bytes = result[2] if result is not None else b""
-        result_valid = bool(result_data is not None)
-        result_outcome = result_data.get("outcome") if result_data else None
-        findings = list(result_data.get("findings", [])) if result_data else []
-        blocked_refs = (
-            list(result_data.get("blocked_on", [])) if result_data else []
-        )
         acquisition_ran, acquisition_exit, acquisition_detail = (
             self._ensure_runner_evidence()
         )
@@ -4584,21 +4763,146 @@ class Campaign:
         ) or (capability_ran and capability_exit == 0)
         if capability_skipped:
             capability_available = False
-        outcome = classify_verification(
-            role=role,
-            scope_ok=violation is None,
-            gate_ran=gate_ran,
-            gate_exit=gate_exit,
-            tester_result_valid=result_valid,
-            tester_result_outcome=result_outcome,
-            findings=findings,
-            blocked_refs=blocked_refs,
-            capability_available=capability_available,
-            capability_ran=capability_ran,
-            capability_exit=capability_exit,
-            gate_skipped=verification_skipped,
-            capability_skipped=capability_skipped,
+        # The milestone decision is a pure function of the trusted state and
+        # the trusted gate evidence (never model prose).  A failed/skipped
+        # deterministic verifier or capability probe is a risk that forces
+        # the independent audit; a security-sensitive path change in this
+        # checkpoint forces it; the final milestone and the checkpoint/round
+        # budgets force it; otherwise the configured coherent-checkpoint
+        # interval schedules it.
+        plan = self._git.plan_at(head)
+        checkpoint = state.checkpoints
+        changed_paths = self._git.diff_paths(state.phase_base_commit)
+        security_changed = scheduler_module.security_sensitive_changed(
+            changed_paths, self._config.campaign_budget
         )
+        verifier_risk = bool(
+            not gate_ran
+            or (gate_exit != 0 or verification_skipped)
+            or (capability_ran and capability_exit != 0)
+            or capability_skipped
+        )
+        more_tasks = self._more_tasks(plan, state)
+        # A task-failure/work-exhaustion/blocked boundary (no coherent
+        # checkpoint progress) forces the independent audit: the campaign
+        # cannot silently loop between implementation and verification on a
+        # task that exhausted its attempt budget.
+        no_checkpoint_progress = state.last_outcome in (
+            "task_failed", "work_exhausted", "blocked",
+        )
+        milestone = no_checkpoint_progress or scheduler_module.should_audit(
+            checkpoint=checkpoint,
+            last_audit_checkpoint=state.last_audit_checkpoint,
+            security_changed=security_changed,
+            verifier_risk=verifier_risk,
+            more_tasks=more_tasks,
+            budget=self._config.campaign_budget,
+        )
+        trigger = self._audit_trigger(
+            checkpoint=checkpoint,
+            security_changed=security_changed,
+            verifier_risk=verifier_risk,
+            more_tasks=more_tasks,
+            no_checkpoint_progress=no_checkpoint_progress,
+        )
+        if milestone:
+            # A successful tester process can still omit its mandatory
+            # handoff.  Retry that one infrastructure-only case once in a
+            # fresh role process before running the expensive trusted gates.
+            # Scope violations and nonzero/interrupted roles do not retry;
+            # absent or malformed JSON gets one fresh serialization attempt.
+            # Each attempt has its own state-digest tag and exact empty
+            # pre-created channel; no prior prose/session is carried forward.
+            attempt = 1
+            while True:
+                tag = self._begin_untrusted(state, attempt)
+                self._prepare_phase_result_file(
+                    self._config.phase_result_path, "verification"
+                )
+                role = self._run_role("tester", state, head, attempt=attempt)
+                dirty = self._git.role_dirty_paths()
+                allow_paths = (
+                    [self._config.phase_result_path]
+                    if self._config.phase_result_path else []
+                )
+                violation = scope_violation(
+                    dirty, phase="verification",
+                    plan_path=self._config.plan_path, spec_path=self._config.spec_path,
+                    allow_paths=allow_paths,
+                )
+                result_error: Optional[CampaignResultError] = None
+                try:
+                    result = read_phase_result(
+                        self._root, self._config.phase_result_path, "verification"
+                    )
+                except CampaignResultError as exc:
+                    # The secure reader already removed the malformed channel.
+                    # One fresh retry may replace model serialization
+                    # corruption; a second malformed result remains a
+                    # fail-closed campaign error and is never interpreted or
+                    # preserved as evidence.
+                    result = None
+                    result_error = exc
+                self._end_untrusted(tag)
+                if result_error is not None and attempt >= 2:
+                    raise result_error
+                if (
+                    result is not None or attempt >= 2 or violation is not None
+                    or role.interrupted or role.exit_status != 0
+                ):
+                    break
+                attempt += 1
+            result_data = result[0] if result is not None else None
+            result_digest = result[1] if result is not None else ""
+            result_bytes = result[2] if result is not None else b""
+            result_valid = bool(result_data is not None)
+            result_outcome = result_data.get("outcome") if result_data else None
+            findings = list(result_data.get("findings", [])) if result_data else []
+            blocked_refs = (
+                list(result_data.get("blocked_on", [])) if result_data else []
+            )
+            outcome = classify_verification(
+                role=role,
+                scope_ok=violation is None,
+                gate_ran=gate_ran,
+                gate_exit=gate_exit,
+                tester_result_valid=result_valid,
+                tester_result_outcome=result_outcome,
+                findings=findings,
+                blocked_refs=blocked_refs,
+                capability_available=capability_available,
+                capability_ran=capability_ran,
+                capability_exit=capability_exit,
+                gate_skipped=verification_skipped,
+                capability_skipped=capability_skipped,
+            )
+        else:
+            # Phase 2B2: no audit milestone — the independent tester does not
+            # run (the trusted scheduler decided the skip; it is recorded in
+            # the state, never a model request).  The trusted deterministic
+            # verifier's evidence alone classifies the candidate exact
+            # commit; a clean pass returns to implementation so the
+            # scheduler reuses the valid selected task.
+            attempt = 1
+            tag = ""
+            role = None
+            violation = None
+            result_data = None
+            result_digest = ""
+            result_bytes = b""
+            result_valid = False
+            result_outcome = None
+            findings = []
+            blocked_refs = []
+            outcome = classify_verifier_only(
+                gate_ran=gate_ran,
+                gate_exit=gate_exit,
+                verification_skipped=verification_skipped,
+                capability_available=capability_available,
+                capability_ran=capability_ran,
+                capability_exit=capability_exit,
+                capability_skipped=capability_skipped,
+            )
         # Phase 2B1: the inner same-task convergence edge.  Only a genuine
         # deterministic software verifier failure may return to
         # implementation for the SAME task: the deterministic gate actually
@@ -4616,7 +4920,8 @@ class Campaign:
         # below, so a genuine gate failure with a passing tester converges
         # instead of being minted into a finding.
         convergence_eligible = (
-            outcome == "findings"
+            milestone
+            and outcome == "findings"
             and gate_ran
             and gate_exit > 0
             and gate_exit not in (126, 127)
@@ -4761,11 +5066,37 @@ class Campaign:
             record_result_digest = result_digest or ("0" * 64)
         detail = (
             violation
-            or (role.diagnostic if role.exit_status != 0 else "")
+            or (role.diagnostic if role is not None and role.exit_status != 0 else "")
             or gate_detail
             or ""
         )
-        state2 = state_module.advance(state, outcome)
+        if outcome == "pass" and not milestone:
+            # Phase 2B2: the scheduler reuses the valid selected task; the
+            # planner/tester/auditor do not run and the trusted skip is
+            # recorded in the control state.
+            state2 = state_module.advance(
+                state, "pass", scheduler_target="implementation",
+                scheduler={
+                    "last_planner_need": "none",
+                    "last_planner_reason": (
+                        "scheduler reuse: no audit milestone"
+                    ),
+                },
+            )
+        else:
+            scheduler_changes: Dict[str, object] = {}
+            if milestone:
+                # The independent audit is about to run at this checkpoint;
+                # record the trusted milestone/risk trigger and the
+                # checkpoint count so a resumed campaign replays the exact
+                # scheduling decision deterministically.
+                scheduler_changes = {
+                    "last_audit_checkpoint": checkpoint,
+                    "audit_risk_trigger": trigger,
+                }
+            state2 = state_module.advance(
+                state, outcome, scheduler=scheduler_changes or None
+            )
         state_module.write_state(self._root, state2)
         return _Step(
             self._record(state, attempt, outcome, detail,
@@ -4818,12 +5149,34 @@ class Campaign:
         result_bytes = result[2] if result is not None else b""
         result_valid = bool(result_data is not None)
         final_gate_detail = ""
+        # Phase 2B2: the trusted scheduler resolves the audit.  The inputs
+        # are pure functions of the trusted state, the committed plan, and
+        # the trusted phase outcomes (never model prose).
+        plan = self._git.plan_at(head)
+        plan_complete = self._plan_complete(plan)
+        objectives_covered = scheduler_module.objective_coverage(
+            state.completed_audit_objectives,
+            self._config.campaign_budget.mandatory_audit_objectives,
+        )
+        verification_outcome = state.last_outcome
+        max_rounds_reached = (
+            state.current_round >= self._config.rounds_requested
+        )
+        max_checkpoints_reached = (
+            state.checkpoints >= self._config.campaign_budget.max_checkpoints
+        )
+        re_plan_needed = (
+            verification_outcome in ("findings", "blocked")
+            or not self._more_tasks(plan, state)
+        )
         if (
             result_valid
             and role.exit_status == 0
             and violation is None
             and result_data.get("outcome") == "pass"
-            and state.current_round == self._config.rounds_requested
+            and plan_complete
+            and objectives_covered
+            and verification_outcome == "pass"
             and self._config.role_driver is None
         ):
             # Auditor JSON is never sufficient for campaign success.  At the
@@ -4876,6 +5229,44 @@ class Campaign:
             findings=list(result_data.get("findings", [])) if result_data else [],
             blocked_refs=list(result_data.get("blocked_on", [])) if result_data else [],
         )
+        # The deterministic progress fingerprint and the no-progress streak
+        # are monotonic and recorded in the trusted state.  Two consecutive
+        # audits that reproduce the same fingerprint made no meaningful
+        # progress; the scheduler terminates honestly as ``no_progress``
+        # after the configured limit.
+        fingerprint = scheduler_module.progress_fingerprint(
+            task_statuses=self._task_statuses(plan),
+            verification_outcome=verification_outcome,
+            audit_outcome=outcome,
+            covered_objectives=state.completed_audit_objectives,
+        )
+        if fingerprint == state.progress_fingerprint:
+            no_progress_streak = state.no_progress_streak + 1
+        else:
+            no_progress_streak = 1
+        no_progress = (
+            no_progress_streak >= self._config.campaign_budget.no_progress_limit
+        )
+        # The objective this audit exercised is the deterministic per-round
+        # selection; a completed audit with a verdict covers it (a blocked,
+        # interrupted, or untrusted audit never covers an objective).
+        covered_objectives = list(state.completed_audit_objectives)
+        if outcome in ("pass", "findings"):
+            try:
+                objective_bytes = _audit_objective_bytes(
+                    self._root, state.current_round
+                )
+                objective_id = json.loads(
+                    objective_bytes.decode("utf-8")
+                ).get("id")
+            except (CampaignError, ValueError, AttributeError) as exc:
+                raise CampaignPhaseError(
+                    f"cannot derive the audited objective for round "
+                    f"{state.current_round}: {exc}"
+                ) from exc
+            if objective_id and objective_id not in covered_objectives:
+                covered_objectives.append(objective_id)
+                covered_objectives.sort()
         if outcome in ("findings", "blocked"):
             # Task 10 §16: audit findings/blocked become next-round planner
             # input through an orchestrator-minted receipt; a non-final
@@ -4922,13 +5313,38 @@ class Campaign:
                 self._record(state, attempt, outcome, violation or "audit untrusted"),
                 state=state2, terminal=outcome,
             )
-        state2 = state_module.advance(state, outcome)
+        # Phase 2B2: resolve the next phase from the trusted scheduler.  The
+        # resolution is a pure function of the trusted inputs; the terminal
+        # reason is a closed enum recorded in the control state and the
+        # published result (never mis-mapped to success/findings).
+        next_phase, terminal_reason = scheduler_module.audit_next_phase(
+            outcome=outcome,
+            verification_outcome=verification_outcome,
+            plan_complete=plan_complete,
+            objectives_covered=objectives_covered,
+            no_progress=no_progress,
+            max_rounds_reached=max_rounds_reached,
+            max_checkpoints_reached=max_checkpoints_reached,
+            re_plan_needed=re_plan_needed,
+        )
+        scheduler_changes: Dict[str, object] = {
+            "last_audit_checkpoint": state.checkpoints,
+            "progress_fingerprint": fingerprint,
+            "no_progress_streak": no_progress_streak,
+            "completed_audit_objectives": tuple(covered_objectives),
+        }
+        if terminal_reason:
+            scheduler_changes["terminal_reason"] = terminal_reason
+        state2 = state_module.advance(
+            state, outcome, scheduler_target=next_phase,
+            scheduler=scheduler_changes,
+        )
         state_module.write_state(self._root, state2)
         if state2.current_phase == "planning":
             self._rounds_completed = state2.current_round - 1
             self._planning_attempts_used = 0
         elif state2.current_phase in TERMINAL_PHASES:
-            # The final round completed: its audit ended the campaign, so the
+            # The round completed: its audit ended the campaign, so the
             # completed-round counter reaches the current round.
             self._rounds_completed = state2.current_round
         audit_detail = (
@@ -4938,6 +5354,8 @@ class Campaign:
             self._record(state, attempt, outcome, audit_detail,
                          result_digest=record_result_digest),
             state=state2,
+            terminal=next_phase if next_phase in TERMINAL_PHASES else None,
+            terminal_reason=terminal_reason,
         )
 
     # -- round-zero readiness -------------------------------------------------
@@ -5236,6 +5654,7 @@ class Campaign:
             self._records = list(history)
             terminal_outcome: Optional[str] = None
             terminal_phase: str = state.current_phase
+            terminal_reason: str = ""
             if state.current_phase in TERMINAL_PHASES:
                 # Task 10 REQ 1: a crash-window reconciliation may complete a
                 # final audit directly into a terminal (its findings receipt
@@ -5250,6 +5669,7 @@ class Campaign:
                         "re-run"
                     )
                 terminal_outcome = recovered.outcome
+                terminal_reason = state.terminal_reason
             else:
                 while state.current_phase not in TERMINAL_PHASES:
                     step = self._step(state)
@@ -5258,12 +5678,14 @@ class Campaign:
                     if step.terminal is not None:
                         terminal_outcome = step.record.outcome
                         terminal_phase = step.terminal
+                        terminal_reason = step.terminal_reason
                         break
                     if step.state is not None:
                         state = step.state
                         if state.current_phase in TERMINAL_PHASES:
                             terminal_outcome = step.record.outcome
                             terminal_phase = state.current_phase
+                            terminal_reason = state.terminal_reason
                             break
                     # A retry keeps the same live phase for the next attempt; an
                     # advanced live phase (planning -> implementation, ...) is the
@@ -5283,6 +5705,7 @@ class Campaign:
                 terminal_outcome=terminal_outcome,
                 head_commit=head,
                 phase_history=tuple(history),
+                terminal_reason=terminal_reason,
             )
             result.validate()
             validate_campaign_result(result)
@@ -5414,6 +5837,32 @@ def derive_campaign_config(
     registry, implementation_digests, hook_configuration_digest = (
         _derive_pre_round_binding(root, bound_commit=head)
     )
+    # Phase 2B2: the trusted committed campaign budget is loaded from the
+    # committed blob at the bound HEAD (never the mutable worktree, so the
+    # model can never weaken it) or the documented defaults when absent, and
+    # its deterministic digest is bound into the campaign config and the
+    # control state.  ``rounds`` is a maximum budget, never an exact count;
+    # the committed budget's ``max_rounds`` is the hard configured maximum.
+    try:
+        budget_data = _blob_at(root, scheduler_module.BUDGET_RELPATH)
+    except CampaignError:
+        budget_data = None
+    if budget_data is not None:
+        try:
+            campaign_budget = scheduler_module.parse_budget(budget_data)
+        except scheduler_module.SchedulerError as exc:
+            raise CampaignConfigError(
+                f"the committed campaign budget is invalid: {exc}"
+            ) from exc
+        campaign_budget_digest = plan_sha256(budget_data)
+    else:
+        campaign_budget = scheduler_module.default_budget()
+        campaign_budget_digest = scheduler_module.budget_digest(campaign_budget)
+    if rounds > campaign_budget.max_rounds:
+        raise CampaignConfigError(
+            "--rounds may not exceed the committed campaign budget "
+            f"max_rounds ({campaign_budget.max_rounds})"
+        )
     return CampaignConfig(
         root=root,
         campaign_id=campaign_id,
@@ -5455,6 +5904,8 @@ def derive_campaign_config(
         gate_timeout=gate_timeout,
         runner_timeout=runner_timeout,
         campaign_timeout=campaign_timeout,
+        campaign_budget=campaign_budget,
+        campaign_budget_digest=campaign_budget_digest,
     )
 
 
@@ -5491,7 +5942,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "run", help="run ordered pre-round hooks and phases to a §14 terminal"
     )
     p_run.add_argument("--campaign-id", required=True)
-    p_run.add_argument("--rounds", type=int, required=True)
+    p_run.add_argument(
+        "--rounds", type=int, required=True,
+        help=(
+            "the maximum planning/implementation/verification/audit cycle "
+            "budget (never an exact count; the committed campaign budget's "
+            "max_rounds is the hard configured maximum)"
+        ),
+    )
     p_run.add_argument("--branch", required=True)
     p_run.add_argument("--plan-path", default=".factory/artifacts/implementation-plan.md")
     p_run.add_argument("--planning-attempts", type=int, default=3)

@@ -239,7 +239,7 @@ class FixtureWorkspace:
         )
         for module in (
             "usage.py", "usage_fetch.py", "pre_round.py", "campaign.py", "state.py",
-            "lock.py", "gitutil.py",
+            "lock.py", "gitutil.py", "scheduler.py",
         ):
             shutil.copy2(
                 ROOT / ".factory" / "loop" / module,
@@ -362,6 +362,32 @@ class FixtureWorkspace:
         _git(self.root, "commit", "-qm", "scenario fixture")
         self.scenario_commit = _git(
             self.root, "rev-parse", "HEAD").stdout.strip()
+
+    def commit_budget(self, budget: dict) -> None:
+        """Write and commit a custom campaign budget (Phase 2B2).
+
+        The committed ``.factory/campaign-budget.json`` blob is what the
+        campaign binds (never the mutable worktree), so a test that commits
+        a custom budget exercises the exact committed-config path.
+        """
+        document = {
+            "schema": "factory-campaign-budget/v1",
+            "max_rounds": 5,
+            "max_checkpoints": 100,
+            "max_wall_seconds": 21600.0,
+            "max_task_attempts": 3,
+            "audit_interval": 1,
+            "security_sensitive_paths": [],
+            "mandatory_audit_objectives": [],
+            "no_progress_limit": 2,
+        }
+        document.update(budget)
+        (self.root / ".factory" / "campaign-budget.json").write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        _git(self.root, "add", ".factory/campaign-budget.json")
+        _git(self.root, "commit", "-qm", "campaign budget fixture")
 
     # -- invocation ------------------------------------------------------------
 
@@ -548,7 +574,11 @@ class CampaignTerminals(_CampaignBase):
     """§14 finite terminal classification fixtures."""
 
     def test_success_campaign(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        # Phase 2B2: ``--rounds`` is a maximum budget; the campaign works
+        # through every runnable task within one planning cycle (the
+        # scheduler reuses the valid selected task) and terminates early on
+        # verified completion before the maximum round budget.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -559,17 +589,26 @@ class CampaignTerminals(_CampaignBase):
             (1, "implementation", "task_completed"),
             (1, "verification", "pass"),
             (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
         ])
         state = ws.load_state()
         self.assertEqual(state.current_phase, "success")
         self.assertEqual(state.last_outcome, "success")
+        self.assertEqual(state.terminal_reason, "success")
+        self.assertEqual(state.checkpoints, 3)
+        self.assertEqual(state.completed_audit_objectives, ("AUD-01",))
 
     def test_missing_tester_handoff_retries_once_before_gates(self) -> None:
         scenario = json.loads(json.dumps(SUCCESS_SCENARIO))
         scenario["tester"] = {
             "behavior": {"1.1": "no-result", "1.2": "pass"}
         }
-        ws = self.make(scenario)
+        ws = self.make(scenario, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
@@ -587,7 +626,7 @@ class CampaignTerminals(_CampaignBase):
         scenario["tester"] = {
             "behavior": {"1.1": "malformed-result", "1.2": "pass"}
         }
-        ws = self.make(scenario)
+        ws = self.make(scenario, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         verification = next(
@@ -602,7 +641,7 @@ class CampaignTerminals(_CampaignBase):
         scenario["auditor"] = {
             "behavior": {"1.1": "crash", "1.2": "pass"}
         }
-        ws = self.make(scenario)
+        ws = self.make(scenario, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         audit = next(
@@ -753,8 +792,15 @@ class CampaignTerminals(_CampaignBase):
             "auditor": {"behavior": "pass"},
         })
         rc, data = ws.run_cli()
-        self.assertEqual(rc, 0)
-        self.assertEqual(data["rounds_completed"], 1)
+        # Phase 2B2: the task exhausted its attempt budget without a
+        # coherent checkpoint; the failure boundary forces the independent
+        # audit, and the maximum round budget ends the campaign honestly as
+        # budget_exhausted (never success — the plan is not complete).
+        self.assertEqual(rc, 8)
+        assert_terminal(self, data, terminal_phase="budget_exhausted",
+                        terminal_outcome="pass", exit_code=8,
+                        rounds_completed=1)
+        self.assertEqual(data["terminal_reason"], "budget_exhausted")
         self.assertTrue(any(
             r["phase"] == "implementation" and r["outcome"] == "task_failed"
             for r in data["phase_history"]
@@ -880,7 +926,7 @@ class CampaignRecovery(_CampaignBase):
     """§17 crash reconciliation derived from Git + plan + state."""
 
     def test_planning_commit_before_transition_is_reconciled(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         config = self._crash_at_plan(
             ws,
             lambda state: (
@@ -901,7 +947,7 @@ class CampaignRecovery(_CampaignBase):
         self.assertEqual(result.terminal_outcome, "pass")
 
     def test_completion_commit_before_transition_is_reconciled(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         config = self._crash_at_plan(
             ws,
             lambda state: (
@@ -949,7 +995,7 @@ class CampaignRecovery(_CampaignBase):
         self.assertNotIn("planned", [r.outcome for r in recovered.phase_history])
 
     def test_programmatic_forged_empty_hook_registry_fails_under_lock(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         config = ws.derive_config()
         forged = pre_round_module.Registry((), "0" * 64)
         forged_digest = pre_round_module.configuration_digest(
@@ -991,32 +1037,47 @@ class EmptyWorkAndFindings(_CampaignBase):
     """§14/§16: findings and empty work flow through verification/audit."""
 
     def test_multi_task_campaign_completes_every_runnable_task(self) -> None:
-        # §14: each round runs planning -> implementation -> verification ->
-        # audit, and the planner revision of round N preserves the tasks the
-        # earlier rounds completed.  The campaign therefore works through
-        # every runnable task — one per round — and the final round's last
-        # selection classifies as work_exhausted before verification/audit.
+        # Phase 2B2: the scheduler reuses the valid selected task after a
+        # passing audit (the planner runs only on demand), so the campaign
+        # works through every runnable task within one planning cycle and
+        # terminates early on verified completion before the maximum round
+        # budget.
         ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
-        self.assertEqual(data["rounds_completed"], 3)
+        self.assertEqual(data["rounds_completed"], 1)
         assert_history(self, data, [
             (1, "planning", "planned"),
             (1, "implementation", "task_completed"),
             (1, "verification", "pass"),
             (1, "audit", "pass"),
-            (2, "planning", "planned"),
-            (2, "implementation", "task_completed"),
-            (2, "verification", "pass"),
-            (2, "audit", "pass"),
-            (3, "planning", "planned"),
-            (3, "implementation", "task_completed"),
-            (3, "verification", "pass"),
-            (3, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
         ])
 
     def test_five_round_campaign_runs_one_pre_round_sequence_per_round(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO, rounds=5)
+        # Phase 2B2: a findings audit forces the next round's planner; a
+        # clean pass on a complete plan terminates verified completion.  A
+        # plan that works through the three tasks (rounds 1-3), hits the
+        # blocked extension (round 4), and completes (round 5) with findings
+        # in the first four audits runs exactly five planning rounds.
+        ws = self.make({
+            "planner": {"behavior": {
+                "1": "planned", "2": "planned", "3": "planned",
+                "4": "planned", "5": "planned-complete",
+                "default": "planned",
+            }},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {
+                "1": "findings", "2": "findings", "3": "findings",
+                "4": "findings", "5": "pass", "default": "pass",
+            }},
+        }, rounds=5)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         self.assertEqual(data["rounds_completed"], 5)
@@ -1032,7 +1093,19 @@ class EmptyWorkAndFindings(_CampaignBase):
         self.assertNotEqual(sidecar.results_digest, "0" * 64)
 
     def test_five_round_hook_order_and_execution_count_are_exact(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO, rounds=5)
+        ws = self.make({
+            "planner": {"behavior": {
+                "1": "planned", "2": "planned", "3": "planned",
+                "4": "planned", "5": "planned-complete",
+                "default": "planned",
+            }},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": {
+                "1": "findings", "2": "findings", "3": "findings",
+                "4": "findings", "5": "pass", "default": "pass",
+            }},
+        }, rounds=5)
         observed = []
         original = pre_round_module.run_hooks
 
@@ -1079,7 +1152,8 @@ class EmptyWorkAndFindings(_CampaignBase):
 
     def test_findings_reach_next_round_via_revised_plan(self) -> None:
         # Round 1 verification+audit findings; round 2's planner revises the
-        # plan and the campaign completes.
+        # plan and the campaign completes the remaining tasks (the scheduler
+        # reuses the valid selected task after the passing audit).
         ws = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": "complete"},
@@ -1087,14 +1161,14 @@ class EmptyWorkAndFindings(_CampaignBase):
                                      "default": "pass"}},
             "auditor": {"behavior": {"1": "findings", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_terminal(self, data, terminal_phase="success",
                         terminal_outcome="pass", exit_code=0,
                         rounds_completed=2)
         rounds = [r["round"] for r in data["phase_history"]]
-        self.assertEqual(rounds, [1, 1, 1, 1, 2, 2, 2, 2])
+        self.assertEqual(rounds, [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2])
 
     def test_secret_findings_never_persist_or_prompt(self) -> None:
         """Task 23 (F): raw credential-shaped values in free-text findings/
@@ -1112,7 +1186,7 @@ class EmptyWorkAndFindings(_CampaignBase):
                                      "default": "pass"}},
             "auditor": {"behavior": {"1": "secret-blocked", "2": "pass",
                                      "default": "pass"}},
-        }, rounds=2)
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0, data)
         assert_terminal(self, data, terminal_phase="success",
@@ -1193,7 +1267,7 @@ class EmptyWorkAndFindings(_CampaignBase):
             "developer": {"behavior": "complete"},
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "pass"},
-        })
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_history(self, data, [
@@ -1202,12 +1276,21 @@ class EmptyWorkAndFindings(_CampaignBase):
             (1, "implementation", "task_completed"),
             (1, "verification", "pass"),
             (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
         ])
 
     def test_clean_task_failure_reaches_verification(self) -> None:
         # A reproducible deterministic developer failure (nonzero exit with no
         # work) exhausts the attempt budget cleanly and then proceeds to
-        # verification/audit at the last coherent commit (§13.3).
+        # verification/audit at the last coherent commit (§13.3).  Phase 2B2:
+        # the failure boundary forces the independent audit, and the maximum
+        # round budget ends the campaign honestly as budget_exhausted (the
+        # plan is not complete — never success).
         ws = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": "exit1"},
@@ -1215,7 +1298,11 @@ class EmptyWorkAndFindings(_CampaignBase):
             "auditor": {"behavior": "pass"},
         })
         rc, data = ws.run_cli()
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 8)
+        assert_terminal(self, data, terminal_phase="budget_exhausted",
+                        terminal_outcome="pass", exit_code=8,
+                        rounds_completed=1)
+        self.assertEqual(data["terminal_reason"], "budget_exhausted")
         assert_history(self, data, [
             (1, "planning", "planned"),
             (1, "implementation", "task_failed"),
@@ -1233,7 +1320,10 @@ class EmptyWorkAndFindings(_CampaignBase):
             "auditor": {"behavior": "pass"},
         })
         rc, data = ws.run_cli()
-        self.assertEqual(rc, 0)
+        # Phase 2B2: the invalid-plan task failure exhausts the attempt
+        # budget; the failure boundary forces the audit and the maximum
+        # round budget ends the campaign honestly as budget_exhausted.
+        self.assertEqual(rc, 8)
         self.assertEqual(
             [r["outcome"] for r in data["phase_history"][1:4]],
             ["task_failed", "task_failed", "task_failed"],
@@ -1258,7 +1348,7 @@ class EmptyWorkAndFindings(_CampaignBase):
             "developer": {"behavior": "complete-no-file"},
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "pass"},
-        })
+        }, rounds=3)
         command = "`nix-shell --run 'ctest -R fixture'`"
         for relative in (
             "fixture/templates/planner-1.md",
@@ -1278,6 +1368,10 @@ class EmptyWorkAndFindings(_CampaignBase):
         self.assertEqual(data["phase_history"][1]["outcome"], "task_completed")
 
     def test_task_progress_retries_then_completes(self) -> None:
+        # The deterministic per-round/per-attempt behavior applies to task 1
+        # (the only task with a progress template): it progresses once and
+        # then completes.  Phase 2B2: the maximum round budget ends the
+        # campaign honestly as budget_exhausted (the plan is not complete).
         ws = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": {"1.1": "progress", "1.2": "complete",
@@ -1286,7 +1380,10 @@ class EmptyWorkAndFindings(_CampaignBase):
             "auditor": {"behavior": "pass"},
         })
         rc, data = ws.run_cli()
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 8)
+        assert_terminal(self, data, terminal_phase="budget_exhausted",
+                        terminal_outcome="pass", exit_code=8,
+                        rounds_completed=1)
         assert_history(self, data, [
             (1, "planning", "planned"),
             (1, "implementation", "task_progress"),
@@ -1335,7 +1432,7 @@ class EmptyWorkAndFindings(_CampaignBase):
         )
 
     def test_fresh_campaign_namespace_never_reads_or_overwrites_foreign_state(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         foreign_dir = ws.root / ".factory-state"
         foreign_dir.mkdir(mode=0o700)
         foreign = foreign_dir / "foreign-lifecycle.bin"
@@ -1392,7 +1489,7 @@ class EmptyWorkAndFindings(_CampaignBase):
         self.assertEqual(foreign.read_bytes(), b"foreign\x00bytes\xff")
 
     def test_namespaced_verifier_evidence_override_preserves_foreign_root_bytes(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         state_root = ws.root / STATE_DIR
         state_root.mkdir(mode=0o700)
         foreign = state_root / "installed-functional-evidence.env"
@@ -1531,7 +1628,7 @@ class ConvergenceRetry(_CampaignBase):
             "developer": {"behavior": "complete"},
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "pass"},
-        })
+        }, rounds=3)
         gate = self._commit_gate_script(ws, (
             "#!/bin/sh\n"
             "if [ -f \"$FACTORY_VERIFIER_ROOT/src/fixed-1.md\" ]; then\n"
@@ -1548,6 +1645,12 @@ class ConvergenceRetry(_CampaignBase):
             (1, "planning", "planned"),
             (1, "implementation", "task_completed"),
             (1, "verification", "verifier_failure"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
             (1, "implementation", "task_completed"),
             (1, "verification", "pass"),
             (1, "audit", "pass"),
@@ -1863,7 +1966,7 @@ class ScopeAndGit(_CampaignBase):
         self.assertIn("crash-attempt-1\n", work.read_text(encoding="utf-8"))
 
     def test_every_campaign_commit_is_orchestrator_authored(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         self.assertIsNotNone(ws.scenario_commit)
@@ -1879,7 +1982,7 @@ class ScopeAndGit(_CampaignBase):
                 msg=f"unexpected commit author {entry!r}")
 
     def test_committed_scope_is_exactly_the_allowed_paths(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         self.assertIsNotNone(ws.scenario_commit)
@@ -1901,7 +2004,7 @@ class ScopeAndGit(_CampaignBase):
         # The only commits after the scenario fixture are orchestrator
         # commits; the fixture role never runs Git (the driver performs no
         # git operation at all).
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         messages = _git(ws.root, "log", "--format=%s").stdout.splitlines()
@@ -1917,7 +2020,7 @@ class LifecycleAndCli(_CampaignBase):
     """§11 one-lifecycle surface, committed schema, and CLI behavior."""
 
     def test_no_runtime_ledger_is_created(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         names = sorted(path.name for path in (ws.root / STATE_DIR).iterdir())
@@ -1929,7 +2032,7 @@ class LifecycleAndCli(_CampaignBase):
         ])
 
     def test_published_result_conforms_to_committed_schema(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         published = json.loads(
@@ -1939,14 +2042,17 @@ class LifecycleAndCli(_CampaignBase):
         self.assertEqual(published, data)
 
     def test_control_state_is_exactly_the_section11_field_set(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         state = ws.load_state()
         keys = sorted(state.to_dict())
         # Phase 2B1: the convergence-extension fields are serialized only
         # when active, so a campaign that never converged round-trips the
-        # exact legacy 17-field shape (migration compatibility).
+        # exact legacy 17-field shape (migration compatibility).  Phase 2B2:
+        # the scheduler-extension fields are serialized because the trusted
+        # scheduler recorded its decisions (planner need, audit trigger,
+        # progress fingerprint, terminal reason) in the control state.
         self.assertEqual(
             keys,
             sorted(f for f in state_module.FIELD_NAMES
@@ -1956,9 +2062,13 @@ class LifecycleAndCli(_CampaignBase):
         self.assertNotIn("verifier_failure_digest", keys)
         self.assertNotIn("convergence_retries", keys)
         self.assertNotIn("last_failure_fingerprint", keys)
+        self.assertIn("campaign_budget_digest", keys)
+        self.assertIn("checkpoints", keys)
+        self.assertIn("completed_audit_objectives", keys)
+        self.assertIn("terminal_reason", keys)
 
     def test_write_once_campaign_binding_fails_closed(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
         # A second campaign with a different id must not clobber the binding.
@@ -1967,7 +2077,7 @@ class LifecycleAndCli(_CampaignBase):
         self.assertIsNone(data2)
 
     def test_terminal_state_refuses_to_rerun(self) -> None:
-        ws = self.make(SUCCESS_SCENARIO)
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
         config = ws.derive_config()
         rc, _ = ws.run_cli()
         self.assertEqual(rc, 0)
@@ -2657,14 +2767,18 @@ class ReviewHardening(_CampaignBase):
         # A task whose cumulative resource budget is already exhausted is
         # never launched and can never be accepted: the campaign reloads the
         # ledger, records a deterministic task failure (no retries), and
-        # proceeds to verification/audit at the last coherent commit.
+        # proceeds to verification/audit at the last coherent commit.  Phase
+        # 2B2: the failure boundary forces the independent audit, and the
+        # maximum round budget ends the campaign honestly as
+        # budget_exhausted (the plan is not complete — never success).
         ws = self.make(SUCCESS_SCENARIO)
         self._seed_exhausted_ledger(ws)
         config = ws.derive_config()
         result = campaign_module.Campaign(
             config, role_runner=self._budget_runner(ws, config)
         ).run()
-        self.assertEqual(result.terminal_phase, "success")
+        self.assertEqual(result.terminal_phase, "budget_exhausted")
+        self.assertEqual(result.terminal_reason, "budget_exhausted")
         history = [(r.phase, r.outcome) for r in result.phase_history]
         self.assertEqual(history, [
             ("planning", "planned"),
@@ -3186,17 +3300,26 @@ class ReviewHardening(_CampaignBase):
         # L3 integration: a developer whose complete work is accompanied by a
         # nonzero exit status is a deterministic task_failed on that attempt;
         # the coherent work is preserved and the retry commits it as the
-        # completion.
+        # completion.  The deterministic behavior applies to every task, so
+        # each of the three tasks fails once and then completes.
         ws = self.make({
             "planner": {"behavior": "planned"},
             "developer": {"behavior": "complete-exit1"},
             "tester": {"behavior": "pass"},
             "auditor": {"behavior": "pass"},
-        })
+        }, rounds=3)
         rc, data = ws.run_cli()
         self.assertEqual(rc, 0)
         assert_history(self, data, [
             (1, "planning", "planned"),
+            (1, "implementation", "task_failed"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+            (1, "implementation", "task_failed"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
             (1, "implementation", "task_failed"),
             (1, "implementation", "task_completed"),
             (1, "verification", "pass"),
@@ -3489,6 +3612,200 @@ class RunnerAcquisitionLifecycleTests(_CampaignBase):
                         accepted_commit=base.phase_base_commit,
                         install_manifest="/trusted/manifest.json",
                     )
+
+
+class Phase2B2Scheduler(_CampaignBase):
+    """Phase 2B2: the trusted scheduler drives the campaign flow.
+
+    ``--rounds`` is a finite maximum budget (never an exact count, no
+    exactly-five rejection); the planner runs initially/on-demand only; the
+    independent tester/auditor run only at milestone/risk boundaries; the
+    audit resolves the next phase and the closed terminal reason; the
+    committed campaign budget is bound and cannot be weakened; and the
+    distinct honest terminal reasons are never mis-mapped to
+    success/findings.
+    """
+
+    def test_legacy_rounds_is_maximum_not_exact(self) -> None:
+        # ``--rounds 3`` is a maximum: the campaign works through every
+        # runnable task within one planning cycle and terminates early on
+        # verified completion before the maximum round budget.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+        self.assertEqual(data["terminal_reason"], "success")
+        state = ws.load_state()
+        self.assertEqual(state.checkpoints, 3)
+        self.assertEqual(state.terminal_reason, "success")
+
+    def test_no_exact_five_rejection(self) -> None:
+        # A two-round budget is accepted (no exactly-five requirement).
+        ws = self.make(SUCCESS_SCENARIO, rounds=2)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=1)
+
+    def test_planner_need_recorded_initial_and_on_demand(self) -> None:
+        # The planner runs initially (round 1) and on demand (after a
+        # findings audit); the trusted need/reason are recorded in the
+        # control state, never model prose.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+            "auditor": {"behavior": {"1": "findings", "2": "pass",
+                                     "default": "pass"}},
+        }, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        state = ws.load_state()
+        self.assertEqual(state.last_planner_need, "findings")
+        self.assertIn("findings", state.last_planner_reason)
+        # The round-1 planning recorded the initial need before the first
+        # planner ran.
+        self.assertEqual(
+            [r["outcome"] for r in data["phase_history"]
+             if r["phase"] == "planning"],
+            ["planned", "planned"],
+        )
+
+    def test_tester_skipped_at_non_milestone(self) -> None:
+        # With audit_interval=2 the independent tester does not run at
+        # checkpoint 1 (no milestone); the trusted deterministic verifier
+        # still runs and the campaign reuses the valid selected task.  The
+        # first verification record carries no tester result digest.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"audit_interval": 2})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        verifications = [
+            r for r in data["phase_history"] if r["phase"] == "verification"
+        ]
+        self.assertEqual(len(verifications), 3)
+        # Checkpoint 1: no milestone -> tester skipped -> no result digest.
+        self.assertEqual(verifications[0]["result_digest"], "0" * 64)
+        # Checkpoint 2: milestone -> tester ran -> bound result digest.
+        self.assertNotEqual(verifications[1]["result_digest"], "0" * 64)
+        state = ws.load_state()
+        # The last audit was the final milestone (no more runnable tasks).
+        self.assertEqual(state.audit_risk_trigger, "final")
+        self.assertEqual(state.last_audit_checkpoint, 3)
+
+    def test_security_sensitive_path_forces_audit(self) -> None:
+        # A security-sensitive path change in a checkpoint forces the
+        # independent audit even when the interval has not elapsed.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({
+            "audit_interval": 100,
+            "security_sensitive_paths": ["src"],
+        })
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        state = ws.load_state()
+        # The last audit was the final milestone; the security-sensitive
+        # path forced the earlier audits (every checkpoint touched src/).
+        self.assertEqual(state.audit_risk_trigger, "final")
+        # Every checkpoint touched src/ so every verification ran the tester.
+        verifications = [
+            r for r in data["phase_history"] if r["phase"] == "verification"
+        ]
+        self.assertTrue(all(
+            r["result_digest"] != "0" * 64 for r in verifications
+        ))
+
+    def test_mandatory_objective_coverage_blocks_success(self) -> None:
+        # A mandatory audit objective that is never covered blocks verified
+        # completion: with a one-round budget the campaign honestly exhausts
+        # its round budget (the round-1 audit covers AUD-01, never AUD-02).
+        ws = self.make(SUCCESS_SCENARIO, rounds=1)
+        ws.commit_budget({"mandatory_audit_objectives": ["AUD-02"]})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 8)
+        assert_terminal(self, data, terminal_phase="budget_exhausted",
+                        terminal_outcome="pass", exit_code=8,
+                        rounds_completed=1)
+        self.assertEqual(data["terminal_reason"], "budget_exhausted")
+        state = ws.load_state()
+        self.assertEqual(state.completed_audit_objectives, ("AUD-01",))
+
+    def test_mandatory_objective_rotation_covers_before_success(self) -> None:
+        # The deterministic rotation covers the mandatory objective in a
+        # later round; success is reached only after every mandatory
+        # objective is covered.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"mandatory_audit_objectives": ["AUD-02"]})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        assert_terminal(self, data, terminal_phase="success",
+                        terminal_outcome="pass", exit_code=0,
+                        rounds_completed=2)
+        state = ws.load_state()
+        self.assertEqual(state.completed_audit_objectives,
+                         ("AUD-01", "AUD-02"))
+
+    def test_no_progress_terminates_honestly(self) -> None:
+        # A task that exhausts its attempt budget without a coherent
+        # checkpoint reproduces the same audit-boundary fingerprint; the
+        # scheduler terminates honestly as no_progress (never success).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "exit1"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        }, rounds=3)
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 7)
+        assert_terminal(self, data, terminal_phase="no_progress",
+                        terminal_outcome="pass", exit_code=7,
+                        rounds_completed=1)
+        self.assertEqual(data["terminal_reason"], "no_progress")
+        state = ws.load_state()
+        self.assertEqual(state.terminal_reason, "no_progress")
+        self.assertGreaterEqual(state.no_progress_streak, 2)
+
+    def test_config_tamper_fails_closed(self) -> None:
+        # A committed budget that exceeds the documented caps fails closed
+        # before any role launches (the model can never weaken the budget).
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"max_rounds": 100000})
+        with self.assertRaises(campaign_module.CampaignConfigError):
+            ws.derive_config()
+
+    def test_rounds_above_budget_max_fails_closed(self) -> None:
+        # ``--rounds`` may not exceed the committed budget's max_rounds.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"max_rounds": 2})
+        with self.assertRaises(campaign_module.CampaignConfigError):
+            ws.derive_config()
+
+    def test_no_ceremonial_roles_when_skipped(self) -> None:
+        # At a non-milestone checkpoint the tester/auditor do not run and no
+        # planner ceremony runs: the phase history contains no tester/auditor
+        # record between the two non-milestone verifications.
+        ws = self.make(SUCCESS_SCENARIO, rounds=3)
+        ws.commit_budget({"audit_interval": 3})
+        rc, data = ws.run_cli()
+        self.assertEqual(rc, 0)
+        history = [
+            (r["phase"], r["outcome"]) for r in data["phase_history"]
+        ]
+        # Checkpoints 1 and 2 are non-milestones: verification pass returns
+        # to implementation with no audit between them.
+        self.assertIn(("verification", "pass"), history)
+        self.assertIn(("implementation", "task_completed"), history)
+        # The planner ran exactly once (round 1 initial planning).
+        self.assertEqual(
+            sum(1 for r in data["phase_history"] if r["phase"] == "planning"),
+            1,
+        )
+        state = ws.load_state()
+        self.assertEqual(state.last_planner_need, "none")
 
 
 if __name__ == "__main__":
