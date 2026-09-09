@@ -80,7 +80,8 @@ class ConformanceFixture:
                     "tests/fixtures"):
             (root / rel).mkdir(parents=True, exist_ok=True)
         for script in (VALIDATOR, FACTS_VALIDATOR, CAPABILITY_CHECKER,
-                        CONTRACT_CHECKER, RUNNER_CHECKER):
+                        CONTRACT_CHECKER, RUNNER_CHECKER,
+                        SCRIPTS / "check-factory-environment.py"):
             shutil.copy2(script, root / ".factory" / "tools" / script.name)
         shutil.copy2(
             SCRIPTS / "factory_runner_artifacts.py",
@@ -691,17 +692,15 @@ class UnevidencedCapabilityTests(unittest.TestCase):
         self.fixture.policy_patch("REQ-01", required_capabilities=[capability])
         self.fixture.sidecar_patch("REQ-01", required_capabilities=[capability])
 
-    def test_undeclared_capability_fails_planning(self) -> None:
-        # hardware-runner is never declared in the fixture environment: the
-        # verified claim fails now, in planning mode, not only at completion.
-        self._require_capability("hardware-runner")
-        result = self.fixture.validator("planning")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("not declared", result.stderr)
+    def _declare_runner(self) -> None:
+        """Commit a valid signer-trust policy and a runner declaration so the
+        capability-evidence checker reaches the aggregate-missing failure.
 
-    def test_declared_but_unevidenced_capability_fails_planning(self) -> None:
-        # probe-capability is declared and has a tracked contract, but no
-        # accepted runner receipt exists: unevidenced in planning mode.
+        The ephemeral ed25519 signer key is test-owned fixture state (never
+        committed); the committed signer-trust policy and environment are the
+        minimum valid trust inputs the strong runner-evidence checker needs
+        before it can read the (deliberately absent) aggregate.
+        """
         env = self.fixture.root / ".factory" / "environment.toml"
         env.write_text(
             "schema_version = 1\n\n[[runners]]\n"
@@ -712,6 +711,45 @@ class UnevidencedCapabilityTests(unittest.TestCase):
             "verify_argv = [\"./.factory/tools/verify-boilerplate.sh\"]\n",
             encoding="utf-8",
         )
+        signer_key = Path(self._tmp.name) / "signer-key"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+             "-f", str(signer_key)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        public_key = " ".join(
+            (Path(str(signer_key) + ".pub").read_text(
+                encoding="utf-8").split())[:2])
+        (self.fixture.root / ".factory" / "signer-trust.json").write_text(
+            json.dumps({
+                "schema": "ralph-runner-signer-trust/v1",
+                "description": "conformance-suite ephemeral fixture signer",
+                "require_signature": True,
+                "enabled": True,
+                "namespace": "factory-runner-receipt",
+                "public_keys": [{"principal": "probe-runner",
+                                  "public_key": public_key}],
+                "allowed_principals": ["probe-runner"],
+            }, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.fixture.commit_all("declare probe-runner and signer trust")
+
+    def test_undeclared_capability_fails_planning(self) -> None:
+        # hardware-runner is never declared in the fixture environment: the
+        # verified claim fails now, in planning mode, not only at completion.
+        self._require_capability("hardware-runner")
+        result = self.fixture.validator("planning")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("not declared", result.stderr)
+
+    def test_declared_but_unevidenced_capability_fails_planning(self) -> None:
+        # probe-capability is declared and has a tracked contract, but no
+        # accepted runner receipt exists: unevidenced in planning mode.  The
+        # committed signer-trust policy and runner declaration let the strong
+        # runner-evidence checker reach the aggregate read, which is absent,
+        # so the verified claim fails closed as unevidenced.
+        self._declare_runner()
         (self.fixture.root / ".factory" / "capability-contracts.json").write_text(
             json.dumps({"schema": "ralph-capability-contract/v1", "capabilities": [
                 {"name": "probe-capability",
@@ -722,9 +760,13 @@ class UnevidencedCapabilityTests(unittest.TestCase):
                  "deny_simulated_markers": ["mock"]},
             ]}), encoding="utf-8")
         self._require_capability("probe-capability")
-        result = self.fixture.validator("planning")
+        env = {**os.environ,
+               "FACTORY_CAMPAIGN_ID": "fixture",
+               "FACTORY_READINESS_NONCE": "9" * 64}
+        result = self.fixture.validator("planning", env=env)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("runner evidence aggregate is missing", result.stderr)
+        self.assertIn("strong runner evidence rejected", result.stderr)
+        self.assertIn("unsafe or missing evidence file", result.stderr)
 
 
 class DuplicateAuthorityTests(unittest.TestCase):

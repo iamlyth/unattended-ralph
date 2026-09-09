@@ -1814,10 +1814,36 @@ Tasks 25-27 plus the pending final audit.
 - Evidence: The scheduler foundation commit passes the 86-case `test-factory-scheduler.py` suite and the full `./scripts/verify-boilerplate.sh` gate serially. This is implementation evidence for the pure authority only; no campaign execution wiring, `--rounds` compatibility, or live campaign behavior is claimed.
 - Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.1, §22, §24 BUDGET-01).
 
-## Task 31: Final documentation and specification audit
+## Task 31: Conformance runner-evidence fixture repair (BUG-0001)
+
+- Status: complete
+- Dependencies: Task 14
+- Scope: Repair the hidden conformance suite's single failing test
+  (`test_declared_but_unevidenced_capability_fails_planning`) so it proves a
+  declared-but-unevidenced required capability fails planning for the intended
+  reason. The fixture must commit a valid `ralph-runner-signer-trust/v1`
+  policy and a runner declaration so the capability-evidence checker reaches
+  the aggregate read (which is deliberately absent), instead of failing
+  earlier on the missing signer-trust policy. The misleading assertion
+  (`runner evidence aggregate is missing`) is renamed to the honest
+  aggregate-missing failure. The full conformance suite is registered in the
+  generic gate (`verify-boilerplate.sh`). Fake/tampered/missing signatures
+  remain fail-closed (covered by the adversarial suite); fixture evidence is
+  tests only and never acceptance evidence.
+- Acceptance criteria: `python3 .factory/tests/test-factory-conformance.py`
+  passes 46/46; the unevidenced-capability test fails closed for the intended
+  reason; the conformance suite is registered in `verify-boilerplate.sh`; the
+  generic gate passes serially; BUG-0001 is closed with actual evidence.
+- Verification: `.factory/tests/test-factory-conformance.py`,
+  `.factory/tools/verify-boilerplate.sh`.
+- Documentation impact: none (hidden harness test fixture).
+- Evidence: conformance suite 46/46; generic gate passes.
+
+
+## Task 32: Final documentation and specification audit
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31
 - Scope: Current checkpoint: the Phase 2B2 runtime wiring is complete: the campaign consumes the trusted scheduler decisions (planning initial/on-demand only with the planner need/reason recorded in the control state; the trusted deterministic verifier runs at each candidate exact commit; the independent tester/auditor run only at milestone/risk boundaries; the audit resolves the next phase and the closed terminal reason), `--rounds` is a finite maximum budget (never an exact count, no exactly-five rejection) capped by the committed `factory-campaign-budget/v1` `max_rounds`, the scheduler-extension state fields (checkpoints, task attempts, progress/no-progress fingerprints, planner need/reason, audit trigger, completed audit objectives, terminal reason) are optional-in-parse and serialized only when active (byte-compatible migration), and the distinct honest terminal reasons (`success`, `software_verified_external_acceptance_blocked`, `blocked`, `no_progress`, `budget_exhausted`, `interrupted`, `infrastructure_failure`) are never mis-mapped to success/findings. The security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the
@@ -1889,5 +1915,6 @@ Tasks 25-27 plus the pending final audit.
   fixture authority remains explicitly simulated and no production runner,
   model, campaign, or deployment is claimed.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.
+
 
 

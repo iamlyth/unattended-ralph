@@ -22,6 +22,7 @@ python3 .factory/tests/test-factory-campaign.py
 python3 .factory/tests/test-factory-findings.py
 python3 .factory/tests/test-factory-verifier-failure.py
 python3 .factory/tests/test-factory-evidence.py
+python3 .factory/tests/test-factory-conformance.py
 ./.factory/tests/test-factory-footprint.sh
 ./.factory/tests/test-factory-installed.sh
 ./.factory/tests/test-factory-migration.sh

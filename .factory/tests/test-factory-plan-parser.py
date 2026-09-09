@@ -126,7 +126,7 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         plan = Plan.from_file(CANONICAL_PLAN)
         self.assertEqual(plan.schema, SCHEMA_NAME)
         self.assertEqual(plan.status, "active")
-        self.assertEqual(len(plan.tasks), 31)
+        self.assertEqual(len(plan.tasks), 32)
         self.assertEqual(len(plan.matrix), 26)
         self.assertEqual(
             [entry.boundary for entry in plan.interactions],
@@ -138,8 +138,8 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         )
         final = [task for task in plan.tasks if task.title == FINAL_AUDIT_TITLE]
         self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].number, 31)
-        self.assertEqual(set(final[0].dependencies), set(range(1, 31)))
+        self.assertEqual(final[0].number, 32)
+        self.assertEqual(set(final[0].dependencies), set(range(1, 32)))
         # Default priority derives from the task id for a stable sort. Task 19
         # alone retains its explicit remediation priority; dependencies keep
         # audit-round tasks 20-24 finite and serialized; the redesign
@@ -147,7 +147,7 @@ class CanonicalPlanAgreementTest(unittest.TestCase):
         # the final audit.
         self.assertEqual(
             [task.priority for task in plan.tasks],
-            list(range(1, 19)) + [1] + list(range(20, 32)),
+            list(range(1, 19)) + [1] + list(range(20, 33)),
         )
         # Front matter binds the canonical specification.
         self.assertEqual(plan.spec_path, "docs/FACTORY-LOOP-SPEC.md")
