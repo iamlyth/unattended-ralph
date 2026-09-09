@@ -66,8 +66,9 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
         selection = select_task(plan)
         self.assertTrue(selection.selected)
         self.assertEqual(selection.classification, "selected")
-        # Tasks 1-27 are complete/blocked; the pending Phase 2A task 28 and
-        # the pending Phase 2C1 path-lease foundation task 32 depend only on
+        # Tasks 1-27 are complete/blocked; the pending Phase 2A task 28,
+        # the pending Phase 2C1 path-lease foundation task 32, and the
+        # pending Phase 2C2b-A campaign minting task 34 depend only on
         # complete tasks and are the next runnable tasks (28 wins on the
         # priority-then-id sort).
         self.assertEqual(selection.task_id, 28)
@@ -78,7 +79,7 @@ class CanonicalPlanSelectionTest(unittest.TestCase):
             if task.status == "pending"
             and all(statuses[dep] == "complete" for dep in task.dependencies)
         )
-        self.assertEqual(runnable, [28, 32])
+        self.assertEqual(runnable, [28, 32, 34])
         self.assertEqual(plan.tasks[18].status, "complete")
         self.assertEqual(plan.tasks[18].priority, 1)
         self.assertEqual(plan.tasks[12].priority, 13)
