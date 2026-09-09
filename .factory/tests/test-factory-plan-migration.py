@@ -49,19 +49,29 @@ COMMIT = "c" * 40
 def _make_v1_plan() -> str:
     """The committed v1 plan plus the Phase 2D1 migration task (the real input).
 
-    The canonical plan is now the concise v2 plan; the v1 input is the
-    pre-migration committed 36-task v1 plan (HEAD~1) with the migration task
-    added as Task 36 and the final audit renumbered to Task 37 (the exact
-    pre-migration state): 30 completed tasks, 7 unfinished (21, 24, 28, 29,
-    32, 36, 37).
+    The canonical plan is now the concise v2 plan; the v1 input is the last
+    committed v1 plan in history (the pre-migration 36-task plan) with the
+    migration task added as Task 36 and the final audit renumbered to Task
+    37 (the exact pre-migration state): 30 completed tasks, 7 unfinished
+    (21, 24, 28, 29, 32, 36, 37).
     """
     import subprocess
 
-    result = subprocess.run(
-        ["git", "show", "HEAD~1:.factory/artifacts/implementation-plan.md"],
+    # Walk history to the most recent commit whose plan is still v1.
+    commits = subprocess.run(
+        ["git", "log", "--format=%H", "--", ".factory/artifacts/implementation-plan.md"],
         capture_output=True, text=True, check=True,
-    )
-    text = result.stdout
+    ).stdout.split()
+    text = None
+    for commit in commits:
+        candidate = subprocess.run(
+            ["git", "show", f"{commit}:.factory/artifacts/implementation-plan.md"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        if "schema: factory-plan/v2" not in candidate:
+            text = candidate
+            break
+    assert text is not None, "no committed v1 plan found in history"
     marker = "## Task 36: Final documentation and specification audit"
     assert text.count(marker) == 1
     task36 = (
