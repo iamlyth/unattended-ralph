@@ -143,6 +143,7 @@ Plan: Python 3.11 standard library only; the migration never reads legacy state.
 | MIG-01 | §21 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | TEST-01 | §22 | missing | fixture exercises a registry-bound matrix | Task 1 |
 | ACCEPT-01 | §23 | missing | fixture exercises a registry-bound matrix | Task 2 |
+| LEASE-01 | §14.2, §22, §24 | missing | fixture exercises a registry-bound matrix | Task 1 |
 
 ## Interaction acceptance inventory
 
