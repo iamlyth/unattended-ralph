@@ -221,6 +221,10 @@ ADVANCE_EDGES = {
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
     ("verification", "software_verified_external_acceptance_blocked"): "audit",
+    # Phase 2B1: the inner same-task convergence edge — a trusted
+    # deterministic software verifier failure returns to implementation for
+    # the SAME task (conditional on the campaign's convergence conditions).
+    ("verification", "verifier_failure"): "implementation",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
     # Task 9 review B1: an interrupted audit and an untrusted audit are
     # terminal campaign ends with no nonfinal edge; the round never advances.
@@ -235,7 +239,7 @@ ALLOWED_ADVANCE_OUTCOMES = {
     ),
     "verification": (
         "pass", "findings", "blocked", "infrastructure_failure",
-        "software_verified_external_acceptance_blocked",
+        "software_verified_external_acceptance_blocked", "verifier_failure",
     ),
     "audit": ("pass", "findings", "blocked", "interrupted",
                "infrastructure_failure"),
@@ -415,9 +419,13 @@ class FieldSetTest(StateConformanceCase):
                 "selected_task_id", "attempt_number",
                 "phase_started_at_monotonic", "attempt_started_at_monotonic",
                 "last_outcome",
+                # Phase 2B1 convergence-extension fields (optional in parse,
+                # serialized only when active).
+                "convergence_task_id", "verifier_failure_digest",
+                "convergence_retries", "last_failure_fingerprint",
             ),
         )
-        self.assertEqual(len(FIELD_NAMES), 17)
+        self.assertEqual(len(FIELD_NAMES), 21)
 
     def test_extra_field_is_rejected(self) -> None:
         data = json.loads(self.fixture("state-field-extra.json").read_text("utf-8"))
@@ -552,7 +560,8 @@ class CounterTest(StateConformanceCase):
         )
         self.assertEqual(
             PHASE_OUTCOMES["implementation"], frozenset(
-                {"planned", "task_progress", "task_failed", "interrupted"}
+                {"planned", "task_progress", "task_failed", "interrupted",
+                 "verifier_failure"}
             )
         )
         self.assertEqual(
@@ -709,6 +718,7 @@ class OutcomeTest(StateConformanceCase):
                 "work_exhausted", "blocked",
                 "pass", "findings", "infrastructure_failure",
                 "software_verified_external_acceptance_blocked",
+                "verifier_failure",
                 "success",
             ),
         )
@@ -809,6 +819,16 @@ class TransitionTableTest(StateConformanceCase):
                     kwargs["plan_digest"] = "0" * 64
                     kwargs["phase_base_commit"] = "0" * 40
                 source = self._source(phase)
+                if (phase, outcome) == ("verification", "verifier_failure"):
+                    # Phase 2B1: the inner convergence edge requires the
+                    # bound task and the validated failure artifact.
+                    source = make_state(
+                        current_phase="verification",
+                        last_outcome="task_completed",
+                        convergence_task_id=4,
+                    )
+                    kwargs["verifier_failure_digest"] = "1" * 64
+                    kwargs["failure_fingerprint"] = "2" * 64
                 result = advance(source, outcome, **kwargs)
                 self.assertEqual(result.current_phase, target)
                 if target in TERMINAL_PHASES:
@@ -989,6 +1009,113 @@ class TransitionTableTest(StateConformanceCase):
         self.assertIsNone(state.selected_task_id)
         self.assertEqual(state.attempt_number, 0)
         self.assertEqual(state.attempt_started_at_monotonic, 0)
+
+    def test_task_completed_binds_the_convergence_task(self) -> None:
+        # Phase 2B1: the task_completed edge binds the task being verified so
+        # a deterministic verifier failure can return to the SAME task.
+        state = advance(
+            implementation_state(), "task_completed", now=MONOTONIC2
+        )
+        self.assertEqual(state.convergence_task_id, 4)
+        self.assertEqual(state.verifier_failure_digest, "")
+        self.assertEqual(state.convergence_retries, 0)
+        self.assertEqual(state.last_failure_fingerprint, "")
+
+    def test_convergence_edge_requires_bound_task_and_artifact(self) -> None:
+        # The verifier_failure edge is conditional: it requires the bound
+        # task and the validated artifact digest/fingerprint.
+        verification = make_state(
+            current_phase="verification", last_outcome="task_completed"
+        )
+        with self.assertRaisesRegex(
+            StateTransitionError, "requires a bound convergence_task_id"
+        ):
+            advance(verification, "verifier_failure", now=MONOTONIC2)
+        bound = make_state(
+            current_phase="verification", last_outcome="task_completed",
+            convergence_task_id=4,
+        )
+        with self.assertRaisesRegex(StateTamperError, "64-hex"):
+            advance(
+                bound, "verifier_failure", now=MONOTONIC2,
+                verifier_failure_digest="not-hex",
+                failure_fingerprint="0" * 64,
+            )
+        with self.assertRaisesRegex(StateTamperError, "64-hex"):
+            advance(
+                bound, "verifier_failure", now=MONOTONIC2,
+                verifier_failure_digest="1" * 64,
+                failure_fingerprint="not-hex",
+            )
+
+    def test_convergence_edge_carries_the_cycle_forward(self) -> None:
+        # The verifier_failure edge returns to implementation for the SAME
+        # task, records the artifact digest, and increments the retry count.
+        bound = make_state(
+            current_phase="verification", last_outcome="task_completed",
+            convergence_task_id=4,
+        )
+        result = advance(
+            bound, "verifier_failure", now=MONOTONIC2,
+            verifier_failure_digest="1" * 64,
+            failure_fingerprint="2" * 64,
+        )
+        self.assertEqual(result.current_phase, "implementation")
+        self.assertEqual(result.convergence_task_id, 4)
+        self.assertEqual(result.verifier_failure_digest, "1" * 64)
+        self.assertEqual(result.convergence_retries, 1)
+        self.assertEqual(result.last_failure_fingerprint, "2" * 64)
+        # The cycle is serialized only while active (migration compatible).
+        self.assertIn("convergence_task_id", result.to_dict())
+        self.assertIn("verifier_failure_digest", result.to_dict())
+
+    def test_convergence_fields_clear_on_other_transitions(self) -> None:
+        # A verification -> audit edge clears the convergence cycle: the
+        # loop never leaks across a task or phase boundary.
+        bound = make_state(
+            current_phase="verification", last_outcome="task_completed",
+            convergence_task_id=4, convergence_retries=1,
+            last_failure_fingerprint="2" * 64,
+        )
+        result = advance(bound, "pass", now=MONOTONIC2)
+        self.assertEqual(result.current_phase, "audit")
+        self.assertIsNone(result.convergence_task_id)
+        self.assertEqual(result.verifier_failure_digest, "")
+        self.assertEqual(result.convergence_retries, 0)
+        self.assertEqual(result.last_failure_fingerprint, "")
+        self.assertNotIn("convergence_task_id", result.to_dict())
+
+    def test_legacy_state_round_trips_byte_identically(self) -> None:
+        # Migration compatibility: a pre-2B1 state (no convergence fields)
+        # parses with inactive defaults and serializes byte-identically.
+        data = json.loads(
+            self.fixture("state-valid-verification.json").read_text("utf-8")
+        )
+        state = parse_state(data)
+        self.assertIsNone(state.convergence_task_id)
+        self.assertEqual(state.verifier_failure_digest, "")
+        self.assertEqual(state.convergence_retries, 0)
+        self.assertEqual(state.last_failure_fingerprint, "")
+        self.assertEqual(state.to_dict(), data)
+
+    def test_convergence_invariants_fail_closed(self) -> None:
+        # retries > 0 requires a bound task; a digest requires the
+        # implementation phase; a fingerprint requires retries >= 1.
+        with self.assertRaisesRegex(StateTamperError, "convergence_task_id"):
+            parse_state(make_state(
+                current_phase="verification", last_outcome="task_completed",
+                convergence_retries=1,
+            ).to_dict())
+        with self.assertRaisesRegex(StateTamperError, "implementation"):
+            parse_state(make_state(
+                current_phase="verification", last_outcome="task_completed",
+                convergence_task_id=4, verifier_failure_digest="1" * 64,
+            ).to_dict())
+        with self.assertRaisesRegex(StateTamperError, "convergence retry"):
+            parse_state(make_state(
+                current_phase="implementation", last_outcome="verifier_failure",
+                convergence_task_id=4, last_failure_fingerprint="2" * 64,
+            ).to_dict())
 
 
 class SoftwareVerifiedExternalAcceptanceBlockedTest(StateConformanceCase):

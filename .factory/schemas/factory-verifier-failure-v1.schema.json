@@ -32,6 +32,11 @@
       "type": "string",
       "enum": ["verification", "audit"]
     },
+    "task_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Positive plan task id the failing verifier was verifying (present for verification-phase failures; absent for audit-phase failures). A replay of an artifact across a different task fails closed at consumption."
+    },
     "commit": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$",

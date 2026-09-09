@@ -76,6 +76,24 @@ changed files, artifact refs, an environment/capability classification, and
 a rerun scope, with bounded sizes, closed enums, and duplicate-key rejection
 (`.factory/loop/verifier_failure.py`).
 
+Phase 2B1 inner same-task convergence: when a trusted deterministic software
+verifier failure meets every convergence condition (the gate actually ran and
+returned an ordinary nonzero status, the tester passed with no findings, the
+declared capability is available and ran clean, no scope violation, the task
+is bound, the retry budget remains, the failure is not a byte-identical
+repeat, the task resource budget is not exhausted, and the campaign deadline
+remains), the campaign returns to implementation for the SAME task with the
+validated verifier-failure artifact, bypassing planner/tester/auditor
+ceremony.  The artifact is published write-once by its content-addressed
+digest and re-validated at consumption against the exact commit, campaign,
+task, and digest; its fields enter the developer's sealed prompt as inert
+quoted data (the command is a record, never an authority to re-execute).  The
+campaign performs at most two same-task convergence retries per task
+(`MAX_CONVERGENCE_RETRIES = 2`); a repeated identical failure (same
+fingerprint) and a consumed task resource budget terminate the loop honestly
+before that bound.  Infrastructure, capability, human/external, and
+tester-finding failures never converge.
+
 Trusted control-plane operations only (each prints one machine-readable
 outcome; `ROOT` defaults to the canonical repository):
 

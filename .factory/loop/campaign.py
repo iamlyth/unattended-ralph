@@ -94,6 +94,7 @@ try:  # package import (the hidden `.factory/loop/` package)
     from . import readiness as readiness_module
     from . import sidecars as sidecars_module
     from . import usage as usage_module
+    from . import verifier_failure as verifier_failure_module
 except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import audit_objectives as audit_objectives_module  # type: ignore[no-redef]
     import evidence as evidence_module  # type: ignore[no-redef]
@@ -112,6 +113,7 @@ except ImportError:  # flat import used by the hidden `.factory/tests/` suite
     import readiness as readiness_module  # type: ignore[no-redef]
     import sidecars as sidecars_module  # type: ignore[no-redef]
     import usage as usage_module  # type: ignore[no-redef]
+    import verifier_failure as verifier_failure_module  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -138,10 +140,17 @@ PLANNING_OUTCOMES = ("planned", "failed", "interrupted", "infrastructure_failure
 IMPLEMENTATION_OUTCOMES = (
     "task_completed", "task_progress", "task_failed",
     "interrupted", "work_exhausted", "blocked",
+    # Phase 2B1: the inner same-task convergence edge returns to
+    # implementation with the validated verifier-failure artifact.
+    "verifier_failure",
 )
 VERIFICATION_OUTCOMES = (
     "pass", "findings", "blocked", "infrastructure_failure",
     "software_verified_external_acceptance_blocked",
+    # Phase 2B1: a trusted deterministic software verifier failure with a
+    # passing tester converges to the SAME task (conditional on the
+    # campaign's convergence conditions).
+    "verifier_failure",
 )
 AUDIT_OUTCOMES = (
     "pass", "findings", "blocked",
@@ -224,6 +233,12 @@ DEFAULT_RUNNER_TIMEOUT = 7800.0
 MAX_RUNNER_TIMEOUT = 10800.0
 DEFAULT_CAMPAIGN_TIMEOUT = 21600.0
 MAX_CAMPAIGN_TIMEOUT = 86400.0
+# Phase 2B1: the inner same-task convergence loop may return a trusted
+# deterministic software verifier failure to implementation at most this many
+# times per task.  Each retry is a fresh model process with the validated
+# failure artifact; a repeated identical failure (same fingerprint) and a
+# consumed task resource budget terminate the loop honestly before this bound.
+MAX_CONVERGENCE_RETRIES = 2
 INSTALLED_EVIDENCE_OVERRIDE = "FACTORY_INSTALLED_FUNCTIONAL_EVIDENCE_PATH"
 SKIP_OUTPUT_RE = re.compile(r"(?i)(?:^|[^a-z])(?:skip(?:ped)?|not[ -]?run)(?:[^a-z]|$)")
 # Finite bound for every trusted Git call of the orchestrator (Task 9
@@ -1979,6 +1994,7 @@ def launch_role_attempt(
     task_excerpt: Optional[bytes] = None,
     audit_objective: Optional[bytes] = None,
     findings_payload: Optional[bytes] = None,
+    verifier_failure: Optional[Mapping[str, object]] = None,
     _authorization_store: Optional[object] = None,
     _authorization_token: str = "",
     _authorization_claims: Optional[Mapping[str, object]] = None,
@@ -2008,6 +2024,15 @@ def launch_role_attempt(
     findings payload of the previous round, delivered only to the planner
     role as a digest-bound input (never to the developer, tester, or
     auditor, and never read by the deterministic selector).
+
+    Phase 2B1: ``verifier_failure`` is the validated ``factory-verifier-
+    failure/v1`` artifact of the trusted deterministic verifier failure
+    that returned this attempt to implementation for the SAME task.  It is
+    delivered only to the developer role, only when the state binds its
+    exact content-addressed digest, and only after the campaign re-validated
+    commit/campaign/task/digest at this cycle; the artifact's structured
+    fields enter the sealed prompt as inert quoted data (never path/argv
+    authority).
 
     Confinement is not caller-configurable: ``authorize_launch`` internally
     creates the private home, canonical descriptor-anchored specification,
@@ -2108,6 +2133,11 @@ def launch_role_attempt(
                 if findings_payload is not None
                 else ""
             ),
+            verifier_failure_digest=(
+                verifier_failure_module.artifact_digest(verifier_failure)
+                if verifier_failure is not None
+                else ""
+            ),
             result_write_path=result_write_path,
             runtime_limit=config.runtime_limit,
             inactivity_limit=config.inactivity_limit,
@@ -2122,6 +2152,7 @@ def launch_role_attempt(
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             findings=findings_payload,
+            verifier_failure=verifier_failure,
             task_budget=budget,
             _authorization_store=_authorization_store,
             _authorization_token=_authorization_token,
@@ -2851,6 +2882,7 @@ class Campaign:
         task_id: Optional[int] = None,
         attempt: int = 1,
         findings_payload: Optional[bytes] = None,
+        verifier_failure: Optional[Mapping[str, object]] = None,
     ) -> RoleOutcome:
         if self._role_runner is not None:
             return self._role_runner(role, state, head, task_id, attempt)
@@ -2859,6 +2891,7 @@ class Campaign:
                 role, state, head,
                 task_id=task_id, attempt=attempt,
                 findings_payload=findings_payload,
+                verifier_failure=verifier_failure,
             )
         remaining = self._remaining_time(f"{role} launch")
         runtime_budget = min(float(self._config.runtime_limit), remaining)
@@ -2925,6 +2958,10 @@ class Campaign:
                 plan_sha256(launch_module.task_excerpt_bytes(plan_blob, task_id))
                 if role == "developer" else ""
             ),
+            "verifier_failure_digest": (
+                verifier_failure_module.artifact_digest(verifier_failure)
+                if verifier_failure is not None else ""
+            ),
         }
         token = self._launch_store.mint(claims)
         return launch_role_attempt(
@@ -2934,13 +2971,15 @@ class Campaign:
             task_id=task_id,
             round_number=state.current_round,
             findings_payload=findings_payload,
+            verifier_failure=verifier_failure,
             _authorization_store=self._launch_store,
             _authorization_token=token,
             _authorization_claims=claims,
         )
 
     def _run_driver(
-        self, role, state, head, *, task_id, attempt, findings_payload=None
+        self, role, state, head, *, task_id, attempt, findings_payload=None,
+        verifier_failure=None,
     ) -> RoleOutcome:
         config = self._config
         driver_rel = config.role_driver
@@ -3024,6 +3063,24 @@ class Campaign:
             )
             env[CAMPAIGN_ENV_PREFIX + "FINDINGS_DIGEST"] = plan_sha256(
                 findings_payload
+            )
+        # Phase 2B1: the developer convergence retry receives the validated
+        # verifier-failure artifact as a digest-bound structured channel
+        # (mirroring the production sealed-prompt section).  The driver
+        # fails closed when the digest is absent or the delivered bytes do
+        # not carry it, so a substituted or tampered artifact can never
+        # reach the retry.
+        if role == "developer" and verifier_failure is not None:
+            raw = json.dumps(
+                verifier_failure, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(raw) > 64 * 1024:
+                raise CampaignPhaseError(
+                    "the verifier-failure artifact exceeds the driver-channel bound"
+                )
+            env[CAMPAIGN_ENV_PREFIX + "VERIFIER_FAILURE"] = raw.decode("utf-8")
+            env[CAMPAIGN_ENV_PREFIX + "VERIFIER_FAILURE_DIGEST"] = (
+                verifier_failure_module.artifact_digest(verifier_failure)
             )
         # The structured-result handoff is role-specific: the tester may only
         # write the verification result path and the auditor only the audit
@@ -4110,27 +4167,73 @@ class Campaign:
     def _step_implementation(self, state: state_module.FactoryState) -> _Step:
         head = self._git.head()
         plan = self._git.plan_at(head)
-        # Task 9 review M2: the selector is bound to the authoritative plan
-        # base anchored at the state's phase base (never the plan's own
-        # self-declared base), so a stale committed plan fails closed before
-        # any task is selected.
-        try:
-            selection = selector_module.select_task(
-                plan, bound_base_commit=self._authoritative_plan_base(state)
+        verifier_failure: Optional[Dict[str, object]] = None
+        if state.verifier_failure_digest:
+            # Phase 2B1: this is an inner same-task convergence retry.  The
+            # trusted deterministic verifier failure returned to
+            # implementation for the SAME task; the selector is bypassed and
+            # every binding (branch/HEAD/plan/task/commit/artifact digest) is
+            # re-validated at this cycle before any consumption.  A stale,
+            # replayed, or tampered artifact fails closed here, never in the
+            # model.
+            if state.convergence_task_id is None:
+                raise CampaignRecoveryError(
+                    "a convergence retry state binds no convergence task"
+                )
+            task_id = state.convergence_task_id
+            try:
+                verifier_failure = verifier_failure_module.read_artifact(
+                    self._root, self._config.campaign_id,
+                    state.verifier_failure_digest,
+                )
+                verifier_failure_module.validate_consumption(
+                    verifier_failure,
+                    expected_commit=head,
+                    expected_campaign_id=self._config.campaign_id,
+                    expected_task_id=task_id,
+                    expected_digest=state.verifier_failure_digest,
+                    resolver=lambda c: bool(self._git.object_id(c)),
+                )
+            except verifier_failure_module.VerifierFailureError as exc:
+                raise CampaignRecoveryError(
+                    f"the bound verifier-failure artifact is not consumable: "
+                    f"{exc}"
+                ) from exc
+            # The task must still exist in the committed plan: a stale
+            # convergence cycle (a plan revision that dropped the task)
+            # fails closed.  The task is normally marked complete in the
+            # committed plan — that is exactly why it reached verification —
+            # so a convergence retry reworks it rather than re-selecting it.
+            task = next(
+                (t for t in plan.tasks if t.number == task_id), None
             )
-        except selector_module.SelectorError as exc:
-            raise CampaignRecoveryError(
-                f"the committed plan at HEAD is stale or ambiguous: {exc}"
-            ) from exc
-        if not selection.selected:
-            outcome = (
-                "work_exhausted" if selection.classification == "work_exhausted"
-                else "blocked"
-            )
-            state2 = state_module.advance(state, outcome)
-            state_module.write_state(self._root, state2)
-            return _Step(self._record(state, 1, outcome, ""), state=state2)
-        task_id = selection.task_id
+            if task is None:
+                raise CampaignRecoveryError(
+                    f"the convergence task {task_id} no longer exists in the "
+                    "committed plan; a stale convergence cycle fails closed"
+                )
+        else:
+            # Task 9 review M2: the selector is bound to the authoritative plan
+            # base anchored at the state's phase base (never the plan's own
+            # self-declared base), so a stale committed plan fails closed before
+            # any task is selected.
+            try:
+                selection = selector_module.select_task(
+                    plan, bound_base_commit=self._authoritative_plan_base(state)
+                )
+            except selector_module.SelectorError as exc:
+                raise CampaignRecoveryError(
+                    f"the committed plan at HEAD is stale or ambiguous: {exc}"
+                ) from exc
+            if not selection.selected:
+                outcome = (
+                    "work_exhausted" if selection.classification == "work_exhausted"
+                    else "blocked"
+                )
+                state2 = state_module.advance(state, outcome)
+                state_module.write_state(self._root, state2)
+                return _Step(self._record(state, 1, outcome, ""), state=state2)
+            task_id = selection.task_id
         # ``begin_attempt`` increments the attempt counter for a retry of the
         # same task and resets it on a trusted task transition (§11); the
         # attempt sequence is therefore monotonic and durable.
@@ -4215,7 +4318,8 @@ class Campaign:
                 )
         head = self._git.head()
         role = self._run_role(
-            "developer", state, head, task_id=task_id, attempt=attempt
+            "developer", state, head, task_id=task_id, attempt=attempt,
+            verifier_failure=verifier_failure,
         )
         plan_worktree = _bounded_read(
             self._root, self._config.plan_path, "plan", PLAN_BLOB_MAX
@@ -4495,6 +4599,105 @@ class Campaign:
             gate_skipped=verification_skipped,
             capability_skipped=capability_skipped,
         )
+        # Phase 2B1: the inner same-task convergence edge.  Only a genuine
+        # deterministic software verifier failure may return to
+        # implementation for the SAME task: the deterministic gate actually
+        # ran and returned an ordinary nonzero status (never 126/127 or a
+        # negative supervisor status), the tester passed with no findings,
+        # the declared capability is available and ran clean, no scope
+        # violation, the task is bound, the retry budget remains, the
+        # failure is not a byte-identical repeat, the task resource budget
+        # is not exhausted, and the campaign deadline remains.
+        # Infrastructure, capability, human/external, and tester-finding
+        # failures never converge: they keep the existing findings/blocked/
+        # infrastructure flow with no planner/tester/auditor ceremony
+        # skipped.  This check runs BEFORE the optimistic-pass override
+        # below, so a genuine gate failure with a passing tester converges
+        # instead of being minted into a finding.
+        convergence_eligible = (
+            outcome == "findings"
+            and gate_ran
+            and gate_exit not in (126, 127)
+            and gate_exit != 0
+            and not verification_skipped
+            and result_outcome == "pass"
+            and not findings
+            and capability_available
+            and capability_ran
+            and capability_exit == 0
+            and not capability_skipped
+            and violation is None
+            and state.convergence_task_id is not None
+            and state.convergence_retries < MAX_CONVERGENCE_RETRIES
+            and self._remaining_time("convergence retry") > 0
+        )
+        if convergence_eligible:
+            task_id = state.convergence_task_id
+            try:
+                budget = task_budget_module.load_budget_config(self._root)
+                ledger = task_budget_module.load_ledger(
+                    self._root, self._config.campaign_id, task_id
+                )
+                convergence_eligible = (
+                    task_budget_module.exhausted_reason(ledger, budget) is None
+                )
+            except task_budget_module.TaskBudgetError as exc:
+                raise CampaignPhaseError(
+                    f"cannot read the task-budget ledger for convergence: {exc}"
+                ) from exc
+        if convergence_eligible:
+            artifact = verifier_failure_module.build_artifact(
+                campaign_id=self._config.campaign_id,
+                phase="verification",
+                commit=head,
+                command=self._config.verification_command,
+                exit_status=gate_exit,
+                expected=(
+                    "exit 0 (the deterministic verification gate must pass)"
+                ),
+                observed=f"exit {gate_exit}",
+                output_tail=(gate_detail or "")[:4096],
+                changed_files=self._git.role_dirty_paths(),
+                environment_classification=(
+                    "dirty" if self._git.role_dirty_paths() else "clean"
+                ),
+                capability_classification=(
+                    "available" if capability_available else "unavailable"
+                ),
+                rerun_scope="targeted",
+                task_id=task_id,
+            )
+            fingerprint = verifier_failure_module.failure_fingerprint(artifact)
+            if fingerprint == state.last_failure_fingerprint:
+                # A byte-identical repeat made no meaningful progress; the
+                # loop terminates honestly instead of spinning.
+                convergence_eligible = False
+        if convergence_eligible:
+            digest, _name = verifier_failure_module.publish_artifact(
+                self._root, self._config.campaign_id, artifact
+            )
+            verifier_failure_module.validate_consumption(
+                artifact,
+                expected_commit=head,
+                expected_campaign_id=self._config.campaign_id,
+                expected_task_id=task_id,
+                expected_digest=digest,
+                resolver=lambda c: bool(self._git.object_id(c)),
+            )
+            state2 = state_module.advance(
+                state, "verifier_failure",
+                verifier_failure_digest=digest,
+                failure_fingerprint=fingerprint,
+            )
+            state_module.write_state(self._root, state2)
+            return _Step(
+                self._record(
+                    state, attempt, "verifier_failure",
+                    f"deterministic verifier exit {gate_exit}",
+                    result_digest=digest,
+                ),
+                state=state2,
+            )
         if (
             outcome == "findings" and result_data is not None
             and result_data.get("outcome") == "pass" and not findings

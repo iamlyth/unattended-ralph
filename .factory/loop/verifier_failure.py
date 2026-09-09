@@ -40,12 +40,13 @@ infrastructure-failure fail-closed closes, or human authority.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import stat
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 SCHEMA_NAME = "factory-verifier-failure/v1"
 SCHEMA_FILE = "factory-verifier-failure-v1.schema.json"
@@ -53,6 +54,7 @@ MAX_ARTIFACT_BYTES = 256 * 1024
 
 SAFE_CAMPAIGN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Closed enums (EVID-02): an unknown value fails closed.
 PHASES = ("verification", "audit")
@@ -336,6 +338,24 @@ def validate_artifact(artifact: Mapping[str, object]) -> None:
         raise VerifierFailureMalformedError(
             f"verifier-failure phase must be one of {PHASES!r}"
         )
+    task_id = artifact.get("task_id")
+    if task_id is not None and (
+        isinstance(task_id, bool)
+        or not isinstance(task_id, int)
+        or task_id < 1
+    ):
+        raise VerifierFailureMalformedError(
+            "verifier-failure task_id must be a positive integer when present"
+        )
+    if phase == "verification" and task_id is None:
+        raise VerifierFailureMalformedError(
+            "a verification-phase verifier-failure artifact must carry the "
+            "positive task_id it was verifying"
+        )
+    if phase == "audit" and task_id is not None:
+        raise VerifierFailureMalformedError(
+            "an audit-phase verifier-failure artifact must not carry a task_id"
+        )
     command = artifact.get("command")
     if (
         not isinstance(command, list)
@@ -519,6 +539,7 @@ def build_artifact(
     environment_classification: str = "clean",
     capability_classification: str = "not_required",
     rerun_scope: str = "full",
+    task_id: Optional[int] = None,
 ) -> Dict[str, object]:
     """Build a schema-valid verifier-failure artifact from trusted inputs.
 
@@ -526,7 +547,10 @@ def build_artifact(
     fails; the returned artifact is validated before it is returned, so a
     caller can never mint an invalid record.  ``command`` is recorded as
     data (the exact argv the control plane invoked) and is never an
-    executable authority.
+    executable authority.  ``task_id`` is the positive plan task the
+    failing verifier was verifying (mandatory for verification-phase
+    artifacts, forbidden for audit-phase artifacts), so a replay of an
+    artifact across a different task fails closed at consumption.
     """
     artifact: Dict[str, object] = {
         "schema": SCHEMA_NAME,
@@ -541,6 +565,8 @@ def build_artifact(
         "capability_classification": capability_classification,
         "rerun_scope": rerun_scope,
     }
+    if task_id is not None:
+        artifact["task_id"] = task_id
     # Optional fields are omitted when empty: the schema requires a
     # non-empty string whenever a field is present, so an empty optional
     # field is represented by absence, never by an empty string.
@@ -554,3 +580,177 @@ def build_artifact(
         artifact["artifact_refs"] = list(artifact_refs)
     validate_artifact(artifact)
     return artifact
+
+
+def failure_fingerprint(artifact: Mapping[str, object]) -> str:
+    """The deterministic failure signature of one verifier-failure artifact.
+
+    The fingerprint covers only the *stable* failure characteristics — the
+    exact exit status, expected vs observed, the changed files, and the
+    recorded command — never the output tail (which may legitimately vary
+    across runs).  Two failures with the same fingerprint are the same
+    failure: a convergence retry that reproduces the identical fingerprint
+    made no meaningful progress and terminates honestly instead of looping.
+    """
+    validate_artifact(artifact)
+    stable = {
+        "exit_status": artifact.get("exit_status"),
+        "expected": artifact.get("expected"),
+        "observed": artifact.get("observed"),
+        "changed_files": artifact.get("changed_files", []),
+        "command": artifact.get("command"),
+    }
+    raw = json.dumps(
+        stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def artifact_digest(artifact: Mapping[str, object]) -> str:
+    """The SHA-256 of the canonical artifact bytes (the publication name)."""
+    return hashlib.sha256(artifact_bytes(artifact)).hexdigest()
+
+
+def _verifier_failure_name(campaign_id: str, digest: str) -> str:
+    """The canonical write-once artifact name under the private state dir.
+
+    The artifact is published as a flat content-addressed name
+    ``verifier-failure-<digest>.json`` inside the private ``.factory-state``
+    namespace (the established dirfd/no-follow writer accepts only flat
+    lifecycle-marker names); the digest is the canonical-bytes SHA-256, so
+    the name is content-addressed and a forged or tampered artifact can
+    never occupy a trusted name.
+    """
+    if not SAFE_CAMPAIGN_ID_RE.fullmatch(campaign_id):
+        raise VerifierFailureError(
+            "verifier-failure campaign_id is invalid for publication"
+        )
+    if not SHA256_RE.fullmatch(digest):
+        raise VerifierFailureError(
+            "verifier-failure publication digest must be a 64-hex SHA-256"
+        )
+    return f"verifier-failure-{digest}.json"
+
+
+def publish_artifact(
+    root: Path, campaign_id: str, artifact: Mapping[str, object]
+) -> Tuple[str, str]:
+    """Publish one validated artifact write-once under the private state dir.
+
+    The artifact is validated, canonicalized, and published through the
+    established dirfd/no-follow atomic writer with no-replace semantics
+    (``factory_state_io.atomic_write_json``), so a raced pathname or a
+    forged pre-existing artifact fails closed and the model can never write
+    it (the private ``.factory-state`` namespace is outside every
+    model-writable path).  Returns ``(digest, repository-relative name)``.
+    """
+    raw = artifact_bytes(artifact)
+    digest = hashlib.sha256(raw).hexdigest()
+    name = _verifier_failure_name(campaign_id, digest)
+    try:
+        from . import factory_state_io as _io
+    except ImportError:
+        import factory_state_io as _io  # type: ignore[no-redef]
+    try:
+        _io.atomic_write_json(
+            root, name, json.loads(raw.decode("utf-8")),
+            no_replace=True,
+        )
+    except _io.StateIOError as exc:
+        # Write-once with byte-idempotent crash recovery: a byte-exact
+        # re-publication across a crash window is accepted; any other
+        # pre-existing content (a forged, tampered, or foreign artifact)
+        # fails closed instead of being silently replaced.
+        try:
+            existing = _io.read_bytes(root, name, maximum=MAX_ARTIFACT_BYTES)
+        except _io.StateIOError as read_exc:
+            raise VerifierFailureError(
+                f"cannot publish the verifier-failure artifact {name}: a "
+                f"marker already exists and cannot be safely re-read "
+                f"({read_exc})"
+            ) from read_exc
+        if existing != raw + b"\n":
+            raise VerifierFailureError(
+                f"cannot publish the verifier-failure artifact {name}: a "
+                "different marker already exists; a tampered or foreign "
+                "artifact fails closed"
+            ) from exc
+    return digest, name
+
+
+def read_artifact(
+    root: Path, campaign_id: str, digest: str
+) -> Dict[str, object]:
+    """Read and validate one published artifact by its exact digest.
+
+    The read is a bounded no-follow dirfd read of the content-addressed
+    name; the bytes are parsed with duplicate-key rejection and validated
+    against the committed schema.  A missing, foreign, malformed, or
+    tampered artifact fails closed (never silently skipped).
+    """
+    name = _verifier_failure_name(campaign_id, digest)
+    try:
+        from . import factory_state_io as _io
+    except ImportError:
+        import factory_state_io as _io  # type: ignore[no-redef]
+    try:
+        raw = _io.read_bytes(root, name, maximum=MAX_ARTIFACT_BYTES)
+    except _io.StateIOError as exc:
+        raise VerifierFailureError(
+            f"cannot safely read the verifier-failure artifact {name}: {exc}"
+        ) from exc
+    if raw is None:
+        raise VerifierFailureError(
+            f"the verifier-failure artifact {name} is missing"
+        )
+    artifact = parse_artifact(raw)
+    if artifact_digest(artifact) != digest:
+        raise VerifierFailureError(
+            f"the verifier-failure artifact {name} does not match its "
+            "content-addressed digest; a tampered artifact fails closed"
+        )
+    return artifact
+
+
+def validate_consumption(
+    artifact: Mapping[str, object],
+    *,
+    expected_commit: str,
+    expected_campaign_id: str,
+    expected_task_id: int,
+    expected_digest: str,
+    resolver: Optional[Callable[[str], bool]] = None,
+) -> None:
+    """Validate one artifact for consumption by the next implementation
+    attempt (Phase 2B1).
+
+    Every binding is re-checked before any structured field is fed into a
+    prompt: the exact commit (with repository resolvability when a resolver
+    is available), the campaign, the task, and the content-addressed
+    digest.  A stale commit, a foreign campaign/task, an altered digest, a
+    missing artifact, or a replay across task/campaign/commit fails closed
+    before any consumption.
+    """
+    validate_artifact(artifact)
+    validate_commit_context(
+        artifact, expected_commit=expected_commit, root=Path("."),
+        resolver=resolver,
+    )
+    campaign_id = artifact.get("campaign_id")
+    if campaign_id != expected_campaign_id:
+        raise VerifierFailureError(
+            f"verifier-failure campaign {campaign_id!r} does not match the "
+            f"expected campaign {expected_campaign_id!r}; a replayed or "
+            "foreign artifact fails closed"
+        )
+    task_id = artifact.get("task_id")
+    if task_id != expected_task_id:
+        raise VerifierFailureError(
+            f"verifier-failure task {task_id!r} does not match the expected "
+            f"task {expected_task_id!r}; a replay across tasks fails closed"
+        )
+    if artifact_digest(artifact) != expected_digest:
+        raise VerifierFailureError(
+            "the verifier-failure artifact digest does not match the bound "
+            "digest; an altered artifact fails closed"
+        )

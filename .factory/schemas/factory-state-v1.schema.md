@@ -48,8 +48,12 @@ initialization, so canonical `current_phase` is never `readiness` and
 
 ## 2. Field set
 
-The object carries exactly these seventeen keys (`FIELD_NAMES`), each exactly
-once, with the §11 type and invariant:
+The object carries exactly these keys (`FIELD_NAMES`), each exactly
+once, with the §11 type and invariant.  The four Phase 2B1
+convergence-extension fields are optional in parse and serialized only while
+an inner same-task convergence cycle is active, so a state with an inactive
+cycle round-trips byte-identically to a pre-Phase-2B1 state (migration
+compatibility):
 
 | Field | Type / invariant | Mutable by |
 |-------|------------------|------------|
@@ -70,6 +74,10 @@ once, with the §11 type and invariant:
 | `phase_started_at_monotonic` | positive integer (`time.monotonic_ns`); a zeroed `now=0` epoch marker is rejected as tamper (Task 19 S3) | only phase transitions |
 | `attempt_started_at_monotonic` | non-negative integer; positive exactly while an attempt is active and `>= phase_started_at_monotonic` (an attempt can never precede the phase that owns it, S9); the inverse holds too — when no attempt is active (`attempt_number == 0`) the marker must be zero (S9) | only `begin_attempt` / phase transitions |
 | `last_outcome` | `null` only during a fresh `planning` phase, otherwise exactly one §13 outcome of the owning phase (S9); a phase/outcome mismatch fails closed | trusted harness only |
+| `convergence_task_id` | positive integer or absent; present only while an inner same-task convergence cycle is active (bound at `implementation --task_completed--> verification`, carried by `verification --verifier_failure--> implementation`) | only the two inner-loop edges |
+| `verifier_failure_digest` | 64-hex SHA-256 or absent; present only during `implementation` while a validated verifier-failure artifact is being consumed | only the `verifier_failure` edge |
+| `convergence_retries` | non-negative integer or absent; monotonic, incremented on each `verifier_failure` edge, at most `MAX_CONVERGENCE_RETRIES = 2`; requires a bound `convergence_task_id` when nonzero | only the `verifier_failure` edge |
+| `last_failure_fingerprint` | 64-hex SHA-256 or absent; the deterministic failure signature of the last convergence failure; requires `convergence_retries >= 1` | only the `verifier_failure` edge |
 
 ### 2.1 Write-once bindings
 
@@ -115,6 +123,7 @@ verification   pass            -> audit
 verification   findings        -> audit
 verification   blocked         -> audit
 verification   software_verified_external_acceptance_blocked -> audit
+verification   verifier_failure -> implementation
 verification   infrastructure_failure -> infrastructure_failure (terminal)
 audit          pass            -> planning (next round) | success      (final)
 audit          findings        -> planning (next round) | findings     (final)
@@ -133,6 +142,26 @@ when the audit phase was entered with this verification outcome, an audit
 `success`) and to the next round's `planning` in a non-final round.  The
 outcome never weakens round-zero readiness, the `infrastructure_failure`
 fail-closed closes, or human authority.
+
+`verifier_failure` is the Phase 2B1 inner same-task convergence edge: a
+trusted deterministic software verifier failure returns to implementation for
+the SAME task (`convergence_task_id`) with the validated
+`factory-verifier-failure/v1` artifact, without planner/tester/auditor
+ceremony.  The edge is conditional and bounded: the campaign takes it only
+when the deterministic gate actually ran and returned an ordinary nonzero
+status (never 126/127 or a negative supervisor status), the tester passed with
+no findings, the declared capability is available and ran clean, no scope
+violation occurred, the task is bound, the retry budget remains, the failure
+is not a byte-identical repeat, the task resource budget is not exhausted, and
+the campaign deadline remains.  Infrastructure, capability, human/external,
+and tester-finding failures never converge.  The campaign performs at most
+two same-task convergence retries per task (`MAX_CONVERGENCE_RETRIES = 2`);
+a repeated identical failure (same fingerprint) and a consumed task resource
+budget terminate the loop honestly before that bound.  The convergence cycle
+is cleared on every transition except the two inner-loop edges
+(`implementation --task_completed--> verification` binds the task being
+verified; `verification --verifier_failure--> implementation` carries the
+cycle forward), so it can never leak across a task or phase boundary.
 
 An interrupted audit and an untrusted audit (`infrastructure_failure`) are
 the two terminal fail-closed closes that have no nonfinal `audit ->

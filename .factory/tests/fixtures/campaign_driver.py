@@ -260,6 +260,46 @@ def main() -> int:
                 "campaign driver: developer requires the exact task-excerpt "
                 "digest of the committed plan"
             )
+        # Phase 2B1: a convergence retry receives the validated
+        # verifier-failure artifact as a digest-bound structured channel
+        # (mirroring the production sealed-prompt section).  The driver
+        # fails closed when the digest is present but the delivered bytes do
+        # not carry it, so a substituted or tampered artifact can never
+        # reach the retry.
+        verifier_failure_env = os.environ.get(PREFIX + "VERIFIER_FAILURE", "")
+        verifier_failure_digest = os.environ.get(
+            PREFIX + "VERIFIER_FAILURE_DIGEST", ""
+        )
+        if bool(verifier_failure_env) != bool(verifier_failure_digest):
+            raise SystemExit(
+                "campaign driver: the verifier-failure channel must carry "
+                "both the artifact and its exact digest"
+            )
+        if verifier_failure_env:
+            if sha256(verifier_failure_env.encode("utf-8")) != verifier_failure_digest:
+                raise SystemExit(
+                    "campaign driver: verifier-failure artifact digest "
+                    "mismatch; the delivered artifact is substituted or "
+                    "tampered"
+                )
+            try:
+                artifact = json.loads(verifier_failure_env)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"campaign driver: verifier-failure artifact is not JSON: {exc}"
+                )
+            if not isinstance(artifact, dict) or artifact.get("schema") != (
+                "factory-verifier-failure/v1"
+            ):
+                raise SystemExit(
+                    "campaign driver: verifier-failure artifact has the "
+                    "wrong schema"
+                )
+            if artifact.get("task_id") != int(task_id):
+                raise SystemExit(
+                    "campaign driver: verifier-failure artifact task does "
+                    "not match the selected task; a replay fails closed"
+                )
         if behavior == "complete":
             # The exact received bytes are recorded only for the coherent
             # completion behavior (the deterministic model working the exact
@@ -277,6 +317,7 @@ def main() -> int:
                 "task_excerpt_digest": excerpt_digest,
                 "plan_digest": sha256(plan_bytes),
                 "findings_present": bool(findings_env),
+                "verifier_failure_digest": verifier_failure_digest,
             }
             evidence_rel = (
                 f"src/.factory-test-output/developer-evidence-round-{round_no}.json"
@@ -301,6 +342,19 @@ def main() -> int:
         if behavior == "complete":
             copy_template(f"dev-{task_id}.md", plan_rel, root)
             touch(root, f"src/work-{task_id}.md")
+            if verifier_failure_env:
+                # Phase 2B1 convergence fixture: a same-task retry that
+                # received the validated verifier-failure artifact also
+                # creates the fix marker the deterministic gate requires, so
+                # a fixture can prove a retry converges to a pass.
+                touch(root, f"src/fixed-{task_id}.md")
+            return 0
+        if behavior == "complete-with-fix":
+            # Explicit convergence fixture: the retry completes the task AND
+            # creates the fix marker the deterministic gate requires.
+            copy_template(f"dev-{task_id}.md", plan_rel, root)
+            touch(root, f"src/work-{task_id}.md")
+            touch(root, f"src/fixed-{task_id}.md")
             return 0
         if behavior == "complete-no-file":
             copy_template(f"dev-{task_id}.md", plan_rel, root)

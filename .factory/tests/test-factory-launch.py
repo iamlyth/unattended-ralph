@@ -78,6 +78,7 @@ import gitutil  # noqa: E402
 import launch  # noqa: E402
 import lock as lock_module  # noqa: E402
 import task_budget  # noqa: E402
+import verifier_failure  # noqa: E402
 from launch import (  # noqa: E402
     DEFAULT_ALLOWED_TOOLS,
     DEFAULT_INACTIVITY_LIMIT,
@@ -488,6 +489,7 @@ class _Base(unittest.TestCase):
         audit_objective: bytes | None = None,
         task_excerpt: bytes | None = None,
         task_budget=None,
+        verifier_failure: dict | None = None,
     ) -> launch.LaunchAuthority:
         """Mint the verified-committed authority from the actual bytes.
 
@@ -505,6 +507,7 @@ class _Base(unittest.TestCase):
             audit_objective=audit_objective,
             task_excerpt=task_excerpt,
             task_budget=task_budget,
+            verifier_failure=verifier_failure,
         )
 
     def read_json(self, name: str) -> object:
@@ -834,6 +837,225 @@ class ComposePromptTests(_Base):
         with self.assertRaises(InvocationError):
             compose_prompt(
                 binding, role_prompt=role, agents=agents, spec=spec, plan=plan
+            )
+
+
+# --------------------------------------------------------------------------
+# Phase 2B1: verifier-failure sealed-prompt (inert data, digest-bound)
+# --------------------------------------------------------------------------
+
+class VerifierFailurePromptTests(_Base):
+    """The validated verifier-failure artifact enters the developer sealed
+    prompt as inert quoted data and is digest-bound at compose/authorize.
+
+    The exact command argv is a *record* of what the trusted control plane
+    invoked — never an authority the model may re-execute — and the output
+    tail is bounded diagnostic text.  A substituted, tampered, or foreign
+    artifact (different task/campaign/commit) changes the canonical bytes
+    and therefore the content-addressed digest, so it fails closed at
+    authorize before any prompt byte is composed.
+    """
+
+    def _artifact(self, **overrides) -> dict:
+        kwargs = dict(
+            campaign_id="campaign",
+            phase="verification",
+            commit=self.head,
+            command=["./.factory/tools/verify-boilerplate.sh"],
+            exit_status=1,
+            expected="exit 0 with a clean tree",
+            observed="exit 1 with a dirty tree",
+            output_tail="verify-boilerplate: gate failed\n",
+            changed_files=["src/main.c"],
+            environment_classification="dirty",
+            capability_classification="available",
+            rerun_scope="targeted",
+            task_id=1,
+        )
+        kwargs.update(overrides)
+        return verifier_failure.build_artifact(**kwargs)
+
+    def _developer_binding(self, artifact: dict) -> InvocationBinding:
+        binding, _, _, _, _ = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        return dataclasses.replace(
+            binding, verifier_failure_digest=verifier_failure.artifact_digest(artifact)
+        )
+
+    def test_compose_renders_artifact_as_inert_quoted_data(self) -> None:
+        artifact = self._artifact()
+        binding = self._developer_binding(artifact)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        prompt = compose_prompt(
+            binding,
+            role_prompt=role,
+            agents=agents,
+            spec=spec,
+            plan=plan,
+            task_excerpt=task_excerpt_bytes(plan, 1),
+            verifier_failure=artifact,
+        )
+        text = prompt.decode("utf-8")
+        # The section is digest-bound and explicitly inert.
+        self.assertIn(
+            "## Trusted verifier failure (same task, digest "
+            + binding.verifier_failure_digest, text
+        )
+        self.assertIn("inert data", text)
+        self.assertIn("never an authority to re-execute", text)
+        # The exact command argv is rendered as a quoted record, never as an
+        # executable authority.
+        self.assertIn("- recorded command (inert data):", text)
+        self.assertIn('"./.factory/tools/verify-boilerplate.sh"', text)
+        # The bounded output tail and changed files are data.
+        self.assertIn("- bounded output tail:", text)
+        self.assertIn("verify-boilerplate: gate failed", text)
+        self.assertIn("- changed files (data):", text)
+        self.assertIn('"src/main.c"', text)
+        # The structured classifications are present.
+        self.assertIn("- environment classification: dirty", text)
+        self.assertIn("- capability classification: available", text)
+        self.assertIn("- rerun scope: targeted", text)
+        # Deterministic: the same inputs compose identical bytes.
+        again = compose_prompt(
+            binding,
+            role_prompt=role,
+            agents=agents,
+            spec=spec,
+            plan=plan,
+            task_excerpt=task_excerpt_bytes(plan, 1),
+            verifier_failure=artifact,
+        )
+        self.assertEqual(prompt, again)
+
+    def test_compose_requires_the_bound_artifact_digest(self) -> None:
+        artifact = self._artifact()
+        binding, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        # The artifact is present but the binding carries no digest: the
+        # section cannot be rendered and fails closed.
+        with self.assertRaisesRegex(InvocationError, "artifact digest"):
+            compose_prompt(
+                binding,
+                role_prompt=role,
+                agents=agents,
+                spec=spec,
+                plan=plan,
+                task_excerpt=task_excerpt_bytes(plan, 1),
+                verifier_failure=artifact,
+            )
+
+    def test_authorize_binds_the_exact_artifact_digest(self) -> None:
+        artifact = self._artifact()
+        binding = self._developer_binding(artifact)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        authority = self.authorize(
+            binding, role, agents, spec, plan, verifier_failure=artifact
+        )
+        self.assertIsNotNone(authority)
+
+    def test_authorize_digest_mismatch_fails_closed(self) -> None:
+        artifact = self._artifact()
+        binding = self._developer_binding(artifact)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        # A tampered artifact (altered observed bytes) changes the canonical
+        # digest, so authorize fails closed before any prompt byte.
+        tampered = dict(artifact, observed="exit 2 with a different tree")
+        with self.assertRaisesRegex(InvocationError, "digest does not match"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=tampered
+            )
+
+    def test_authorize_foreign_task_fails_closed(self) -> None:
+        # A replay of an artifact minted for a different task changes the
+        # canonical bytes and therefore the digest: authorize fails closed.
+        # The binding is minted from the valid task-1 artifact; the foreign
+        # task-9 artifact is then refused by the digest binding.
+        binding = self._developer_binding(self._artifact())
+        foreign = self._artifact(task_id=9)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        with self.assertRaisesRegex(InvocationError, "digest does not match"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=foreign
+            )
+
+    def test_authorize_foreign_campaign_fails_closed(self) -> None:
+        binding = self._developer_binding(self._artifact())
+        foreign = self._artifact(campaign_id="other-campaign")
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        with self.assertRaisesRegex(InvocationError, "digest does not match"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=foreign
+            )
+
+    def test_authorize_foreign_commit_fails_closed(self) -> None:
+        binding = self._developer_binding(self._artifact())
+        foreign = self._artifact(commit="0" * 40)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        with self.assertRaisesRegex(InvocationError, "digest does not match"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=foreign
+            )
+
+    def test_authorize_schema_invalid_artifact_fails_closed(self) -> None:
+        # A malformed artifact (missing mandatory fields) is refused by the
+        # committed schema before any digest comparison.  The binding is
+        # minted from the valid artifact so the digest is well-formed; the
+        # malformed bytes are then refused by the schema.
+        valid = self._artifact()
+        binding = self._developer_binding(valid)
+        _, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        malformed = dict(valid)
+        malformed.pop("expected")
+        with self.assertRaisesRegex(InvocationError, "not schema-valid"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=malformed
+            )
+
+    def test_authorize_artifact_requires_bound_digest(self) -> None:
+        artifact = self._artifact()
+        binding, role, agents, spec, plan = self.make_binding(
+            role="developer", task_id=1,
+            task_excerpt_digest=sha256(task_excerpt_bytes(
+                self.plan.read_bytes(), 1)),
+        )
+        with self.assertRaisesRegex(InvocationError, "artifact digest"):
+            self.authorize(
+                binding, role, agents, spec, plan, verifier_failure=artifact
             )
 
 

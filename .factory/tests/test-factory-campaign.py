@@ -1296,6 +1296,10 @@ class EmptyWorkAndFindings(_CampaignBase):
         ])
 
     def test_verification_gate_failure_is_findings(self) -> None:
+        # The planner-complete template leaves no runnable task, so no task
+        # is bound for convergence: the deterministic gate failure with no
+        # bound task stays the existing findings flow (Phase 2B1 never
+        # converges an unbound task).
         ws = self.make({
             "planner": {"behavior": "planned-complete"},
             "developer": {"behavior": "complete"},
@@ -1503,6 +1507,215 @@ class EmptyWorkAndFindings(_CampaignBase):
         self.assertEqual(data["phase_history"][3]["outcome"], "pass")
 
 
+class ConvergenceRetry(_CampaignBase):
+    """Phase 2B1: inner same-task convergence on deterministic verifier
+    failure."""
+
+    def _commit_gate_script(self, ws: FixtureWorkspace, body: str) -> str:
+        """Write and commit a deterministic gate script in the fixture repo."""
+        path = ws.root / "fixture" / "gate.sh"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        os.chmod(path, 0o755)
+        _git(ws.root, "add", "fixture/gate.sh")
+        _git(ws.root, "commit", "-qm", "fixture gate script")
+        return "./fixture/gate.sh"
+
+    def test_same_task_retry_then_pass(self) -> None:
+        # The deterministic gate fails while the fix marker is absent and
+        # passes once the developer's convergence retry creates it: the
+        # campaign converges on the SAME task (no planner/tester/auditor
+        # between retries) and then passes.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        })
+        gate = self._commit_gate_script(ws, (
+            "#!/bin/sh\n"
+            "if [ -f \"$FACTORY_VERIFIER_ROOT/src/fixed-1.md\" ]; then\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n"
+        ))
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", gate,
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 0)
+        assert_history(self, data, [
+            (1, "planning", "planned"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "verifier_failure"),
+            (1, "implementation", "task_completed"),
+            (1, "verification", "pass"),
+            (1, "audit", "pass"),
+        ])
+        # The convergence cycle completed and cleared: the final state
+        # carries no active convergence fields (the audit edges clear them).
+        state = ws.load_state()
+        self.assertIsNone(state.convergence_task_id)
+        self.assertEqual(state.verifier_failure_digest, "")
+        self.assertEqual(state.convergence_retries, 0)
+        self.assertEqual(state.last_failure_fingerprint, "")
+
+    def test_repeated_identical_failure_terminates_honestly(self) -> None:
+        # The gate always fails: the first failure converges to the same
+        # task, the retry reproduces the identical failure fingerprint, and
+        # the loop terminates honestly as findings (no infinite loop, no
+        # planner/tester/auditor ceremony between retries).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "findings"},
+        })
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", str(FALSE_EXECUTABLE),
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 1)
+        history = data["phase_history"]
+        self.assertEqual(history[2]["outcome"], "verifier_failure")
+        self.assertEqual(history[3]["outcome"], "task_completed")
+        self.assertEqual(history[4]["outcome"], "findings")
+        self.assertEqual(history[5]["outcome"], "findings")
+
+    def test_capability_failure_never_converges(self) -> None:
+        # A failed declared capability is not a software verifier failure:
+        # it keeps the existing findings flow (no same-task retry).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "findings"},
+        })
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", str(TRUE_EXECUTABLE),
+            "--capability-command", str(FALSE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["phase_history"][2]["outcome"], "findings")
+
+    def test_tester_findings_never_converge(self) -> None:
+        # Tester-reported findings are not a deterministic software verifier
+        # failure: the existing findings flow runs (no same-task retry).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "findings"},
+            "auditor": {"behavior": "findings"},
+        })
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", str(FALSE_EXECUTABLE),
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["phase_history"][2]["outcome"], "findings")
+
+    def test_exhausted_task_budget_never_converges(self) -> None:
+        # A consumed task resource budget stops the convergence loop exactly
+        # like the attempt budget: the gate failure stays findings.
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "findings"},
+        })
+        (ws.root / ".factory-state").mkdir(mode=0o700, exist_ok=True)
+        ledger = task_budget_module.BudgetLedger(
+            campaign_id="campaign", task_id=1
+        )
+        ledger.record_attempt(
+            wall_time_seconds=999999.0, cpu_time_seconds=0.0,
+            output_bytes=0, max_live_processes=0,
+        )
+        task_budget_module.save_ledger(ws.root, ledger)
+        rc, data = ws.run_cli(extra=[
+            "--verification-command", str(FALSE_EXECUTABLE),
+            "--acceptance-command", str(TRUE_EXECUTABLE),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["phase_history"][2]["outcome"], "findings")
+
+    def test_verifier_modification_fails_closed(self) -> None:
+        # The verifier is independently bound before planning; a developer
+        # that changes the verifier-owned path is rejected by the scope
+        # authority (task_failed, dirty work preserved) and the campaign
+        # terminates honestly — the tampered bytes never execute and never
+        # certify the developer's own work (self-certification prevention).
+        ws = self.make({
+            "planner": {"behavior": "planned"},
+            "developer": {"behavior": "complete"},
+            "tester": {"behavior": "pass"},
+            "auditor": {"behavior": "pass"},
+        })
+        self._commit_gate_script(ws, "#!/bin/sh\nexit 0\n")
+        config = ws.derive_config()
+        config = dataclasses.replace(
+            config,
+            verification_command=("./fixture/gate.sh",),
+            acceptance_command=(str(TRUE_EXECUTABLE),),
+        )
+        template = ws.root / "fixture" / "templates" / "planner-1.md"
+        dev_template = ws.root / "fixture" / "templates" / "dev-1.md"
+
+        def runner(role, state, head, task_id, attempt):
+            if role == "planner":
+                shutil.copy2(template, ws.root / config.plan_path)
+                return campaign_module.RoleOutcome("planner", 0)
+            if role == "developer":
+                shutil.copy2(dev_template, ws.root / config.plan_path)
+                (ws.root / "src").mkdir(exist_ok=True)
+                (ws.root / "src" / "work-1.md").write_text("work\n")
+                # Tamper with the verifier-owned path (scope violation).
+                (ws.root / "fixture" / "gate.sh").write_text(
+                    "#!/bin/sh\nexit 1\n"
+                )
+                return campaign_module.RoleOutcome("developer", 0)
+            if role == "tester":
+                result_path = ws.root / config.phase_result_path
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps({
+                        "schema": "factory-phase-result/v1",
+                        "outcome": "pass",
+                    }),
+                    encoding="utf-8",
+                )
+                return campaign_module.RoleOutcome("tester", 0)
+            if role == "auditor":
+                result_path = ws.root / config.audit_result_path
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(
+                    json.dumps({
+                        "schema": "factory-phase-result/v1",
+                        "outcome": "pass",
+                    }),
+                    encoding="utf-8",
+                )
+                return campaign_module.RoleOutcome("auditor", 0)
+            raise AssertionError(f"unexpected role {role}")
+
+        result = campaign_module.Campaign(config, role_runner=runner).run()
+        self.assertEqual(result.terminal_phase, "infrastructure_failure")
+        self.assertEqual(result.terminal_outcome, "infrastructure_failure")
+        history = [(r.phase, r.outcome) for r in result.phase_history]
+        self.assertEqual(history, [
+            ("planning", "planned"),
+            ("implementation", "task_completed"),
+            ("verification", "infrastructure_failure"),
+        ])
+        # The tampered verifier never executed: the retained descriptor was
+        # re-validated immediately before the gate and the committed-tree
+        # substitution failed closed (self-certification prevention).
+        self.assertIn(
+            "verifier binding failed closed",
+            result.phase_history[-1].detail,
+        )
+
+
 class ScopeAndGit(_CampaignBase):
     """§12 scope authority, commit boundary, and dirty preservation."""
 
@@ -1666,7 +1879,18 @@ class LifecycleAndCli(_CampaignBase):
         self.assertEqual(rc, 0)
         state = ws.load_state()
         keys = sorted(state.to_dict())
-        self.assertEqual(keys, sorted(state_module.FIELD_NAMES))
+        # Phase 2B1: the convergence-extension fields are serialized only
+        # when active, so a campaign that never converged round-trips the
+        # exact legacy 17-field shape (migration compatibility).
+        self.assertEqual(
+            keys,
+            sorted(f for f in state_module.FIELD_NAMES
+                   if f not in state_module.CONVERGENCE_FIELDS),
+        )
+        self.assertNotIn("convergence_task_id", keys)
+        self.assertNotIn("verifier_failure_digest", keys)
+        self.assertNotIn("convergence_retries", keys)
+        self.assertNotIn("last_failure_fingerprint", keys)
 
     def test_write_once_campaign_binding_fails_closed(self) -> None:
         ws = self.make(SUCCESS_SCENARIO)

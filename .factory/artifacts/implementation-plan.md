@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: 2369019f119005a430f88d9fc10cefcf957dad65
-spec_blob: 187c352e0e6d287d3bd3b8e3bc26f1d895c1ae3a
+spec_blob: e05ea30b22fca2af6607e09ffc4012d9ca572890
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -134,17 +134,17 @@ Tasks 25-27 plus the pending final audit.
 | TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 28 |
 | QUOTA-01 | §10 | partial | existing `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 28 |
 | QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 28 |
-| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25, Task 28 |
+| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection, including the Phase 2B1 convergence-extension fields (optional in parse, serialized only while active) | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25, Task 28, Task 30 |
 | STATE-02 | §11, §13, §14, §15 | partial | the verification outcome `software_verified_external_acceptance_blocked` records software fully verified while external release acceptance remains blocked; it advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority | Task 25, Task 27, Task 28 |
 | LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 28 |
 | PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 22, Task 28 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 23, Task 28 |
-| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28 |
+| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin, including the Phase 2B1 inner same-task convergence edge | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28, Task 30 |
 | COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28 |
 | FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 27, Task 28 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 22, Task 28 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained; installed-tier receipts minted from the installed copy | Task 12, Task 16, Task 20, Task 23, Task 26, Task 28 |
-| EVID-02 | §19 | partial | verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection | Task 26, Task 27, Task 28 |
+| EVID-02 | §19 | partial | verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection; a trusted deterministic software verifier failure converges to the SAME task at most twice per task (`MAX_CONVERGENCE_RETRIES = 2`) with the artifact digest-bound and rendered as inert data, and a repeated identical failure or consumed task resource budget terminates the loop honestly | Task 26, Task 27, Task 28, Task 30 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 23, Task 28 |
 | RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 21, Task 24, Task 28 |
 | HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 23, Task 28 |
@@ -1744,10 +1744,70 @@ Tasks 25-27 plus the pending final audit.
 - Evidence: Phase 2A slice committed on `boilerplate-develop` with the task-budget unit suite, launch budget-enforcement suite, campaign exhaustion-classification tests, updated prompts/schema/spec, and the full boilerplate gate passing.
 - Documentation impact: `docs/FACTORY-LOOP-SPEC.md` §9.1; `.factory/prompts/developer.md`; `.factory/prompts/tester.md`; `.factory/schemas/factory-task-budget-v1.schema.json`.
 
-## Task 29: Final documentation and specification audit
+## Task 29: Phase 2B1 inner same-task convergence on deterministic verifier failure
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28
+- Dependencies: Task 6, Task 9, Task 26, Task 28
+- Scope: Implement the Phase 2B1 inner same-task convergence edge: when a
+  trusted deterministic software verifier failure meets every convergence
+  condition, the campaign returns to implementation for the SAME task with the
+  validated `factory-verifier-failure/v1` artifact, bypassing
+  planner/tester/auditor ceremony.  The convergence conditions are exactly:
+  the deterministic gate actually ran and returned an ordinary nonzero status
+  (never 126/127 or a negative supervisor status), the tester passed with no
+  findings, the declared capability is available and ran clean, no scope
+  violation occurred, the task is bound, the retry budget remains, the failure
+  is not a byte-identical repeat (same `failure_fingerprint`), the task
+  resource budget is not exhausted, and the campaign deadline remains.
+  Infrastructure, capability, human/external, and tester-finding failures
+  never converge.  The artifact is published write-once under the private
+  `.factory-state/` namespace by its content-addressed digest and is
+  re-validated at consumption against the exact commit, campaign, task, and
+  digest; a stale commit, a foreign campaign/task, an altered digest, a
+  missing artifact, or a replay across task/campaign/commit fails closed
+  before any consumption.  The artifact's structured fields enter the
+  developer's sealed prompt as inert quoted data (the exact command argv is a
+  record of what the trusted control plane invoked, never an authority to
+  re-execute; the output tail is bounded diagnostic text).  The state binds
+  `convergence_task_id`, `verifier_failure_digest`, a monotonic
+  `convergence_retries` count, and `last_failure_fingerprint`; the cycle is
+  cleared on every transition except the two inner-loop edges
+  (`implementation --task_completed--> verification` binds the task being
+  verified; `verification --verifier_failure--> implementation` carries the
+  cycle forward).  The campaign performs at most two same-task convergence
+  retries per task (`MAX_CONVERGENCE_RETRIES = 2`); a repeated identical
+  failure (same fingerprint) and a consumed task resource budget terminate the
+  loop honestly before that bound.  The convergence edge never weakens
+  round-zero readiness, the `infrastructure_failure` fail-closed closes, or
+  human authority.
+- Acceptance criteria: unit tests cover the convergence-extension state fields
+  (optional in parse, serialized only while active, migration-compatible
+  round-trip, and the fail-closed invariants), the `verifier_failure` state
+  edge (requires a bound task and validated artifact digest/fingerprint,
+  carries the cycle forward, clears on other transitions), the write-once
+  artifact publication/read and the commit/campaign/task/digest consumption
+  validation, and the launch sealed-prompt inert-data rendering plus the
+  compose/authorize digest/task/campaign/commit mismatch fail-closed;
+  integration tests cover a same-task retry that then passes, a repeated
+  identical failure that terminates honestly, and capability/tester-finding/
+  exhausted-budget failures that never converge; the focused suites and the
+  full `./scripts/verify-boilerplate.sh` gate pass serially.
+- Verification: `.factory/tests/test-factory-state.py`;
+  `.factory/tests/test-factory-verifier-failure.py`;
+  `.factory/tests/test-factory-launch.py` (VerifierFailurePromptTests);
+  `.factory/tests/test-factory-campaign.py` (ConvergenceRetry);
+  `.factory/tools/verify-boilerplate.sh`.
+- Evidence: Phase 2B1 slice committed on `boilerplate-develop` with the
+  convergence state/artifact/launch/campaign suites, the updated
+  spec/state-schema/FACTORY/OPERATIONS documentation, and the full boilerplate
+  gate passing.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` §11/§13/§14/§19/§22/§24;
+  `.factory/schemas/factory-state-v1.schema.md`; `docs/FACTORY.md`;
+  `docs/OPERATIONS.md`.
+## Task 30: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29
 - Scope: Current checkpoint: the security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the
@@ -1819,3 +1879,4 @@ Tasks 25-27 plus the pending final audit.
   fixture authority remains explicitly simulated and no production runner,
   model, campaign, or deployment is claimed.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.
+

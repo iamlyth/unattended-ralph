@@ -284,7 +284,11 @@ It contains exactly:
 - `selected_task_id`, if any;
 - `attempt_number` (monotonic within the current task and reset to zero only on a trusted task/phase transition);
 - `phase_started_at_monotonic` and `attempt_started_at_monotonic` for timeout recovery;
-- `last_outcome`, which is a trusted control-plane enum, not an evidence claim.
+- `last_outcome`, which is a trusted control-plane enum, not an evidence claim;
+- `convergence_task_id`, `verifier_failure_digest`, `convergence_retries`, and
+  `last_failure_fingerprint` (Phase 2B1 convergence-extension fields, present
+  only while an inner same-task convergence cycle is active; a state with an
+  inactive cycle serializes byte-identically to a pre-Phase-2B1 state).
 
 No wall-clock timestamp or additional field is accepted by the schema.
 
@@ -298,6 +302,7 @@ planning --attempts-exhausted--> failed
 implementation --dirty-attempts-exhausted--> interrupted
 verification --infrastructure-failure--> infrastructure_failure
 verification --software_verified_external_acceptance_blocked--> audit
+verification --verifier_failure--> implementation
 audit --nonfinal--> planning(next round)
 audit --final--> success | findings | blocked
 ```
@@ -312,6 +317,26 @@ when the audit phase was entered with this verification outcome, an audit
 `success`) and to the next round's `planning` in a non-final round.  The
 outcome never weakens round-zero readiness, the `infrastructure_failure`
 fail-closed closes, or human authority.
+
+`verifier_failure` is the Phase 2B1 inner same-task convergence outcome: a
+trusted deterministic software verifier failure returns to implementation
+for the SAME task (`convergence_task_id`) with the validated
+`factory-verifier-failure/v1` artifact, without planner/tester/auditor
+ceremony.  The edge is conditional and bounded: the campaign takes it only
+when the deterministic gate actually ran and returned an ordinary nonzero
+status (never 126/127 or a negative supervisor status), the tester passed
+with no findings, the declared capability is available and ran clean, no
+scope violation occurred, the task is bound, the retry budget remains, the
+failure is not a byte-identical repeat, the task resource budget is not
+exhausted, and the campaign deadline remains.  Infrastructure, capability,
+human/external, and tester-finding failures never converge: they keep the
+existing `findings`/`blocked`/`infrastructure_failure` flow.  The campaign
+performs at most two same-task convergence retries per task
+(`MAX_CONVERGENCE_RETRIES = 2`); a repeated identical failure (same
+fingerprint) and a consumed task resource budget terminate the loop honestly
+before that bound.  The convergence edge never weakens round-zero
+readiness, the `infrastructure_failure` fail-closed closes, or human
+authority.
 
 Round advances only on `audit --nonfinal`; phase never moves backward within a round. State fields that bind a completed phase are write-once; round and attempt counters are monotonic. The harness records the state digest before every untrusted phase and reopens and validates the file after the phase. Any same-UID mutation not produced by the trusted transition, including content, mode, owner, link-count, or pathname identity changes, fails closed.
 
@@ -348,7 +373,10 @@ Outcomes:
 - `task_failed`: deterministic check or model process failed;
 - `interrupted`: bounded process interruption;
 - `work_exhausted`: no pending or in-progress tasks remain;
-- `blocked`: every unfinished task is explicitly blocked on unavailable external or human evidence.
+- `blocked`: every unfinished task is explicitly blocked on unavailable external or human evidence;
+- `verifier_failure`: a Phase 2B1 inner same-task convergence retry returned to
+  implementation for the SAME task with the validated verifier-failure
+  artifact (see §13.3/§14).
 
 `work_exhausted` and `blocked` are not product acceptance. `task_failed` and `task_progress` retry the same plan task while its bounded attempt budget remains. If the budget expires with dirty work, the campaign terminates `interrupted` and verification does not run. If the budget expires cleanly with a reproducible task failure, the trusted harness records a finding and proceeds to verification/audit at the last coherent commit.
 
@@ -364,7 +392,16 @@ gate passed, no finding remains, the declared capability is available, and
 the tester cited exact blocked references — software is fully verified while
 external release acceptance (human approval, real-system evidence, or an
 unavailable external release authority) remains blocked;
-- `infrastructure_failure` when the verifier itself cannot be trusted.
+- `infrastructure_failure` when the verifier itself cannot be trusted;
+- `verifier_failure` when the deterministic software verifier actually ran and
+  returned an ordinary nonzero status while the tester passed with no
+  findings, the declared capability is available and ran clean, no scope
+  violation occurred, the task is bound, the retry budget remains, the
+  failure is not a byte-identical repeat, the task resource budget is not
+  exhausted, and the campaign deadline remains.  It returns to implementation
+  for the SAME task (at most two retries per task, `MAX_CONVERGENCE_RETRIES =
+  2`); a repeated identical failure (same fingerprint) and a consumed task
+  resource budget terminate the loop honestly before that bound.
 
 Verification `findings` or `blocked` do not prevent the independent audit from running. In a non-final round they advance to audit and then become next-round plan inputs. `blocked` means a required, correctly declared capability or human/external authority is unavailable while the verifier and binding remain trusted. `software_verified_external_acceptance_blocked` also advances to the independent audit, but it can never produce campaign success: an audit `pass` entered from it resolves to the terminal `blocked` state in the final round (never `success`) and to the next round's `planning` in a non-final round. `infrastructure_failure` means verifier identity, digest, execution, receipt publication, or control-plane trust is invalid; it fails closed and stops the campaign.
 
@@ -394,6 +431,23 @@ For non-final rounds:
 
 - audit `pass` or `findings` advances to the next round;
 - audit findings MUST be represented in the next plan before development starts.
+
+Phase 2B1 inner same-task convergence: when a trusted deterministic software
+verifier failure meets every convergence condition (§13.3), the campaign
+returns to implementation for the SAME task with the validated
+`factory-verifier-failure/v1` artifact, bypassing planner/tester/auditor
+ceremony.  The convergence cycle is task-bound and monotonic: the state binds
+`convergence_task_id`, the artifact digest, a monotonic `convergence_retries`
+count, and the last failure fingerprint, and the cycle is cleared on every
+transition except the two inner-loop edges (`implementation --task_completed-->
+verification` binds the task being verified; `verification --verifier_failure-->
+implementation` carries the cycle forward).  The campaign performs at most two
+same-task convergence retries per task (`MAX_CONVERGENCE_RETRIES = 2`); a
+repeated identical failure (same fingerprint) and a consumed task resource
+budget terminate the loop honestly before that bound.  Infrastructure,
+capability, human/external, and tester-finding failures never converge: they
+keep the existing `findings`/`blocked`/`infrastructure_failure` flow with no
+planner/tester/auditor ceremony skipped.
 
 For the final round:
 
@@ -476,6 +530,8 @@ The verifier entrypoint MUST be opened and bound to its committed blob and secur
 
 Every deterministic verifier failure MUST be recorded as a strict structured verifier-failure artifact (schema `factory-verifier-failure/v1`, EVID-02) carrying the exact command, the exact exit status, expected vs observed, a bounded relevant output tail and/or a bounded output reference, changed files, artifact references, an environment/capability classification, and a rerun scope.  Strings in the artifact are data, never executable path/argv authority: the exact command is an argv record of what the trusted control plane invoked and no consumer may re-execute it from the artifact.  Sizes are bounded, enums are closed, and duplicate JSON keys are rejected at parse time.  The artifact is the structured-handoff foundation for the implementer-owned inspect/edit/test/diagnose loop and never weakens round-zero readiness, infrastructure-failure fail-closed closes, or human authority.
 
+Phase 2B1: a trusted deterministic software verifier failure that meets every convergence condition (§13.3) returns to implementation for the SAME task with the validated artifact.  The artifact is published write-once under the private `.factory-state/` namespace by its content-addressed digest and is re-validated at consumption against the exact commit, campaign, task, and digest; a stale commit, a foreign campaign/task, an altered digest, a missing artifact, or a replay across task/campaign/commit fails closed before any consumption.  The artifact's structured fields enter the developer's sealed prompt as inert quoted data — the exact command argv is a record of what the trusted control plane invoked, never an authority to re-execute, and the output tail is bounded diagnostic text.  The campaign performs at most two same-task convergence retries per task (`MAX_CONVERGENCE_RETRIES = 2`); a repeated identical failure (same fingerprint) and a consumed task resource budget terminate the loop honestly before that bound.
+
 Missing evidence remains a finding. A receipt declaration is not a receipt; a model assertion is not evidence; private integration is not real-system acceptance; machine vision is not human approval.
 
 ## 20. Direct Pi execution
@@ -543,7 +599,13 @@ The generic implementation is not acceptable until tests prove:
 24. synthetic Ollama credentials appear in neither child argv nor child environments during `--check` and `--wait`;
 25. the immutable verifier descriptor rejects pathname replacement;
 26. Git commit-boundary bypass attempts remain rejected;
-27. no new implementation depends on Ralph lifecycle events, tokens, shims, runtime tasks, or memories.
+27. no new implementation depends on Ralph lifecycle events, tokens, shims, runtime tasks, or memories;
+28. a trusted deterministic software verifier failure converges to the SAME task
+    at most twice per task (`MAX_CONVERGENCE_RETRIES = 2`), the validated
+    verifier-failure artifact is digest-bound and rendered as inert data, a
+    repeated identical failure and a consumed task resource budget terminate
+    the loop honestly, and infrastructure/capability/tester-finding failures
+    never converge.
 
 ## 23. Acceptance criteria for the redesign
 
@@ -588,7 +650,7 @@ The stable IDs below are the conformance authority for this specification. Secti
 | FIND-01 | §16 | Findings reach later developers only through a planner revision of the canonical plan | private_integration |
 | CRED-01 | §18 | Existing Pi tool-call/tool-result credential enforcement and trusted SDK authority remain active | private_integration |
 | EVID-01 | §19 | Evidence tiers, exact receipts/manifests, immutable verifier binding, and no-elevation rules remain authoritative | installed |
-| EVID-02 | §19 | Verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection | unit |
+| EVID-02 | §19 | Verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection; a trusted deterministic software verifier failure converges to the SAME task at most twice per task (`MAX_CONVERGENCE_RETRIES = 2`) with the artifact digest-bound and rendered as inert data, and a repeated identical failure or consumed task resource budget terminates the loop honestly | unit |
 | VIS-01 | §19 | Visual evidence preserves exact-byte provenance and never substitutes machine review for human authority | installed |
 | RUNNER-01 | §19 | Runner/capability evidence remains signed, exact-commit, non-skipped, and non-simulated | real_system |
 | HIDE-01 | §3 | Harness files remain within hidden namespaces/external prefix and never pollute product/build/package paths | installed |

@@ -162,12 +162,22 @@ PHASE_VALUES = PHASES + TERMINAL_PHASES
 # remains blocked; it advances to the independent audit and can never produce
 # campaign success (an audit ``pass`` entered from this outcome resolves to
 # the terminal ``blocked`` state in the final round).
+#
+# ``verifier_failure`` is the Phase 2B1 inner same-task convergence outcome: a
+# trusted deterministic software verifier failure returns to implementation
+# for the SAME task (``convergence_task_id``) while the task resource budget
+# remains and meaningful progress is possible, without planner/tester/auditor
+# ceremony.  The convergence edge is conditional — the campaign takes it only
+# when the deterministic software verifier failed and the convergence
+# conditions hold; every other verification failure keeps the existing
+# ``findings``/``blocked``/``infrastructure_failure`` flow.
 OUTCOMES = (
     "planned", "failed", "interrupted",
     "task_completed", "task_progress", "task_failed",
     "work_exhausted", "blocked",
     "pass", "findings", "infrastructure_failure",
     "software_verified_external_acceptance_blocked",
+    "verifier_failure",
     "success",
 )
 
@@ -189,6 +199,7 @@ TRANSITIONS: Dict[Tuple[str, str], str] = {
     ("verification", "findings"): "audit",
     ("verification", "blocked"): "audit",
     ("verification", "software_verified_external_acceptance_blocked"): "audit",
+    ("verification", "verifier_failure"): "implementation",
     ("verification", "infrastructure_failure"): "infrastructure_failure",
     ("audit", "interrupted"): "interrupted",
     ("audit", "infrastructure_failure"): "infrastructure_failure",
@@ -222,7 +233,8 @@ RETRY_OUTCOMES: Dict[str, Tuple[str, ...]] = {
 PHASE_OUTCOMES: Dict[str, frozenset] = {
     "planning": frozenset({"interrupted", "pass", "findings", "blocked"}),
     "implementation": frozenset(
-        {"planned", "task_progress", "task_failed", "interrupted"}
+        {"planned", "task_progress", "task_failed", "interrupted",
+         "verifier_failure"}
     ),
     "verification": frozenset(
         {"task_completed", "work_exhausted", "blocked", "task_failed"}
@@ -239,6 +251,17 @@ BINDING_FIELDS = (
     "rounds_requested", "specification_digest", "role_prompt_digests",
     "audit_objectives_digest",
 )
+# Phase 2B1 convergence-extension fields (optional in parse, serialized only
+# when active): the inner same-task convergence cycle binds the task being
+# verified/converged on, the digest of the latest validated verifier-failure
+# artifact, the monotonic convergence-retry count, and the fingerprint of the
+# last failure.  A state with an inactive convergence cycle serializes
+# byte-identically to a pre-Phase-2B1 state (migration compatibility).
+CONVERGENCE_FIELDS: Tuple[str, ...] = (
+    "convergence_task_id", "verifier_failure_digest",
+    "convergence_retries", "last_failure_fingerprint",
+)
+
 # The exact §11 field set (FACTORY-LOOP-SPEC §11): no wall-clock timestamp,
 # model prose, task description, memory, evidence claim, or copy of the plan
 # is accepted.  Pre-round hook and readiness extension data live in strict
@@ -250,7 +273,7 @@ FIELD_NAMES: Tuple[str, ...] = (
     "audit_objectives_digest", "phase_base_commit", "selected_task_id",
     "attempt_number", "phase_started_at_monotonic",
     "attempt_started_at_monotonic", "last_outcome",
-)
+) + CONVERGENCE_FIELDS
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -464,10 +487,22 @@ class FactoryState:
     phase_started_at_monotonic: int
     attempt_started_at_monotonic: int
     last_outcome: Optional[str]
+    # Phase 2B1 convergence-extension fields (inactive defaults; serialized
+    # only when active so a pre-Phase-2B1 state round-trips byte-identically).
+    convergence_task_id: Optional[int] = None
+    verifier_failure_digest: str = ""
+    convergence_retries: int = 0
+    last_failure_fingerprint: str = ""
 
     def to_dict(self) -> Dict[str, object]:
-        """Deterministic JSON-ready dict (role digests sorted by role)."""
-        return {
+        """Deterministic JSON-ready dict (role digests sorted by role).
+
+        The Phase 2B1 convergence-extension fields are serialized only when
+        active, so a state with an inactive convergence cycle serializes
+        byte-identically to a pre-Phase-2B1 state (migration compatibility:
+        the state digest of an in-flight campaign never changes on upgrade).
+        """
+        result: Dict[str, object] = {
             "schema": self.schema,
             "repository_identity": self.repository_identity,
             "branch": self.branch,
@@ -486,6 +521,15 @@ class FactoryState:
             "attempt_started_at_monotonic": self.attempt_started_at_monotonic,
             "last_outcome": self.last_outcome,
         }
+        if self.convergence_task_id is not None:
+            result["convergence_task_id"] = self.convergence_task_id
+        if self.verifier_failure_digest:
+            result["verifier_failure_digest"] = self.verifier_failure_digest
+        if self.convergence_retries:
+            result["convergence_retries"] = self.convergence_retries
+        if self.last_failure_fingerprint:
+            result["last_failure_fingerprint"] = self.last_failure_fingerprint
+        return result
 
     def validate(self) -> None:
         """Validate every structural invariant (``parse_state`` does the same)."""
@@ -688,6 +732,54 @@ def _validate_state(state: FactoryState) -> None:
                 f"`last_outcome` {state.last_outcome!r} is not a §13 outcome "
                 f"of phase {state.current_phase!r}"
             )
+    # Phase 2B1 convergence-extension invariants: the convergence cycle is
+    # task-bound, monotonic, and active only while a validated verifier-
+    # failure artifact is being consumed (implementation) or a task is being
+    # verified (verification).  A forged/rewound/foreign convergence field
+    # fails closed exactly like every other state field.
+    if state.convergence_task_id is not None and (
+        isinstance(state.convergence_task_id, bool)
+        or not isinstance(state.convergence_task_id, int)
+        or state.convergence_task_id < 1
+    ):
+        raise StateTamperError(
+            "`convergence_task_id` must be a positive integer when present"
+        )
+    if state.verifier_failure_digest and not SHA256_RE.fullmatch(
+        state.verifier_failure_digest
+    ):
+        raise StateTamperError(
+            "`verifier_failure_digest` must be a 64-hex SHA-256 digest or empty"
+        )
+    if (
+        isinstance(state.convergence_retries, bool)
+        or not isinstance(state.convergence_retries, int)
+        or state.convergence_retries < 0
+    ):
+        raise StateTamperError(
+            "`convergence_retries` must be a non-negative integer"
+        )
+    if state.last_failure_fingerprint and not SHA256_RE.fullmatch(
+        state.last_failure_fingerprint
+    ):
+        raise StateTamperError(
+            "`last_failure_fingerprint` must be a 64-hex SHA-256 digest or "
+            "empty"
+        )
+    if state.convergence_retries > 0 and state.convergence_task_id is None:
+        raise StateTamperError(
+            "a convergence cycle requires a bound `convergence_task_id`"
+        )
+    if state.verifier_failure_digest and state.current_phase != "implementation":
+        raise StateTamperError(
+            "`verifier_failure_digest` is active only during the "
+            "implementation phase"
+        )
+    if state.last_failure_fingerprint and state.convergence_retries == 0:
+        raise StateTamperError(
+            "`last_failure_fingerprint` requires at least one convergence "
+            "retry"
+        )
 
 
 def migrate_offline_state(data: object) -> Dict[str, object]:
@@ -745,8 +837,12 @@ def parse_state(data: object) -> FactoryState:
     # Runtime parsing is deliberately migration-free.  Legacy/offline callers
     # must opt in through ``migrate_offline_state``; production recovery can
     # therefore never synthesize a readiness authority at the old version.
+    # The Phase 2B1 convergence-extension fields are optional in parse: a
+    # pre-Phase-2B1 state (or a state with an inactive convergence cycle)
+    # loads with the inactive defaults, so an in-flight campaign never fails
+    # closed on upgrade (migration compatibility).
     extra = sorted(set(data) - set(FIELD_NAMES))
-    missing = sorted(set(FIELD_NAMES) - set(data))
+    missing = sorted(set(FIELD_NAMES) - set(data) - set(CONVERGENCE_FIELDS))
     if extra or missing:
         raise StateTamperError(
             "control state must contain exactly the §11 field set"
@@ -788,6 +884,10 @@ def parse_state(data: object) -> FactoryState:
             data, "attempt_started_at_monotonic"
         ),
         last_outcome=data.get("last_outcome"),
+        convergence_task_id=data.get("convergence_task_id"),
+        verifier_failure_digest=data.get("verifier_failure_digest", ""),
+        convergence_retries=data.get("convergence_retries", 0),
+        last_failure_fingerprint=data.get("last_failure_fingerprint", ""),
     )
     _validate_state(state)
     return state
@@ -815,6 +915,8 @@ def advance(
     now: Optional[int] = None,
     plan_digest: Optional[str] = None,
     phase_base_commit: Optional[str] = None,
+    verifier_failure_digest: Optional[str] = None,
+    failure_fingerprint: Optional[str] = None,
 ) -> FactoryState:
     """Apply exactly one §11 transition and return the new trusted state.
 
@@ -830,6 +932,13 @@ def advance(
       ``pass`` entered from this outcome resolves to the terminal ``blocked``
       state in the final round (never ``success``) and to the next round's
       ``planning`` in a non-final round;
+    * ``verification --verifier_failure--> implementation`` is the Phase 2B1
+      inner same-task convergence edge: a trusted deterministic software
+      verifier failure returns to implementation for the SAME task
+      (``convergence_task_id``) with the validated failure artifact
+      (``verifier_failure_digest``/``failure_fingerprint`` required there),
+      preserving the convergence cycle and incrementing ``convergence_retries``
+      without planner/tester/auditor ceremony;
     * ``audit`` resolves finality from ``rounds_requested``:
       ``current_round < rounds_requested`` advances to the next round's
       ``planning`` (``current_round`` increments); the final round ends the
@@ -845,7 +954,12 @@ def advance(
     Attempt bookkeeping is reset on every phase change
     (``selected_task_id``/``attempt_number``/``attempt_started_at_monotonic``)
     and ``phase_started_at_monotonic`` is refreshed, so a reloaded state is
-    always internally consistent.
+    always internally consistent.  The Phase 2B1 convergence-extension fields
+    are cleared on every transition except the two inner-loop edges
+    (``implementation --task_completed--> verification`` binds the task being
+    verified; ``verification --verifier_failure--> implementation`` carries
+    the cycle forward), so a convergence cycle can never leak across a task
+    or phase boundary.
     """
     state.validate()
     if state.current_phase in TERMINAL_PHASES:
@@ -887,7 +1001,7 @@ def advance(
                 f"no §11 transition from {state.current_phase!r} with "
                 f"outcome {outcome!r}"
             )
-    if target == "implementation":
+    if state.current_phase == "planning" and outcome == "planned":
         if plan_digest is None or phase_base_commit is None:
             raise StateTransitionError(
                 "planning -> implementation requires the bound plan_digest "
@@ -909,6 +1023,42 @@ def advance(
                 "planning -> implementation transition"
             )
         next_plan_digest, next_base = state.plan_digest, state.phase_base_commit
+    # Phase 2B1 convergence-extension fields.  The default clears the
+    # convergence cycle on every transition; the two inner-loop edges carry
+    # it forward (task_completed binds the task being verified; the
+    # verifier_failure edge returns to implementation for that same task).
+    next_convergence_task_id: Optional[int] = None
+    next_verifier_failure_digest = ""
+    next_convergence_retries = 0
+    next_last_failure_fingerprint = ""
+    if state.current_phase == "implementation" and outcome == "task_completed":
+        next_convergence_task_id = state.selected_task_id
+        next_convergence_retries = state.convergence_retries
+        next_last_failure_fingerprint = state.last_failure_fingerprint
+    elif state.current_phase == "verification" and outcome == "verifier_failure":
+        if state.convergence_task_id is None:
+            raise StateTransitionError(
+                "verifier_failure requires a bound convergence_task_id; a "
+                "convergence retry can never target an unbound task"
+            )
+        if (
+            not isinstance(verifier_failure_digest, str)
+            or not SHA256_RE.fullmatch(verifier_failure_digest)
+        ):
+            raise StateTamperError(
+                "`verifier_failure_digest` must be a 64-hex SHA-256 digest"
+            )
+        if (
+            not isinstance(failure_fingerprint, str)
+            or not SHA256_RE.fullmatch(failure_fingerprint)
+        ):
+            raise StateTamperError(
+                "`failure_fingerprint` must be a 64-hex SHA-256 digest"
+            )
+        next_convergence_task_id = state.convergence_task_id
+        next_verifier_failure_digest = verifier_failure_digest
+        next_convergence_retries = state.convergence_retries + 1
+        next_last_failure_fingerprint = failure_fingerprint
     if now is None:
         now = time.monotonic_ns()
     if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
@@ -932,6 +1082,10 @@ def advance(
         attempt_started_at_monotonic=0,
         phase_started_at_monotonic=now,
         last_outcome=target if target in TERMINAL_PHASES else outcome,
+        convergence_task_id=next_convergence_task_id,
+        verifier_failure_digest=next_verifier_failure_digest,
+        convergence_retries=next_convergence_retries,
+        last_failure_fingerprint=next_last_failure_fingerprint,
     )
     result.validate()
     return result

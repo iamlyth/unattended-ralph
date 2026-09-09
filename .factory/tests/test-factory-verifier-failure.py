@@ -21,7 +21,9 @@ structured-handoff foundation:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +47,11 @@ from verifier_failure import (  # noqa: E402
     SCHEMA_NAME,
     VerifierFailureError,
     VerifierFailureMalformedError,
+    artifact_digest,
+    failure_fingerprint,
+    publish_artifact,
+    read_artifact,
+    validate_consumption,
     artifact_bytes,
     build_artifact,
     parse_artifact,
@@ -60,6 +67,7 @@ def valid_artifact(**overrides):
         "schema": SCHEMA_NAME,
         "campaign_id": CAMPAIGN,
         "phase": "verification",
+        "task_id": 3,
         "commit": COMMIT,
         "command": ["./.factory/tools/verify-boilerplate.sh"],
         "exit_status": 1,
@@ -142,13 +150,16 @@ class PositiveTest(unittest.TestCase):
             environment_classification="clean",
             capability_classification="unavailable",
             rerun_scope="full",
+            task_id=3,
         )
         self.assertEqual(artifact["schema"], SCHEMA_NAME)
         self.assertEqual(artifact["exit_status"], 2)
+        self.assertEqual(artifact["task_id"], 3)
         validate_artifact(artifact)
 
     def test_audit_phase_is_accepted(self) -> None:
         artifact = valid_artifact(phase="audit")
+        artifact.pop("task_id")
         validate_artifact(artifact)
 
     def test_optional_fields_may_be_absent(self) -> None:
@@ -354,6 +365,86 @@ class StaleCommitTest(unittest.TestCase):
         with self.assertRaises(VerifierFailureMalformedError) as caught:
             validate_artifact(artifact)
         self.assertIn(fragment, str(caught.exception))
+
+
+class PublicationAndConsumptionTest(unittest.TestCase):
+    """Phase 2B1: write-once publication and sealed consumption validation."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="factory-vf-test."))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / ".factory-state").mkdir(mode=0o700)
+
+    def test_publish_read_roundtrip(self) -> None:
+        artifact = valid_artifact()
+        digest, name = publish_artifact(self.tmp, CAMPAIGN, artifact)
+        self.assertEqual(len(digest), 64)
+        self.assertTrue(name.startswith("verifier-failure-"))
+        loaded = read_artifact(self.tmp, CAMPAIGN, digest)
+        self.assertEqual(loaded, artifact)
+
+    def test_publish_is_write_once(self) -> None:
+        artifact = valid_artifact()
+        digest, _ = publish_artifact(self.tmp, CAMPAIGN, artifact)
+        # A byte-identical re-publication is accepted (crash idempotency).
+        digest2, _ = publish_artifact(self.tmp, CAMPAIGN, artifact)
+        self.assertEqual(digest, digest2)
+        # A different artifact at the same content-addressed name fails
+        # closed (a forged or tampered marker is never silently replaced).
+        path = self.tmp / ".factory-state" / f"verifier-failure-{digest}.json"
+        path.write_text('{"schema":"factory-verifier-failure/v1","tampered":true}')
+        with self.assertRaises(VerifierFailureError):
+            publish_artifact(self.tmp, CAMPAIGN, artifact)
+
+    def test_read_missing_and_tampered_fail_closed(self) -> None:
+        with self.assertRaises(VerifierFailureError):
+            read_artifact(self.tmp, CAMPAIGN, "0" * 64)
+        artifact = valid_artifact()
+        digest, _ = publish_artifact(self.tmp, CAMPAIGN, artifact)
+        path = self.tmp / ".factory-state" / f"verifier-failure-{digest}.json"
+        path.write_text('{"schema":"factory-verifier-failure/v1","tampered":true}')
+        with self.assertRaises(VerifierFailureError):
+            read_artifact(self.tmp, CAMPAIGN, digest)
+
+    def test_validate_consumption_binds_commit_campaign_task_digest(self) -> None:
+        artifact = valid_artifact()
+        digest = artifact_digest(artifact)
+        validate_consumption(
+            artifact, expected_commit=COMMIT,
+            expected_campaign_id=CAMPAIGN, expected_task_id=3,
+            expected_digest=digest,
+        )
+        with self.assertRaisesRegex(VerifierFailureError, "commit"):
+            validate_consumption(
+                artifact, expected_commit="0" * 40,
+                expected_campaign_id=CAMPAIGN, expected_task_id=3,
+                expected_digest=digest,
+            )
+        with self.assertRaisesRegex(VerifierFailureError, "campaign"):
+            validate_consumption(
+                artifact, expected_commit=COMMIT,
+                expected_campaign_id="other", expected_task_id=3,
+                expected_digest=digest,
+            )
+        with self.assertRaisesRegex(VerifierFailureError, "task"):
+            validate_consumption(
+                artifact, expected_commit=COMMIT,
+                expected_campaign_id=CAMPAIGN, expected_task_id=9,
+                expected_digest=digest,
+            )
+        with self.assertRaisesRegex(VerifierFailureError, "digest"):
+            validate_consumption(
+                artifact, expected_commit=COMMIT,
+                expected_campaign_id=CAMPAIGN, expected_task_id=3,
+                expected_digest="1" * 64,
+            )
+
+    def test_failure_fingerprint_is_stable_and_output_tail_insensitive(self) -> None:
+        first = valid_artifact()
+        second = valid_artifact(output_tail="different tail bytes")
+        self.assertEqual(failure_fingerprint(first), failure_fingerprint(second))
+        changed = valid_artifact(changed_files=["src/other.c"])
+        self.assertNotEqual(failure_fingerprint(first), failure_fingerprint(changed))
 
 
 if __name__ == "__main__":
