@@ -283,9 +283,21 @@ planning -> implementation -> verification -> audit
 planning --attempts-exhausted--> failed
 implementation --dirty-attempts-exhausted--> interrupted
 verification --infrastructure-failure--> infrastructure_failure
+verification --software_verified_external_acceptance_blocked--> audit
 audit --nonfinal--> planning(next round)
 audit --final--> success | findings | blocked
 ```
+
+`software_verified_external_acceptance_blocked` is the verification outcome
+that records software fully verified while external release acceptance
+remains blocked (human approval, real-system evidence, or an unavailable
+external release authority).  It advances to the independent `audit` exactly
+like `pass`/`findings`/`blocked`, but it can never produce campaign success:
+when the audit phase was entered with this verification outcome, an audit
+`pass` resolves to the terminal `blocked` state in the final round (never
+`success`) and to the next round's `planning` in a non-final round.  The
+outcome never weakens round-zero readiness, the `infrastructure_failure`
+fail-closed closes, or human authority.
 
 Round advances only on `audit --nonfinal`; phase never moves backward within a round. State fields that bind a completed phase are write-once; round and attempt counters are monotonic. The harness records the state digest before every untrusted phase and reopens and validates the file after the phase. Any same-UID mutation not produced by the trusted transition, including content, mode, owner, link-count, or pathname identity changes, fails closed.
 
@@ -333,9 +345,14 @@ Outcomes:
 - `pass`;
 - `findings`;
 - `blocked` when a required declared capability cannot execute;
+- `software_verified_external_acceptance_blocked` when the deterministic
+gate passed, no finding remains, the declared capability is available, and
+the tester cited exact blocked references — software is fully verified while
+external release acceptance (human approval, real-system evidence, or an
+unavailable external release authority) remains blocked;
 - `infrastructure_failure` when the verifier itself cannot be trusted.
 
-Verification `findings` or `blocked` do not prevent the independent audit from running. In a non-final round they advance to audit and then become next-round plan inputs. `blocked` means a required, correctly declared capability or human/external authority is unavailable while the verifier and binding remain trusted. `infrastructure_failure` means verifier identity, digest, execution, receipt publication, or control-plane trust is invalid; it fails closed and stops the campaign.
+Verification `findings` or `blocked` do not prevent the independent audit from running. In a non-final round they advance to audit and then become next-round plan inputs. `blocked` means a required, correctly declared capability or human/external authority is unavailable while the verifier and binding remain trusted. `software_verified_external_acceptance_blocked` also advances to the independent audit, but it can never produce campaign success: an audit `pass` entered from it resolves to the terminal `blocked` state in the final round (never `success`) and to the next round's `planning` in a non-final round. `infrastructure_failure` means verifier identity, digest, execution, receipt publication, or control-plane trust is invalid; it fails closed and stops the campaign.
 
 ### 13.4 Audit
 
@@ -369,6 +386,7 @@ For the final round:
 - complete product acceptance and audit pass produce campaign `success`;
 - any unresolved software, test, documentation, security, or audit defect produces terminal nonzero `findings`;
 - if there are no such defects and every unresolved mandatory item exclusively requires unavailable external, hardware, declared-capability, or human authority, the result is terminal nonzero `blocked`;
+- a verification outcome of `software_verified_external_acceptance_blocked` (software fully verified while external release acceptance remains blocked) can never produce `success`: even a final-round audit `pass` resolves to the terminal `blocked` state;
 - if both categories exist, `findings` takes precedence;
 - state and evidence are preserved for a later campaign after circumstances change.
 
@@ -381,11 +399,12 @@ The following predicates MUST remain distinct:
 1. **Task completion:** one plan task and its acceptance checks are complete.
 2. **Implementation work exhaustion:** no runnable plan task remains.
 3. **Verification pass:** deterministic checks at the exact commit passed.
-4. **Audit pass:** independent review found no acceptance finding within scope.
-5. **Product acceptance:** every normative specification requirement has adequate evidence, including required real-system and human evidence.
-6. **Campaign success:** final-round product acceptance and audit pass.
+4. **Software verified, external acceptance blocked:** the deterministic gate passed, no finding remains, the declared capability is available, and the tester cited exact blocked references; the verification outcome is `software_verified_external_acceptance_blocked` and the campaign can never reach `success` while it holds.
+5. **Audit pass:** independent review found no acceptance finding within scope.
+6. **Product acceptance:** every normative specification requirement has adequate evidence, including required real-system and human evidence.
+7. **Campaign success:** final-round product acceptance and audit pass.
 
-No lower predicate implies a higher predicate.
+No lower predicate implies a higher predicate. In particular, software fully verified while external acceptance remains blocked is never product acceptance and never campaign success.
 
 ## 16. Findings flow
 
@@ -440,6 +459,8 @@ These systems answer whether a claim is proven. They MUST NOT decide which imple
 Coordinator commands that support acceptance MUST run through the trusted receipt wrapper. PASS requires the bound command to exit 0; command, working identity, commit, digest, timestamps, and output digests are verified; any BLOCKED evidence forces an audit result of findings. Audits cite exact `[receipt: ...]` and `[manifest: ...]` references. A model assertion or free-text command transcript is not a receipt.
 
 The verifier entrypoint MUST be opened and bound to its committed blob and secure identity before untrusted execution; later pathname substitution fails closed.
+
+Every deterministic verifier failure MUST be recorded as a strict structured verifier-failure artifact (schema `factory-verifier-failure/v1`, EVID-02) carrying the exact command, the exact exit status, expected vs observed, a bounded relevant output tail and/or a bounded output reference, changed files, artifact references, an environment/capability classification, and a rerun scope.  Strings in the artifact are data, never executable path/argv authority: the exact command is an argv record of what the trusted control plane invoked and no consumer may re-execute it from the artifact.  Sizes are bounded, enums are closed, and duplicate JSON keys are rejected at parse time.  The artifact is the structured-handoff foundation for the implementer-owned inspect/edit/test/diagnose loop and never weakens round-zero readiness, infrastructure-failure fail-closed closes, or human authority.
 
 Missing evidence remains a finding. A receipt declaration is not a receipt; a model assertion is not evidence; private integration is not real-system acceptance; machine vision is not human approval.
 
@@ -544,6 +565,7 @@ The stable IDs below are the conformance authority for this specification. Secti
 | QUOTA-01 | §10 | Ollama check/wait behavior runs before each invocation and fails closed by documented exit table | private_integration |
 | QUOTA-02 | §10 | Ollama credentials appear in no child argv/environment/log and owned material is securely removed | private_integration |
 | STATE-01 | §11, §17 | One minimal atomic state file enforces the explicit monotonic transition table and detects tampering | unit |
+| STATE-02 | §11, §13, §14, §15 | The verification outcome `software_verified_external_acceptance_blocked` records software fully verified while external release acceptance remains blocked; it advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority | unit |
 | LOCK-01 | §12 | Canonical root-descriptor lock enforces one writer and is not inherited or unlockable by untrusted children | private_integration |
 | PROC-01 | §9, §12, §17 | Bounded process-session signaling, escaped-child detection, full reap, and dirty-work preservation hold | private_integration |
 | GIT-01 | §12, §17 | Canonical repository/branch/spec/plan bindings and guarded commit boundary fail closed | installed |
@@ -552,6 +574,7 @@ The stable IDs below are the conformance authority for this specification. Secti
 | FIND-01 | §16 | Findings reach later developers only through a planner revision of the canonical plan | private_integration |
 | CRED-01 | §18 | Existing Pi tool-call/tool-result credential enforcement and trusted SDK authority remain active | private_integration |
 | EVID-01 | §19 | Evidence tiers, exact receipts/manifests, immutable verifier binding, and no-elevation rules remain authoritative | installed |
+| EVID-02 | §19 | Verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection | unit |
 | VIS-01 | §19 | Visual evidence preserves exact-byte provenance and never substitutes machine review for human authority | installed |
 | RUNNER-01 | §19 | Runner/capability evidence remains signed, exact-commit, non-skipped, and non-simulated | real_system |
 | HIDE-01 | §3 | Harness files remain within hidden namespaces/external prefix and never pollute product/build/package paths | installed |
