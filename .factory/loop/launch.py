@@ -68,6 +68,7 @@ import json
 import math
 import os
 from pathlib import Path
+import resource
 import re
 import secrets
 import selectors
@@ -265,6 +266,25 @@ BUDGET_CAPTURE_MINIMUM = 512
 BUDGET_REASON_PREFIX = "budget:"
 # Clock ticks per second for /proc stat utime/stime (proc(5) fields 14/15).
 _CLK_TCK = float(os.sysconf("SC_CLK_TCK")) if hasattr(os, "sysconf") else 100.0
+
+
+def _children_cpu_seconds() -> float:
+    """Cumulative user+system CPU of this process's already-reaped children.
+
+    ``RUSAGE_CHILDREN`` is kernel accounting: it accumulates the CPU of every
+    direct child this process has reaped, *including* the CPU of that child's
+    own reaped descendants (the kernel folds each child's ``RUSAGE_CHILDREN``
+    into the parent's counter at reap time).  The launch supervisor is the
+    direct parent of the dedicated confinement/exec broker, and the broker is
+    the subreaper that reaps the model and every descendant, so the
+    per-attempt delta of this counter (baseline before spawn, read after the
+    broker is reaped) is the authoritative cumulative process-tree CPU of the
+    attempt — including short-lived burners that never appear in a live
+    ``/proc`` sample.  ``resource`` is used because ``os.getrusage`` was
+    removed in Python 3.13; ``ru_utime``/``ru_stime`` are floats there.
+    """
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return float(usage.ru_utime) + float(usage.ru_stime)
 
 # TOCTOU-free verify-to-interpreter (F2): exact committed wrapper/backend
 # bytes are staged in a private mode-0700 directory as non-executable mode-0400
@@ -1637,13 +1657,16 @@ class _BoundedStream:
 class BudgetUsage:
     """One attempt's measured resource usage (Phase 2A).
 
-    ``wall_time_seconds`` is the attempt's elapsed wall time, ``cpu_time_seconds``
-    the cumulative user+system CPU of the live process tree sampled from
-    ``/proc`` (real kernel accounting, never a simulated counter),
-    ``output_bytes`` the combined captured stdout+stderr byte count, and
-    ``max_live_processes`` the peak live/descendant process count observed.
-    The supervisor records these monotonically into the per-task cumulative
-    ledger after every attempt.
+    ``wall_time_seconds`` is the attempt's elapsed wall time,
+    ``cpu_time_seconds`` the *fast live sample* of the process-tree CPU
+    (real ``/proc`` utime+stime of the identity-pinned live descendant
+    closure, used only for early termination and as the last-known bounded
+    fallback — the authoritative cumulative CPU of the attempt, including
+    short-lived reaped descendants, is the ``RUSAGE_CHILDREN`` delta read
+    after the broker is reaped), ``output_bytes`` the combined captured
+    stdout+stderr byte count, and ``max_live_processes`` the peak
+    live/descendant process count observed.  The supervisor records these
+    monotonically into the per-task cumulative ledger after every attempt.
     """
 
     wall_time_seconds: float = 0.0
@@ -1835,6 +1858,14 @@ class LaunchSupervision:
         self._budget_usage = BudgetUsage()
         self._budget_exhausted_reason: Optional[str] = None
         self._started: float = 0.0
+        # Phase 2A authoritative CPU accounting: the ``RUSAGE_CHILDREN``
+        # baseline is pinned immediately before spawn and the delta is read
+        # after the broker is reaped, so the per-attempt cumulative
+        # process-tree CPU (broker + model + every reaped descendant,
+        # including short-lived burners) is isolated from the campaign's
+        # other sequential role attempts.  ``None`` while no budget is active
+        # or before the baseline is pinned.
+        self._budget_cpu_baseline: Optional[float] = None
         # The last budget-sample descendant closure (identity-pinned), retained
         # so post-run cleanup can be verified against the exact measured tree.
         self._budget_captured: frozenset = frozenset()
@@ -2054,28 +2085,39 @@ class LaunchSupervision:
         )
 
     def _measure_tree(self) -> Tuple[float, int]:
-        """Measure cumulative CPU seconds and live process count of the tree.
+        """Fast live sample of the tree: CPU seconds and live process count.
 
         The measurement re-snapshots the full descendant closure of the
         launched leader (the existing identity-safe capture machinery, never
         a baseline subtraction) and sums the real user+system CPU ticks of
         every still-live, identity-matching member from ``/proc/<pid>/stat``.
-        A tree that exceeds the capture bound is reported as the bound (the
-        live-process budget is then exhausted); an unreadable ``/proc`` fails
-        closed with :class:`BudgetExhaustedError` (``accounting_untrusted``)
-        rather than silently under-counting.
+        This is the *fast live sample* used only for early termination and as
+        the last-known bounded fallback; the authoritative cumulative CPU of
+        the attempt (including short-lived reaped descendants) is the
+        ``RUSAGE_CHILDREN`` delta read after the broker is reaped.  A tree
+        that exceeds the capture bound is reported as the bound (the
+        live-process budget is then exhausted) while preserving the
+        last-known CPU — never a trusted zero; a leader that is fully gone
+        reports an empty live scope with the last-known CPU.
         """
         child = self._child
-        if child is None or self._leader_exited(child):
+        if child is None:
             return 0.0, 0
         pid = child.pid
         try:
             captured = capture_descendants(pid, maximum=self._budget_capture_maximum())
         except RootLockUnsafeError:
+            if _proc_stat_fields(pid) is None:
+                # The leader is fully gone: nothing live can burn more CPU
+                # and the reaped counter already holds the leader's CPU.
+                # Preserve the last-known CPU (never a trusted zero) with an
+                # empty live scope.
+                return self._budget_usage.cpu_time_seconds, 0
             # The tree exceeds the capture bound: report the bound as the
             # live count so the live-process budget is exhausted (never an
-            # incomplete snapshot mistaken for a small tree).
-            return 0.0, self._budget_capture_maximum()
+            # incomplete snapshot mistaken for a small tree), preserving the
+            # last-known CPU (never a trusted zero).
+            return self._budget_usage.cpu_time_seconds, self._budget_capture_maximum()
         self._budget_captured = captured
         live = live_scope(captured)
         ticks = 0
@@ -2088,6 +2130,69 @@ class LaunchSupervision:
             except ValueError:
                 continue
         return ticks / _CLK_TCK, len(live)
+
+    def _live_tree_cpu_seconds(self) -> float:
+        """CPU of the still-live identity-pinned descendant closure.
+
+        Sums ``/proc/<pid>/stat`` utime+stime over the last captured
+        descendant closure that is still live and identity-matching.  Returns
+        0.0 when the leader is gone (nothing live can burn more CPU; the
+        reaped counter already holds the leader's CPU).  This is the fast
+        live sample used only for early termination and as the last-known
+        fallback; the authoritative cumulative CPU of the attempt is the
+        ``RUSAGE_CHILDREN`` delta.
+        """
+        child = self._child
+        if child is None:
+            return 0.0
+        try:
+            captured = capture_descendants(
+                child.pid, maximum=self._budget_capture_maximum()
+            )
+        except RootLockUnsafeError:
+            return 0.0
+        self._budget_captured = captured
+        live = live_scope(captured)
+        ticks = 0
+        for member in live:
+            fields = _proc_stat_fields(member)
+            if fields is None or len(fields) < 13:
+                continue
+            try:
+                ticks += int(fields[11]) + int(fields[12])
+            except ValueError:
+                continue
+        return ticks / _CLK_TCK
+
+    def _authoritative_cpu_seconds(self) -> Optional[float]:
+        """Cumulative process-tree CPU of this attempt, or ``None`` if untrusted.
+
+        The authoritative value is the per-attempt ``RUSAGE_CHILDREN`` delta
+        (baseline pinned immediately before spawn, read after the broker is
+        reaped) plus the CPU of any still-live identity-pinned descendants.
+        ``RUSAGE_CHILDREN`` is kernel accounting: at reap time the kernel
+        folds each child's own reaped-descendant CPU into the parent's
+        counter, so the delta includes short-lived burners that never appear
+        in a live ``/proc`` sample.  The live CPU is read *before* the delta
+        so a process that exits between the two reads is counted exactly once
+        (it moves from the live set into the reaped counter — never both).
+        Returns ``None`` when the baseline is unavailable or the accounting
+        cannot be read, so the caller fails closed as
+        ``accounting_untrusted`` instead of recording a trusted zero.
+        """
+        if self._budget_cpu_baseline is None:
+            return None
+        try:
+            live_cpu = self._live_tree_cpu_seconds()
+            delta = _children_cpu_seconds() - self._budget_cpu_baseline
+        except (OSError, ValueError):
+            return None
+        if delta < 0.0:
+            # RUSAGE_CHILDREN is monotonic; a negative delta means the
+            # baseline was not pinned for this attempt (e.g. a reused
+            # supervisor), so the accounting cannot be trusted.
+            return None
+        return delta + live_cpu
 
     def _budget_preflight(self) -> None:
         """Fail closed before spawn when the cumulative budget is exhausted.
@@ -2112,16 +2217,29 @@ class LaunchSupervision:
         The usage is accumulated monotonically (never replaced, never
         decreased) and the ledger is published with the no-replace
         byte-idempotent authority, so a tampered or foreign ledger fails
-        closed.  The first exhausted dimension is recorded with its closed
-        exhaustion reason; the attempt's own budget-termination reason wins
-        over the derived precedence so the actual cause is never masked.
+        closed.  The recorded CPU is the authoritative per-attempt
+        ``RUSAGE_CHILDREN`` delta (including short-lived reaped descendants);
+        when exact accounting cannot be established the attempt fails closed
+        as ``accounting_untrusted`` and the last-known bounded usage is
+        preserved — never a trusted zero.  The first exhausted dimension is
+        recorded with its closed exhaustion reason; the attempt's own
+        budget-termination reason wins over the derived precedence so the
+        actual cause is never masked.
         """
         if self._budget is None or self._ledger is None:
             return
         usage = self._budget_usage
+        cpu = self._authoritative_cpu_seconds()
+        if cpu is None:
+            # Exact cumulative CPU accounting could not be established: fail
+            # closed as accounting_untrusted and preserve the last-known
+            # bounded usage (never a trusted zero).
+            cpu = usage.cpu_time_seconds
+            if self._budget_exhausted_reason is None:
+                self._budget_exhausted_reason = "accounting_untrusted"
         self._ledger.record_attempt(
             wall_time_seconds=elapsed,
-            cpu_time_seconds=usage.cpu_time_seconds,
+            cpu_time_seconds=cpu,
             output_bytes=usage.output_bytes,
             max_live_processes=usage.max_live_processes,
         )
@@ -2585,7 +2703,12 @@ class LaunchSupervision:
                             break
                         self._budget_usage = BudgetUsage(
                             wall_time_seconds=now - self._started,
-                            cpu_time_seconds=cpu,
+                            # The live sample is a lower bound on the
+                            # cumulative CPU (exited processes drop out of
+                            # /proc), so the fallback is kept monotonic.
+                            cpu_time_seconds=max(
+                                self._budget_usage.cpu_time_seconds, cpu
+                            ),
                             output_bytes=stdout._total + stderr._total,
                             max_live_processes=max(
                                 self._budget_usage.max_live_processes, live
@@ -3206,6 +3329,13 @@ class LaunchSupervision:
             # Phase 2A: a task whose cumulative budget is already exhausted
             # is never started (fail closed before spawn).
             self._budget_preflight()
+            # Phase 2A: pin the RUSAGE_CHILDREN baseline immediately before
+            # spawn so the post-reap delta isolates exactly this attempt's
+            # process tree (broker + model + every reaped descendant,
+            # including short-lived burners) from the campaign's other
+            # sequential role attempts.
+            if self._budget is not None:
+                self._budget_cpu_baseline = _children_cpu_seconds()
             child = self.spawn()
             started = time.monotonic()
             self._started = started

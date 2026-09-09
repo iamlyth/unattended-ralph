@@ -213,6 +213,28 @@ def main():
         while time.monotonic() < end:
             pass
         return 0
+    if mode == "burn-short-lived":
+        # Adversarial CPU-accounting fixture: repeatedly fork short-lived
+        # CPU burners that each consume ``burn_seconds`` of CPU and exit
+        # before the next 1s live sample, so a sampling-only accounting
+        # would under-count them.  The trusted supervisor's authoritative
+        # RUSAGE_CHILDREN delta must include every reaped burner.
+        burners = int(cfg.get("burners", 4))
+        rounds = int(cfg.get("rounds", 3))
+        burn_seconds = float(cfg.get("burn_seconds", 0.2))
+        for _ in range(rounds):
+            pids = []
+            for _ in range(burners):
+                pid = os.fork()
+                if pid == 0:
+                    end = time.monotonic() + burn_seconds
+                    while time.monotonic() < end:
+                        pass
+                    os._exit(0)
+                pids.append(pid)
+            for pid in pids:
+                os.waitpid(pid, 0)
+        return 0
     if mode == "fork-many":
         # Deterministic live-process-budget fixture: fork ``count``
         # pipe-holding sleeping descendants so the trusted supervisor's
@@ -1828,6 +1850,106 @@ class TaskBudgetEnforcementTests(_Base):
         self.assertGreaterEqual(saved.cpu_time_seconds, 1.0)
         self.assertEqual(saved.exhausted_reason, "cpu_time")
         self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_short_lived_burners_are_counted_in_ledger(self) -> None:
+        # Adversarial CPU accounting: short-lived burners exit between the
+        # 1s live samples, so a sampling-only accounting would under-count
+        # them.  The authoritative RUSAGE_CHILDREN delta (baseline pinned
+        # before spawn, read after the broker is reaped) must include every
+        # reaped burner in the cumulative ledger.
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget()  # generous: the attempt completes
+        supervisor, result = self._run(
+            "burn-short-lived", budget, ledger,
+            burners=4, rounds=3, burn_seconds=0.2,
+        )
+        self.assertEqual(result.outcome, "completed")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        # 4 burners x 3 rounds x 0.2s = 2.4s of CPU that never appears in a
+        # live sample; the ledger must carry the reaped total.
+        self.assertGreaterEqual(saved.cpu_time_seconds, 1.5)
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_capture_overflow_preserves_last_known_cpu(self) -> None:
+        # Finding 2: on descendant-capture overflow the live-process budget
+        # is exhausted (the bound is reported, never an incomplete snapshot
+        # mistaken for a small tree) while the last-known CPU is preserved
+        # — never a trusted zero.
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget(max_live_processes=2)
+        real_capture = launch.capture_descendants
+        calls = {"n": 0}
+
+        def flaky(root_pid, *, maximum=launch.BUDGET_CAPTURE_MINIMUM):
+            calls["n"] += 1
+            if calls["n"] > 2:  # snapshot + first sample succeed
+                raise launch.RootLockUnsafeError("simulated capture overflow")
+            return real_capture(root_pid, maximum=maximum)
+
+        with unittest.mock.patch.object(
+            launch, "BUDGET_SAMPLE_INTERVAL", 0.05
+        ), unittest.mock.patch.object(
+            launch, "capture_descendants", side_effect=flaky
+        ):
+            supervisor, result = self._run("burn-cpu", budget, ledger, seconds=3)
+        self.assertEqual(result.outcome, "terminated")
+        self.assertEqual(result.reason, "budget:live_processes")
+        # The last-known CPU from the first successful sample is preserved
+        # (never a trusted zero) and the bound exhausted the live budget.
+        self.assertGreater(supervisor._budget_usage.cpu_time_seconds, 0.0)
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertGreaterEqual(saved.max_live_processes, 2)
+        self.assertEqual(saved.exhausted_reason, "live_processes")
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_accounting_failure_fails_closed_untrusted(self) -> None:
+        # Finding 1/2: when exact cumulative CPU accounting cannot be
+        # established, the attempt fails closed as accounting_untrusted and
+        # the last-known bounded usage is preserved — never a trusted zero.
+        self._state_dir()
+        ledger = self._ledger()
+        budget = self._budget()
+        with unittest.mock.patch.object(
+            launch, "BUDGET_SAMPLE_INTERVAL", 0.05
+        ), unittest.mock.patch.object(
+            launch.LaunchSupervision,
+            "_authoritative_cpu_seconds",
+            return_value=None,
+        ):
+            supervisor, result = self._run("burn-cpu", budget, ledger, seconds=2)
+        self.assertEqual(result.outcome, "completed")
+        saved = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        self.assertEqual(saved.exhausted_reason, "accounting_untrusted")
+        # The last-known live sample (real burned CPU) is preserved.
+        self.assertGreaterEqual(saved.cpu_time_seconds, 1.0)
+        self.assertEqual(supervisor.live_scope(), frozenset())
+
+    def test_rusage_delta_isolates_sequential_attempts(self) -> None:
+        # The per-attempt RUSAGE_CHILDREN baseline is pinned before each
+        # spawn, so a later attempt's delta never re-counts an earlier
+        # attempt's CPU (the campaign launches sequential roles through the
+        # same supervisor process).
+        self._state_dir()
+        budget = self._budget()
+        with unittest.mock.patch.object(launch, "BUDGET_SAMPLE_INTERVAL", 0.05):
+            _, result1 = self._run("burn-cpu", budget, self._ledger(), seconds=1)
+            self.assertEqual(result1.outcome, "completed")
+            saved1 = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+            # Attempt 2 reloads the cumulative ledger and burns almost no
+            # CPU; its own delta must be small.
+            _, result2 = self._run(
+                "record", budget,
+                task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1),
+            )
+            self.assertEqual(result2.outcome, "completed")
+            saved2 = task_budget.load_ledger(self.workspace, self.CAMPAIGN, 1)
+        # If the baseline were not per-attempt, attempt 2's delta would have
+        # re-counted attempt 1's ~1s of CPU.
+        self.assertLess(
+            saved2.cpu_time_seconds - saved1.cpu_time_seconds, 0.5
+        )
 
     def test_output_budget_terminates_on_flood(self) -> None:
         self._state_dir()
