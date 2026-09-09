@@ -1,8 +1,8 @@
 ---
 schema: factory-plan/v2
 spec_path: docs/FACTORY-LOOP-SPEC.md
-spec_commit: bbf951d95ecc59b9623fc0b1debcabcc758e6182
-spec_blob: cf477ccaff935d8fc4301e97b445803d2bcd68fd
+spec_commit: 6ea6fe4c1bf03c21d22f05e98ab56c0784f14b14
+spec_blob: 2413cbfae1665768f39aad6a829b4481aa191618
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 sidecars: {"archive":"b04b7b6b8da3cee4534bc122f0af236cb07e24a03bb457602cf1a3b64dba28eb","history":"debd9f76bd847b2793e90db7cbedb866ad4e6234e52352bfe6de2fe8fbc16ef0"}
