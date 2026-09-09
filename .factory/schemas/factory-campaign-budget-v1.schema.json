@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "factory-campaign-budget/v1",
+  "title": "factory-campaign-budget",
+  "description": "Versioned strict generic campaign/audit budget configuration for the adaptive scheduler authority (Phase 2B2). The trusted scheduler derives every milestone, objective-coverage, no-progress, and terminal decision as a pure function of this committed closed config and the trusted plan/state/outcome inputs — never of model prose. `max_rounds` is the maximum number of planning/implementation/verification/audit cycles (the existing `--rounds` option is a maximum budget, never an exact count; there is no exactly-five rejection); `max_checkpoints` bounds the coherent task checkpoints; `max_wall_seconds` bounds the wall clock (enforced by the existing campaign-timeout authority); `max_task_attempts` bounds the per-task attempts (enforced by the existing task-resource-budget authority); `audit_interval` is the coherent-checkpoint interval at which the independent tester/auditor run; `security_sensitive_paths` are trusted closed-config repository-relative path prefixes that force an independent audit when a checkpoint touches them (never plan prose); `mandatory_audit_objectives` are the audit objective IDs that must all be covered before release success, regardless of checkpoint count; `no_progress_limit` bounds the consecutive identical-audit streak before honest `no_progress` termination. Every field is bounded, the field set is closed (additionalProperties false), duplicate JSON keys are rejected at parse time, and security-sensitive paths reject absolute paths, traversal segments, and glob characters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "max_rounds",
+    "max_checkpoints",
+    "max_wall_seconds",
+    "max_task_attempts",
+    "audit_interval",
+    "security_sensitive_paths",
+    "mandatory_audit_objectives",
+    "no_progress_limit"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": ["factory-campaign-budget/v1"]
+    },
+    "max_rounds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Maximum number of planning/implementation/verification/audit cycles. A maximum budget, never an exact count; verified completion may terminate the campaign early."
+    },
+    "max_checkpoints": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Maximum number of coherent task checkpoints (committed task completions) the campaign may produce."
+    },
+    "max_wall_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 86400,
+      "description": "Wall-clock budget in seconds, enforced by the existing campaign-timeout authority. A finite positive number."
+    },
+    "max_task_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Per-task attempt budget, enforced by the existing task-resource-budget authority."
+    },
+    "audit_interval": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Coherent-checkpoint interval at which the independent tester/auditor run (milestone-boundary roles, not mandatory after every patch)."
+    },
+    "security_sensitive_paths": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^[A-Za-z0-9._/+-]+$",
+        "description": "A repository-relative path prefix (no leading slash, no empty/`.`/`..` segment, no glob characters)."
+      },
+      "description": "Trusted closed-config path prefixes that force an independent audit when a checkpoint touches them. Never model prose."
+    },
+    "mandatory_audit_objectives": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "pattern": "^AUD-[0-9]{2}$"
+      },
+      "description": "Audit objective IDs that must all be covered before release success, regardless of checkpoint count."
+    },
+    "no_progress_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Number of consecutive audits that reproduce the same progress fingerprint before the campaign terminates honestly as `no_progress`."
+    }
+  }
+}

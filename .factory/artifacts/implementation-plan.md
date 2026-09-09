@@ -1,7 +1,7 @@
 ---
 spec_path: docs/FACTORY-LOOP-SPEC.md
 spec_commit: 2369019f119005a430f88d9fc10cefcf957dad65
-spec_blob: e05ea30b22fca2af6607e09ffc4012d9ca572890
+spec_blob: 6db01f2792915402b191bee852c45abdee170dff
 base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
 status: active
 ---
@@ -134,17 +134,17 @@ Tasks 25-27 plus the pending final audit.
 | TASK-02 | §9, §20 | partial | delivered task bytes and digest exactly match the committed plan | Task 6, Task 9, Task 16, Task 20, Task 22, Task 23, Task 28 |
 | QUOTA-01 | §10 | partial | existing `.factory/tools/ollama-usage-guard.sh` `--check`/`--wait` contract retained and wired into every invocation | Task 7, Task 9, Task 11, Task 16, Task 22, Task 28 |
 | QUOTA-02 | §10 | partial | Ollama credentials absent from child argv/environ/log and owned material securely erased | Task 7, Task 8, Task 11, Task 16, Task 22, Task 28 |
-| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection, including the Phase 2B1 convergence-extension fields (optional in parse, serialized only while active) | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25, Task 28, Task 30 |
+| STATE-01 | §11, §17 | partial | one minimal atomic control-state file enforcing the monotonic transition table and tamper detection, including the Phase 2B1 convergence-extension fields (optional in parse, serialized only while active) | Task 4, Task 9, Task 16, Task 19, Task 22, Task 25, Task 28, Task 31 |
 | STATE-02 | §11, §13, §14, §15 | partial | the verification outcome `software_verified_external_acceptance_blocked` records software fully verified while external release acceptance remains blocked; it advances to the independent audit, can never produce campaign success, and never weakens readiness or human authority | Task 25, Task 27, Task 28 |
 | LOCK-01 | §12 | partial | canonical root-descriptor flock, one writer, non-inheritance and non-unlockable-by-second-descriptor | Task 5, Task 6, Task 16, Task 22, Task 28 |
 | PROC-01 | §9, §12, §17 | partial | bounded process-session signaling, escaped-child detection, full reap, dirty-work preservation | Task 6, Task 16, Task 22, Task 28 |
 | GIT-01 | §12, §17 | partial | canonical repository/branch/spec/plan bindings and guarded commit boundary enforced in the new launcher | Task 5, Task 11, Task 16, Task 20, Task 23, Task 28 |
-| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin, including the Phase 2B1 inner same-task convergence edge | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28, Task 30 |
+| PHASE-01 | §13, §14 | partial | phase/campaign outcome machine with exact advance/terminate behavior and no no-task spin, including the Phase 2B1 inner same-task convergence edge | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28, Task 31 |
 | COMPLETE-01 | §15 | partial | task, work-exhaustion, verification, audit, product-acceptance, and campaign-success predicates stay distinct | Task 9, Task 16, Task 22, Task 25, Task 27, Task 28 |
 | FIND-01 | §16 | partial | findings reach later developers only through a planner revision of the canonical plan | Task 10, Task 16, Task 27, Task 28 |
 | CRED-01 | §18 | partial | existing Pi credential tool-call/tool-result enforcement and trusted SDK authority retained | Task 11, Task 16, Task 22, Task 28 |
 | EVID-01 | §19 | partial | existing exact-commit receipts/manifests and immutable verifier binding retained; installed-tier receipts minted from the installed copy | Task 12, Task 16, Task 20, Task 23, Task 26, Task 28 |
-| EVID-02 | §19 | partial | verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection; a trusted deterministic software verifier failure converges to the SAME task at most twice per task (`MAX_CONVERGENCE_RETRIES = 2`) with the artifact digest-bound and rendered as inert data, and a repeated identical failure or consumed task resource budget terminates the loop honestly | Task 26, Task 27, Task 28, Task 30 |
+| EVID-02 | §19 | partial | verifier failures are recorded as strict structured artifacts (exact command as data, exit status, expected vs observed, bounded output tail/reference, changed files, artifact refs, environment/capability classification, rerun scope) with bounded sizes, closed enums, and duplicate-key rejection; a trusted deterministic software verifier failure converges to the SAME task at most twice per task (`MAX_CONVERGENCE_RETRIES = 2`) with the artifact digest-bound and rendered as inert data, and a repeated identical failure or consumed task resource budget terminates the loop honestly | Task 26, Task 27, Task 28, Task 31 |
 | VIS-01 | §19 | partial | existing visual provenance machinery retained with exact-byte provenance | Task 12, Task 16, Task 20, Task 23, Task 28 |
 | RUNNER-01 | §19 | blocked | existing runner/capability receipt machinery retained; real_system evidence requires a declared, provisioned, signed hardware runner the generic environment does not provide | Task 12, Task 16, Task 21, Task 24, Task 28 |
 | HIDE-01 | §3 | partial | harness-footprint conformance test inventories every installed file and fails on escapes; installed physical-file inventory from the installed copy | Task 13, Task 16, Task 20, Task 23, Task 28 |
@@ -1804,10 +1804,20 @@ Tasks 25-27 plus the pending final audit.
 - Documentation impact: `docs/FACTORY-LOOP-SPEC.md` §11/§13/§14/§19/§22/§24;
   `.factory/schemas/factory-state-v1.schema.md`; `docs/FACTORY.md`;
   `docs/OPERATIONS.md`.
-## Task 30: Final documentation and specification audit
+## Task 30: Adaptive campaign/audit scheduler foundation (Phase 2B2)
 
 - Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29
+- Dependencies: Task 1, Task 4, Task 8, Task 9, Task 19, Task 25, Task 28, Task 29
+- Scope: This slice turns the adaptive scheduler into a reviewed pure generic authority without wiring campaign execution yet. The trusted `.factory/loop/scheduler.py` authority implements the committed campaign budget (`factory-campaign-budget/v1`, `.factory/campaign-budget.json` or the documented defaults) and the pure decisions: the milestone decision (`should_audit`), objective coverage before success (`objective_coverage`), the deterministic no-progress fingerprint (`progress_fingerprint`), the terminal resolution (`audit_next_phase`), and security-sensitive-path matching (`is_security_sensitive`/`security_sensitive_changed`). The budget is closed config with bounded values and duplicate-key rejection; security-sensitive paths are trusted closed config (never plan prose) and reject absolute/traversal/glob paths; mandatory audit objectives must all be covered before success; the campaign terminates honestly on verified completion, `software_verified_external_acceptance_blocked`, no progress, and round/checkpoint budget exhaustion. `max_rounds` is a maximum budget, never an exact count (no exactly-five rejection). Wall-clock and per-task attempt budgets are carried as trusted finite maxima and enforced by the existing campaign-timeout and task-resource-budget authorities, not by this module. The scheduler is exported from the hidden package, registered in the generic gate, and covered by a comprehensive pure-function/unit/adversarial test suite. Campaign execution wiring (`--rounds` compatibility, state scheduler-extension fields, and the campaign phase-machine integration) is a later slice and is explicitly not claimed here.
+- Acceptance criteria: `.factory/loop/scheduler.py` is a pure generic authority with no campaign-execution wiring; the committed `factory-campaign-budget/v1` schema and `.factory/campaign-budget.json` default config are present and reject duplicate/unknown/overflow/path-traversal/unsafe-glob config; every scheduler decision and boundary is covered by the registered `test-factory-scheduler.py` suite; the scheduler APIs are exported from the hidden package; the spec (`docs/FACTORY-LOOP-SPEC.md` §14.1, §22, §24 BUDGET-01) and the plan document the authority accurately without claiming campaign wiring; `./scripts/verify-boilerplate.sh` passes serially.
+- Verification: `python3 .factory/tests/test-factory-scheduler.py`; `./scripts/verify-boilerplate.sh`.
+- Evidence: The scheduler foundation commit passes the 86-case `test-factory-scheduler.py` suite and the full `./scripts/verify-boilerplate.sh` gate serially. This is implementation evidence for the pure authority only; no campaign execution wiring, `--rounds` compatibility, or live campaign behavior is claimed.
+- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.1, §22, §24 BUDGET-01).
+
+## Task 31: Final documentation and specification audit
+
+- Status: pending
+- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30
 - Scope: Current checkpoint: the security commits `93efa22e` (close credential and git bypass windows) and `9992aa69` (anchor credential persistence to dirfds) post-date the old audit base and are the current exact-commit head. Focused security reviews approved the credential, Git, and dirfd boundaries at these commits. The complete exact-PATH `verify-boilerplate.sh` gate passes at `9992aa69`. Production and conformance acceptance remain `blocked`/`partial`: no runner evidence and no human approval exist, so no full acceptance is claimed. Independent read-only audit and review at the final committed
   revision verifies the definition of done: every conformance row in the
   matrix and the sidecar is `verified` with exact-commit evidence at the
@@ -1879,4 +1889,5 @@ Tasks 25-27 plus the pending final audit.
   fixture authority remains explicitly simulated and no production runner,
   model, campaign, or deployment is claimed.
 - Documentation impact: `.factory/artifacts/campaign-audit.md`.
+
 
