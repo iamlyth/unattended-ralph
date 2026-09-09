@@ -1108,7 +1108,7 @@ class GenericEvidenceSuite(unittest.TestCase):
         )
         return _run(
             [sys.executable,
-             str(self.fixture / "scripts" / "machine-receipt.py"),
+             str(self.fixture / ".factory" / "tools" / "machine-receipt.py"),
              "--root", str(self.fixture), "--tag", "installed-harness-smoke",
              "--audit-round", str(coordinator["round"]),
              "--evidence-commit", str(coordinator["base_commit"]),

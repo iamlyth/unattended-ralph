@@ -395,14 +395,17 @@ class InstalledTierSuite(unittest.TestCase):
                     check=check)
 
     def assert_pass_receipt(self, tag: str,
-                            expected_installed_root: str | None = None) -> dict:
-        """A PASS gate: exit 0, no skip marker in the certified stdout, and
-        (when given) the certified argv/stdout must bind the installed
-        root so a source invocation can never mint an equivalent receipt."""
+                            expected_installed_root: str | None = None,
+                            expected_exit_code: int = 0) -> dict:
+        """A PASS gate: the certified exit code, no skip marker in the
+        certified stdout, and (when given) the certified argv/stdout must
+        bind the installed root so a source invocation can never mint an
+        equivalent receipt."""
         ref = f"{RECEIPTS_DIR}/{tag}.json"
         receipt = evidence_module.validate_receipt(self.fixture, ref)
-        self.assertEqual(receipt["exit_code"], 0,
-                         f"gate {tag} must exit 0 to be certified PASS")
+        self.assertEqual(receipt["exit_code"], expected_exit_code,
+                         f"gate {tag} must exit {expected_exit_code} to be "
+                         "certified PASS")
         self.assertEqual(receipt["evidence_commit"], self.head)
         self.assertEqual(receipt["coordinator_round"], 1)
         self.assertEqual(receipt["coordinator_nonce"], self.nonce)
@@ -1030,9 +1033,16 @@ class InstalledTierSuite(unittest.TestCase):
         ]
         attested = self.attested_argv(run_argv)
         tag = "installed-smoke-campaign"
-        minted = self.mint(tag, attested)
+        # Phase 2B2: the evidence round honestly terminates budget_exhausted
+        # (exit 8) because the plan is not complete; the receipt binds that
+        # exact honest exit code, so the mint is not a check=True PASS gate.
+        minted = self.mint(tag, attested, check=False)
+        self.assertEqual(minted.returncode, 8, minted.stderr[-2000:])
         self.assertIn(f"[receipt: {RECEIPTS_DIR}/{tag}.json]", minted.stdout)
-        self.assert_pass_receipt(tag, expected_installed_root=self.installed_root)
+        self.assert_pass_receipt(
+            tag, expected_installed_root=self.installed_root,
+            expected_exit_code=8,
+        )
         stdout = (self.fixture / RECEIPTS_DIR / f"{tag}.stdout").read_bytes()
         text = stdout.decode("utf-8", "replace")
         # The certified stdout binds the installed root: the module-form
@@ -1048,7 +1058,10 @@ class InstalledTierSuite(unittest.TestCase):
         )
         self.assertEqual(summary["schema"], "factory-campaign-result/v1")
         self.assertEqual(summary["campaign_id"], campaign_id)
-        self.assertEqual(summary["terminal_phase"], "success")
+        # Phase 2B2: the evidence round completes exactly the designated
+        # smoke task and leaves the final audit task pending, so the honest
+        # terminal is budget_exhausted (the plan is not complete).
+        self.assertEqual(summary["terminal_phase"], "budget_exhausted")
         self.assertEqual(summary["terminal_outcome"], "pass")
         self.assertEqual(summary["rounds_completed"], 1)
         # The pre-campaign evidence-bound commit (`head`) and the campaign's
