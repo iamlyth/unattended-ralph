@@ -22,19 +22,19 @@ import time
 import tomllib
 from pathlib import Path
 
-from plan_parser import parse, dump, Plan, Task
-from selector import select
-from state import load, save, validate, State
-import gitutil
-from lock import Lock
-from runner import (
+from .plan_parser import parse, dump, Plan, Task
+from .selector import select
+from .state import load, save, validate, State
+from . import gitutil
+from .lock import Lock
+from .runner import (
     Runner,
     load_environment,
     get_available_capabilities,
     run_verification,
     VerificationResult,
 )
-from preflight import run_preflight
+from .preflight import run_preflight
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / ".factory" / "config.toml"
