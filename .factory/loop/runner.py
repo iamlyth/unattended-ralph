@@ -151,6 +151,16 @@ def run_verification(
         return _blocked(runner, "rsync sync failed", command)
 
     remote_command = f"cd {runner.working_directory} && {command}"
+    # Wrap in nix-shell if the runner has shell.nix and nix-shell available.
+    nix_check = (
+        f"test -f {runner.working_directory}/shell.nix "
+        f"&& command -v nix-shell >/dev/null 2>&1"
+    )
+    escaped = remote_command.replace("'", "'\\''")
+    remote_command = (
+        f"if {nix_check}; then nix-shell --run '{escaped}'; "
+        f"else {remote_command}; fi"
+    )
     try:
         proc = subprocess.run(
             _ssh_argv(runner.ssh_config_alias, remote_command),
@@ -171,10 +181,37 @@ def run_verification(
     )
 
 
+def _has_nix_shell(root: str | Path) -> bool:
+    """Check if nix-shell and shell.nix are available."""
+    root = Path(root)
+    if not (root / "shell.nix").is_file():
+        return False
+    try:
+        subprocess.run(
+            ["nix-shell", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _wrap_nix_shell(command: str, root: str | Path) -> str:
+    """Wrap a command in nix-shell --run if shell.nix exists."""
+    if _has_nix_shell(root):
+        escaped = command.replace("'", "'\\''")
+        return f"nix-shell --run '{escaped}'"
+    return command
+
+
 def _run_local(command: str, root: str | Path, runner_name: str) -> VerificationResult:
+    wrapped = _wrap_nix_shell(command, root)
     try:
         proc = subprocess.run(
-            command,
+            wrapped,
             cwd=str(root),
             shell=True,
             stdout=subprocess.PIPE,
@@ -188,12 +225,12 @@ def _run_local(command: str, root: str | Path, runner_name: str) -> Verification
             stdout="",
             stderr=f"local verification failed: {exc}",
             runner=runner_name,
-            command=command,
+            command=wrapped,
         )
     return VerificationResult(
         exit_code=proc.returncode,
         stdout=proc.stdout or "",
         stderr=proc.stderr or "",
         runner=runner_name,
-        command=command,
+        command=wrapped,
     )
