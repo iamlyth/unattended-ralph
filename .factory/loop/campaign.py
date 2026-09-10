@@ -86,7 +86,10 @@ def invoke_role(role: str, provider: str, model: str, root: Path,
         return _RoleResult(127, "", f"cannot read prompt {prompt_path}: {exc}")
     if extra:
         prompt += "\n\n" + extra
-    cmd = ["pi2", "--provider", provider, "--model", model]
+    cmd = [
+        "pi2", "--provider", provider, "--model", model,
+        "--print", "--no-session", "--approve",
+    ]
     try:
         result = subprocess.run(
             cmd,
