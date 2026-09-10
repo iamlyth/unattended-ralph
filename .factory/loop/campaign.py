@@ -44,7 +44,7 @@ PLAN_PATH = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 PROMPTS_DIR = ROOT / ".factory" / "prompts"
 FINDINGS_PATH = ROOT / ".factory" / "artifacts" / "audit-findings.md"
 
-ROLE_TIMEOUT = 600  # seconds per role invocation
+ROLE_TIMEOUT = 900  # seconds per role invocation
 
 # Exit codes for terminal outcomes. Preflight failure exits 2.
 TERMINAL_EXIT = {
