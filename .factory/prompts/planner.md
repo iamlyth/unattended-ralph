@@ -59,7 +59,7 @@ mismatch as fatal.
 Model tool access is enforced, not merely described: only allowlisted inputs
 are readable and only the plan file is writable for you. `.factory-state/`,
 runtime task or memory stores, scratchpads, handoffs, and context summaries
-are unavailable to your tools; `.factory/loop/`, `.factory/tests/`, and
+are unavailable to your tools; `.factory/loop/` and
 `.factory/prompts/` are not readable. Do not attempt to read or write them;
 a denial is the enforcement working, not a tool failure.
 

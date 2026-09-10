@@ -193,7 +193,7 @@ transport = "ssh"
 ssh_config_alias = "ralphrunner"
 working_directory = "/srv/factory-work/controller-box"
 capabilities = ["physical-controller", "inputplumber-system-dbus", "gpu-compositor"]
-verify_command = "./scripts/verify-project.sh"
+verify_command = "./scripts/verify.sh"
 ```
 
 - SSH aliases, credentials, and provisioning stay outside the repository.
@@ -342,8 +342,7 @@ development_branch = "develop"
 release_branch = "main"
 
 [verification]
-command = ["./scripts/verify-project.sh"]
-runner_command = ["./scripts/verify-on-runner.sh"]
+command = ["./scripts/verify.sh"]
 
 [campaign]
 default_rounds = 20

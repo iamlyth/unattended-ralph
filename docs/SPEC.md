@@ -5,8 +5,9 @@
 This repository is the product-neutral Ralph/factory boilerplate. It does not
 define a product, and it must never be planned against.
 
-`SPEC_PENDING_HUMAN_SUPPLY` is the canonical blocking marker. `.factory/tools/check-spec-provided.sh`
-hard-blocks planning and every completion gate while this marker is present:
+`SPEC_PENDING_HUMAN_SUPPLY` is the canonical blocking marker. The factory
+preflight hard-blocks planning and every completion gate while this marker is
+present:
 an autonomous worker must never plan against a placeholder, infer a product
 contract, or invent requirements from this file. No requirement can be
 formulated, no conformance row can exist, and no campaign objective can be

@@ -51,7 +51,7 @@ Model tool access is enforced, not merely described: the plan, specification,
 code, tests, and allowlisted `.factory/` inputs are readable; product paths
 are writable for you; `.git/`, `.factory-state/`, runtime task or memory
 stores, scratchpads, handoffs, and context summaries are unavailable to your
-tools. `.factory/loop/`, `.factory/tests/`, and `.factory/prompts/` are not
+tools. `.factory/loop/` and `.factory/prompts/` are not
 readable. Do not attempt to read or write forbidden paths; a denial is the
 enforcement working, not a tool failure. New files belong inside the existing
 allowlisted directories; the write allowlist does not grant new top-level

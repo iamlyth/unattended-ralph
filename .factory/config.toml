@@ -5,8 +5,7 @@ development_branch = "develop"
 release_branch = "main"
 
 [verification]
-command = ["./scripts/verify-project.sh"]
-runner_command = ["./scripts/verify-on-runner.sh"]
+command = ["./scripts/verify.sh"]
 
 [campaign]
 default_rounds = 20

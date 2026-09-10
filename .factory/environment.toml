@@ -1,9 +1,14 @@
 schema_version = 1
 
+# Minimal Ralph factory — runner declarations.
+# SSH aliases, credentials, and provisioning stay outside the repository.
+# Capabilities are strings; the factory does not infer or invent them.
+# An empty runners section means all verification runs locally.
+
 [[runners]]
 name = "ralphrunner"
 transport = "ssh"
 ssh_config_alias = "ralphrunner"
 working_directory = "/srv/factory-work/controller-box"
 capabilities = ["physical-controller", "inputplumber-system-dbus", "gpu-compositor", "target-consumer", "controller-production-routing"]
-verify_command = "./scripts/verify-project.sh"
+verify_command = "./scripts/verify.sh"

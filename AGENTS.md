@@ -18,16 +18,16 @@ Progress and evidence live in `.factory/artifacts/implementation-plan.md`.
 ## Build
 
 The control plane is stdlib-only Python under `.factory/loop/`. The product
-build is defined by the adopting project; placeholder commands:
+build is defined by the adopting project; placeholder command:
 
 ```bash
-./scripts/build.sh
+./scripts/verify.sh
 ```
 
 ## Immediate validation
 
 ```bash
-./scripts/verify-project.sh
+./scripts/verify.sh
 python3 .factory/loop/plan_parser.py parse .factory/artifacts/implementation-plan.md
 python3 .factory/loop/selector.py select .factory/artifacts/implementation-plan.md
 ```

@@ -1,91 +1,25 @@
 ---
-schema: factory-plan/v2
-spec_path: docs/FACTORY-LOOP-SPEC.md
-spec_commit: 6ea6fe4c1bf03c21d22f05e98ab56c0784f14b14
-spec_blob: 2413cbfae1665768f39aad6a829b4481aa191618
-base_commit: 2d6a4fd1bd70866f7ff47c2128c8f7e850c40760
+schema: factory-plan/v1
+spec_path: docs/SPEC.md
 status: active
-sidecars: {"archive":"b04b7b6b8da3cee4534bc122f0af236cb07e24a03bb457602cf1a3b64dba28eb","history":"debd9f76bd847b2793e90db7cbedb866ad4e6234e52352bfe6de2fe8fbc16ef0"}
 ---
 
 # Implementation Plan
 
-## Goal and non-goals
+## Goal
 
-Goal: implement the minimal fresh-context software-factory loop specified by `docs/FACTORY-LOOP-SPEC.md` as a new Python control plane living only under the hidden `.factory/` namespace with runtime state under ignored `.factory-state/`. The redesign retains the existing Ollama usage guard, the Git commit boundary, the credential tool-call/tool-result enforcement, and the exact-commit evidence/runner/visual machinery, hardens the Ollama credential transport, and migrates off the Ralph Orchestrator control plane with visible `.factory/tools/ralph-*` entrypoints reduced to deprecated forwarders (or removed) only after parity is proven.
+Implement the product described in `docs/SPEC.md` using the minimal factory
+loop defined in `docs/FACTORY-LOOP-SPEC.md`.
 
-## Architecture and constraints
-
-- Control-plane implementation is Python 3.11+ standard library under `.factory/loop/` (plan parser, selector, state, locking, launch/supervision, phase machine, conformance helpers). POSIX shell is limited to small operator entry points. The existing secure Pi wrapper (`.factory/tools/pi2-secure-exec.py`) is invoked, never reimplemented. - Committed schema `factory-plan/v1` (Markdown + schema files under `.factory/schemas/`) is the plan contract; the deterministic parser is part of the acceptance boundary, round-trips without semantic loss, and rejects any plan it cannot bind exactly: a UTF-8 BOM prefix never parses; a `verified` conformance row must reference only `complete` tasks and may not appear in an `active` lifecycle plan; the conformance matrix must cover every ID in the committed §24 machine registry (`.factory/schemas/factory-plan-v1.requirements.json`); and the plan lifecycle status must be consistent with the task statuses (Task 2, Task 18). - Exactly one root canonical mutable control-state file `.factory-state/factory-loop.json` uses the explicitly versioned `factory-state/v1` schema with exactly the §11 field set.
-
-## Task 21: Round-1 campaign audit objective coverage
-
-- Status: blocked
-- Dependencies: Task 20
-- Priority: 21
-- Scope: Remediate campaign-audit Finding 4 by covering the round-1 objective's receipt categories with genuine evidence. `project-verify` becomes coverable by a fresh exact-commit receipt of `./.factory/tools/verify-boilerplate.sh` once Tasks 20/22/23 pass; `runner-evidence` remains coverable only by an exact signed runner manifest accepted by `.factory/tools/check-factory-runner-evidence.py` after the external human completes Task 24. While any category is uncovered, `.factory/tools/check-campaign-objectives.py` exits 1 and the campaign audit keeps reporting `findings`; partial or fabricated coverage is never claimed and no private/synthetic evidence is elevated to the runner-evidence category.
-- Acceptance criteria: the round-1 objective is either fully covered by genuine receipts/manifests (only after Task 24 provisions the runner) or explicitly reported uncovered with the audit result `findings`; no PASS is pretended while `runner-evidence` is uncovered; `.factory/tools/check-campaign-objectives.py` reflects the true covered/uncovered state at the audit base.
-- Verification: `.factory/tools/check-campaign-objectives.py --round 1 --base <exact-commit>`; `.factory/tools/check-audit-receipts.py`; `.factory/tools/check-factory-runner-evidence.py --print-capabilities`.
-- Documentation impact: `docs/FACTORY.md`, `.factory/artifacts/campaign-audit.md`.
-- Blocked on: FACT-020 and Task 24 — the round-1 audit objective `runner-capability` (receipt categories `runner-evidence` and `project-verify`) cannot be covered at the boilerplate audit base: no runner capability is declared, the signer trust is disabled, and no coordinator receipts exist (campaign-audit.md Finding 4). The `runner-evidence` category can be satisfied only by an accepted exact-commit signed runner manifest, which requires the external human provisioning of Task 24; until then this task stays blocked and must never pretend PASS.
-
-## Task 24: External human runner provisioning (RUNNER-01)
-
-- Status: blocked
-- Dependencies: Task 20, Task 23
-- Priority: 24
-- Scope: Remediate campaign-audit Finding 3 (RUNNER-01 real_system evidence blocked on an undeclared, unprovisioned external runner). The generic methodology does not assume external hardware or any product-specific runner class. While the human action is outstanding, the task stays blocked, RUNNER-01 stays `blocked`, and FACT-020 stays open; private/synthetic evidence is never elevated to the real_system tier. When the human completes provisioning, the accepted exact-commit signed manifest (capabilities non-empty) is the only evidence that lets RUNNER-01 move toward `verified`, and the round-1 `runner-evidence` category (Task 21) becomes coverable.
-- Acceptance criteria: without the human action the task remains blocked and the conformance row remains `blocked`; after the human action an exact-commit signed runner manifest is accepted by `.factory/tools/check-factory-runner-evidence.py` (exit 0, capabilities non-empty) and `.factory/tools/check-capability-evidence.py` passes with a fresh exact-commit probe; no fake or simulated runner evidence is ever recorded.
-- Verification: `.factory/tools/check-factory-runner-evidence.py --print-capabilities`; `.factory/tools/run-factory-runners.py`; `.factory/tools/check-capability-evidence.py`; `.factory/tools/check-factory-environment.py .factory/environment.toml`.
-- Documentation impact: none beyond the evidence receipts and blocked-facts resolution.
-- Blocked on: FACT-020 — RUNNER-01 requires real_system evidence from a declared, provisioned, signed external runner, an external human action this environment cannot perform: declare the runner in `.factory/environment.toml`, provision the signer trust in `.factory/signer-trust.json`, run the runner against the exact audit base, and have the signed manifest accepted by `.factory/tools/check-factory-runner-evidence.py`.
-
-## Task 28: Cumulative task-resource budget (Phase 2A)
+## Task 1: Project setup
 
 - Status: pending
-- Dependencies: Task 6, Task 9, Task 11
-- Priority: 28
-- Scope: Replace the prompt-only "at most three focused commands / timeout 120" debugging cap with a trusted cumulative per-task resource budget enforced by the launch supervisor around every fresh developer attempt. The committed `.factory/task-budget.json` config (closed `factory-task-budget/v1` schema, bounded integers, duplicate-key rejection) or the documented defaults supply the limits: cumulative wall time, cumulative process-tree CPU time (authoritative per-attempt `RUSAGE_CHILDREN` delta of the supervisor — baseline pinned immediately before spawn, read after the confinement/exec broker is reaped — which folds every reaped descendant including short-lived burners into the attempt total without double counting; fast live `/proc` sampling of the identity-pinned descendant closure is kept only for early termination and as the last-known bounded fallback), cumulative combined captured output bytes, the live/descendant process peak, and a per-command timeout kept as defense-in-depth.
-- Acceptance criteria: unit tests cover `factory-task-budget/v1` parsing, duplicate/unknown/overflow bounds, canonical bytes, ledger monotonic accounting and no-replace tamper handling, remaining limits, every exhaustion reason, and `validate_commit_context` mismatch/unresolvable/resolver failure; integration/adversarial tests cover cumulative attempts, wall/CPU/output/live-process exhaustion, output flood, descendant escape/cleanup, untrusted accounting, and the impossibility of exhaustion→pass; the focused suites and the full `./scripts/verify-boilerplate.sh` gate pass serially.
-- Verification: `.factory/tests/test-factory-task-budget.py`; `.factory/tests/test-factory-launch.py` (TaskBudgetEnforcementTests); `.factory/tests/test-factory-campaign.py` (ReviewHardening budget tests); `.factory/tools/verify-boilerplate.sh`.
-- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` §9.1; `.factory/prompts/developer.md`; `.factory/prompts/tester.md`; `.factory/schemas/factory-task-budget-v1.schema.json`.
-
-## Task 29: Phase 2B1 inner same-task convergence on deterministic verifier failure
-
-- Status: pending
-- Dependencies: Task 6, Task 9, Task 26, Task 28
-- Priority: 29
-- Scope: Implement the Phase 2B1 inner same-task convergence edge: when a trusted deterministic software verifier failure meets every convergence condition, the campaign returns to implementation for the SAME task with the validated `factory-verifier-failure/v1` artifact, bypassing planner/tester/auditor ceremony.  The convergence conditions are exactly: the deterministic gate actually ran and returned an ordinary nonzero status (never 126/127 or a negative supervisor status), the tester passed with no findings, the declared capability is available and ran clean, no scope violation occurred, the task is bound, the retry budget remains, the failure is not a byte-identical repeat (same `failure_fingerprint`), the task resource budget is not exhausted, and the campaign deadline remains. Infrastructure, capability, human/external, and tester-finding failures never converge.  The artifact is published write-once under the private `.factory-state/` namespace by its content-addressed digest and is re-validated at consumption against the exact commit, campaign, task, and digest;
-- Acceptance criteria: unit tests cover the convergence-extension state fields (optional in parse, serialized only while active, migration-compatible round-trip, and the fail-closed invariants), the `verifier_failure` state edge (requires a bound task and validated artifact digest/fingerprint, carries the cycle forward, clears on other transitions), the write-once artifact publication/read and the commit/campaign/task/digest consumption validation, and the launch sealed-prompt inert-data rendering plus the compose/authorize digest/task/campaign/commit mismatch fail-closed; integration tests cover a same-task retry that then passes, a repeated identical failure that terminates honestly, and capability/tester-finding/ exhausted-budget failures that never converge; the focused suites and the full `./scripts/verify-boilerplate.sh` gate pass serially.
-- Verification: `.factory/tests/test-factory-state.py`; `.factory/tests/test-factory-verifier-failure.py`; `.factory/tests/test-factory-launch.py` (VerifierFailurePromptTests); `.factory/tests/test-factory-campaign.py` (ConvergenceRetry); `.factory/tools/verify-boilerplate.sh`.
-- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` §11/§13/§14/§19/§22/§24; `.factory/schemas/factory-state-v1.schema.md`; `docs/FACTORY.md`; `docs/OPERATIONS.md`.
-
-## Task 32: Generic task-scoped path-lease foundation (Phase 2C1)
-
-- Status: pending
-- Dependencies: Task 2, Task 30
-- Priority: 32
-- Scope: Implement the strict task-scoped product-path lease authority foundation without runtime confinement wiring. The committed generic `factory-path-lease-policy/v1` schema/config (`.factory/path-lease-policy.json`) maps closed scope IDs to bounded repository-relative path prefixes/patterns for product-owned verification surfaces (scripts, build environment/Nix files, packaging, CI/forge files) with explicit immutable deny zones (`.factory` security/control machinery, `.factory-state`, `.git`, credential/key/env authorities, the product spec path, and release/human-approval/golden surfaces as configured) and explicit deny overrides that carve specific paths out of a deny zone; deny is dominant over allow. The policy rejects absolute/dotdot/backslash/control/ symlink-ambiguous patterns, duplicate keys, unsafe globs, and overlapping deny escapes, and every deny override must be strictly inside a deny zone. The strict `factory-task-path-lease/v1` claim schema binds campaign ID, selected task ID, attempt, exact HEAD commit, plan digest, policy digest, requested/granted scopes, the exact deny-dominant expanded paths/patterns, issued/deadline bounds, and a unique attempt nonce/digest;
-- Acceptance criteria: the committed policy and both schemas are present and reject every documented defect class (absolute/traversal/backslash/control/ unsafe-glob/symlink-ambiguous patterns, duplicate keys, overlapping deny escapes, override escapes); the unit/adversarial suite covers planner forgery, unknown scopes, replay across campaign/task/attempt/commit, expiry, policy-digest drift, path traversal/glob abuse, deny override, factory/spec/ credential/golden paths never grantable, duplicate keys, malformed claims, deterministic canonical bytes, the security-audit flag, and legacy plan compatibility; the parser accepts the optional `Write scopes:` field and rejects malformed/duplicate IDs while existing plans round-trip byte-exactly; the focused suites and the full `./scripts/verify-boilerplate.sh` gate pass serially.
-- Verification: `.factory/tests/test-factory-path-lease.py`; `.factory/tests/test-factory-plan-parser.py`; `.factory/tools/verify-boilerplate.sh`.
-- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§14.2, §22, §24 LEASE-01); `.factory/schemas/factory-plan-v1.schema.md`; `docs/FACTORY.md`; `docs/OPERATIONS.md`.
-
-## Task 36: Concise active plan and committed sidecar migration (Phase 2D1)
-
-- Status: pending
-- Dependencies: Task 6, Task 9, Task 11, Task 19, Task 25, Task 26, Task 27, Task 30, Task 32, Task 33, Task 34, Task 35
-- Priority: 36
-- Scope: Introduce the generic concise active-plan format (`factory-plan/v2`) and the lossless machine sidecar migration. The human/model-facing plan carries only active/pending/in_progress/blocked tasks with stable IDs/titles/priorities/dependencies, concise Scope/Acceptance, the current blocker, and the latest actionable failure; completed-task narratives, command/evidence history, iteration prose, and the full conformance/evidence matrix are removed from the injected plan text. Completed/cancelled tasks and the plan acceptance/evidence history live in two strict committed machine sidecars (`.factory/artifacts/plan-archive.jsonl` `factory-plan-archive/v1` and `.factory/artifacts/plan-history.jsonl` `factory-plan-history/v1`): JSON/JSONL, content-addressed/digest-bound, duplicate-key/size/count bounded, append/no-rewrite or deterministic migration, exact commit/evidence refs as data. The existing `.factory/artifacts/conformance.json`, facts, and receipts remain authorities; sidecars are queryable by trusted tools but excluded from routine role prompts. Archived dependency satisfaction uses the trusted completed-ID index bound to the sidecar digest; security remediation A adds the lossless `evidence` narrative field (full v1 Evidence preserved verbatim, bounded inert data) with curated safe inert `evidence_refs` (no absolute/dotdot/control/backslash/empty), parsed-schema v1/v2 detection (never substring), plan-sidecar binding verification against actual sidecar bytes at worktree validation and crash reconciliation, and a trusted archiver anchored to the committed blobs at the exact head that fails closed on stale/forged worktree sidecars;
-- Acceptance criteria: the v2 plan parses with the bound archive records and the final audit closes over active + archived tasks; the migration is lossless (every completed-task datum preserved in the archive sidecar), idempotent, and crash-safe; the composite binding digest changes when the plan or either sidecar changes; the freshness checker verifies the sidecar digests against the plan binding; the commit guard rejects administrative-only metadata commits; the focused suites and the full `./scripts/verify-boilerplate.sh` gate pass serially; the migrated plan is under the size ceiling and the size reduction is documented (measured 154230-byte pre-migration v1 plan to 18352-byte v2 plan, 88.1% reduction).
-- Verification: `.factory/tests/test-factory-plan-sidecars.py`; `.factory/tests/test-factory-plan-migration.py`; `.factory/tests/test-factory-substance.py`; `.factory/tests/test-factory-plan-parser.py`; `.factory/tests/test-factory-selector.py`; `.factory/tests/test-factory-campaign.py`; `.factory/tools/verify-boilerplate.sh`.
-- Documentation impact: `docs/FACTORY-LOOP-SPEC.md` (§7.1, §8, §22, §24 PLAN-01); `docs/FACTORY.md`; `docs/OPERATIONS.md`; `AGENTS.md`; `.factory/schemas/factory-plan-v2.schema.md`; `.factory/schemas/factory-plan-archive-v1.schema.md`; `.factory/schemas/factory-plan-history-v1.schema.md`; `.factory/artifacts/conformance.json`.
-
-## Task 37: Final documentation and specification audit
-
-- Status: pending
-- Dependencies: Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13, Task 14, Task 15, Task 16, Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25, Task 26, Task 27, Task 28, Task 29, Task 30, Task 31, Task 32, Task 33, Task 34, Task 35, Task 36
-- Priority: 37
-- Scope: Current checkpoint: the Phase 2B2 runtime wiring is complete: the campaign consumes the trusted scheduler decisions (planning initial/on-demand only with the planner need/reason recorded in the control state; the trusted deterministic verifier runs at each candidate exact commit; the independent tester/auditor run only at milestone/risk boundaries; the audit resolves the next phase and the closed terminal reason), `--rounds` is a finite maximum budget (never an exact count, no exactly-five rejection) capped by the committed `factory-campaign-budget/v1` `max_rounds`, the scheduler-extension state fields (checkpoints, task attempts, progress/no-progress fingerprints, planner need/reason, audit trigger, completed audit objectives, terminal reason) are optional-in-parse and serialized only when active (byte-compatible migration), and the distinct honest terminal reasons (`success`, `software_verified_external_acceptance_blocked`, `blocked`, `no_progress`, `budget_exhausted`, `interrupted`, `infrastructure_failure`) are never mis-mapped to success/findings.
-- Acceptance criteria: audit report records every §24 requirement verified or an explicit finding; no acceptance-critical audit finding remains; the campaign does not claim success unless the final audit is clean, the conformance sidecar shows all verified, and the `complete` mode of `.factory/tools/validate-conformance.py` exits 0.
-- Verification: `.factory/tools/validate-conformance.py`; `.factory/tools/check-docs-sync.sh`; `.factory/tools/check-audit-receipts.py`; `.factory/tools/check-campaign-objectives.py`; independent audit evidence appended to `.factory/artifacts/campaign-audit.md`.
-- Documentation impact: `.factory/artifacts/campaign-audit.md`.
+- Priority: 1
+- Scope: Replace the placeholder `scripts/verify.sh` with the project's
+  actual build + test command. Write the product specification in
+  `docs/SPEC.md`. Declare runners in `.factory/environment.toml` if
+  external hardware is needed.
+- Acceptance criteria: `scripts/verify.sh` builds and tests the product;
+  `docs/SPEC.md` describes the product contract; `python3 .factory/loop/
+  plan_parser.py parse .factory/artifacts/implementation-plan.md` succeeds.
+- Verification: `./scripts/verify.sh`
