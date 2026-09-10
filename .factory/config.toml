@@ -6,6 +6,8 @@ release_branch = "main"
 
 [verification]
 command = ["./scripts/verify.sh"]
+clean = []
+build_command = ""
 
 [campaign]
 default_rounds = 20
