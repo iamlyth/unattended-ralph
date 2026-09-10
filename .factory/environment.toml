@@ -1,19 +1,9 @@
 schema_version = 1
 
-# Declare only capabilities that are available to the factory now. Keep secrets,
-# credentials, private-key paths, hostnames, usernames, and tokens outside Git.
-# An empty file beyond this schema marker means that no external tools or runners
-# are available; workers must not infer or invent them.
-
-# [[tools]]
-# name = "example-local-tool"
-# command = "example-tool"
-# capabilities = ["example-capability"]
-
-# [[runners]]
-# name = "example-hardware-runner"
-# transport = "ssh"
-# ssh_config_alias = "configured-outside-the-repository"
-# working_directory = "/path/on/runner"
-# capabilities = ["example-real-system-capability"]
-# verify_argv = ["./.factory/tools/verify-project.sh"]
+[[runners]]
+name = "ralphrunner"
+transport = "ssh"
+ssh_config_alias = "ralphrunner"
+working_directory = "/srv/factory-work/controller-box"
+capabilities = ["physical-controller", "inputplumber-system-dbus", "gpu-compositor", "target-consumer", "controller-production-routing"]
+verify_command = "./scripts/verify-project.sh"

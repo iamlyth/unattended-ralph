@@ -1,5 +1,0 @@
-{
-  "schema": "ralph-capability-contract/v1",
-  "description": "Generic product-neutral template. Keep per-product contract instances in the product repository only; this file must not claim any capability that the generic repository does not declare in .factory/environment.toml.",
-  "capabilities": []
-}

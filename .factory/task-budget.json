@@ -1,8 +1,0 @@
-{
-  "schema": "factory-task-budget/v1",
-  "wall_time_seconds": 3600,
-  "cpu_time_seconds": 1800,
-  "output_bytes": 67108864,
-  "max_live_processes": 256,
-  "per_command_timeout_seconds": 300
-}

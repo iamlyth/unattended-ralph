@@ -1,9 +1,0 @@
-{
-  "schema": "ralph-runner-signer-trust/v1",
-  "description": "Neutral disabled trust store for factory-runner-receipt/v3. No production principal, public key, private key, credential, or evidence ships with the boilerplate. Adopters enroll one distinct external signer principal/key per runner class. Validation requires both issuance-commit trust and current trust, so deletion is immediate fail-closed revocation.",
-  "require_signature": true,
-  "enabled": false,
-  "namespace": "factory-runner-receipt",
-  "public_keys": [],
-  "allowed_principals": []
-}

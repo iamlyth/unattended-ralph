@@ -1,6 +1,0 @@
-{
-  "schema": "factory-runner-policy-enrollment/v1",
-  "status": "unenrolled",
-  "probe_authorities": {},
-  "note": "Neutral template only. Production remains blocked until an adopter independently installs and enrolls a root-owned authority, exact executable/resource pins, accounts, signer trust, and capabilities. This file contains no production authority or evidence."
-}

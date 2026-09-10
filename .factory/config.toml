@@ -1,58 +1,17 @@
 [project]
-# This boilerplate cycle plans against the committed redesign specification.
-# docs/SPEC.md remains the adopting-product placeholder and is never planned
-# against; the placeholder-marker guard in .factory/tools/check-spec-provided.sh
-# hard-blocks it regardless of this binding.
-spec = "docs/FACTORY-LOOP-SPEC.md"
+spec = "docs/SPEC.md"
 plan = ".factory/artifacts/implementation-plan.md"
-development_branch = "boilerplate-develop"
+development_branch = "develop"
 release_branch = "main"
 
-[concurrency]
-adaptive = true
-planning_subagents = 8
-research_subagents = 8
-review_subagents = 8
-implementation_advisors = 2
-mutating_workers = 1
-integration_workers = 1
-min_model_requests = 1
-max_model_requests = 8
+[verification]
+command = ["./scripts/verify-project.sh"]
+runner_command = ["./scripts/verify-on-runner.sh"]
 
 [campaign]
-# Populate this in the adopting product with capabilities that a clean
-# independent audit must obtain from .factory/environment.toml.
-required_capabilities = []
-
-[quota]
-threshold_percent = 80
-poll_interval_seconds = 300
-max_wait_seconds = 0
-resume_after_reset = true
-retry_transient_errors = true
-
-[documentation]
-required = true
-readme = "README.md"
-operations = "docs/OPERATIONS.md"
-final_task_title = "Final documentation and specification audit"
-
-[verification]
-maintenance_command = ["./.factory/tools/verify-boilerplate.sh"]
-campaign_command = ["./.factory/tools/verify-boilerplate.sh"]
-
-[issues]
-schema = "ralph-bug-ledger/v1"
-open_ledger = ".factory/bugs/open.md"
-closed_ledger = ".factory/bugs/closed.md"
-maintenance_plan = ".factory/artifacts/maintenance-plan.md"
-final_task_title = "Maintenance verification and documentation audit"
-providers = ["github", "forgejo"]
-external_sync = "manual"
-credentials = false
+default_rounds = 20
+default_attempts = 3
+default_timeout = 21600
 
 [git]
-autonomous_branch = "boilerplate-develop"
-human_release_branch = "main"
-allow_worktrees = false
 checkpoint_each_iteration = true
