@@ -15,8 +15,13 @@ import subprocess
 import tomllib
 from typing import Any
 
+# Resolve SSH config: prefer .factory/ssh/ssh_config in the project,
+# fall back to ~/.local/share/pi2-ssh-runner/ssh_config.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 FACTORY_SSH_CONFIG = str(
-    Path.home() / ".local/share/pi2-ssh-runner/ssh_config"
+    _REPO_ROOT / ".factory" / "ssh" / "ssh_config"
+    if (_REPO_ROOT / ".factory" / "ssh" / "ssh_config").is_file()
+    else Path.home() / ".local/share/pi2-ssh-runner/ssh_config"
 )
 SSH_OPTIONS = (
     "-F", FACTORY_SSH_CONFIG,

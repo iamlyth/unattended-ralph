@@ -48,3 +48,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Factory runner SSH keys (never commit)
+.factory/ssh/
