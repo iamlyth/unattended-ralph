@@ -12,6 +12,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .runner import check_runner_available
+
 PLACEHOLDER_MARKER = "SPEC_PENDING_HUMAN_SUPPLY"
 
 @dataclass
@@ -62,24 +64,7 @@ def _check_branch(root: Path, config: dict, failures: list[str]) -> None:
 def _check_runners(runners: list, failures: list[str]) -> None:
     for runner in runners:
         name = getattr(runner, "name", None) or repr(runner)
-        check = getattr(runner, "check_runner_available", None)
-        if callable(check):
-            try:
-                ok = check()
-            except Exception as exc:  # noqa: BLE001 - surface connectivity error
-                failures.append(f"runner {name!r} unreachable: {exc}")
-                continue
-            if not ok:
-                failures.append(f"runner {name!r} is not reachable")
-            continue
-        alias = getattr(runner, "ssh_config_alias", None)
-        if not alias:
-            failures.append(f"runner {name!r} has no reachability check")
-            continue
-        probe = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, "true"],
-            capture_output=True, text=True, timeout=30)
-        if probe.returncode != 0:
+        if not check_runner_available(runner):
             failures.append(f"runner {name!r} is not reachable over SSH")
 
 
