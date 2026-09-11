@@ -46,7 +46,7 @@ PLAN_PATH = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 PROMPTS_DIR = ROOT / ".factory" / "prompts"
 FINDINGS_PATH = ROOT / ".factory" / "artifacts" / "audit-findings.md"
 
-ROLE_TIMEOUT = 900  # seconds per role invocation
+ROLE_TIMEOUT = 900  # seconds per role invocation (15 min)
 
 # Exit codes for terminal outcomes. Preflight failure exits 2.
 TERMINAL_EXIT = {
@@ -151,6 +151,7 @@ def _clean_verification_dirs(root: Path, config: dict) -> None:
         target = root / d
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
+    # Rebuild from the correct external path.
     build_cmd = config_build_command(config)
     if build_cmd:
         wrapped = _wrap_nix_shell(build_cmd, root)
@@ -202,11 +203,11 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
     """
     commit = gitutil.current_commit(ROOT)
     vcmd = config_verify_command(config)
+    _clean_verification_dirs(ROOT, config)
     local = Runner(
         name="local", transport="local", ssh_config_alias="",
         working_directory="", capabilities=[], verify_command="",
     )
-    _clean_verification_dirs(ROOT, config)
     vresult = run_verification(local, vcmd, ROOT, commit)
     if vresult.exit_code != 0:
         return "failed"
