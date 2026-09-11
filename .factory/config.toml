@@ -6,8 +6,8 @@ release_branch = "main"
 
 [verification]
 command = ["./scripts/verify.sh"]
-clean = []
-build_command = ""
+clean = ["build"]
+build_command = "rm -rf build && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)"
 
 [campaign]
 default_rounds = 20
