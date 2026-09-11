@@ -1,0 +1,119 @@
+# .factory/roles.toml — Parallel role structure for the factory harness.
+#
+# This file defines the subagents that run in each campaign phase.  The
+# harness reads it at startup and launches subagents accordingly.  Projects
+# can add, remove, or modify entries to tailor the process.
+#
+# Three phases exist:
+#   1. planning   — study subagents analyse the codebase in parallel, then
+#                   a single planner synthesises their reports into a plan.
+#   2. implementation — developers work on isolated codebase areas in
+#                       parallel, then an integration developer merges
+#                       their proposed changes and commits.
+#   3. audit      — specialist auditors review the final codebase in
+#                   parallel, each focusing on a different quality axis.
+#
+# Subagent fields:
+#   name        — short identifier used in logs and report headers
+#   prompt      — path to the prompt file (relative to repo root)
+#   description — human-readable summary of what the subagent does
+#   path        — (optional) for study subagents: source directory to focus on
+#   paths       — (optional) for developers: list of directories the dev owns
+#
+# If no [[planning.studies]] entries have a `path` field, the harness will
+# auto-discover subsystems by scanning the source tree and generate one
+# study subagent per major directory.
+
+# ─── Planning phase ───────────────────────────────────────────────────
+
+[planning]
+planner_prompt = ".factory/prompts/planner.md"
+# Timeout for each study subagent and the planner (seconds).
+timeout = 900
+
+[[planning.studies]]
+name = "spec"
+prompt = ".factory/prompts/study-spec.md"
+description = "Study the project specification and requirements"
+
+[[planning.studies]]
+name = "architecture"
+prompt = ".factory/prompts/study-architecture.md"
+description = "Study the overall codebase architecture and module layout"
+
+[[planning.studies]]
+name = "bugs"
+prompt = ".factory/prompts/study-bugs.md"
+description = "Study current bugs, test failures, and known issues"
+
+# Subsystem studies are auto-generated from the source tree.
+# To override with explicit subsystems, uncomment and edit:
+# [[planning.studies]]
+# name = "manager"
+# prompt = ".factory/prompts/study-subsystem.md"
+# path = "src/manager/"
+# description = "Study the manager UI and event loop"
+
+# ─── Implementation phase ─────────────────────────────────────────────
+
+[implementation]
+integration_prompt = ".factory/prompts/integration-developer.md"
+timeout = 900
+
+# Developers work on isolated areas.  Each receives the plan and the
+# current codebase, and outputs proposed changes for their area.
+# The integration developer then applies all proposals and commits.
+#
+# If no developers are defined, a single "default" developer works on
+# the entire codebase (serial, like the old harness).
+
+[[implementation.developers]]
+name = "default"
+prompt = ".factory/prompts/developer.md"
+description = "Full-stack developer for the entire codebase"
+
+# To split into areas, uncomment and edit:
+# [[implementation.developers]]
+# name = "frontend"
+# prompt = ".factory/prompts/developer.md"
+# paths = ["src/manager/", "src/overlay/"]
+#
+# [[implementation.developers]]
+# name = "backend"
+# prompt = ".factory/prompts/developer.md"
+# paths = ["src/dbus/", "src/app/"]
+
+# ─── Audit phase ──────────────────────────────────────────────────────
+
+[audit]
+timeout = 600
+
+[[audit.auditors]]
+name = "linting"
+prompt = ".factory/prompts/auditor-linting.md"
+description = "Language linting, readability, concise comments (no verbose noise)"
+
+[[audit.auditors]]
+name = "efficiency"
+prompt = ".factory/prompts/auditor-efficiency.md"
+description = "Performance, resource usage, algorithmic complexity"
+
+[[audit.auditors]]
+name = "security"
+prompt = ".factory/prompts/auditor-security.md"
+description = "Security vulnerabilities, attack surface, input validation"
+
+[[audit.auditors]]
+name = "functional"
+prompt = ".factory/prompts/auditor-functional.md"
+description = "Functional correctness — does the code actually work"
+
+[[audit.auditors]]
+name = "spec-compliance"
+prompt = ".factory/prompts/auditor-spec.md"
+description = "Compliance with the project specification"
+
+[[audit.auditors]]
+name = "compatibility"
+prompt = ".factory/prompts/auditor-compatibility.md"
+description = "Platform, dependency, and API compatibility"

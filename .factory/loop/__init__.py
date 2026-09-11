@@ -23,6 +23,19 @@ from .runner import (
     sync_to_runner,
 )
 from .preflight import PreflightResult, run_preflight
+from .parallel import (
+    SubagentResult,
+    StudyConfig,
+    DeveloperConfig,
+    AuditorConfig,
+    invoke_subagent,
+    run_parallel,
+    assemble_reports,
+    assemble_developer_outputs,
+    assemble_audit_findings,
+    discover_subsystems,
+    load_roles,
+)
 from .campaign import main
 
 __all__ = [
@@ -43,6 +56,11 @@ __all__ = [
     "run_verification", "sync_to_runner",
     # preflight
     "PreflightResult", "run_preflight",
+    # parallel
+    "SubagentResult", "StudyConfig", "DeveloperConfig", "AuditorConfig",
+    "invoke_subagent", "run_parallel", "assemble_reports",
+    "assemble_developer_outputs", "assemble_audit_findings",
+    "discover_subsystems", "load_roles",
     # campaign
     "main",
 ]

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Minimal Ralph factory campaign orchestrator.
+"""Parallel Ralph factory campaign orchestrator.
 
 Ties together the control-plane modules (plan_parser, selector, state,
-gitutil, lock, runner, preflight) into the finite campaign loop described in
-spec sections 7, 9, 11, 13 and 15.
+gitutil, lock, runner, preflight, parallel) into a finite campaign loop
+with parallel study, implementation, and audit phases.
 
-Each round runs: planning -> implementation -> verification -> audit.
+Each round runs:
+  1. PLANNING: parallel study subagents → planner synthesises plan.
+  2. SELECTION: deterministic task selection (model never chooses).
+  3. IMPLEMENTATION: parallel developers → integration developer commits.
+  4. VERIFICATION: task verification on local or runner hardware.
+  5. AUDIT: parallel specialist auditors → findings.
+
 The orchestrator is the sole Git writer and the sole reader/writer of the
-control-state file. Model prose is never control protocol: outcomes are
+control-state file.  Model prose is never control protocol: outcomes are
 derived from plan state, Git state, exit status, and verification results.
-
-Terminal outcomes (spec 9.2): success, findings, blocked, failed,
-interrupted, infrastructure_failure.
 """
 from __future__ import annotations
 
@@ -37,6 +40,15 @@ from .runner import (
     _wrap_nix_shell,
 )
 from .preflight import run_preflight
+from .parallel import (
+    SubagentResult,
+    run_parallel,
+    assemble_reports,
+    assemble_developer_outputs,
+    assemble_audit_findings,
+    discover_subsystems,
+    load_roles,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / ".factory" / "config.toml"
@@ -45,10 +57,10 @@ STATE_PATH = ROOT / ".factory-state" / "factory-loop.json"
 PLAN_PATH = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 PROMPTS_DIR = ROOT / ".factory" / "prompts"
 FINDINGS_PATH = ROOT / ".factory" / "artifacts" / "audit-findings.md"
+ROLES_PATH = ROOT / ".factory" / "roles.toml"
 
-ROLE_TIMEOUT = 900  # seconds per role invocation (15 min)
+ROLE_TIMEOUT = 900  # default seconds per role invocation (15 min)
 
-# Exit codes for terminal outcomes. Preflight failure exits 2.
 TERMINAL_EXIT = {
     "success": 0,
     "findings": 1,
@@ -59,55 +71,31 @@ TERMINAL_EXIT = {
 }
 
 
-class _RoleResult:
-    """Minimal stand-in for a subprocess result (also used on launch errors)."""
-
-    def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
+# ─── Config helpers ───────────────────────────────────────────────────
 
 def load_config() -> dict:
-    """Load config.toml via tomllib."""
-    with open(CONFIG_PATH, "rb") as handle:
-        return tomllib.load(handle)
+    with open(CONFIG_PATH, "rb") as f:
+        return tomllib.load(f)
 
 
-def invoke_role(role: str, provider: str, model: str, root: Path,
-                extra: str = "") -> _RoleResult:
-    """Invoke a role in a fresh context (spec 7).
+def config_build_command(config: dict) -> str:
+    return str(config.get("verification", {}).get("build_command", ""))
 
-    The role prompt is the only input channel; ``extra`` (e.g. the selected
-    task excerpt) is appended to the prompt. Captures stdout/stderr/exit code.
-    """
-    prompt_path = root / ".factory" / "prompts" / f"{role}.md"
-    try:
-        prompt = prompt_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return _RoleResult(127, "", f"cannot read prompt {prompt_path}: {exc}")
-    if extra:
-        prompt += "\n\n" + extra
-    cmd = [
-        "pi2", "--provider", provider, "--model", model,
-        "--print", "--no-session", "--approve",
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            cwd=str(root),
-            timeout=ROLE_TIMEOUT,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return _RoleResult(127, "", f"role invocation failed: {exc}")
-    return _RoleResult(result.returncode, result.stdout or "", result.stderr or "")
 
+def config_verify_command(config: dict) -> str:
+    cmd = config.get("verification", {}).get("command") or []
+    if isinstance(cmd, list):
+        return " ".join(cmd)
+    return str(cmd) if cmd else ""
+
+
+def config_clean_dirs(config: dict) -> list[str]:
+    return list(config.get("verification", {}).get("clean", []))
+
+
+# ─── Task helpers ─────────────────────────────────────────────────────
 
 def task_excerpt(task: Task) -> str:
-    """Render a task verbatim for the developer/auditor prompt."""
     deps = ", ".join(str(d) for d in task.dependencies) if task.dependencies else "none"
     return "\n".join([
         f"## Task {task.id}: {task.title}",
@@ -121,37 +109,24 @@ def task_excerpt(task: Task) -> str:
     ])
 
 
-def config_verify_command(config: dict) -> str:
-    """The overall verification command string from config (spec 13.1)."""
-    cmd = config.get("verification", {}).get("command") or []
-    if isinstance(cmd, list):
-        return " ".join(cmd)
-    return str(cmd) if cmd else ""
+def find_runner_for_capability(runners: list, cap: str) -> Runner | None:
+    for r in runners:
+        if cap in r.capabilities:
+            return r
+    return None
 
 
-def config_clean_dirs(config: dict) -> list[str]:
-    """Directories to clean before verification (spec 13.1 ``clean``)."""
-    return list(config.get("verification", {}).get("clean", []))
+def _strip_markdown_ticks(cmd: str) -> str:
+    return cmd.replace("`", "").strip() if cmd else ""
 
 
-def config_build_command(config: dict) -> str:
-    """Build command to run after cleaning, before task verification."""
-    return str(config.get("verification", {}).get("build_command", ""))
-
+# ─── Verification ─────────────────────────────────────────────────────
 
 def _clean_verification_dirs(root: Path, config: dict) -> None:
-    """Remove directories listed in verification.clean, then rebuild.
-
-    The developer role runs inside a sandbox (pi2) that may remap paths.
-    Build artifacts created there contain sandbox-internal paths that are
-    invalid when verification runs outside the sandbox. Cleaning ensures
-    verification rebuilds from the correct path.
-    """
     for d in config_clean_dirs(config):
         target = root / d
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
-    # Rebuild from the correct external path.
     build_cmd = config_build_command(config)
     if build_cmd:
         wrapped = _wrap_nix_shell(build_cmd, root)
@@ -162,60 +137,207 @@ def _clean_verification_dirs(root: Path, config: dict) -> None:
         )
 
 
-def find_runner_for_capability(runners: list, capability: str) -> Runner | None:
-    """Return the first runner declaring the given capability."""
-    for runner in runners:
-        if capability in runner.capabilities:
-            return runner
-    return None
-
-
-def _strip_markdown_ticks(command: str) -> str:
-    """Remove Markdown code-span backticks from a verification command.
-
-    The canonical plan formats every Verification/Runner command as a Markdown
-    code span (e.g. `` `ctest ... --output-on-failure` ``). If passed verbatim
-    to a shell, the backticks are interpreted as command substitution, which
-    breaks (or hangs) the run and can never pass. Strip surrounding backticks
-    (and any stray ones used purely as Markdown delimiters) so the command is
-    actually executed.
-    """
-    return command.replace("`", "").strip() if command else ""
-
-
 def run_task_verification(task: Task, runners: list, root: Path,
                           commit: str, build_command: str = "") -> VerificationResult:
-    """Run a task's verification locally or on a runner (spec 8.3)."""
     command = _strip_markdown_ticks(task.verification)
     if task.runner:
         runner = find_runner_for_capability(runners, task.runner)
         if runner is None:
             return VerificationResult(
-                exit_code=127,
-                stdout="",
+                exit_code=127, stdout="",
                 stderr=f"runner-unavailable: {task.runner}",
-                runner=task.runner,
-                command=task.verification,
+                runner=task.runner, command=task.verification,
             )
         return run_verification(runner, command, root, commit,
                                 build_command=build_command)
     local = Runner(
-        name="local",
-        transport="local",
-        ssh_config_alias="",
-        working_directory="",
-        capabilities=[],
-        verify_command="",
+        name="local", transport="local", ssh_config_alias="",
+        working_directory="", capabilities=[], verify_command="",
     )
     return run_verification(local, command, root, commit)
 
 
-def _finalize_success(plan: Plan, config: dict, env: dict, args,
-                      state: State) -> str:
-    """work_exhausted: run overall verification + audit, then decide.
+# ─── Parallel phases ─────────────────────────────────────────────────
 
-    Never silently succeeds (spec 9.2). Returns a terminal outcome.
+def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
+    """Run the planning phase: parallel study subagents → planner.
+
+    Returns True if planning succeeded (plan file was written/parsed).
     """
+    plan_cfg = roles.get("planning", {})
+    timeout = plan_cfg.get("timeout", ROLE_TIMEOUT)
+    studies = list(plan_cfg.get("studies", []))
+
+    # Auto-discover subsystems if no explicit subsystem studies are defined.
+    has_subsystem_studies = any(s.get("path") for s in studies)
+    if not has_subsystem_studies:
+        subsystems = discover_subsystems(root)
+        studies.extend(subsystems)
+
+    if not studies:
+        # No study subagents — run planner directly.
+        studies = []
+
+    print(f"  planning: {len(studies)} study subagents", file=sys.stderr)
+
+    # Launch study subagents in parallel (read-only, approve=False).
+    def study_context(name: str, sa: dict) -> str:
+        ctx = f"Project root: {root}\n"
+        if sa.get("path"):
+            ctx += f"Focus on the `{sa['path']}` directory.\n"
+        if sa.get("description"):
+            ctx += f"Task: {sa['description']}\n"
+        return ctx
+
+    study_results = run_parallel(
+        studies, study_context, args.provider, args.model,
+        timeout, cwd=root, approve=False,
+    )
+
+    # Assemble study reports.
+    study_report = assemble_reports(study_results)
+
+    # Feed study reports to the planner.
+    planner_prompt = plan_cfg.get("planner_prompt", ".factory/prompts/planner.md")
+    planner_result = run_parallel(
+        [{"name": "planner", "prompt": planner_prompt}],
+        lambda name, sa: f"## Study Reports\n\n{study_report}\n\n"
+                         f"Review discrepancies against the spec and devise "
+                         f"an implementation plan at "
+                         f".factory/artifacts/implementation-plan.md",
+        args.provider, args.model,
+        timeout, cwd=root, approve=True,
+    )
+
+    if not planner_result or not planner_result[0].success:
+        stderr = planner_result[0].stderr if planner_result else "no result"
+        print(f"  planning: planner failed: {stderr}", file=sys.stderr)
+        return False
+
+    return True
+
+
+def run_implementation_phase(roles: dict, config: dict, args,
+                              task: Task, root: Path) -> str:
+    """Run the implementation phase for a single task.
+
+    Parallel developers propose changes → integration developer applies
+    and commits.  Returns the commit SHA (or empty string on failure).
+    """
+    impl_cfg = roles.get("implementation", {})
+    timeout = impl_cfg.get("timeout", ROLE_TIMEOUT)
+    developers = list(impl_cfg.get("developers", []))
+
+    if not developers:
+        developers = [{"name": "default", "prompt": ".factory/prompts/developer.md"}]
+
+    excerpt = task_excerpt(task)
+
+    # Single developer: run directly with --approve (old behaviour).
+    if len(developers) == 1:
+        print(f"  implementation: 1 developer (serial)", file=sys.stderr)
+        dev = developers[0]
+        from .parallel import invoke_subagent
+        name, exit_code, stdout, stderr = invoke_subagent(
+            dev["prompt"], excerpt, args.provider, args.model,
+            timeout, cwd=root, approve=True,
+        )
+        if exit_code != 0:
+            print(f"  implementation: developer failed (exit {exit_code})",
+                  file=sys.stderr)
+            return ""
+        return gitutil.commit_all(
+            root, f"factory: task {task.id} implementation",
+        )
+
+    # Multiple developers: run in parallel, then integration developer.
+    print(f"  implementation: {len(developers)} developers (parallel)",
+          file=sys.stderr)
+
+    def dev_context(name: str, sa: dict) -> str:
+        ctx = excerpt
+        paths = sa.get("paths", [])
+        if paths:
+            ctx += f"\n\n## Your Assigned Area\n\nYou are responsible for " \
+                   f"these paths ONLY: {', '.join(paths)}\n" \
+                   f"Do not modify files outside your assigned area.\n"
+        else:
+            ctx += "\n\nYou are responsible for the entire codebase.\n"
+        ctx += "\nOutput your proposed changes. Do NOT commit — the " \
+               "integration developer will apply and commit all changes.\n"
+        return ctx
+
+    dev_results = run_parallel(
+        developers, dev_context, args.provider, args.model,
+        timeout, cwd=root, approve=False,
+    )
+
+    # Assemble developer outputs and feed to integration developer.
+    proposals = assemble_developer_outputs(dev_results)
+    integration_prompt = impl_cfg.get(
+        "integration_prompt", ".factory/prompts/integration-developer.md")
+
+    from .parallel import invoke_subagent
+    name, exit_code, stdout, stderr = invoke_subagent(
+        integration_prompt,
+        f"## Task\n\n{excerpt}\n\n"
+        f"## Developer Proposals\n\n{proposals}",
+        args.provider, args.model,
+        timeout, cwd=root, approve=True,
+    )
+
+    if exit_code != 0:
+        print(f"  implementation: integration developer failed (exit {exit_code})",
+              file=sys.stderr)
+        return ""
+
+    return gitutil.commit_all(
+        root, f"factory: task {task.id} integrated implementation",
+    )
+
+
+def run_audit_phase(roles: dict, config: dict, args,
+                     task: Task, root: Path) -> tuple[str, bool]:
+    """Run the audit phase: parallel specialist auditors.
+
+    Returns ``(report, has_findings)``.
+    """
+    audit_cfg = roles.get("audit", {})
+    timeout = audit_cfg.get("timeout", 600)
+    auditors = list(audit_cfg.get("auditors", []))
+
+    if not auditors:
+        # Fallback: single auditor.
+        auditors = [{"name": "auditor", "prompt": ".factory/prompts/auditor.md"}]
+
+    print(f"  audit: {len(auditors)} specialist auditors (parallel)",
+          file=sys.stderr)
+
+    excerpt = task_excerpt(task)
+
+    def audit_context(name: str, sa: dict) -> str:
+        ctx = f"You are auditing task {task.id}: {task.title}\n\n"
+        ctx += f"## Task Details\n\n{excerpt}\n\n"
+        if sa.get("description"):
+            ctx += f"## Your Focus\n\n{sa['description']}\n"
+        ctx += "\nAudit the current codebase state. Report findings as " \
+               "markdown. Exit non-zero if you find BLOCKER issues.\n"
+        return ctx
+
+    audit_results = run_parallel(
+        auditors, audit_context, args.provider, args.model,
+        timeout, cwd=root, approve=False,
+    )
+
+    report, has_blockers = assemble_audit_findings(audit_results)
+    return report, has_blockers
+
+
+# ─── Terminal success ────────────────────────────────────────────────
+
+def _finalize_success(plan: Plan, config: dict, env: dict, args,
+                      roles: dict, state: State) -> str:
+    """work_exhausted: run overall verification + audit, then decide."""
     commit = gitutil.current_commit(ROOT)
     vcmd = config_verify_command(config)
     _clean_verification_dirs(ROOT, config)
@@ -226,16 +348,23 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
     vresult = run_verification(local, vcmd, ROOT, commit)
     if vresult.exit_code != 0:
         return "failed"
-    aud = invoke_role("auditor", args.provider, args.model, ROOT,
-                      "Final audit: all plan tasks are complete.")
-    if aud.returncode != 0:
-        return "findings"
-    return "success"
 
+    # Run full audit with all specialist auditors.
+    dummy_task = Task(id=0, title="Final audit", status="completed",
+                      acceptance="All tasks complete", verification=vcmd)
+    report, has_blockers = run_audit_phase(roles, config, args, dummy_task, ROOT)
+    FINDINGS_PATH.write_text(
+        f"# Final Audit Findings\n\n{report}\n", encoding="utf-8",
+    )
+    return "findings" if has_blockers else "success"
+
+
+# ─── Main campaign loop ──────────────────────────────────────────────
 
 def run_campaign(args, config: dict, env: dict) -> int:
-    """Run the full campaign loop. Returns the process exit code."""
-    # 1. Preflight (spec 13.3). Failure -> exit 2.
+    roles = load_roles(ROOT)
+
+    # 1. Preflight.
     preflight = run_preflight(ROOT, config, env["runners"])
     if not preflight.passed:
         for failure in preflight.failures:
@@ -243,7 +372,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
         return 2
 
     with Lock(ROOT):
-        # 2. Load or create control state (spec 10).
         state = load(STATE_PATH)
         if state.campaign_id and state.campaign_id != args.campaign_id:
             state = State(campaign_id=args.campaign_id)
@@ -251,7 +379,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
             state.campaign_id = args.campaign_id
         validate(state)
 
-        # 3. Switch to the development branch (spec 11).
         branch = args.branch or config.get("project", {}).get(
             "development_branch", "develop")
         gitutil.switch_branch(ROOT, branch)
@@ -271,13 +398,13 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 state.last_outcome = None
                 save(STATE_PATH, state)
 
-                # 6a. PLANNING
-                plan_result = invoke_role("planner", args.provider,
-                                          args.model, ROOT)
-                if plan_result.returncode != 0:
+                print(f"\n=== Round {round_num} ===", file=sys.stderr)
+
+                # ── 1. PLANNING (parallel study → planner) ──
+                ok = run_planning_phase(roles, config, args, ROOT)
+                if not ok:
                     outcome = "failed"
-                    reason = (f"planning failed (exit "
-                              f"{plan_result.returncode})")
+                    reason = "planning failed"
                     break
                 try:
                     plan = parse(PLAN_PATH)
@@ -286,17 +413,16 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     reason = f"plan parse failed: {exc}"
                     break
 
-                # 6c/6d. Runner availability + deterministic selection.
+                # ── 2. SELECTION (deterministic, model never chooses) ──
                 caps = get_available_capabilities(env["runners"])
                 sel = select(plan.tasks, caps)
 
-                # 6e. work_exhausted -> verification + audit, then success.
                 if sel.status == "work_exhausted":
-                    outcome = _finalize_success(plan, config, env, args, state)
+                    outcome = _finalize_success(
+                        plan, config, env, args, roles, state)
                     reason = "all tasks complete"
                     break
 
-                # 6f. blocked -> terminate blocked.
                 if sel.status == "blocked":
                     outcome = "blocked"
                     reason = sel.reason
@@ -307,30 +433,30 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 state.current_phase = "implementation"
                 save(STATE_PATH, state)
 
-                # 6g-6k. IMPLEMENTATION + VERIFICATION with attempt budget.
+                # ── 3. IMPLEMENTATION + VERIFICATION ──
                 verified = False
+                vresult: VerificationResult | None = None
                 for attempt in range(1, args.attempts + 1):
                     state.attempt_number = attempt
                     save(STATE_PATH, state)
 
-                    dev = invoke_role("developer", args.provider, args.model,
-                                      ROOT, task_excerpt(task))
-                    commit = gitutil.commit_all(
-                        ROOT,
-                        f"factory: task {task.id} round {round_num} "
-                        f"attempt {attempt}",
-                    )
+                    commit = run_implementation_phase(
+                        roles, config, args, task, ROOT)
+
+                    if not commit:
+                        # Developer/integration failed; retry if attempts left.
+                        continue
 
                     state.current_phase = "verification"
                     save(STATE_PATH, state)
                     _clean_verification_dirs(ROOT, config)
-                    vresult = run_task_verification(task, env["runners"],
-                                                    ROOT, commit,
-                                                    config_build_command(config))
+                    vresult = run_task_verification(
+                        task, env["runners"], ROOT, commit,
+                        config_build_command(config))
+
                     if vresult.exit_code == 0:
                         verified = True
                         break
-                    # Verification failed; retry if attempts remain.
 
                 if not verified:
                     outcome = "failed"
@@ -338,43 +464,44 @@ def run_campaign(args, config: dict, env: dict) -> int:
                               f"{args.attempts} attempts")
                     break
 
-                # Mark the task completed in the sole task ledger.
+                # Mark task completed in the plan.
                 task.status = "completed"
                 task.evidence = (f"verification exit {vresult.exit_code} "
                                 f"on {vresult.runner}")
                 PLAN_PATH.write_text(dump(plan), encoding="utf-8")
 
-                # 6l. AUDIT.
+                # ── 4. AUDIT (parallel specialist auditors) ──
                 state.current_phase = "audit"
                 save(STATE_PATH, state)
-                aud = invoke_role("auditor", args.provider, args.model, ROOT,
-                                  task_excerpt(task))
-                audit_findings = aud.returncode != 0
-                if audit_findings:
+                report, has_findings = run_audit_phase(
+                    roles, config, args, task, ROOT)
+                if has_findings:
                     FINDINGS_PATH.write_text(
                         f"# Audit findings (round {round_num}, task "
-                        f"{task.id})\n\n{aud.stdout}\n{aud.stderr}\n",
+                        f"{task.id})\n\n{report}\n",
                         encoding="utf-8",
                     )
 
-                # 6n. Commit checkpoint.
-                gitutil.commit_all(ROOT, f"factory: checkpoint round {round_num}")
+                # ── 5. Checkpoint ──
+                gitutil.commit_all(
+                    ROOT, f"factory: checkpoint round {round_num}")
 
-                # 6o. Update state, advance round.
                 state.rounds_completed = round_num
                 state.current_round = round_num + 1
-                state.last_outcome = ("audit_findings" if audit_findings
+                state.last_outcome = ("audit_findings" if has_findings
                                       else "audit_pass")
                 save(STATE_PATH, state)
+
         except KeyboardInterrupt:
             outcome, reason = "interrupted", "process interrupted"
 
-        # 7. Rounds exhausted without a terminal outcome.
         if outcome is None:
             if state.last_outcome == "audit_findings":
-                outcome, reason = "findings", "rounds exhausted with audit findings"
+                outcome = "findings"
+                reason = "rounds exhausted with audit findings"
             else:
-                outcome, reason = "failed", "rounds exhausted before completion"
+                outcome = "failed"
+                reason = "rounds exhausted before completion"
 
         state.terminal_outcome = outcome
         state.current_phase = "terminal"
@@ -385,10 +512,12 @@ def run_campaign(args, config: dict, env: dict) -> int:
     return TERMINAL_EXIT.get(outcome, 1)
 
 
+# ─── CLI ──────────────────────────────────────────────────────────────
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="campaign.py",
-        description="Minimal Ralph factory campaign orchestrator",
+        prog="factory-campaign",
+        description="Parallel Ralph factory campaign orchestrator",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     run_p = sub.add_parser("run", help="run a finite campaign")
