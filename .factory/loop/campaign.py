@@ -170,9 +170,23 @@ def find_runner_for_capability(runners: list, capability: str) -> Runner | None:
     return None
 
 
+def _strip_markdown_ticks(command: str) -> str:
+    """Remove Markdown code-span backticks from a verification command.
+
+    The canonical plan formats every Verification/Runner command as a Markdown
+    code span (e.g. `` `ctest ... --output-on-failure` ``). If passed verbatim
+    to a shell, the backticks are interpreted as command substitution, which
+    breaks (or hangs) the run and can never pass. Strip surrounding backticks
+    (and any stray ones used purely as Markdown delimiters) so the command is
+    actually executed.
+    """
+    return command.replace("`", "").strip() if command else ""
+
+
 def run_task_verification(task: Task, runners: list, root: Path,
-                          commit: str) -> VerificationResult:
+                          commit: str, build_command: str = "") -> VerificationResult:
     """Run a task's verification locally or on a runner (spec 8.3)."""
+    command = _strip_markdown_ticks(task.verification)
     if task.runner:
         runner = find_runner_for_capability(runners, task.runner)
         if runner is None:
@@ -183,7 +197,8 @@ def run_task_verification(task: Task, runners: list, root: Path,
                 runner=task.runner,
                 command=task.verification,
             )
-        return run_verification(runner, task.verification, root, commit)
+        return run_verification(runner, command, root, commit,
+                                build_command=build_command)
     local = Runner(
         name="local",
         transport="local",
@@ -192,7 +207,7 @@ def run_task_verification(task: Task, runners: list, root: Path,
         capabilities=[],
         verify_command="",
     )
-    return run_verification(local, task.verification, root, commit)
+    return run_verification(local, command, root, commit)
 
 
 def _finalize_success(plan: Plan, config: dict, env: dict, args,
@@ -310,7 +325,8 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     save(STATE_PATH, state)
                     _clean_verification_dirs(ROOT, config)
                     vresult = run_task_verification(task, env["runners"],
-                                                    ROOT, commit)
+                                                    ROOT, commit,
+                                                    config_build_command(config))
                     if vresult.exit_code == 0:
                         verified = True
                         break

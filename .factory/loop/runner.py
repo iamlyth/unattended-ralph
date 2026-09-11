@@ -28,8 +28,10 @@ SSH_OPTIONS = (
     "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
 )
 
-# Never sync VCS metadata, mutable control state, or local-only artifacts.
-RSYNC_EXCLUDES = (".git", ".factory-state", ".factory-state/", "__pycache__")
+# Never sync VCS metadata, mutable control state, local-only artifacts, or
+# build directories (build artifacts contain local/sandbox paths invalid on
+# the runner — the runner rebuilds from source after sync).
+RSYNC_EXCLUDES = (".git", ".factory-state", ".factory-state/", "__pycache__", "build")
 
 
 @dataclass
@@ -145,12 +147,14 @@ def _blocked(runner: Runner, reason: str, command: str) -> VerificationResult:
 
 
 def run_verification(
-    runner: Runner, command: str, root: str | Path, commit: str
+    runner: Runner, command: str, root: str | Path, commit: str,
+    build_command: str = "",
 ) -> VerificationResult:
     """Run verification on a runner, capturing stdout/stderr/exit code.
 
     ``local`` runs ``command`` via subprocess in ``root``; ``ssh`` syncs the
-    repo to the runner's working dir, then runs ``cd {workdir} && {command}``
+    repo to the runner's working dir, rebuilds from source (so build artifacts
+    contain correct runner-local paths), then runs ``cd {workdir} && {command}``
     on the runner. ``commit`` is recorded for traceability.
     """
     if runner.transport == "local":
@@ -162,7 +166,12 @@ def run_verification(
     if not sync_to_runner(runner, root):
         return _blocked(runner, "rsync sync failed", command)
 
-    remote_command = f"cd {runner.working_directory} && {command}"
+    # Rebuild on the runner so build artifacts contain runner-local paths.
+    parts = [f"cd {runner.working_directory}"]
+    if build_command:
+        parts.append(build_command)
+    parts.append(command)
+    remote_command = " && ".join(parts)
     # Wrap in nix-shell if the runner has shell.nix and nix-shell available.
     # The check runs remotely; if not available, the command runs as-is.
     nix_check = (
