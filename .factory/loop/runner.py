@@ -15,7 +15,13 @@ import subprocess
 import tomllib
 from typing import Any
 
-SSH_OPTIONS = ("-o", "ConnectTimeout=5", "-o", "BatchMode=yes")
+FACTORY_SSH_CONFIG = str(
+    Path.home() / ".local/share/pi2-ssh-runner/ssh_config"
+)
+SSH_OPTIONS = (
+    "-F", FACTORY_SSH_CONFIG,
+    "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+)
 
 # Never sync VCS metadata, mutable control state, or local-only artifacts.
 RSYNC_EXCLUDES = (".git", ".factory-state", ".factory-state/", "__pycache__")
@@ -105,7 +111,8 @@ def sync_to_runner(runner: Runner, root: str | Path) -> bool:
         return False
     source = f"{Path(root)}/"
     destination = f"{runner.ssh_config_alias}:{runner.working_directory}/"
-    argv = ["rsync", "-az", "--delete"]
+    argv = ["rsync", "-az", "--delete",
+           "-e", f"ssh -F {FACTORY_SSH_CONFIG}"]
     for exclude in RSYNC_EXCLUDES:
         argv.append(f"--exclude={exclude}")
     argv.extend([source, destination])
@@ -152,6 +159,7 @@ def run_verification(
 
     remote_command = f"cd {runner.working_directory} && {command}"
     # Wrap in nix-shell if the runner has shell.nix and nix-shell available.
+    # The check runs remotely; if not available, the command runs as-is.
     nix_check = (
         f"test -f {runner.working_directory}/shell.nix "
         f"&& command -v nix-shell >/dev/null 2>&1"
@@ -202,6 +210,7 @@ def _has_nix_shell(root: str | Path) -> bool:
 def _wrap_nix_shell(command: str, root: str | Path) -> str:
     """Wrap a command in nix-shell --run if shell.nix exists."""
     if _has_nix_shell(root):
+        # Single-quote the inner command for nix-shell --run '...'
         escaped = command.replace("'", "'\\''")
         return f"nix-shell --run '{escaped}'"
     return command
