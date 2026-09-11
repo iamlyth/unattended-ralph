@@ -66,26 +66,55 @@ revision. They MUST NOT create an independent task queue.
 
 ## 4. Roles
 
-Four static roles, each a separate fresh CLI invocation with a static prompt.
-No role resumes a prior session or inherits another role's memory.
+The factory uses a configurable parallel role structure defined in
+`.factory/roles.toml`. Each role is a separate fresh CLI invocation with a
+static prompt. No role resumes a prior session or inherits another role's
+memory.
 
-### 4.1 Planner
+### 4.1 Study subagents (planning phase)
 
-- Inputs: planner prompt, `AGENTS.md`, specification, current plan, current code.
-- Responsibilities: inspect code before planning; create or revise the canonical
-  plan; translate findings into bounded tasks with dependencies and acceptance
-  criteria; never modify product code or the specification.
-- The planner is the only role that creates, removes, splits, or reorders tasks.
+Study subagents run **in parallel** during the planning phase to analyse
+the codebase. They are read-only (no `--approve`). The harness auto-discovers
+subsystems from the source tree and creates one study subagent per major
+directory. Default study subagents:
 
-### 4.2 Developer
+- **Spec study**: reads the project spec and summarises requirements.
+- **Architecture study**: maps the codebase structure and module layout.
+- **Bug study**: runs the test suite and identifies failures and TODOs.
+- **Subsystem study** (one per source directory): deep-dives into one
+  subsystem's files, interfaces, and test coverage.
 
-- Inputs: developer prompt, `AGENTS.md`, specification, plan, current code,
-  one deterministically selected task.
-- Responsibilities: implement only the selected task; run focused verification;
-  update the task's plan status; never claim final product acceptance.
-- The developer is the only role that writes product code.
+All study reports are collected and fed to the planner.
 
-### 4.3 Tester
+### 4.2 Planner
+
+- Inputs: planner prompt, `AGENTS.md`, specification, current plan, current
+  code, **study reports** from parallel study subagents.
+- Responsibilities: review study reports for discrepancies against the spec;
+  create or revise the canonical plan; translate findings into bounded tasks
+  with dependencies and acceptance criteria; never modify product code or
+  the specification.
+- The planner is the only role that creates, removes, splits, or reorders
+  tasks. The planner does not execute tool calls itself — it relies on the
+  study subagents' analysis.
+
+### 4.3 Developers (implementation phase)
+
+Developers implement the selected task. The structure is configurable:
+
+- **Single developer** (default): one developer implements the entire task
+  with `--approve` and the orchestrator commits.
+- **Multiple developers**: one developer per isolated codebase area (e.g.
+  frontend, backend, renderer, networking) runs in parallel. Each developer
+  proposes changes for their area only. An **integration developer** then
+  reviews all proposals, resolves conflicts, applies changes, builds, and
+  commits.
+
+The developer(s) are the only roles that write product code. The
+integration developer is the only one who commits when multiple developers
+are configured.
+
+### 4.4 Tester
 
 - Inputs: tester prompt, `AGENTS.md`, specification, plan, committed code.
 - Responsibilities: run deterministic verification independently of the
@@ -94,15 +123,24 @@ No role resumes a prior session or inherits another role's memory.
 - The tester MUST run the verification command and report the actual result.
   It MUST NOT skip tests, weaken assertions, or report success without running
   the real verification.
+- In the current implementation, the orchestrator runs verification directly
+  (locally or on a runner) rather than invoking a tester role subprocess.
 
-### 4.4 Auditor
+### 4.5 Auditors (audit phase)
 
-- Inputs: auditor prompt, `AGENTS.md`, specification, plan, committed code,
-  one deterministically selected audit objective.
-- Responsibilities: perform a read-only audit at the bound commit; check for
-  test quality (no weakened assertions, no skipped tests, no fake passes);
-  verify that the implementation matches the specification; never edit code.
-- Audit findings feed the next planner revision as plan tasks.
+Specialist auditors run **in parallel** during the audit phase. Each focuses
+on a different quality axis. Default auditors:
+
+- **Linting**: language conventions, readability, concise comments.
+- **Efficiency**: performance, resource leaks, algorithmic complexity.
+- **Security**: vulnerabilities, attack surface, input validation.
+- **Functional**: does the code actually work (build + test verification).
+- **Spec compliance**: does the implementation match the specification.
+- **Compatibility**: platform, dependency, and API compatibility.
+
+All auditors are read-only. Findings from all auditors are assembled into a
+single report. Any auditor that finds BLOCKER issues signals findings for
+the next planning round.
 
 ## 5. Plan contract
 
@@ -161,17 +199,26 @@ Selection rules (in priority order):
 Each role invocation is a fresh CLI call:
 
 ```bash
-cat .factory/prompts/{role}.md | pi2 --provider ollama --model {model}
+pi2 --provider ollama --model {model} --print --no-session [--approve] < prompt
 ```
 
 - No `--resume`, no session continuation, no memory injection.
 - The prompt is the only input channel; all other context comes from the
-  repository on disk.
+  repository on disk or from the orchestrator (study reports, task excerpts).
 - The orchestrator captures stdout, stderr, and exit code.
 - Model prose is never control protocol — the orchestrator derives outcomes
   from plan state, Git state, exit status, and verification results.
 
-### 7.1 Task-resource budget
+### 7.1 Parallel execution
+
+Study subagents and specialist auditors run in parallel via
+`ThreadPoolExecutor`. Each subagent is an independent `pi2` subprocess with
+its own fresh context. Subagents that only read the codebase (study,
+audit) run without `--approve`. Developers run with `--approve` when single
+(serial mode) or without `--approve` when multiple (parallel propose mode,
+where the integration developer applies changes).
+
+### 7.2 Task-resource budget
 
 Each task has a bounded attempt budget (default: 3 attempts). Each campaign
 has a bounded round budget (default: 20 rounds). A campaign timeout (default:
@@ -249,17 +296,20 @@ task in the next planning round.
 Each round executes:
 
 ```
-planning → implementation → verification → audit
+planning → selection → implementation → verification → audit
 ```
 
-- **Planning**: the planner creates or revises the plan. Outcome: `planned`
-  or `failed`.
-- **Implementation**: the developer implements the one selected task. Outcome:
-  `task_completed`, `task_progress`, `task_failed`, or `interrupted`.
-- **Verification**: the tester runs the verification command independently.
-  Outcome: `verified` or `verification_failed`.
-- **Audit**: the auditor performs a read-only audit. Outcome: `audit_pass`
-  or `audit_findings`.
+- **Planning**: parallel study subagents analyse the codebase; the planner
+  synthesises their reports into the plan. Outcome: `planned` or `failed`.
+- **Selection**: deterministic task selection (model never chooses).
+- **Implementation**: parallel developers propose changes per area; the
+  integration developer applies and commits. Outcome: `task_completed`,
+  `task_progress`, `task_failed`, or `interrupted`.
+- **Verification**: the orchestrator runs the verification command
+  independently (locally or on a runner). Outcome: `verified` or
+  `verification_failed`.
+- **Audit**: parallel specialist auditors review the codebase. Outcome:
+  `audit_pass` or `audit_findings`.
 
 ### 9.2 Terminal outcomes
 
@@ -358,7 +408,20 @@ checkpoint_each_iteration = true
 Declares runners and tools (see §8.1). This is the only file that needs
 project-specific editing for runner setup.
 
-### 13.3 Preflight
+### 13.3 roles.toml
+
+Declares the parallel role structure (see §4). This file defines:
+
+- `[planning]`: study subagents and planner prompt.
+- `[implementation]`: developer subagents and integration developer prompt.
+- `[audit]`: specialist auditor subagents.
+
+Projects can add, remove, or modify subagents to tailor the process. The
+default structure (3 studies + auto-discovered subsystems, 1 developer,
+6 auditors) is a good starting point. See `.factory/roles.toml` for the
+full format.
+
+### 13.4 Preflight
 
 Before a campaign, the orchestrator runs a simple preflight:
 
@@ -409,7 +472,7 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | PLAN-01 | One canonical plan as sole task ledger; parser fails closed on malformed input |
 | TASK-01 | Deterministic selection of exactly one task per attempt; model never chooses |
 | CTX-01 | Every role is a fresh CLI invocation with no memory or session resume |
-| ROLE-01 | Four distinct roles: planner, developer, tester, auditor |
+| ROLE-01 | Configurable parallel roles: study subagents, planner, developers, integration developer, specialist auditors |
 | VERIFY-01 | Tester independently runs verification and reports actual exit code |
 | VERIFY-02 | Auditor checks for weakened assertions, skipped tests, or fake passes |
 | RUNNER-01 | Runners declared in environment.toml with SSH transport and capabilities |
