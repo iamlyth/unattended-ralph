@@ -324,7 +324,11 @@ def _extract_findings(auditor_name: str, output: str) -> list[AuditFinding]:
         if not block:
             continue
         upper = block.upper()
-        if "BLOCKER" in upper:
+        # Check for negative BLOCKER statements first (e.g. "No BLOCKERs",
+        # "BLOCKERs: none", "No blocking findings") to avoid false positives.
+        has_negative_blocker = bool(re.search(
+            r'NO\s+BLOCKER|BLOCKER[s]?\s*:?\s*NONE|NO\s+BLOCKING', upper))
+        if "BLOCKER" in upper and not has_negative_blocker:
             severity = "BLOCKER"
         elif "WARN" in upper:
             severity = "WARN"
@@ -410,8 +414,19 @@ def assemble_audit_findings(results: list[SubagentResult]) -> AuditReport:
         )
         raw_parts.append(f"{header}\n\n{body}")
 
-        # If the auditor process exited non-zero, treat as BLOCKER.
-        if r.exit_code != 0 and not body.upper().count("BLOCKER"):
+        # If the auditor process exited non-zero, treat as BLOCKER
+        # — unless it was a timeout (exit 124), which means the auditor
+        # didn't finish in time.  A timeout is treated as WARN: the
+        # audit is incomplete for this auditor, but we don't block the
+        # campaign on it (the other auditors may have covered the area).
+        if r.exit_code == 124:
+            all_findings.append(AuditFinding(
+                auditor=r.name, severity="WARN",
+                file_refs=[],
+                text=f"Auditor timed out (exit 124) — audit incomplete "
+                     f"for this auditor.\n{body[:1000]}",
+            ))
+        elif r.exit_code != 0 and not body.upper().count("BLOCKER"):
             all_findings.append(AuditFinding(
                 auditor=r.name, severity="BLOCKER",
                 file_refs=[],

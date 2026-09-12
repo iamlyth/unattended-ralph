@@ -73,10 +73,11 @@ memory.
 
 ### 4.1 Study subagents (planning phase)
 
-Study subagents run **in parallel** during the planning phase to analyse
-the codebase. They are read-only (no `--approve`). The harness auto-discovers
-subsystems from the source tree and creates one study subagent per major
-directory. Default study subagents:
+Study subagents run **in parallel** during the planning phase (once, at
+campaign start) to analyse the codebase. They are read-only (no
+`--approve`). The harness auto-discovers subsystems from the source tree
+and creates one study subagent per major directory. Default study
+subagents:
 
 - **Spec study**: reads the project spec and summarises requirements.
 - **Architecture study**: maps the codebase structure and module layout.
@@ -84,19 +85,22 @@ directory. Default study subagents:
 - **Subsystem study** (one per source directory): deep-dives into one
   subsystem's files, interfaces, and test coverage.
 
-All study reports are collected and fed to the planner.
+All study reports are collected and fed to the planner. Study subagents
+do not run again during the implementation loop.
 
 ### 4.2 Planner
 
 - Inputs: planner prompt, `AGENTS.md`, specification, current plan, current
   code, **study reports** from parallel study subagents.
 - Responsibilities: review study reports for discrepancies against the spec;
-  create or revise the canonical plan; translate findings into bounded tasks
+  create the canonical plan; translate findings into bounded tasks
   with dependencies and acceptance criteria; never modify product code or
   the specification.
+- The planner runs **once** at campaign start. The plan is never revised
+  during the implementation loop — this prevents scope creep and keeps the
+  loop simple (select → implement → verify → audit).
 - The planner is the only role that creates, removes, splits, or reorders
-  tasks. The planner does not execute tool calls itself — it relies on the
-  study subagents' analysis.
+  tasks.
 
 ### 4.3 Developers (implementation phase)
 
@@ -441,20 +445,29 @@ task in the next planning round.
 
 ## 9. Campaign semantics
 
-### 9.1 Phase machine
+### 9.1 Campaign structure
 
-Each round executes:
+The campaign has two phases:
 
+**Phase 0 — Planning (once):**
 ```
-planning → selection → implementation → verification → audit
+study subagents (parallel) → planner → plan
+```
+The plan is created once at campaign start and never revised. Study
+subagents analyse the codebase in parallel; the planner synthesises their
+reports into the canonical plan. If all tasks in an existing plan are
+already completed, planning is skipped and the campaign goes straight to
+finalisation.
+
+**Phase 1 — Implementation loop (per round):**
+```
+selection → implementation → verification → audit
   → if clean audit: checkpoint → next round
   → if BLOCKERs: [repair → verification → audit] × max_repairs
     → if resolved: checkpoint → next round
     → if unresolvable: task blocked → checkpoint → next round
 ```
 
-- **Planning**: parallel study subagents analyse the codebase; the planner
-  synthesises their reports into the plan. Outcome: `planned` or `failed`.
 - **Selection**: deterministic task selection (model never chooses).
 - **Implementation**: parallel developers propose changes per area; the
   integration developer applies and commits. Outcome: `task_completed`,
@@ -469,6 +482,10 @@ planning → selection → implementation → verification → audit
   fed back to the developer. The developer makes targeted fixes.
   Re-verification and re-audit follow. Up to `max_repairs` cycles.
 - **Checkpoint**: commit and advance to the next round.
+
+**Phase 2 — Finalise:** When all tasks are completed (`work_exhausted`),
+the harness runs overall verification + audit. If verification passes and
+audit is clean: `success`. If audit finds BLOCKERs: `findings`.
 
 ### 9.2 Terminal outcomes
 
@@ -490,7 +507,7 @@ always reaches verification and audit and never silently succeeds.
 
 ### 9.3 Round and attempt bounds
 
-- `--rounds N` (default 20): maximum planning-implement-verify-audit cycles.
+- `--rounds N` (default 20): maximum implement-verify-audit cycles.
 - `--implementation-attempts N` (default 3): maximum retries for one task
   during the implementation+verification phase.
 - `--max-repairs N` (default 3): maximum repair cycles after audit finds

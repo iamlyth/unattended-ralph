@@ -3,21 +3,22 @@
 
 Ties together the control-plane modules (plan_parser, selector, state,
 gitutil, lock, runner, preflight, parallel, metrics) into a finite
-campaign loop with parallel study, implementation, and audit phases.
+campaign that plans once, then loops implementation.
 
-Each round runs:
-  1. PLANNING: parallel study subagents → planner synthesises plan.
-     The planner receives historical metrics and may emit a
-     ``roles_override`` in the plan front matter to adjust the next
-     round's roles.
-  2. SELECTION: deterministic task selection (model never chooses).
-  3. IMPLEMENTATION: parallel developers → integration developer commits.
-     Each role may use a different model (model tiering).
-  4. VERIFICATION: task verification on local or runner hardware.
-  5. AUDIT: parallel specialist auditors → findings.
-  6. REPAIR (if BLOCKERs): findings + verification output fed back to
-     developer → re-verify → re-audit.  Capped at max_repairs cycles.
-  7. CHECKPOINT: commit, record metrics, advance to next round.
+Campaign structure:
+  0. PLANNING (once): parallel study subagents → planner synthesises
+     the plan.  The plan is never revised during the campaign.
+  1. LOOP (per round):
+     a. SELECTION: deterministic task selection (model never chooses).
+     b. IMPLEMENTATION: parallel developers → integration developer
+        commits.  Each role may use a different model (model tiering).
+     c. VERIFICATION: task verification on local or runner hardware.
+     d. AUDIT: parallel specialist auditors → findings.
+     e. REPAIR (if BLOCKERs): findings + verification output fed back
+        to developer → re-verify → re-audit.  Capped at max_repairs.
+     f. CHECKPOINT: commit, record metrics, advance to next round.
+  2. FINALIZE: when all tasks complete → overall verification + audit
+     → success or findings.
 
 The orchestrator is the sole Git writer and the sole reader/writer of the
 control-state file.  Model prose is never control protocol: outcomes are
@@ -129,6 +130,20 @@ def config_stale_rounds(config: dict) -> int:
 
 def config_escalation_threshold(config: dict) -> int:
     return int(config.get("campaign", {}).get("escalation_threshold", 3))
+
+
+def _clean_untracked(root: Path) -> None:
+    """Remove untracked files left by study/audit subagents.
+
+    Study and audit subagents run with ``approve=False`` but pi2 may
+    still create files (e.g. bash output redirection).  These untracked
+    files break ``git status --porcelain`` verification and must be
+    cleaned before verification and final audit.
+    """
+    subprocess.run(
+        ["git", "clean", "-fd", "-e", ".factory-state/", "-e", ".factory/ssh/"],
+        cwd=str(root), capture_output=True, timeout=30,
+    )
 
 
 # ─── Roles override ───────────────────────────────────────────────────
@@ -571,6 +586,7 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
     """work_exhausted: run overall verification + audit, then decide."""
     commit = gitutil.current_commit(ROOT)
     vcmd = config_verify_command(config)
+    _clean_untracked(ROOT)
     _clean_verification_dirs(ROOT, config)
     local = Runner(
         name="local", transport="local", ssh_config_alias="",
@@ -589,6 +605,8 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
     )
     return "findings" if report.has_blockers else "success"
 
+
+# ─── Main campaign loop ──────────────────────────────────────────────
 
 # ─── Main campaign loop ──────────────────────────────────────────────
 
@@ -624,20 +642,58 @@ def run_campaign(args, config: dict, env: dict) -> int:
         reason: str | None = None
 
         try:
-            for round_num in range(state.current_round, args.rounds + 1):
-                if time.time() - start > args.timeout:
-                    outcome, reason = "interrupted", "campaign timeout"
-                    break
+            # ── PHASE 0: PLAN ONCE ──────────────────────────────────
+            # The plan is created once at campaign start and never
+            # re-planned.  The loop below only implements, verifies,
+            # and audits — it does not revise the plan.
 
-                state.current_round = round_num
-                state.current_phase = "planning"
-                state.last_outcome = None
-                state.repair_count = 0
-                save(STATE_PATH, state)
-
-                print(f"\n=== Round {round_num} ===", file=sys.stderr)
-
-                # ── 1. PLANNING (parallel study → planner) ──
+            # If all tasks are already completed, go straight to
+            # final verification + audit.
+            try:
+                pre_plan = parse(PLAN_PATH)
+                pre_caps = get_available_capabilities(env["runners"])
+                pre_sel = select(pre_plan.tasks, pre_caps)
+                if pre_sel.status == "work_exhausted":
+                    print("  pre-check: all tasks complete, "
+                          "skipping planning", file=sys.stderr)
+                    pre_roles = apply_roles_override(
+                        base_roles, pre_plan.roles_override)
+                    outcome = _finalize_success(
+                        pre_plan, config, env, args,
+                        pre_roles, state)
+                    reason = "all tasks complete (pre-planning)"
+                else:
+                    # Run the planner once: study subagents → planner.
+                    print("\n=== Planning ===", file=sys.stderr)
+                    planning_start = time.time()
+                    ok = run_planning_phase(
+                        base_roles, config, args, ROOT, metrics_log,
+                        issue_tracker)
+                    planning_time = time.time() - planning_start
+                    if not ok:
+                        outcome = "failed"
+                        reason = "planning failed"
+                    else:
+                        try:
+                            plan = parse(PLAN_PATH)
+                        except ValueError as exc:
+                            # Planner produced a malformed plan.
+                            # Fall back to the committed plan.
+                            print(f"  planning: plan parse failed ({exc}), "
+                                  f"falling back to committed plan",
+                                  file=sys.stderr)
+                            subprocess.run(
+                                ["git", "checkout", "--", str(PLAN_PATH)],
+                                cwd=str(ROOT), capture_output=True)
+                            try:
+                                plan = parse(PLAN_PATH)
+                            except ValueError as exc2:
+                                outcome = "failed"
+                                reason = f"plan parse failed: {exc2}"
+            except ValueError:
+                # Plan file doesn't exist or is malformed — run planner.
+                print("\n=== Planning (no valid plan found) ===",
+                      file=sys.stderr)
                 planning_start = time.time()
                 ok = run_planning_phase(
                     base_roles, config, args, ROOT, metrics_log,
@@ -646,36 +702,50 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 if not ok:
                     outcome = "failed"
                     reason = "planning failed"
-                    break
-                try:
-                    plan = parse(PLAN_PATH)
-                except ValueError as exc:
-                    # The planner produced a malformed plan.  Fall back to
-                    # the plan at the last commit rather than failing the
-                    # campaign — the planner is advisory and the previous
-                    # plan is still valid.
-                    print(f"  planning: plan parse failed ({exc}), "
-                          f"falling back to committed plan",
-                          file=sys.stderr)
-                    import subprocess as _sp
-                    _sp.run(["git", "checkout", "--",
-                             str(PLAN_PATH)],
-                            cwd=str(ROOT), capture_output=True)
+                else:
                     try:
                         plan = parse(PLAN_PATH)
-                    except ValueError as exc2:
+                    except ValueError as exc:
                         outcome = "failed"
-                        reason = f"plan parse failed: {exc2}"
-                        break
+                        reason = f"plan parse failed: {exc}"
 
-                # Apply roles_override from the plan (round-adaptive).
-                roles = apply_roles_override(base_roles, plan.roles_override)
-                if plan.roles_override:
-                    print(f"  roles_override applied: "
-                          f"{list(plan.roles_override.keys())}",
-                          file=sys.stderr)
+            if outcome is not None:
+                # Planning failed or all tasks were already done.
+                state.terminal_outcome = outcome
+                state.current_phase = "terminal"
+                save(STATE_PATH, state)
+                print(f"campaign outcome: {outcome}"
+                      + (f" ({reason})" if reason else ""))
+                return TERMINAL_EXIT.get(outcome, 1)
 
-                # ── 2. SELECTION (deterministic, model never chooses) ──
+            # Clean up untracked files left by study subagents.
+            _clean_untracked(ROOT)
+
+            # Apply roles_override from the plan.
+            roles = apply_roles_override(base_roles, plan.roles_override)
+            if plan.roles_override:
+                print(f"  roles_override applied: "
+                      f"{list(plan.roles_override.keys())}",
+                      file=sys.stderr)
+
+            # ── PHASE 1: IMPLEMENTATION LOOP ────────────────────────
+            # Each round: select → implement → verify → audit → repair
+            # The plan is fixed; no re-planning.
+
+            for round_num in range(state.current_round, args.rounds + 1):
+                if time.time() - start > args.timeout:
+                    outcome, reason = "interrupted", "campaign timeout"
+                    break
+
+                state.current_round = round_num
+                state.current_phase = "selection"
+                state.last_outcome = None
+                state.repair_count = 0
+                save(STATE_PATH, state)
+
+                print(f"\n=== Round {round_num} ===", file=sys.stderr)
+
+                # ── 1. SELECTION (deterministic, model never chooses) ──
                 caps = get_available_capabilities(env["runners"])
                 sel = select(plan.tasks, caps)
 
@@ -696,17 +766,14 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 save(STATE_PATH, state)
 
                 round_start = time.time()
-                round_study_results = []
                 round_dev_results = []
                 round_audit_report = None
                 round_v_attempts = 0
                 round_v_passed = False
                 round_repair_cycles = 0
                 round_repair_resolved = False
-                round_outcome = ""
 
-                # ── 3. IMPLEMENTATION + VERIFICATION ──
-                # Feed verification output back to developer on retry.
+                # ── 2. IMPLEMENTATION + VERIFICATION ──
                 verified = False
                 vresult: VerificationResult | None = None
                 last_voutput = ""
@@ -731,6 +798,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     round_v_attempts = attempt
                     state.current_phase = "verification"
                     save(STATE_PATH, state)
+                    _clean_untracked(ROOT)
                     _clean_verification_dirs(ROOT, config)
                     verify_start = time.time()
                     vresult = run_task_verification(
@@ -743,7 +811,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         round_v_passed = True
                         break
 
-                    # Capture verification output for next attempt's developer.
                     last_voutput = _format_verification_output(vresult)
                     print(f"  verification: attempt {attempt} failed "
                           f"(exit {vresult.exit_code})", file=sys.stderr)
@@ -752,8 +819,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     outcome = "failed"
                     reason = (f"task {task.id} failed verification after "
                               f"{args.attempts} attempts")
-                    round_outcome = "failed"
-                    # Record metrics for the failed round.
                     rm = build_round_metrics(
                         round_num, args.campaign_id, task, round_start,
                         dev_results=round_dev_results,
@@ -764,14 +829,13 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     metrics_log.append(rm)
                     break
 
-                # Mark task completed in the plan (tentatively — audit may
-                # un-mark it if repair fails).
+                # Mark task completed in the plan.
                 task.status = "completed"
                 task.evidence = (f"verification exit {vresult.exit_code} "
                                 f"on {vresult.runner}")
                 PLAN_PATH.write_text(dump(plan), encoding="utf-8")
 
-                # ── 4. AUDIT (parallel specialist auditors) ──
+                # ── 3. AUDIT (parallel specialist auditors) ──
                 state.current_phase = "audit"
                 save(STATE_PATH, state)
                 audit_start = time.time()
@@ -779,7 +843,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 audit_time = time.time() - audit_start
                 round_audit_report = report
 
-                # Update the accumulating issue tracker.
                 escalated = []
                 if report.blockers:
                     escalated = issue_tracker.add_findings(
@@ -789,7 +852,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                               f"ESCALATED (recurred too many times)",
                               file=sys.stderr)
 
-                # ── 5. REPAIR CYCLE (if BLOCKERs found) ──
+                # ── 4. REPAIR CYCLE (if BLOCKERs found) ──
                 if report.has_blockers:
                     FINDINGS_PATH.write_text(
                         f"# Audit findings (round {round_num}, task "
@@ -833,6 +896,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         # Re-verify after repair.
                         state.current_phase = "verification"
                         save(STATE_PATH, state)
+                        _clean_untracked(ROOT)
                         _clean_verification_dirs(ROOT, config)
                         vresult = run_task_verification(
                             task, env["runners"], ROOT, commit,
@@ -871,8 +935,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     round_repair_cycles = state.repair_count
 
                     if not repair_resolved:
-                        # Mark task as blocked — audit found unresolvable
-                        # issues after max_repairs cycles.
                         task.status = "blocked"
                         task.evidence = (
                             f"verification passed but audit BLOCKERs "
@@ -884,14 +946,12 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             f"factory: task {task.id} blocked by audit "
                             f"after {max_repairs} repairs")
 
-                        # Stale round detection: no improvement.
                         state.stale_rounds += 1
                         state.rounds_completed = round_num
                         state.current_round = round_num + 1
                         state.last_outcome = "audit_findings_unresolved"
                         save(STATE_PATH, state)
 
-                        # Write round scratchpad.
                         write_round_scratchpad(
                             ROOT, round_num, args.campaign_id, task,
                             plan_summary=f"Task {task.id} selected",
@@ -903,7 +963,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             issues_summary=issue_tracker.summary(),
                         )
 
-                        # Check for escalation.
                         if issue_tracker.has_escalations:
                             outcome = "escalated"
                             reason = (f"issue(s) escalated after "
@@ -911,7 +970,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                                       f"recurrences")
                             break
 
-                        # Check for stale rounds.
                         if state.stale_rounds >= stale_threshold:
                             outcome = "stale"
                             reason = (f"no improvement for "
@@ -919,7 +977,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
                                       f"rounds")
                             break
 
-                        # Record metrics for the blocked round.
                         rm = build_round_metrics(
                             round_num, args.campaign_id, task, round_start,
                             dev_results=round_dev_results,
@@ -929,7 +986,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             repair_cycles=round_repair_cycles,
                             repair_resolved=False,
                             outcome="blocked",
-                            planning_time_s=planning_time,
+                            planning_time_s=0.0,
                             implementation_time_s=impl_time_total,
                             verification_time_s=verify_time_total,
                             audit_time_s=audit_time,
@@ -938,10 +995,9 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             escalated_issues=len(issue_tracker.escalated_issues),
                         )
                         metrics_log.append(rm)
-                        continue  # next round — planner may split the task
+                        continue  # next round, next task
 
-                # ── 6. CHECKPOINT (clean audit or repair resolved) ──
-                # Clean audit resets stale counter.
+                # ── 5. CHECKPOINT (clean audit or repair resolved) ──
                 state.stale_rounds = 0
 
                 if report.conflicts:
@@ -964,8 +1020,10 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 )
                 save(STATE_PATH, state)
 
-                # Write round scratchpad for iteration continuity.
-                audit_summary = "No BLOCKERs found" if not report.has_blockers else f"{len(report.blockers)} BLOCKER(s) found and resolved in {state.repair_count} repair cycle(s)"
+                audit_summary = ("No BLOCKERs found" if not report.has_blockers
+                                 else f"{len(report.blockers)} BLOCKER(s) "
+                                      f"resolved in {state.repair_count} "
+                                      f"repair cycle(s)")
                 write_round_scratchpad(
                     ROOT, round_num, args.campaign_id, task,
                     plan_summary=f"Task {task.id}: {task.title}",
@@ -977,8 +1035,8 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     issues_summary=issue_tracker.summary(),
                 )
 
-                # Record metrics for the completed round.
-                round_outcome = "completed" if state.repair_count == 0 else "completed_with_repairs"
+                round_outcome = ("completed" if state.repair_count == 0
+                                 else "completed_with_repairs")
                 rm = build_round_metrics(
                     round_num, args.campaign_id, task, round_start,
                     dev_results=round_dev_results,
@@ -988,7 +1046,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     repair_cycles=round_repair_cycles,
                     repair_resolved=round_repair_resolved,
                     outcome=round_outcome,
-                    planning_time_s=planning_time,
+                    planning_time_s=0.0,
                     implementation_time_s=impl_time_total,
                     verification_time_s=verify_time_total,
                     audit_time_s=audit_time,
@@ -1012,7 +1070,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 outcome = "findings"
                 reason = "rounds exhausted with audit findings"
             else:
-                outcome = "failed"
+                outcome = "findings"
                 reason = "rounds exhausted before completion"
 
         state.terminal_outcome = outcome
@@ -1023,8 +1081,6 @@ def run_campaign(args, config: dict, env: dict) -> int:
           + (f" ({reason})" if reason else ""))
     return TERMINAL_EXIT.get(outcome, 1)
 
-
-# ─── CLI ──────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
