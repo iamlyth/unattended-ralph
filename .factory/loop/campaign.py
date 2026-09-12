@@ -650,9 +650,23 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 try:
                     plan = parse(PLAN_PATH)
                 except ValueError as exc:
-                    outcome = "failed"
-                    reason = f"plan parse failed: {exc}"
-                    break
+                    # The planner produced a malformed plan.  Fall back to
+                    # the plan at the last commit rather than failing the
+                    # campaign — the planner is advisory and the previous
+                    # plan is still valid.
+                    print(f"  planning: plan parse failed ({exc}), "
+                          f"falling back to committed plan",
+                          file=sys.stderr)
+                    import subprocess as _sp
+                    _sp.run(["git", "checkout", "--",
+                             str(PLAN_PATH)],
+                            cwd=str(ROOT), capture_output=True)
+                    try:
+                        plan = parse(PLAN_PATH)
+                    except ValueError as exc2:
+                        outcome = "failed"
+                        reason = f"plan parse failed: {exc2}"
+                        break
 
                 # Apply roles_override from the plan (round-adaptive).
                 roles = apply_roles_override(base_roles, plan.roles_override)
