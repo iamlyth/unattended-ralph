@@ -279,11 +279,12 @@ class AuditReport:
 
 # ─── Audit parsing ───────────────────────────────────────────────────
 
-# Regex for file-like references in auditor output.
+# Regex for file-like references in auditor output.  Single capture group
+# so re.findall returns strings, not tuples.
 _FILE_RE = re.compile(
-    r'(?<!\w)((?:src|tests|scripts|data|include|lib|bin|docs)/'
-    r'[\w/]+\.(?:c|h|py|sh|md|toml|yaml|yml|json|txt))'
-    r'|(CMakeLists\.txt)|(AGENTS\.md)'
+    r'(?<!\w)(?:(?:src|tests|scripts|data|include|lib|bin|docs)/'
+    r'[\w/]+\.(?:c|h|py|sh|md|toml|yaml|yml|json|txt)'
+    r'|CMakeLists\.txt|AGENTS\.md)'
 )
 
 
