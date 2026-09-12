@@ -16,17 +16,14 @@
 .factory-state/
 .factory-lock
 .bug-ledger.lock
-
 # Pi runtime output (agent definitions/settings remain tracked)
 .pi/output/
 .pi/subagent-schedules/
 .pi/agent-memory-local/
-
 # Ollama credentials and quota snapshots
 .ollama-usage-env
 .ollama-usage-state.json
 *.env
-
 # Generic build and generated artifacts
 build/
 build-*/
@@ -38,26 +35,16 @@ coverage/
 *.a
 *.so
 *.log
-
 # Python runtime output
 __pycache__/
 *.py[cod]
-
 # Editor and OS files
 .DS_Store
 *.swp
 *.swo
 *~
-
 # Factory runner SSH keys (never commit)
 .factory/ssh/
-
-# Factory study/audit artifacts (not tracked, generated per campaign)
-.factory/artifacts/*.md
-!.factory/artifacts/implementation-plan.md
-.factory/rounds/
-docs/audit-*.md
-
 # Factory study/audit artifacts (not tracked, generated per campaign)
 .factory/artifacts/*.md
 !.factory/artifacts/implementation-plan.md
