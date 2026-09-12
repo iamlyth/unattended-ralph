@@ -973,6 +973,20 @@ def cmd_run(args, config: dict, env: dict) -> int:
                 print(f"  checkpoint: task {task.id} {round_outcome}",
                       file=sys.stderr)
 
+                # After checkpoint, check if all tasks are now done.
+                # If so, finalize immediately rather than waiting for
+                # the next round's selection.
+                try:
+                    post_plan = parse(PLAN_PATH)
+                    post_sel = select(post_plan.tasks, caps)
+                    if post_sel.status == "work_exhausted":
+                        outcome = _finalize_success(
+                            post_plan, config, env, args, roles)
+                        reason = "all tasks complete after checkpoint"
+                        break
+                except ValueError:
+                    pass  # Plan might be corrupt — let next round handle
+
         except KeyboardInterrupt:
             outcome, reason = "interrupted", "process interrupted"
 
