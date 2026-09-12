@@ -55,6 +55,20 @@ context summary, or completion claim is available or authoritative.
    and `blocked` task rows with exact fact references; never let a blocked
    task become passing merely because no model can execute it.
 8. Completed tasks remain in the plan with `Status: completed`.
+9. If **Historical Campaign Metrics** are provided in your context, review
+   them to adjust roles for the next round. You MAY add a `roles_override`
+   field to the plan's YAML front matter (as a JSON-encoded string) to:
+   - Skip auditors with low precision (cry-wolf auditors).
+   - Skip study subagents that are not useful.
+   - Add specialist auditors or developers for specific areas.
+   - Override the model for specific roles (e.g., use a cheaper model for
+     read-only auditors, a stronger model for the integration developer).
+   Supported keys: `skip_auditors`, `skip_studies`, `add_auditors`,
+   `add_studies`, `add_developers`, `auditor_models`, `study_models`,
+   `developer_models`, `planner_model`.
+   Example: `roles_override: {"skip_auditors": ["security"], "auditor_models": {"efficiency": "qwen3:8b"}}`
+   Only add `roles_override` when the metrics clearly warrant it. Do not
+   add it on the first round or when metrics are clean.
 
 ## Workspace confinement
 

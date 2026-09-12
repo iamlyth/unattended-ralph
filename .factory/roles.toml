@@ -19,10 +19,27 @@
 #   description — human-readable summary of what the subagent does
 #   path        — (optional) for study subagents: source directory to focus on
 #   paths       — (optional) for developers: list of directories the dev owns
+#   model       — (optional) model override for this subagent.  If absent,
+#                 the CLI --model argument is used.  Study subagents and
+#                 auditors can use cheaper/faster models (read-only, focused
+#                 tasks); the planner and integration developer should use
+#                 the strongest model (they synthesize and make decisions).
+#   timeout     — (optional) per-subagent timeout override (seconds)
+#
+# Phase-level model overrides:
+#   planner_model      — model for the planner (strong model recommended)
+#   integration_model  — model for the integration developer (strong model)
 #
 # If no [[planning.studies]] entries have a `path` field, the harness will
 # auto-discover subsystems by scanning the source tree and generate one
 # study subagent per major directory.
+#
+# Round-adaptive role selection:
+#   The planner may emit a `roles_override` field in the plan's YAML front
+#   matter (JSON-encoded) to adjust roles for the next round.  Supported
+#   keys: skip_auditors, skip_studies, add_auditors, add_studies,
+#   add_developers, auditor_models, study_models, developer_models,
+#   planner_model.  See docs/FACTORY-LOOP-SPEC.md §4.6.
 
 # ─── Planning phase ───────────────────────────────────────────────────
 

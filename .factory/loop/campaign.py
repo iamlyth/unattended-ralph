@@ -2,18 +2,22 @@
 """Parallel Ralph factory campaign orchestrator.
 
 Ties together the control-plane modules (plan_parser, selector, state,
-gitutil, lock, runner, preflight, parallel) into a finite campaign loop
-with parallel study, implementation, and audit phases.
+gitutil, lock, runner, preflight, parallel, metrics) into a finite
+campaign loop with parallel study, implementation, and audit phases.
 
 Each round runs:
   1. PLANNING: parallel study subagents → planner synthesises plan.
+     The planner receives historical metrics and may emit a
+     ``roles_override`` in the plan front matter to adjust the next
+     round's roles.
   2. SELECTION: deterministic task selection (model never chooses).
   3. IMPLEMENTATION: parallel developers → integration developer commits.
+     Each role may use a different model (model tiering).
   4. VERIFICATION: task verification on local or runner hardware.
   5. AUDIT: parallel specialist auditors → findings.
   6. REPAIR (if BLOCKERs): findings + verification output fed back to
      developer → re-verify → re-audit.  Capped at max_repairs cycles.
-  7. CHECKPOINT: commit and advance to next round.
+  7. CHECKPOINT: commit, record metrics, advance to next round.
 
 The orchestrator is the sole Git writer and the sole reader/writer of the
 control-state file.  Model prose is never control protocol: outcomes are
@@ -54,12 +58,19 @@ from .parallel import (
     discover_subsystems,
     load_roles,
     invoke_subagent,
+    _resolve_model,
+)
+from .metrics import (
+    RoundMetrics,
+    MetricsLog,
+    build_round_metrics,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / ".factory" / "config.toml"
 ENV_PATH = ROOT / ".factory" / "environment.toml"
 STATE_PATH = ROOT / ".factory-state" / "factory-loop.json"
+METRICS_PATH = ROOT / ".factory-state" / "metrics.jsonl"
 PLAN_PATH = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 PROMPTS_DIR = ROOT / ".factory" / "prompts"
 FINDINGS_PATH = ROOT / ".factory" / "artifacts" / "audit-findings.md"
@@ -101,6 +112,102 @@ def config_clean_dirs(config: dict) -> list[str]:
 
 def config_max_repairs(config: dict) -> int:
     return int(config.get("campaign", {}).get("max_repairs", 3))
+
+
+# ─── Roles override ───────────────────────────────────────────────────
+
+def apply_roles_override(roles: dict, override: dict) -> dict:
+    """Apply a roles_override from the plan to the roles config.
+
+    Supported override keys:
+      ``skip_auditors``: list of auditor names to skip.
+      ``skip_studies``: list of study subagent names to skip.
+      ``add_auditors``: list of auditor dicts to add.
+      ``add_studies``: list of study dicts to add.
+      ``add_developers``: list of developer dicts to add/replace.
+      ``auditor_models``: dict of auditor_name → model override.
+      ``study_models``: dict of study_name → model override.
+      ``developer_models``: dict of developer_name → model override.
+      ``planner_model``: model override for the planner.
+    """
+    import copy
+    roles = copy.deepcopy(roles)
+
+    if not override:
+        return roles
+
+    # Skip auditors
+    skip_a = set(override.get("skip_auditors", []))
+    if skip_a:
+        roles.setdefault("audit", {}).setdefault("auditors", [])
+        roles["audit"]["auditors"] = [
+            a for a in roles["audit"]["auditors"]
+            if a.get("name") not in skip_a
+        ]
+
+    # Skip studies
+    skip_s = set(override.get("skip_studies", []))
+    if skip_s:
+        roles.setdefault("planning", {}).setdefault("studies", [])
+        roles["planning"]["studies"] = [
+            s for s in roles["planning"]["studies"]
+            if s.get("name") not in skip_s
+        ]
+
+    # Add auditors
+    add_a = override.get("add_auditors", [])
+    if add_a:
+        roles.setdefault("audit", {}).setdefault("auditors", [])
+        roles["audit"]["auditors"].extend(add_a)
+
+    # Add studies
+    add_s = override.get("add_studies", [])
+    if add_s:
+        roles.setdefault("planning", {}).setdefault("studies", [])
+        roles["planning"]["studies"].extend(add_s)
+
+    # Add/replace developers
+    add_d = override.get("add_developers", [])
+    if add_d:
+        roles.setdefault("implementation", {}).setdefault("developers", [])
+        existing_names = {d.get("name") for d in roles["implementation"]["developers"]}
+        for d in add_d:
+            if d.get("name") in existing_names:
+                # Replace existing
+                roles["implementation"]["developers"] = [
+                    d if existing_d.get("name") == d.get("name") else existing_d
+                    for existing_d in roles["implementation"]["developers"]
+                ]
+            else:
+                roles["implementation"]["developers"].append(d)
+
+    # Model overrides per auditor
+    a_models = override.get("auditor_models", {})
+    if a_models:
+        for a in roles.get("audit", {}).get("auditors", []):
+            if a.get("name") in a_models:
+                a["model"] = a_models[a["name"]]
+
+    # Model overrides per study
+    s_models = override.get("study_models", {})
+    if s_models:
+        for s in roles.get("planning", {}).get("studies", []):
+            if s.get("name") in s_models:
+                s["model"] = s_models[s["name"]]
+
+    # Model overrides per developer
+    d_models = override.get("developer_models", {})
+    if d_models:
+        for d in roles.get("implementation", {}).get("developers", []):
+            if d.get("name") in d_models:
+                d["model"] = d_models[d["name"]]
+
+    # Planner model
+    p_model = override.get("planner_model")
+    if p_model:
+        roles.setdefault("planning", {})["planner_model"] = p_model
+
+    return roles
 
 
 # ─── Task helpers ─────────────────────────────────────────────────────
@@ -183,7 +290,8 @@ def run_task_verification(task: Task, runners: list, root: Path,
 
 # ─── Parallel phases ─────────────────────────────────────────────────
 
-def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
+def run_planning_phase(roles: dict, config: dict, args, root: Path,
+                       metrics_log: MetricsLog | None = None) -> bool:
     """Run the planning phase: parallel study subagents → planner.
 
     Returns True if planning succeeded (plan file was written/parsed).
@@ -219,13 +327,33 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
 
     study_report = assemble_reports(study_results)
 
+    # Build planner context with study reports + historical metrics.
+    planner_context = f"## Study Reports\n\n{study_report}\n\n"
+    if metrics_log:
+        metrics_summary = metrics_log.summary()
+        if metrics_summary and "No historical" not in metrics_summary:
+            planner_context += (
+                f"## Historical Campaign Metrics\n\n"
+                f"{metrics_summary}\n\n"
+            )
+    planner_context += (
+        "Review discrepancies against the spec and devise an "
+        "implementation plan at .factory/artifacts/implementation-plan.md\n\n"
+        "If the metrics show low-precision auditors or high-rejection "
+        "developers, you MAY add a `roles_override` field to the plan's "
+        "YAML front matter (as a JSON string) to adjust roles for the "
+        "next round. Supported keys: skip_auditors, skip_studies, "
+        "add_auditors, add_studies, add_developers, auditor_models, "
+        "study_models, developer_models, planner_model.\n"
+        "Example: roles_override: {\"skip_auditors\": [\"security\"], "
+        "\"auditor_models\": {\"efficiency\": \"qwen3:8b\"}}\n"
+    )
+
     planner_prompt = plan_cfg.get("planner_prompt", ".factory/prompts/planner.md")
+    planner_model = plan_cfg.get("planner_model") or args.model
     planner_result = run_parallel(
-        [{"name": "planner", "prompt": planner_prompt}],
-        lambda name, sa: f"## Study Reports\n\n{study_report}\n\n"
-                         f"Review discrepancies against the spec and devise "
-                         f"an implementation plan at "
-                         f".factory/artifacts/implementation-plan.md",
+        [{"name": "planner", "prompt": planner_prompt, "model": planner_model}],
+        lambda name, sa: planner_context,
         args.provider, args.model,
         timeout, cwd=root, approve=True,
     )
@@ -243,11 +371,12 @@ def run_implementation_phase(
     task: Task, root: Path,
     repair_context: str = "",
     verification_output: str = "",
-) -> str:
+) -> tuple[str, list[SubagentResult]]:
     """Run the implementation phase for a single task.
 
     Parallel developers propose changes → integration developer applies
-    and commits.  Returns the commit SHA (or empty string on failure).
+    and commits.  Returns ``(commit_sha, dev_results)`` (or
+    ``("", dev_results)`` on failure).
 
     If ``repair_context`` is provided, it is appended to the developer's
     context — this is used during repair cycles to feed audit findings
@@ -276,23 +405,30 @@ def run_implementation_phase(
             f"```\n{verification_output[:6000]}\n```"
         )
 
+    all_dev_results: list[SubagentResult] = []
+
     # Single developer: run directly with --approve.
     if len(developers) == 1:
         label = "repair" if repair_context else "implementation"
         print(f"  {label}: 1 developer (serial)", file=sys.stderr)
         dev = developers[0]
+        dev_model = _resolve_model(dev, args.model)
         name, exit_code, stdout, stderr = invoke_subagent(
             dev["prompt"], excerpt + extra_context,
-            args.provider, args.model,
+            args.provider, dev_model,
             timeout, cwd=root, approve=True,
         )
+        all_dev_results.append(SubagentResult(
+            name=name, success=exit_code == 0,
+            stdout=stdout, stderr=stderr, exit_code=exit_code,
+        ))
         if exit_code != 0:
             print(f"  {label}: developer failed (exit {exit_code})",
                   file=sys.stderr)
-            return ""
+            return "", all_dev_results
         msg = (f"factory: task {task.id} "
                f"{'repair' if repair_context else 'implementation'}")
-        return gitutil.commit_all(root, msg)
+        return gitutil.commit_all(root, msg), all_dev_results
 
     # Multiple developers: run in parallel, then integration developer.
     label = "repair" if repair_context else "implementation"
@@ -316,28 +452,30 @@ def run_implementation_phase(
         developers, dev_context, args.provider, args.model,
         timeout, cwd=root, approve=False,
     )
+    all_dev_results.extend(dev_results)
 
     proposals = assemble_developer_outputs(dev_results)
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
+    int_model = impl_cfg.get("integration_model") or args.model
 
     name, exit_code, stdout, stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
         f"## Developer Proposals\n\n{proposals}"
         + extra_context,
-        args.provider, args.model,
+        args.provider, int_model,
         timeout, cwd=root, approve=True,
     )
 
     if exit_code != 0:
         print(f"  {label}: integration developer failed (exit {exit_code})",
               file=sys.stderr)
-        return ""
+        return "", all_dev_results
 
     msg = (f"factory: task {task.id} "
            f"{'repair' if repair_context else 'integrated implementation'}")
-    return gitutil.commit_all(root, msg)
+    return gitutil.commit_all(root, msg), all_dev_results
 
 
 def run_audit_phase(roles: dict, config: dict, args,
@@ -413,7 +551,8 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
 # ─── Main campaign loop ──────────────────────────────────────────────
 
 def run_campaign(args, config: dict, env: dict) -> int:
-    roles = load_roles(ROOT)
+    base_roles = load_roles(ROOT)
+    metrics_log = MetricsLog(METRICS_PATH)
     max_repairs = args.max_repairs
 
     # 1. Preflight.
@@ -454,7 +593,8 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 print(f"\n=== Round {round_num} ===", file=sys.stderr)
 
                 # ── 1. PLANNING (parallel study → planner) ──
-                ok = run_planning_phase(roles, config, args, ROOT)
+                ok = run_planning_phase(
+                    base_roles, config, args, ROOT, metrics_log)
                 if not ok:
                     outcome = "failed"
                     reason = "planning failed"
@@ -465,6 +605,13 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     outcome = "failed"
                     reason = f"plan parse failed: {exc}"
                     break
+
+                # Apply roles_override from the plan (round-adaptive).
+                roles = apply_roles_override(base_roles, plan.roles_override)
+                if plan.roles_override:
+                    print(f"  roles_override applied: "
+                          f"{list(plan.roles_override.keys())}",
+                          file=sys.stderr)
 
                 # ── 2. SELECTION (deterministic, model never chooses) ──
                 caps = get_available_capabilities(env["runners"])
@@ -486,6 +633,16 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 state.current_phase = "implementation"
                 save(STATE_PATH, state)
 
+                round_start = time.time()
+                round_study_results = []
+                round_dev_results = []
+                round_audit_report = None
+                round_v_attempts = 0
+                round_v_passed = False
+                round_repair_cycles = 0
+                round_repair_resolved = False
+                round_outcome = ""
+
                 # ── 3. IMPLEMENTATION + VERIFICATION ──
                 # Feed verification output back to developer on retry.
                 verified = False
@@ -496,14 +653,16 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     state.attempt_number = attempt
                     save(STATE_PATH, state)
 
-                    commit = run_implementation_phase(
+                    commit, dev_results = run_implementation_phase(
                         roles, config, args, task, ROOT,
                         verification_output=last_voutput,
                     )
+                    round_dev_results.extend(dev_results)
 
                     if not commit:
                         continue
 
+                    round_v_attempts = attempt
                     state.current_phase = "verification"
                     save(STATE_PATH, state)
                     _clean_verification_dirs(ROOT, config)
@@ -513,6 +672,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
 
                     if vresult.exit_code == 0:
                         verified = True
+                        round_v_passed = True
                         break
 
                     # Capture verification output for next attempt's developer.
@@ -524,6 +684,16 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     outcome = "failed"
                     reason = (f"task {task.id} failed verification after "
                               f"{args.attempts} attempts")
+                    round_outcome = "failed"
+                    # Record metrics for the failed round.
+                    rm = build_round_metrics(
+                        round_num, args.campaign_id, task, round_start,
+                        dev_results=round_dev_results,
+                        verification_attempts=round_v_attempts,
+                        verification_passed=False,
+                        outcome="failed",
+                    )
+                    metrics_log.append(rm)
                     break
 
                 # Mark task completed in the plan (tentatively — audit may
@@ -537,6 +707,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 state.current_phase = "audit"
                 save(STATE_PATH, state)
                 report = run_audit_phase(roles, config, args, task, ROOT)
+                round_audit_report = report
 
                 # ── 5. REPAIR CYCLE (if BLOCKERs found) ──
                 if report.has_blockers:
@@ -564,11 +735,12 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         print(f"  repair cycle {repair_num}/{max_repairs}",
                               file=sys.stderr)
 
-                        commit = run_implementation_phase(
+                        commit, dev_results = run_implementation_phase(
                             roles, config, args, task, ROOT,
                             repair_context=repair_ctx,
                             verification_output=last_voutput,
                         )
+                        round_dev_results.extend(dev_results)
 
                         if not commit:
                             print(f"  repair: developer failed",
@@ -595,9 +767,11 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         save(STATE_PATH, state)
                         report = run_audit_phase(
                             roles, config, args, task, ROOT)
+                        round_audit_report = report
 
                         if not report.has_blockers:
                             repair_resolved = True
+                            round_repair_resolved = True
                             print(f"  repair: all BLOCKERs resolved",
                                   file=sys.stderr)
                             break
@@ -610,6 +784,8 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             f"{report.raw_report}\n",
                             encoding="utf-8",
                         )
+
+                    round_repair_cycles = state.repair_count
 
                     if not repair_resolved:
                         # Mark task as blocked — audit found unresolvable
@@ -628,6 +804,19 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         state.current_round = round_num + 1
                         state.last_outcome = "audit_findings_unresolved"
                         save(STATE_PATH, state)
+
+                        # Record metrics for the blocked round.
+                        rm = build_round_metrics(
+                            round_num, args.campaign_id, task, round_start,
+                            dev_results=round_dev_results,
+                            audit_report=round_audit_report,
+                            verification_attempts=round_v_attempts,
+                            verification_passed=round_v_passed,
+                            repair_cycles=round_repair_cycles,
+                            repair_resolved=False,
+                            outcome="blocked",
+                        )
+                        metrics_log.append(rm)
                         continue  # next round — planner may split the task
 
                 # ── 6. CHECKPOINT (clean audit or repair resolved) ──
@@ -650,6 +839,20 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     else "audit_pass"
                 )
                 save(STATE_PATH, state)
+
+                # Record metrics for the completed round.
+                round_outcome = "completed" if state.repair_count == 0 else "completed_with_repairs"
+                rm = build_round_metrics(
+                    round_num, args.campaign_id, task, round_start,
+                    dev_results=round_dev_results,
+                    audit_report=round_audit_report,
+                    verification_attempts=round_v_attempts,
+                    verification_passed=round_v_passed,
+                    repair_cycles=round_repair_cycles,
+                    repair_resolved=round_repair_resolved,
+                    outcome=round_outcome,
+                )
+                metrics_log.append(rm)
 
         except KeyboardInterrupt:
             outcome, reason = "interrupted", "process interrupted"

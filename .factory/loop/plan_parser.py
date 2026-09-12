@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import re
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "blocked"}
@@ -32,6 +33,7 @@ class Plan:
     spec_commit: str = ""
     base_commit: str = ""
     status: str = "active"
+    roles_override: dict = field(default_factory=dict)
     tasks: list[Task] = field(default_factory=list)
 
     @property
@@ -98,6 +100,15 @@ def parse(plan_path: str | Path) -> Plan:
         base_commit=fm.get("base_commit", ""),
         status=fm.get("status", "active"),
     )
+
+    # Parse roles_override from front matter (JSON-encoded).
+    roles_override_raw = fm.get("roles_override", "")
+    if roles_override_raw:
+        try:
+            plan.roles_override = json.loads(roles_override_raw)
+        except (json.JSONDecodeError, TypeError):
+            # Malformed roles_override — ignore it rather than failing the plan.
+            pass
 
     # Parse tasks: ## Task N: Title
     task_pattern = re.compile(r"^##\s+Task\s+(\d+)\s*:\s*(.*)$", re.MULTILINE)
@@ -229,6 +240,8 @@ def dump(plan: Plan) -> str:
     lines.append(f"spec_commit: {plan.spec_commit}")
     lines.append(f"base_commit: {plan.base_commit}")
     lines.append(f"status: {plan.status}")
+    if plan.roles_override:
+        lines.append(f"roles_override: {json.dumps(plan.roles_override)}")
     lines.append("---")
     lines.append("")
 

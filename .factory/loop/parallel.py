@@ -115,6 +115,19 @@ def invoke_subagent(
 
 # ─── Parallel execution ──────────────────────────────────────────────
 
+def _resolve_model(sa: dict, default_model: str) -> str:
+    """Resolve which model to use for a subagent.
+
+    Priority: subagent's ``model`` field > ``default_model``.
+    """
+    return sa.get("model") or default_model
+
+
+def _resolve_timeout(sa: dict, default_timeout: int) -> int:
+    """Resolve timeout for a subagent."""
+    return int(sa.get("timeout", default_timeout))
+
+
 def run_parallel(
     subagents: list[dict[str, Any]],
     context_fn,           # callable(name, sa) -> str  (context per subagent)
@@ -128,7 +141,9 @@ def run_parallel(
     """Launch multiple subagents in parallel.
 
     ``context_fn(name, sa)`` is called for each subagent to produce its
-    context string.  Returns results in completion order.
+    context string.  Each subagent may specify its own ``model`` and
+    ``timeout`` in its dict; these override the defaults.  Returns
+    results in completion order.
     """
     results: list[SubagentResult] = []
 
@@ -142,9 +157,11 @@ def run_parallel(
             name = sa.get("name", "unnamed")
             prompt = sa.get("prompt", "")
             ctx = context_fn(name, sa) if context_fn else ""
+            sa_model = _resolve_model(sa, model)
+            sa_timeout = _resolve_timeout(sa, timeout)
             fut = pool.submit(
                 invoke_subagent,
-                prompt, ctx, provider, model, timeout, cwd, approve,
+                prompt, ctx, provider, sa_model, sa_timeout, cwd, approve,
             )
             future_map[fut] = name
 

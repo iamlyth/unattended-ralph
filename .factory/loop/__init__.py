@@ -39,6 +39,15 @@ from .parallel import (
     build_repair_context,
     discover_subsystems,
     load_roles,
+    _resolve_model,
+)
+from .metrics import (
+    RoundMetrics,
+    MetricsLog,
+    StudyMetric,
+    DeveloperMetric,
+    AuditorMetric,
+    build_round_metrics,
 )
 from .campaign import main
 
@@ -67,6 +76,9 @@ __all__ = [
     "assemble_developer_outputs", "assemble_audit_findings",
     "build_repair_context",
     "discover_subsystems", "load_roles",
+    # metrics
+    "RoundMetrics", "MetricsLog", "StudyMetric", "DeveloperMetric",
+    "AuditorMetric", "build_round_metrics",
     # campaign
     "main",
 ]

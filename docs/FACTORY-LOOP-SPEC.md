@@ -186,6 +186,63 @@ If all auditors return no BLOCKER findings, the repair cycle is skipped
 entirely. The task is marked complete and the round checkpoints immediately.
 No repair cycles are wasted on clean code.
 
+### 4.6 Round-adaptive role selection
+
+The planner may emit a `roles_override` field in the plan's YAML front
+matter (JSON-encoded) to adjust roles for the next round. This allows the
+factory to adapt its role configuration based on what the metrics show.
+
+Supported override keys:
+
+| Key | Description |
+|---|---|
+| `skip_auditors` | List of auditor names to skip next round |
+| `skip_studies` | List of study subagent names to skip |
+| `add_auditors` | List of auditor dicts to add |
+| `add_studies` | List of study dicts to add |
+| `add_developers` | List of developer dicts to add or replace |
+| `auditor_models` | Dict of auditor name → model override |
+| `study_models` | Dict of study name → model override |
+| `developer_models` | Dict of developer name → model override |
+| `planner_model` | Model override for the planner |
+
+Example: if round 1's audit found zero security issues but 4 efficiency
+issues, the planner can drop the security auditor and add a second
+efficiency-focused developer for round 2.
+
+### 4.7 Metrics feedback loop
+
+The harness logs per-round metrics to `.factory-state/metrics.jsonl`:
+
+- **Auditor precision**: fraction of BLOCKERs upheld (not overturned by
+  conflict resolution). Auditors with precision below 50% are flagged in
+  the metrics summary with a warning.
+- **Developer rejection rate**: fraction of proposals rejected by the
+  integration developer. Developers with rejection rates above 50% are
+  flagged.
+- **Repair cycle stats**: average repair cycles per round, fraction
+  resolved by repair.
+- **Round outcomes**: count of completed, blocked, and failed rounds.
+
+The metrics summary is fed to the planner at the start of each round. The
+planner can use it to emit `roles_override` adjustments. Without this
+loop, roles.toml tuning is guesswork.
+
+### 4.8 Model tiering
+
+Each role may specify a `model` field in `roles.toml` to use a different
+model than the CLI `--model` default. This enables cost optimization:
+
+- **Study subagents**: read-only, focused tasks → cheaper/faster model.
+- **Auditors**: read-only, focused tasks → cheaper/faster model.
+- **Planner**: synthesizes reports and makes decisions → strongest model.
+- **Integration developer**: reconciles proposals and commits → strongest model.
+- **Developers**: write code → strong model (or default).
+
+Phase-level overrides: `planner_model` and `integration_model` in
+`roles.toml`. Per-subagent overrides: `model` field on each study,
+developer, or auditor entry.
+
 ## 5. Plan contract
 
 The plan is a markdown file at `.factory/artifacts/implementation-plan.md`.
@@ -536,6 +593,11 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | AUDIT-03 | Closed-loop repair: BLOCKERs + verification output fed back to developer; capped at max_repairs cycles |
 | AUDIT-04 | Early exit on clean audit: no repair cycle when no BLOCKERs found |
 | AUDIT-05 | Unresolvable BLOCKERs after max_repairs → task marked blocked, not silently passed |
+| METRIC-01 | Per-round metrics logged to JSONL: auditor precision, developer rejection rate, repair stats |
+| METRIC-02 | Metrics summary fed to planner to enable feedback-driven role tuning |
+| ADAPT-01 | Planner may emit roles_override in plan front matter to adjust roles per round |
+| ADAPT-02 | Supported overrides: skip/add auditors, studies, developers; model overrides per role |
+| TIER-01 | roles.toml supports per-role model field for cost-optimized model tiering |
 | VERIFY-01 | Tester independently runs verification and reports actual exit code |
 | VERIFY-02 | Auditor checks for weakened assertions, skipped tests, or fake passes |
 | RUNNER-01 | Runners declared in environment.toml with SSH transport and capabilities |
