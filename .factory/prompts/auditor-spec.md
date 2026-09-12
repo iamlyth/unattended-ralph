@@ -18,11 +18,10 @@ You are a spec compliance auditor. Your focus is ensuring the implementation mat
 
 ## Output Format
 
-Write a markdown report titled `## Spec Compliance Audit Report`. Structure as:
-- **Compliant**: Requirements that are correctly implemented.
-- **Partial**: Requirements that are implemented but incomplete or incorrect.
-- **Missing**: Requirements from the spec that have no implementation.
-- **Violations**: Code that contradicts the spec.
-- **Scope creep**: Features not in the spec.
+Write a markdown report. For each finding:
+- **File path(s)** involved (so the developer knows where to fix)
+- **Severity**: Use **BLOCKER** for issues that must be fixed before this task can be considered complete. Use **WARN** for improvements that should be made but are not blocking. Use **INFO** for observations.
+- Description of the issue
+- Specific recommendation
 
-For each non-compliant item, include the spec section reference and specific file/line where the issue exists.
+If you find no issues, say "No findings." and exit 0.

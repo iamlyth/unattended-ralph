@@ -13,7 +13,7 @@ import os
 import tempfile
 
 SCHEMA = "factory-state/v1"
-VALID_PHASES = {"planning", "implementation", "verification", "audit", "terminal"}
+VALID_PHASES = {"planning", "implementation", "verification", "audit", "repair", "terminal"}
 VALID_OUTCOMES = {
     "success", "findings", "blocked", "failed",
     "interrupted", "infrastructure_failure", None,
@@ -28,6 +28,7 @@ class State:
     current_phase: str = "planning"
     selected_task_id: int | None = None
     attempt_number: int = 1
+    repair_count: int = 0
     last_outcome: str | None = None
     terminal_outcome: str | None = None
     rounds_completed: int = 0

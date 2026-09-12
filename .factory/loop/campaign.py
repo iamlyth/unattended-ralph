@@ -11,6 +11,9 @@ Each round runs:
   3. IMPLEMENTATION: parallel developers → integration developer commits.
   4. VERIFICATION: task verification on local or runner hardware.
   5. AUDIT: parallel specialist auditors → findings.
+  6. REPAIR (if BLOCKERs): findings + verification output fed back to
+     developer → re-verify → re-audit.  Capped at max_repairs cycles.
+  7. CHECKPOINT: commit and advance to next round.
 
 The orchestrator is the sole Git writer and the sole reader/writer of the
 control-state file.  Model prose is never control protocol: outcomes are
@@ -42,12 +45,15 @@ from .runner import (
 from .preflight import run_preflight
 from .parallel import (
     SubagentResult,
+    AuditReport,
     run_parallel,
     assemble_reports,
     assemble_developer_outputs,
     assemble_audit_findings,
+    build_repair_context,
     discover_subsystems,
     load_roles,
+    invoke_subagent,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -93,6 +99,10 @@ def config_clean_dirs(config: dict) -> list[str]:
     return list(config.get("verification", {}).get("clean", []))
 
 
+def config_max_repairs(config: dict) -> int:
+    return int(config.get("campaign", {}).get("max_repairs", 3))
+
+
 # ─── Task helpers ─────────────────────────────────────────────────────
 
 def task_excerpt(task: Task) -> str:
@@ -118,6 +128,20 @@ def find_runner_for_capability(runners: list, cap: str) -> Runner | None:
 
 def _strip_markdown_ticks(cmd: str) -> str:
     return cmd.replace("`", "").strip() if cmd else ""
+
+
+def _format_verification_output(vresult: VerificationResult) -> str:
+    """Format verification result as context for the developer."""
+    parts = [
+        f"Verification command: {vresult.command}",
+        f"Exit code: {vresult.exit_code}",
+        f"Runner: {vresult.runner}",
+    ]
+    if vresult.stdout:
+        parts.append(f"stdout:\n{vresult.stdout[:4000]}")
+    if vresult.stderr:
+        parts.append(f"stderr:\n{vresult.stderr[:4000]}")
+    return "\n\n".join(parts)
 
 
 # ─── Verification ─────────────────────────────────────────────────────
@@ -175,7 +199,6 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
         studies.extend(subsystems)
 
     if not studies:
-        # No study subagents — run planner directly.
         studies = []
 
     print(f"  planning: {len(studies)} study subagents", file=sys.stderr)
@@ -194,10 +217,8 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
         timeout, cwd=root, approve=False,
     )
 
-    # Assemble study reports.
     study_report = assemble_reports(study_results)
 
-    # Feed study reports to the planner.
     planner_prompt = plan_cfg.get("planner_prompt", ".factory/prompts/planner.md")
     planner_result = run_parallel(
         [{"name": "planner", "prompt": planner_prompt}],
@@ -217,12 +238,21 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path) -> bool:
     return True
 
 
-def run_implementation_phase(roles: dict, config: dict, args,
-                              task: Task, root: Path) -> str:
+def run_implementation_phase(
+    roles: dict, config: dict, args,
+    task: Task, root: Path,
+    repair_context: str = "",
+    verification_output: str = "",
+) -> str:
     """Run the implementation phase for a single task.
 
     Parallel developers propose changes → integration developer applies
     and commits.  Returns the commit SHA (or empty string on failure).
+
+    If ``repair_context`` is provided, it is appended to the developer's
+    context — this is used during repair cycles to feed audit findings
+    back to the developer.  If ``verification_output`` is provided, it is
+    also included so the developer can diagnose test failures.
     """
     impl_cfg = roles.get("implementation", {})
     timeout = impl_cfg.get("timeout", ROLE_TIMEOUT)
@@ -233,29 +263,44 @@ def run_implementation_phase(roles: dict, config: dict, args,
 
     excerpt = task_excerpt(task)
 
-    # Single developer: run directly with --approve (old behaviour).
+    # Build the full context for the developer.
+    extra_context = ""
+    if repair_context:
+        extra_context += "\n\n" + repair_context
+    if verification_output:
+        extra_context += (
+            "\n\n## Previous Verification Output\n\n"
+            "The verification command was run after the previous "
+            "implementation attempt and produced this output. Use it to "
+            "diagnose and fix the failure.\n\n"
+            f"```\n{verification_output[:6000]}\n```"
+        )
+
+    # Single developer: run directly with --approve.
     if len(developers) == 1:
-        print(f"  implementation: 1 developer (serial)", file=sys.stderr)
+        label = "repair" if repair_context else "implementation"
+        print(f"  {label}: 1 developer (serial)", file=sys.stderr)
         dev = developers[0]
-        from .parallel import invoke_subagent
         name, exit_code, stdout, stderr = invoke_subagent(
-            dev["prompt"], excerpt, args.provider, args.model,
+            dev["prompt"], excerpt + extra_context,
+            args.provider, args.model,
             timeout, cwd=root, approve=True,
         )
         if exit_code != 0:
-            print(f"  implementation: developer failed (exit {exit_code})",
+            print(f"  {label}: developer failed (exit {exit_code})",
                   file=sys.stderr)
             return ""
-        return gitutil.commit_all(
-            root, f"factory: task {task.id} implementation",
-        )
+        msg = (f"factory: task {task.id} "
+               f"{'repair' if repair_context else 'implementation'}")
+        return gitutil.commit_all(root, msg)
 
     # Multiple developers: run in parallel, then integration developer.
-    print(f"  implementation: {len(developers)} developers (parallel)",
+    label = "repair" if repair_context else "implementation"
+    print(f"  {label}: {len(developers)} developers (parallel)",
           file=sys.stderr)
 
     def dev_context(name: str, sa: dict) -> str:
-        ctx = excerpt
+        ctx = excerpt + extra_context
         paths = sa.get("paths", [])
         if paths:
             ctx += f"\n\n## Your Assigned Area\n\nYou are responsible for " \
@@ -272,42 +317,41 @@ def run_implementation_phase(roles: dict, config: dict, args,
         timeout, cwd=root, approve=False,
     )
 
-    # Assemble developer outputs and feed to integration developer.
     proposals = assemble_developer_outputs(dev_results)
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
 
-    from .parallel import invoke_subagent
     name, exit_code, stdout, stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
-        f"## Developer Proposals\n\n{proposals}",
+        f"## Developer Proposals\n\n{proposals}"
+        + extra_context,
         args.provider, args.model,
         timeout, cwd=root, approve=True,
     )
 
     if exit_code != 0:
-        print(f"  implementation: integration developer failed (exit {exit_code})",
+        print(f"  {label}: integration developer failed (exit {exit_code})",
               file=sys.stderr)
         return ""
 
-    return gitutil.commit_all(
-        root, f"factory: task {task.id} integrated implementation",
-    )
+    msg = (f"factory: task {task.id} "
+           f"{'repair' if repair_context else 'integrated implementation'}")
+    return gitutil.commit_all(root, msg)
 
 
 def run_audit_phase(roles: dict, config: dict, args,
-                     task: Task, root: Path) -> tuple[str, bool]:
+                     task: Task, root: Path) -> AuditReport:
     """Run the audit phase: parallel specialist auditors.
 
-    Returns ``(report, has_findings)``.
+    Returns an ``AuditReport`` with structured findings, conflict
+    resolution, and repair instructions.
     """
     audit_cfg = roles.get("audit", {})
     timeout = audit_cfg.get("timeout", 600)
     auditors = list(audit_cfg.get("auditors", []))
 
     if not auditors:
-        # Fallback: single auditor.
         auditors = [{"name": "auditor", "prompt": ".factory/prompts/auditor.md"}]
 
     print(f"  audit: {len(auditors)} specialist auditors (parallel)",
@@ -320,8 +364,16 @@ def run_audit_phase(roles: dict, config: dict, args,
         ctx += f"## Task Details\n\n{excerpt}\n\n"
         if sa.get("description"):
             ctx += f"## Your Focus\n\n{sa['description']}\n"
-        ctx += "\nAudit the current codebase state. Report findings as " \
-               "markdown. Exit non-zero if you find BLOCKER issues.\n"
+        ctx += (
+            "\nAudit the current codebase state. Report findings as "
+            "markdown. Use **BLOCKER** for issues that must be fixed "
+            "before this task can be considered complete. Use **WARN** "
+            "for improvements that should be made but are not blocking. "
+            "Use **INFO** for observations.\n"
+            "\nIf you find no issues, say \"No findings.\" and exit 0.\n"
+            "\nFor each finding, reference the specific file path(s) "
+            "involved so the developer knows where to fix.\n"
+        )
         return ctx
 
     audit_results = run_parallel(
@@ -329,8 +381,7 @@ def run_audit_phase(roles: dict, config: dict, args,
         timeout, cwd=root, approve=False,
     )
 
-    report, has_blockers = assemble_audit_findings(audit_results)
-    return report, has_blockers
+    return assemble_audit_findings(audit_results)
 
 
 # ─── Terminal success ────────────────────────────────────────────────
@@ -349,20 +400,21 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
     if vresult.exit_code != 0:
         return "failed"
 
-    # Run full audit with all specialist auditors.
     dummy_task = Task(id=0, title="Final audit", status="completed",
                       acceptance="All tasks complete", verification=vcmd)
-    report, has_blockers = run_audit_phase(roles, config, args, dummy_task, ROOT)
+    report = run_audit_phase(roles, config, args, dummy_task, ROOT)
     FINDINGS_PATH.write_text(
-        f"# Final Audit Findings\n\n{report}\n", encoding="utf-8",
+        f"# Final Audit Findings\n\n{report.raw_report}\n",
+        encoding="utf-8",
     )
-    return "findings" if has_blockers else "success"
+    return "findings" if report.has_blockers else "success"
 
 
 # ─── Main campaign loop ──────────────────────────────────────────────
 
 def run_campaign(args, config: dict, env: dict) -> int:
     roles = load_roles(ROOT)
+    max_repairs = args.max_repairs
 
     # 1. Preflight.
     preflight = run_preflight(ROOT, config, env["runners"])
@@ -396,6 +448,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 state.current_round = round_num
                 state.current_phase = "planning"
                 state.last_outcome = None
+                state.repair_count = 0
                 save(STATE_PATH, state)
 
                 print(f"\n=== Round {round_num} ===", file=sys.stderr)
@@ -434,17 +487,21 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 save(STATE_PATH, state)
 
                 # ── 3. IMPLEMENTATION + VERIFICATION ──
+                # Feed verification output back to developer on retry.
                 verified = False
                 vresult: VerificationResult | None = None
+                last_voutput = ""
+
                 for attempt in range(1, args.attempts + 1):
                     state.attempt_number = attempt
                     save(STATE_PATH, state)
 
                     commit = run_implementation_phase(
-                        roles, config, args, task, ROOT)
+                        roles, config, args, task, ROOT,
+                        verification_output=last_voutput,
+                    )
 
                     if not commit:
-                        # Developer/integration failed; retry if attempts left.
                         continue
 
                     state.current_phase = "verification"
@@ -458,13 +515,19 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         verified = True
                         break
 
+                    # Capture verification output for next attempt's developer.
+                    last_voutput = _format_verification_output(vresult)
+                    print(f"  verification: attempt {attempt} failed "
+                          f"(exit {vresult.exit_code})", file=sys.stderr)
+
                 if not verified:
                     outcome = "failed"
                     reason = (f"task {task.id} failed verification after "
                               f"{args.attempts} attempts")
                     break
 
-                # Mark task completed in the plan.
+                # Mark task completed in the plan (tentatively — audit may
+                # un-mark it if repair fails).
                 task.status = "completed"
                 task.evidence = (f"verification exit {vresult.exit_code} "
                                 f"on {vresult.runner}")
@@ -473,30 +536,132 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 # ── 4. AUDIT (parallel specialist auditors) ──
                 state.current_phase = "audit"
                 save(STATE_PATH, state)
-                report, has_findings = run_audit_phase(
-                    roles, config, args, task, ROOT)
-                if has_findings:
+                report = run_audit_phase(roles, config, args, task, ROOT)
+
+                # ── 5. REPAIR CYCLE (if BLOCKERs found) ──
+                if report.has_blockers:
                     FINDINGS_PATH.write_text(
                         f"# Audit findings (round {round_num}, task "
-                        f"{task.id})\n\n{report}\n",
+                        f"{task.id})\n\n{report.raw_report}\n",
+                        encoding="utf-8",
+                    )
+                    print(f"  audit: {len(report.blockers)} BLOCKER(s) "
+                          f"found — entering repair cycle",
+                          file=sys.stderr)
+
+                    repair_resolved = False
+                    for repair_num in range(1, max_repairs + 1):
+                        state.current_phase = "repair"
+                        state.repair_count = repair_num
+                        save(STATE_PATH, state)
+
+                        repair_ctx = build_repair_context(
+                            report,
+                            verification_output=last_voutput,
+                            repair_attempt=repair_num,
+                        )
+
+                        print(f"  repair cycle {repair_num}/{max_repairs}",
+                              file=sys.stderr)
+
+                        commit = run_implementation_phase(
+                            roles, config, args, task, ROOT,
+                            repair_context=repair_ctx,
+                            verification_output=last_voutput,
+                        )
+
+                        if not commit:
+                            print(f"  repair: developer failed",
+                                  file=sys.stderr)
+                            continue
+
+                        # Re-verify after repair.
+                        state.current_phase = "verification"
+                        save(STATE_PATH, state)
+                        _clean_verification_dirs(ROOT, config)
+                        vresult = run_task_verification(
+                            task, env["runners"], ROOT, commit,
+                            config_build_command(config))
+
+                        if vresult.exit_code != 0:
+                            last_voutput = _format_verification_output(vresult)
+                            print(f"  repair: verification failed "
+                                  f"(exit {vresult.exit_code})",
+                                  file=sys.stderr)
+                            continue
+
+                        # Re-audit after repair.
+                        state.current_phase = "audit"
+                        save(STATE_PATH, state)
+                        report = run_audit_phase(
+                            roles, config, args, task, ROOT)
+
+                        if not report.has_blockers:
+                            repair_resolved = True
+                            print(f"  repair: all BLOCKERs resolved",
+                                  file=sys.stderr)
+                            break
+
+                        print(f"  repair: {len(report.blockers)} BLOCKER(s) "
+                              f"remain", file=sys.stderr)
+                        FINDINGS_PATH.write_text(
+                            f"# Audit findings (round {round_num}, task "
+                            f"{task.id}, repair {repair_num})\n\n"
+                            f"{report.raw_report}\n",
+                            encoding="utf-8",
+                        )
+
+                    if not repair_resolved:
+                        # Mark task as blocked — audit found unresolvable
+                        # issues after max_repairs cycles.
+                        task.status = "blocked"
+                        task.evidence = (
+                            f"verification passed but audit BLOCKERs "
+                            f"unresolved after {max_repairs} repair cycles"
+                        )
+                        PLAN_PATH.write_text(dump(plan), encoding="utf-8")
+                        gitutil.commit_all(
+                            ROOT,
+                            f"factory: task {task.id} blocked by audit "
+                            f"after {max_repairs} repairs")
+                        state.rounds_completed = round_num
+                        state.current_round = round_num + 1
+                        state.last_outcome = "audit_findings_unresolved"
+                        save(STATE_PATH, state)
+                        continue  # next round — planner may split the task
+
+                # ── 6. CHECKPOINT (clean audit or repair resolved) ──
+                if report.conflicts:
+                    FINDINGS_PATH.write_text(
+                        f"# Audit findings (round {round_num}, task "
+                        f"{task.id})\n\n{report.raw_report}\n\n"
+                        f"## Conflict Resolutions\n\n"
+                        + "\n".join(f"- {c.note}" for c in report.conflicts),
                         encoding="utf-8",
                     )
 
-                # ── 5. Checkpoint ──
                 gitutil.commit_all(
                     ROOT, f"factory: checkpoint round {round_num}")
 
                 state.rounds_completed = round_num
                 state.current_round = round_num + 1
-                state.last_outcome = ("audit_findings" if has_findings
-                                      else "audit_pass")
+                state.last_outcome = (
+                    "audit_findings_resolved" if state.repair_count > 0
+                    else "audit_pass"
+                )
                 save(STATE_PATH, state)
 
         except KeyboardInterrupt:
             outcome, reason = "interrupted", "process interrupted"
 
         if outcome is None:
-            if state.last_outcome == "audit_findings":
+            if state.last_outcome == "audit_findings_unresolved":
+                outcome = "findings"
+                reason = "audit BLOCKERs unresolved after max repairs"
+            elif state.last_outcome == "audit_findings_resolved":
+                outcome = "findings"
+                reason = "rounds exhausted after repair cycles"
+            elif state.last_outcome == "audit_findings":
                 outcome = "findings"
                 reason = "rounds exhausted with audit findings"
             else:
@@ -527,6 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--provider", required=True)
     run_p.add_argument("--model", required=True)
     run_p.add_argument("--attempts", type=int, default=None)
+    run_p.add_argument("--max-repairs", type=int, default=None)
     run_p.add_argument("--timeout", type=int, default=None)
     return parser
 
@@ -542,6 +708,8 @@ def main(argv: list[str] | None = None) -> int:
         args.rounds = camp.get("default_rounds", 20)
     if args.attempts is None:
         args.attempts = camp.get("default_attempts", 3)
+    if args.max_repairs is None:
+        args.max_repairs = config_max_repairs(config)
     if args.timeout is None:
         args.timeout = camp.get("default_timeout", 21600)
     return run_campaign(args, config, env)

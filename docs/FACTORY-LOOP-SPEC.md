@@ -138,9 +138,53 @@ on a different quality axis. Default auditors:
 - **Spec compliance**: does the implementation match the specification.
 - **Compatibility**: platform, dependency, and API compatibility.
 
-All auditors are read-only. Findings from all auditors are assembled into a
-single report. Any auditor that finds BLOCKER issues signals findings for
-the next planning round.
+All auditors are read-only. Each auditor reports findings with severity:
+
+- **BLOCKER**: must be fixed before the task can be considered complete.
+- **WARN**: should be improved but is not blocking.
+- **INFO**: observation for future reference.
+
+#### 4.5.1 Cross-auditor conflict resolution
+
+When two auditors both flag BLOCKER findings that reference the same file,
+the harness resolves the conflict by **priority**:
+
+```
+security > functional > spec-compliance > compatibility > efficiency > linting
+```
+
+The higher-priority auditor's BLOCKER stands. The lower-priority auditor's
+BLOCKER is downgraded to WARN. Both findings remain in the report — only the
+severity changes. A conflict resolution note is recorded so the developer
+can review whether the resolution was correct.
+
+#### 4.5.2 Closed-loop repair cycle
+
+When the audit phase finds BLOCKER issues, the harness enters a **repair
+cycle** instead of just reporting findings:
+
+1. BLOCKER findings + conflict notes + verification output are packaged as
+   repair context.
+2. The developer is re-invoked with the repair context appended to its
+   prompt. The developer makes targeted fixes (not a full re-implementation).
+3. Verification re-runs on the repaired code.
+4. Audit re-runs on the repaired code.
+5. If all BLOCKERs are resolved, the task is marked complete and the round
+   checkpoints.
+6. If BLOCKERs remain, steps 1–4 repeat, up to `max_repairs` (default: 3).
+7. If BLOCKERs persist after `max_repairs`, the task is marked `blocked` with
+   the reason. The planner may split the task or add remediation tasks in the
+   next round.
+
+This is the **Generator-Critic** pattern: auditors (critics) feed concrete
+revision instructions back to the developer (generator). The audit is not a
+report card — it is a quality mechanism that drives repair.
+
+#### 4.5.3 Early exit on clean audit
+
+If all auditors return no BLOCKER findings, the repair cycle is skipped
+entirely. The task is marked complete and the round checkpoints immediately.
+No repair cycles are wasted on clean code.
 
 ## 5. Plan contract
 
@@ -297,6 +341,10 @@ Each round executes:
 
 ```
 planning → selection → implementation → verification → audit
+  → if clean audit: checkpoint → next round
+  → if BLOCKERs: [repair → verification → audit] × max_repairs
+    → if resolved: checkpoint → next round
+    → if unresolvable: task blocked → checkpoint → next round
 ```
 
 - **Planning**: parallel study subagents analyse the codebase; the planner
@@ -307,9 +355,14 @@ planning → selection → implementation → verification → audit
   `task_progress`, `task_failed`, or `interrupted`.
 - **Verification**: the orchestrator runs the verification command
   independently (locally or on a runner). Outcome: `verified` or
-  `verification_failed`.
+  `verification_failed`. Verification output is captured and fed back to
+  the developer on the next attempt or repair cycle.
 - **Audit**: parallel specialist auditors review the codebase. Outcome:
-  `audit_pass` or `audit_findings`.
+  `audit_pass` (no BLOCKERs) or `audit_findings` (BLOCKERs found).
+- **Repair** (if BLOCKERs): BLOCKER findings + verification output are
+  fed back to the developer. The developer makes targeted fixes.
+  Re-verification and re-audit follow. Up to `max_repairs` cycles.
+- **Checkpoint**: commit and advance to the next round.
 
 ### 9.2 Terminal outcomes
 
@@ -330,7 +383,10 @@ always reaches verification and audit and never silently succeeds.
 ### 9.3 Round and attempt bounds
 
 - `--rounds N` (default 20): maximum planning-implement-verify-audit cycles.
-- `--implementation-attempts N` (default 3): maximum retries for one task.
+- `--implementation-attempts N` (default 3): maximum retries for one task
+  during the implementation+verification phase.
+- `--max-repairs N` (default 3): maximum repair cycles after audit finds
+  BLOCKER issues. Each repair cycle runs developer → verification → audit.
 - `--campaign-timeout S` (default 21600): wall-clock timeout in seconds.
 
 When a budget is exhausted, the campaign terminates with the honest outcome.
@@ -348,6 +404,7 @@ One JSON file: `.factory-state/factory-loop.json`
   "current_phase": "planning",
   "selected_task_id": null,
   "attempt_number": 1,
+  "repair_count": 0,
   "last_outcome": null,
   "terminal_outcome": null,
   "rounds_completed": 0,
@@ -398,6 +455,7 @@ command = ["./scripts/verify.sh"]
 default_rounds = 20
 default_attempts = 3
 default_timeout = 21600
+max_repairs = 3
 
 [git]
 checkpoint_each_iteration = true
@@ -473,6 +531,11 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | TASK-01 | Deterministic selection of exactly one task per attempt; model never chooses |
 | CTX-01 | Every role is a fresh CLI invocation with no memory or session resume |
 | ROLE-01 | Configurable parallel roles: study subagents, planner, developers, integration developer, specialist auditors |
+| AUDIT-01 | Auditors use BLOCKER/WARN/INFO severity; BLOCKERs trigger repair cycle |
+| AUDIT-02 | Cross-auditor conflicts resolved by priority (security > functional > spec > compatibility > efficiency > linting) |
+| AUDIT-03 | Closed-loop repair: BLOCKERs + verification output fed back to developer; capped at max_repairs cycles |
+| AUDIT-04 | Early exit on clean audit: no repair cycle when no BLOCKERs found |
+| AUDIT-05 | Unresolvable BLOCKERs after max_repairs → task marked blocked, not silently passed |
 | VERIFY-01 | Tester independently runs verification and reports actual exit code |
 | VERIFY-02 | Auditor checks for weakened assertions, skipped tests, or fake passes |
 | RUNNER-01 | Runners declared in environment.toml with SSH transport and capabilities |

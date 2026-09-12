@@ -28,11 +28,15 @@ from .parallel import (
     StudyConfig,
     DeveloperConfig,
     AuditorConfig,
+    AuditFinding,
+    AuditConflict,
+    AuditReport,
     invoke_subagent,
     run_parallel,
     assemble_reports,
     assemble_developer_outputs,
     assemble_audit_findings,
+    build_repair_context,
     discover_subsystems,
     load_roles,
 )
@@ -58,8 +62,10 @@ __all__ = [
     "PreflightResult", "run_preflight",
     # parallel
     "SubagentResult", "StudyConfig", "DeveloperConfig", "AuditorConfig",
+    "AuditFinding", "AuditConflict", "AuditReport",
     "invoke_subagent", "run_parallel", "assemble_reports",
     "assemble_developer_outputs", "assemble_audit_findings",
+    "build_repair_context",
     "discover_subsystems", "load_roles",
     # campaign
     "main",

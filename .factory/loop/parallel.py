@@ -12,13 +12,15 @@ Three patterns:
     paths.  Parallel as long as areas don't overlap; the integration
     developer commits after all developers finish.
   * **Audit** — read-only subagents that review the final codebase.
-    Fully parallel, no side effects.
+    Fully parallel, no side effects.  Findings are structured into an
+    ``AuditReport`` with conflict resolution and repair instructions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -202,26 +204,256 @@ def assemble_developer_outputs(results: list[SubagentResult]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def assemble_audit_findings(results: list[SubagentResult]) -> tuple[str, bool]:
-    """Concatenate auditor findings and determine if any found blockers.
+# ─── Audit structures ─────────────────────────────────────────────────
 
-    Returns ``(report, has_blockers)``.
+# Priority order: higher index = higher priority.  When two auditors
+# conflict on the same file, the higher-priority auditor's finding wins.
+# Security and functional correctness are never sacrificed for efficiency
+# or style.
+AUDITOR_PRIORITY = [
+    "linting",           # 0 — lowest
+    "efficiency",        # 1
+    "compatibility",     # 2
+    "spec-compliance",   # 3
+    "functional",        # 4
+    "security",          # 5 — highest
+]
+
+
+def _auditor_priority(name: str) -> int:
+    """Return priority index for an auditor name (higher = higher priority)."""
+    name_lower = name.lower().replace("_", "-")
+    for i, p in enumerate(AUDITOR_PRIORITY):
+        if p in name_lower:
+            return i
+    return 0  # unknown auditors get lowest priority
+
+
+@dataclass
+class AuditFinding:
+    """A single finding from one auditor."""
+    auditor: str
+    severity: str           # BLOCKER, WARN, INFO
+    file_refs: list[str]    # file paths mentioned in the finding
+    text: str               # the finding text (may be multi-line)
+
+
+@dataclass
+class AuditConflict:
+    """A conflict between two auditors on the same file area."""
+    file_ref: str
+    winner: str             # auditor name (higher priority)
+    loser: str              # auditor name (lower priority)
+    note: str               # explanation
+
+
+@dataclass
+class AuditReport:
+    """Structured audit report with conflict resolution."""
+    findings: list[AuditFinding] = field(default_factory=list)
+    blockers: list[AuditFinding] = field(default_factory=list)
+    conflicts: list[AuditConflict] = field(default_factory=list)
+    has_blockers: bool = False
+    raw_report: str = ""           # assembled markdown for human reading
+
+    @property
+    def repair_instructions(self) -> str:
+        """Markdown listing only BLOCKER findings for the developer."""
+        if not self.blockers:
+            return ""
+        parts = ["## BLOCKER Findings Requiring Repair\n"]
+        for f in self.blockers:
+            parts.append(f"### {f.auditor} (BLOCKER)\n")
+            if f.file_refs:
+                parts.append(f"**Files:** {', '.join(f.file_refs)}\n")
+            parts.append(f"{f.text}\n")
+        if self.conflicts:
+            parts.append("### Conflict Resolution Notes\n")
+            for c in self.conflicts:
+                parts.append(
+                    f"- `{c.file_ref}`: {c.winner} overrode {c.loser}. "
+                    f"{c.note}\n"
+                )
+        return "\n".join(parts)
+
+
+# ─── Audit parsing ───────────────────────────────────────────────────
+
+# Regex for file-like references in auditor output.
+_FILE_RE = re.compile(
+    r'(?<!\w)((?:src|tests|scripts|data|include|lib|bin|docs)/'
+    r'[\w/]+\.(?:c|h|py|sh|md|toml|yaml|yml|json|txt))'
+    r'|(CMakeLists\.txt)|(AGENTS\.md)'
+)
+
+
+def _extract_file_refs(text: str) -> list[str]:
+    """Extract file path references from a block of text."""
+    return list(dict.fromkeys(_FILE_RE.findall(text)))  # dedup, preserve order
+
+
+def _extract_findings(auditor_name: str, output: str) -> list[AuditFinding]:
+    """Parse an auditor's output into structured findings.
+
+    Heuristic: split on blank-line-separated blocks that contain
+    BLOCKER, WARN, or INFO keywords.  Each block becomes one finding.
     """
-    parts = []
-    has_blockers = False
+    findings = []
+    # Split on headers or severity markers.
+    blocks = re.split(r'\n(?=#{1,4}\s|\*\*?(?:BLOCKER|WARN|INFO))', output)
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        upper = block.upper()
+        if "BLOCKER" in upper:
+            severity = "BLOCKER"
+        elif "WARN" in upper:
+            severity = "WARN"
+        elif "INFO" in upper or "NOTE" in upper:
+            severity = "INFO"
+        else:
+            # No explicit severity marker — treat the whole output as one INFO.
+            if not findings and len(blocks) <= 2:
+                severity = "INFO"
+            else:
+                continue
+        file_refs = _extract_file_refs(block)
+        findings.append(AuditFinding(
+            auditor=auditor_name,
+            severity=severity,
+            file_refs=file_refs,
+            text=block[:2000],  # cap individual finding size
+        ))
+    return findings
+
+
+def _detect_and_resolve_conflicts(
+    findings: list[AuditFinding],
+) -> tuple[list[AuditFinding], list[AuditConflict]]:
+    """Detect conflicts between auditors on the same file and resolve by priority.
+
+    When two BLOCKER findings from different auditors reference the same
+    file, the lower-priority auditor's finding is downgraded to WARN and
+    a conflict note is recorded.
+
+    Returns ``(resolved_findings, conflicts)``.
+    """
+    conflicts = []
+    blockers_by_file: dict[str, list[AuditFinding]] = {}
+
+    for f in findings:
+        if f.severity != "BLOCKER":
+            continue
+        for ref in f.file_refs:
+            blockers_by_file.setdefault(ref, []).append(f)
+
+    for file_ref, refs in blockers_by_file.items():
+        if len(refs) < 2:
+            continue
+        # Sort by priority (highest first).
+        ranked = sorted(refs, key=lambda f: _auditor_priority(f.auditor),
+                        reverse=True)
+        winner = ranked[0]
+        for loser in ranked[1:]:
+            # Downgrade the loser's finding from BLOCKER to WARN.
+            loser.severity = "WARN"
+            conflicts.append(AuditConflict(
+                file_ref=file_ref,
+                winner=winner.auditor,
+                loser=loser.auditor,
+                note=(
+                    f"{winner.auditor} (priority "
+                    f"{_auditor_priority(winner.auditor)}) overrode "
+                    f"{loser.auditor} (priority "
+                    f"{_auditor_priority(loser.auditor)}) on {file_ref}"
+                ),
+            ))
+
+    # Rebuild blockers list (only findings still at BLOCKER severity).
+    resolved_blockers = [f for f in findings if f.severity == "BLOCKER"]
+    return resolved_blockers, conflicts
+
+
+def assemble_audit_findings(results: list[SubagentResult]) -> AuditReport:
+    """Assemble auditor results into a structured AuditReport.
+
+    Parses each auditor's output for findings, detects cross-auditor
+    conflicts, resolves them by priority, and returns a report with
+    repair instructions for the developer.
+    """
+    all_findings: list[AuditFinding] = []
+    raw_parts = []
+
     for r in results:
         header = f"## {r.name} Audit"
         body = r.stdout if r.success else (
             f"**Auditor failed (exit {r.exit_code})**\n\n{r.stderr}"
         )
-        parts.append(f"{header}\n\n{body}")
-        # An auditor that exits non-zero is signalling findings/blockers.
-        if r.exit_code != 0:
-            has_blockers = True
-        # Also check for BLOCKER severity in the output.
-        if "BLOCKER" in (r.stdout or "").upper():
-            has_blockers = True
-    return "\n\n---\n\n".join(parts), has_blockers
+        raw_parts.append(f"{header}\n\n{body}")
+
+        # If the auditor process exited non-zero, treat as BLOCKER.
+        if r.exit_code != 0 and not body.upper().count("BLOCKER"):
+            all_findings.append(AuditFinding(
+                auditor=r.name, severity="BLOCKER",
+                file_refs=[],
+                text=f"Auditor exited with code {r.exit_code}.\n{body[:1000]}",
+            ))
+        else:
+            all_findings.extend(_extract_findings(r.name, body))
+
+    # Resolve conflicts and get final blockers list.
+    blockers, conflicts = _detect_and_resolve_conflicts(all_findings)
+
+    return AuditReport(
+        findings=all_findings,
+        blockers=blockers,
+        conflicts=conflicts,
+        has_blockers=len(blockers) > 0,
+        raw_report="\n\n---\n\n".join(raw_parts),
+    )
+
+
+def build_repair_context(
+    report: AuditReport,
+    verification_output: str = "",
+    repair_attempt: int = 1,
+) -> str:
+    """Build context string for a repair-cycle developer invocation.
+
+    Includes BLOCKER findings, conflict resolution notes, and the
+    verification output from the previous attempt so the developer can
+    diagnose what went wrong.
+    """
+    parts = [f"## Repair Cycle {repair_attempt}\n"]
+    parts.append(
+        "The previous implementation attempt was audited and BLOCKER "
+        "issues were found. You must fix these issues.\n"
+    )
+    parts.append(report.repair_instructions)
+
+    if verification_output:
+        parts.append("\n## Verification Output (Previous Attempt)\n")
+        parts.append(
+            "This is the stdout/stderr from the verification command that "
+            "ran after the previous implementation. Use it to diagnose "
+            "integration issues.\n"
+        )
+        parts.append(f"```\n{verification_output[:8000]}\n```\n")
+
+    if report.conflicts:
+        parts.append("\n## Auditor Conflict Resolution\n")
+        parts.append(
+            "Some auditors disagreed. The following conflicts were "
+            "resolved by priority (security > functional > spec > "
+            "compatibility > efficiency > linting). Lower-priority "
+            "BLOCKERs were downgraded to WARN. Review these to ensure "
+            "the resolution was correct.\n"
+        )
+        for c in report.conflicts:
+            parts.append(f"- {c.note}\n")
+
+    return "\n".join(parts)
 
 
 # ─── Auto-discovery ──────────────────────────────────────────────────

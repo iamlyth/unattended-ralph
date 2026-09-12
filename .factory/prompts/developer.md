@@ -15,6 +15,24 @@ scratchpad, memory, context summary, or completion claim is available or
 authoritative. The delivered task bytes are digest-bound to the committed
 plan; if they differ from the plan section, stop and report.
 
+## Repair context
+
+If your context includes a **Repair Cycle** section, this is a repair
+invocation: a previous implementation attempt was audited and BLOCKER
+issues were found, or verification failed. You MUST:
+
+1. Read the BLOCKER findings carefully. Each finding references specific
+   files and describes what is wrong.
+2. If **Previous Verification Output** is included, read it to diagnose
+   test failures — this is the actual stdout/stderr from the verification
+   command that ran after the previous attempt.
+3. If **Auditor Conflict Resolution** notes are included, understand that
+   some auditors disagreed and a priority decision was made. Review whether
+   the resolution was correct, but focus on the remaining BLOCKERs.
+4. Fix the identified issues. Do not re-implement the task from scratch —
+   make targeted fixes for the specific findings.
+5. Run focused verification after your fix to confirm the issue is resolved.
+
 ## Responsibilities
 
 1. Implement ONLY the assigned task, completely and at its root. Do not work

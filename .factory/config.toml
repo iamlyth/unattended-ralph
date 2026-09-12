@@ -13,6 +13,7 @@ build_command = "rm -rf build && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug &&
 default_rounds = 20
 default_attempts = 3
 default_timeout = 21600
+max_repairs = 3
 
 [git]
 checkpoint_each_iteration = true
