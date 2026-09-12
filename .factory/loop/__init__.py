@@ -3,7 +3,7 @@
 # Core modules
 from .plan_parser import Task, Plan, parse, dump
 from .selector import SelectionResult, select
-from .state import State, load, save, validate, SCHEMA
+from .state import State, SCHEMA  # state file no longer used
 from .gitutil import (
     current_branch,
     current_commit,
@@ -63,7 +63,7 @@ __all__ = [
     # selector
     "SelectionResult", "select",
     # state
-    "State", "load", "save", "validate", "SCHEMA",
+    "State", "SCHEMA",
     # gitutil
     "current_branch", "current_commit", "is_clean",
     "commit_all", "switch_branch", "file_at_commit",

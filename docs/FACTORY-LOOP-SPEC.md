@@ -190,17 +190,19 @@ If all auditors return no BLOCKER findings, the repair cycle is skipped
 entirely. The task is marked complete and the round checkpoints immediately.
 No repair cycles are wasted on clean code.
 
-### 4.6 Round-adaptive role selection
+### 4.6 Role configuration via plan overrides
 
 The planner may emit a `roles_override` field in the plan's YAML front
-matter (JSON-encoded) to adjust roles for the next round. This allows the
-factory to adapt its role configuration based on what the metrics show.
+matter (JSON-encoded) to configure roles for the implementation loop.
+Roles are fixed once from the single plan and are not adjusted between
+rounds. This lets the factory set its role configuration up front against
+the plan's scope rather than adapting roles round by round.
 
 Supported override keys:
 
 | Key | Description |
 |---|---|
-| `skip_auditors` | List of auditor names to skip next round |
+| `skip_auditors` | List of auditor names to skip in the implementation loop |
 | `skip_studies` | List of study subagent names to skip |
 | `add_auditors` | List of auditor dicts to add |
 | `add_studies` | List of study dicts to add |
@@ -210,9 +212,10 @@ Supported override keys:
 | `developer_models` | Dict of developer name → model override |
 | `planner_model` | Model override for the planner |
 
-Example: if round 1's audit found zero security issues but 4 efficiency
-issues, the planner can drop the security auditor and add a second
-efficiency-focused developer for round 2.
+Example: if the plan's study found the work to be heavy on efficiency
+concerns with little security exposure, the planner can drop a security
+auditor and add a second efficiency-focused developer before the
+implementation loop begins.
 
 ### 4.7 Metrics feedback loop
 
@@ -224,13 +227,15 @@ The harness logs per-round metrics to `.factory-state/metrics.jsonl`:
 - **Developer rejection rate**: fraction of proposals rejected by the
   integration developer. Developers with rejection rates above 50% are
   flagged.
-- **Repair cycle stats**: average repair cycles per round, fraction
+- **Repair cycle stats**: average repair cycles across rounds, fraction
   resolved by repair.
 - **Round outcomes**: count of completed, blocked, and failed rounds.
 
-The metrics summary is fed to the planner at the start of each round. The
-planner can use it to emit `roles_override` adjustments. Without this
-loop, roles.toml tuning is guesswork.
+The metrics summary is available to inform the plan's `roles_override`
+configuration. Because roles are fixed from the single plan, metrics do
+not trigger mid-loop role changes; any adjustment requires a plan
+revision rather than per-round tuning. Without these signals, roles.toml
+configuration would be guesswork.
 
 ### 4.8 Model tiering
 
@@ -284,7 +289,7 @@ mechanism is not working and a different approach is needed.
 
 ### 4.11 Cost accounting per phase
 
-The harness tracks wall-clock time per phase per round:
+The harness tracks wall-clock time per phase in each round:
 
 - `planning_time_s`: study subagents + planner.
 - `implementation_time_s`: developers + integration.
@@ -445,35 +450,44 @@ task in the next planning round.
 
 ## 9. Campaign semantics
 
-### 9.1 Campaign structure
+### 9.1 Commands
 
-The campaign has two phases:
+The factory campaign is split into two independent commands:
 
-**Phase 0 — Planning (once):**
-```
-study subagents (parallel) → planner → plan
-```
-The plan is created once at campaign start and never revised. Study
-subagents analyse the codebase in parallel; the planner synthesises their
-reports into the canonical plan. If all tasks in an existing plan are
-already completed, planning is skipped and the campaign goes straight to
-finalisation.
+**`factory-campaign plan`** — creates or refreshes the plan. Runs study
+subagents in parallel, then the planner synthesises their reports into the
+canonical plan. Run this manually when you want to (re)plan.
 
-**Phase 1 — Implementation loop (per round):**
+**`factory-campaign run`** — runs the implementation loop. Reads the plan,
+picks the next pending task, implements/verifies/audits/checkpoints.
+Repeats for `--rounds` iterations or until work is exhausted.
+
+The campaign is **stateless**: the plan IS the state. There is no separate
+control-state file. If the campaign is interrupted, just run it again — it
+reads the plan and picks up where it left off. This mirrors the Ralph loop:
+`while :; do factory-campaign run --campaign-id foo --rounds 1; done`.
+
+### 9.2 Implementation loop
+
+Each round executes:
 ```
 selection → implementation → verification → audit
   → if clean audit: checkpoint → next round
   → if BLOCKERs: [repair → verification → audit] × max_repairs
     → if resolved: checkpoint → next round
-    → if unresolvable: task blocked → checkpoint → next round
+    → if unresolvable: task blocked → next round
 ```
+
+When all tasks are completed (`work_exhausted`), the harness runs overall
+verification + audit. If verification passes and audit is clean: `success`.
+If audit finds BLOCKERs: `findings`.
 
 - **Selection**: deterministic task selection (model never chooses).
 - **Implementation**: parallel developers propose changes per area; the
-  integration developer applies and commits. Outcome: `task_completed`,
-  `task_progress`, `task_failed`, or `interrupted`.
+  integration developer applies and commits.
 - **Verification**: the orchestrator runs the verification command
-  independently (locally or on a runner). Outcome: `verified` or
+  independently (locally or on a runner). Verification output is captured
+  and fed back to the developer on retry or repair.
   `verification_failed`. Verification output is captured and fed back to
   the developer on the next attempt or repair cycle.
 - **Audit**: parallel specialist auditors review the codebase. Outcome:
@@ -497,7 +511,6 @@ A campaign always terminates with exactly one of:
 | `findings` | Work done but audit found issues that need remediation |
 | `blocked` | Tasks remain but cannot proceed (runner unavailable, external dependency) |
 | `failed` | Planning failed or a task failed after exhausting its attempt budget |
-| `stale` | No improvement in audit findings for K consecutive rounds (stale_rounds threshold) |
 | `escalated` | Same issue recurred N times across rounds (escalation_threshold exceeded) |
 | `interrupted` | Campaign timeout or process interruption |
 | `infrastructure_failure` | Runner unreachable, SSH failure, or other infrastructure error |
@@ -523,30 +536,19 @@ always reaches verification and audit and never silently succeeds.
 When a budget is exhausted, the campaign terminates with the honest outcome.
 Reaching a ceiling is NEVER success.
 
-## 10. Minimal control state
+## 10. No control-state file
 
-One JSON file: `.factory-state/factory-loop.json`
+The campaign is **stateless**. There is no `factory-loop.json` or similar
+control-state file. The plan IS the state:
 
-```json
-{
-  "schema": "factory-state/v1",
-  "campaign_id": "unique-id",
-  "current_round": 1,
-  "current_phase": "planning",
-  "selected_task_id": null,
-  "attempt_number": 1,
-  "repair_count": 0,
-  "stale_rounds": 0,
-  "last_outcome": null,
-  "terminal_outcome": null,
-  "rounds_completed": 0,
-  "phase_history": []
-}
-```
+- **Which tasks are done** → plan file (task `Status:` fields)
+- **Where to resume** → read the plan, select the next pending task
+- **Recovery** → Git state + plan file. If interrupted, run again.
 
-- The orchestrator reads and writes this file; roles never see it.
-- Round and attempt counters are monotonic (never go backward).
-- Recovery derives from Git + plan + this state file.
+Supplementary files (not control state):
+- `.factory-state/metrics.jsonl` — per-round metrics (historical)
+- `.factory-state/issues.json` — accumulating issue tracker
+- `.factory-state/rounds/N.md` — round scratchpads
 
 ## 11. Git boundary
 
@@ -560,7 +562,7 @@ One JSON file: `.factory-state/factory-loop.json`
 
 ## 12. Recovery
 
-Recovery is derived from Git, the plan, and the control-state file:
+Recovery is derived from Git and the plan (no state file needed):
 
 - A clean committed task resumes from the next deterministic task.
 - An `in_progress` task resumes from current code and Git diff.
@@ -588,7 +590,6 @@ default_rounds = 20
 default_attempts = 3
 default_timeout = 21600
 max_repairs = 3
-stale_rounds = 3
 escalation_threshold = 3
 
 [git]
@@ -672,12 +673,11 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | AUDIT-05 | Unresolvable BLOCKERs after max_repairs → task marked blocked, not silently passed |
 | METRIC-01 | Per-round metrics logged to JSONL: auditor precision, developer rejection rate, repair stats |
 | METRIC-02 | Metrics summary fed to planner to enable feedback-driven role tuning |
-| ADAPT-01 | Planner may emit roles_override in plan front matter to adjust roles per round |
+| ADAPT-01 | Planner may emit roles_override in plan front matter to configure roles for the implementation loop; roles are fixed from the single plan and are not adjusted between rounds |
 | ADAPT-02 | Supported overrides: skip/add auditors, studies, developers; model overrides per role |
 | TIER-01 | roles.toml supports per-role model field for cost-optimized model tiering |
-| STALE-01 | stale_rounds threshold: campaign stops after K consecutive rounds with no audit improvement |
 | STALE-02 | escalation_threshold: same issue recurring N times → campaign terminates as escalated |
-| COST-01 | Per-phase wall-clock time tracked per round (planning, implementation, verification, audit, repair) |
+| COST-01 | Per-phase wall-clock time tracked for a round (planning, implementation, verification, audit, repair) |
 | COST-02 | Cost data included in metrics summary; planning > implementation triggers fan-out warning |
 | SCRATCH-01 | Round scratchpad written to .factory/rounds/N.md after each round |
 | SCRATCH-02 | Prior round scratchpads (last 3) fed to planner for iteration continuity |
@@ -690,6 +690,6 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | RUNNER-03 | Unreachable runners cause blocked status, never silent skip or fake pass |
 | CAMP-01 | Finite campaigns with six terminal outcomes; never spins on empty work |
 | CAMP-02 | Reaching a budget ceiling is never success |
-| STATE-01 | One minimal control-state file; monotonic counters; orchestrator-only |
+| STATE-01 | Campaign is stateless: plan IS the state, no control-state file |
 | GIT-01 | Orchestrator is sole Git writer; roles never commit |
-| RECOV-01 | Recovery from Git + plan + state; dirty work never discarded |
+| RECOV-01 | Recovery from Git + plan; interrupted campaign resumes by re-running |
