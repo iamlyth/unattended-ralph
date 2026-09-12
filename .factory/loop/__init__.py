@@ -49,6 +49,12 @@ from .metrics import (
     AuditorMetric,
     build_round_metrics,
 )
+from .issues import (
+    Issue,
+    IssueTracker,
+    write_round_scratchpad,
+    read_round_scratchpads,
+)
 from .campaign import main
 
 __all__ = [
@@ -79,6 +85,9 @@ __all__ = [
     # metrics
     "RoundMetrics", "MetricsLog", "StudyMetric", "DeveloperMetric",
     "AuditorMetric", "build_round_metrics",
+    # issues
+    "Issue", "IssueTracker", "write_round_scratchpad",
+    "read_round_scratchpads",
     # campaign
     "main",
 ]

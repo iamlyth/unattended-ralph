@@ -16,7 +16,7 @@ SCHEMA = "factory-state/v1"
 VALID_PHASES = {"planning", "implementation", "verification", "audit", "repair", "terminal"}
 VALID_OUTCOMES = {
     "success", "findings", "blocked", "failed",
-    "interrupted", "infrastructure_failure", None,
+    "interrupted", "infrastructure_failure", "stale", "escalated", None,
 }
 
 
@@ -29,6 +29,7 @@ class State:
     selected_task_id: int | None = None
     attempt_number: int = 1
     repair_count: int = 0
+    stale_rounds: int = 0
     last_outcome: str | None = None
     terminal_outcome: str | None = None
     rounds_completed: int = 0

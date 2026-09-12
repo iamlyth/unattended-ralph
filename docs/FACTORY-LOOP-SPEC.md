@@ -243,6 +243,55 @@ Phase-level overrides: `planner_model` and `integration_model` in
 `roles.toml`. Per-subagent overrides: `model` field on each study,
 developer, or auditor entry.
 
+### 4.9 Round scratchpad
+
+After each round, the harness writes a structured summary to
+`.factory/rounds/N.md` containing:
+
+- What was planned (task selected).
+- What was implemented (attempts, files changed).
+- What verification produced (exit code, runner).
+- What auditors found (BLOCKERs, conflicts).
+- What repair cycles did (cycles used, resolved or not).
+- What issues are tracked (from the issue tracker).
+- The round outcome.
+
+At the start of the next round, the last 3 round scratchpads are read
+and included in the planner's context. This provides iteration continuity
+across fresh-context invocations — the planner knows what was tried
+before and can avoid repeating the same mistakes.
+
+### 4.10 Accumulating issue tracker
+
+The harness maintains `.factory/issues.json` — a persistent record of
+audit findings across rounds. When an auditor flags a BLOCKER:
+
+1. The tracker checks if a matching issue exists (same auditor + same
+   file reference).
+2. If yes, `repeat_count` is incremented.
+3. If no, a new issue is created.
+4. If `repeat_count` reaches `escalation_threshold`, the issue is marked
+   `escalated` and the campaign terminates with outcome `escalated`.
+5. If an issue is not seen in a subsequent round, it is marked `resolved`.
+
+The issue tracker summary is fed to the planner and study agents so they
+know which issues are recurring. Recurring issues signal that the repair
+mechanism is not working and a different approach is needed.
+
+### 4.11 Cost accounting per phase
+
+The harness tracks wall-clock time per phase per round:
+
+- `planning_time_s`: study subagents + planner.
+- `implementation_time_s`: developers + integration.
+- `verification_time_s`: task verification.
+- `audit_time_s`: specialist auditors.
+- `repair_time_s`: repair cycle (developer + verify + audit per cycle).
+
+This data is included in the metrics summary. If planning consistently
+costs more than implementation, the fan-out is too wide for the value it
+produces — the planner can reduce study subagents via `roles_override`.
+
 ## 5. Plan contract
 
 The plan is a markdown file at `.factory/artifacts/implementation-plan.md`.
@@ -431,6 +480,8 @@ A campaign always terminates with exactly one of:
 | `findings` | Work done but audit found issues that need remediation |
 | `blocked` | Tasks remain but cannot proceed (runner unavailable, external dependency) |
 | `failed` | Planning failed or a task failed after exhausting its attempt budget |
+| `stale` | No improvement in audit findings for K consecutive rounds (stale_rounds threshold) |
+| `escalated` | Same issue recurred N times across rounds (escalation_threshold exceeded) |
 | `interrupted` | Campaign timeout or process interruption |
 | `infrastructure_failure` | Runner unreachable, SSH failure, or other infrastructure error |
 
@@ -444,6 +495,12 @@ always reaches verification and audit and never silently succeeds.
   during the implementation+verification phase.
 - `--max-repairs N` (default 3): maximum repair cycles after audit finds
   BLOCKER issues. Each repair cycle runs developer → verification → audit.
+- `--stale-rounds K` (default 3): if audit findings don't improve for K
+  consecutive rounds (no clean audit), the campaign terminates with
+  outcome `stale`.
+- `--escalation-threshold N` (default 3): if the same issue (same auditor
+  + same file) recurs N times across rounds, it is marked `escalated` and
+  the campaign terminates with outcome `escalated`.
 - `--campaign-timeout S` (default 21600): wall-clock timeout in seconds.
 
 When a budget is exhausted, the campaign terminates with the honest outcome.
@@ -462,6 +519,7 @@ One JSON file: `.factory-state/factory-loop.json`
   "selected_task_id": null,
   "attempt_number": 1,
   "repair_count": 0,
+  "stale_rounds": 0,
   "last_outcome": null,
   "terminal_outcome": null,
   "rounds_completed": 0,
@@ -513,6 +571,8 @@ default_rounds = 20
 default_attempts = 3
 default_timeout = 21600
 max_repairs = 3
+stale_rounds = 3
+escalation_threshold = 3
 
 [git]
 checkpoint_each_iteration = true
@@ -598,6 +658,14 @@ no SSH key enrollment, no 34 schemas. Just spec, plan, loop, runners, done.
 | ADAPT-01 | Planner may emit roles_override in plan front matter to adjust roles per round |
 | ADAPT-02 | Supported overrides: skip/add auditors, studies, developers; model overrides per role |
 | TIER-01 | roles.toml supports per-role model field for cost-optimized model tiering |
+| STALE-01 | stale_rounds threshold: campaign stops after K consecutive rounds with no audit improvement |
+| STALE-02 | escalation_threshold: same issue recurring N times → campaign terminates as escalated |
+| COST-01 | Per-phase wall-clock time tracked per round (planning, implementation, verification, audit, repair) |
+| COST-02 | Cost data included in metrics summary; planning > implementation triggers fan-out warning |
+| SCRATCH-01 | Round scratchpad written to .factory/rounds/N.md after each round |
+| SCRATCH-02 | Prior round scratchpads (last 3) fed to planner for iteration continuity |
+| ISSUES-01 | Accumulating issue tracker at .factory/issues.json with cross-round deduplication |
+| ISSUES-02 | Recurring issues (same auditor + same file) increment repeat_count; threshold → escalation |
 | VERIFY-01 | Tester independently runs verification and reports actual exit code |
 | VERIFY-02 | Auditor checks for weakened assertions, skipped tests, or fake passes |
 | RUNNER-01 | Runners declared in environment.toml with SSH transport and capabilities |

@@ -66,6 +66,17 @@ class RoundMetrics:
     task_id: int = 0
     task_title: str = ""
     duration_s: float = 0.0
+    # Per-phase cost tracking (wall-clock seconds).
+    planning_time_s: float = 0.0
+    implementation_time_s: float = 0.0
+    verification_time_s: float = 0.0
+    audit_time_s: float = 0.0
+    repair_time_s: float = 0.0
+    # Per-phase token estimates (if available from pi2 output).
+    planning_tokens: int = 0
+    implementation_tokens: int = 0
+    verification_tokens: int = 0
+    audit_tokens: int = 0
     studies: list[StudyMetric] = field(default_factory=list)
     developers: list[DeveloperMetric] = field(default_factory=list)
     auditors: list[AuditorMetric] = field(default_factory=list)
@@ -74,7 +85,9 @@ class RoundMetrics:
     repair_cycles: int = 0
     repair_resolved: bool = False
     conflicts_count: int = 0
-    outcome: str = ""               # completed, blocked, failed, etc.
+    stale_rounds: int = 0
+    escalated_issues: int = 0
+    outcome: str = ""               # completed, blocked, failed, stale, etc.
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -214,6 +227,43 @@ class MetricsLog:
             )
             parts.append("")
 
+        # ─── Cost accounting per phase ───
+        planning_times = [r.get("planning_time_s", 0) for r in recent]
+        impl_times = [r.get("implementation_time_s", 0) for r in recent]
+        verify_times = [r.get("verification_time_s", 0) for r in recent]
+        audit_times = [r.get("audit_time_s", 0) for r in recent]
+        repair_times = [r.get("repair_time_s", 0) for r in recent]
+
+        if any(planning_times + impl_times + verify_times + audit_times):
+            parts.append("### Cost Accounting (per phase, seconds)\n")
+            parts.append(
+                "| Round | Planning | Implementation | Verification | "
+                "Audit | Repair | Total |\n"
+                "|---|---|---|---|---|---|---|\n"
+            )
+            for i, r in enumerate(recent):
+                p = r.get("planning_time_s", 0)
+                im = r.get("implementation_time_s", 0)
+                v = r.get("verification_time_s", 0)
+                a = r.get("audit_time_s", 0)
+                rp = r.get("repair_time_s", 0)
+                total = p + im + v + a + rp
+                parts.append(
+                    f"| {r.get('round_number', i+1)} | {p:.0f}s | {im:.0f}s | "
+                    f"{v:.0f}s | {a:.0f}s | {rp:.0f}s | {total:.0f}s |\n"
+                )
+
+            # Flag if planning consistently costs more than implementation.
+            avg_planning = sum(planning_times) / len(planning_times) if planning_times else 0
+            avg_impl = sum(impl_times) / len(impl_times) if impl_times else 0
+            if avg_planning > avg_impl and avg_planning > 0:
+                parts.append(
+                    f"\n> **⚠ Planning phase** averages {avg_planning:.0f}s vs "
+                    f"implementation {avg_impl:.0f}s. Fan-out may be too wide "
+                    f"— consider reducing study subagents.\n"
+                )
+            parts.append("")
+
         # ─── Round outcomes ───
         outcomes: dict[str, int] = {}
         for r in recent:
@@ -241,6 +291,13 @@ def build_round_metrics(
     repair_cycles: int = 0,
     repair_resolved: bool = False,
     outcome: str = "",
+    planning_time_s: float = 0.0,
+    implementation_time_s: float = 0.0,
+    verification_time_s: float = 0.0,
+    audit_time_s: float = 0.0,
+    repair_time_s: float = 0.0,
+    stale_rounds: int = 0,
+    escalated_issues: int = 0,
 ) -> RoundMetrics:
     """Build a RoundMetrics object from phase results."""
     from .parallel import SubagentResult, AuditReport
@@ -256,6 +313,13 @@ def build_round_metrics(
         repair_cycles=repair_cycles,
         repair_resolved=repair_resolved,
         outcome=outcome,
+        planning_time_s=planning_time_s,
+        implementation_time_s=implementation_time_s,
+        verification_time_s=verification_time_s,
+        audit_time_s=audit_time_s,
+        repair_time_s=repair_time_s,
+        stale_rounds=stale_rounds,
+        escalated_issues=escalated_issues,
     )
 
     # Study metrics

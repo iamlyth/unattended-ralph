@@ -65,12 +65,19 @@ from .metrics import (
     MetricsLog,
     build_round_metrics,
 )
+from .issues import (
+    Issue,
+    IssueTracker,
+    write_round_scratchpad,
+    read_round_scratchpads,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / ".factory" / "config.toml"
 ENV_PATH = ROOT / ".factory" / "environment.toml"
 STATE_PATH = ROOT / ".factory-state" / "factory-loop.json"
 METRICS_PATH = ROOT / ".factory-state" / "metrics.jsonl"
+ISSUES_PATH = ROOT / ".factory-state" / "issues.json"
 PLAN_PATH = ROOT / ".factory" / "artifacts" / "implementation-plan.md"
 PROMPTS_DIR = ROOT / ".factory" / "prompts"
 FINDINGS_PATH = ROOT / ".factory" / "artifacts" / "audit-findings.md"
@@ -85,6 +92,8 @@ TERMINAL_EXIT = {
     "failed": 1,
     "interrupted": 1,
     "infrastructure_failure": 1,
+    "stale": 1,
+    "escalated": 1,
 }
 
 
@@ -112,6 +121,14 @@ def config_clean_dirs(config: dict) -> list[str]:
 
 def config_max_repairs(config: dict) -> int:
     return int(config.get("campaign", {}).get("max_repairs", 3))
+
+
+def config_stale_rounds(config: dict) -> int:
+    return int(config.get("campaign", {}).get("stale_rounds", 3))
+
+
+def config_escalation_threshold(config: dict) -> int:
+    return int(config.get("campaign", {}).get("escalation_threshold", 3))
 
 
 # ─── Roles override ───────────────────────────────────────────────────
@@ -291,7 +308,8 @@ def run_task_verification(task: Task, runners: list, root: Path,
 # ─── Parallel phases ─────────────────────────────────────────────────
 
 def run_planning_phase(roles: dict, config: dict, args, root: Path,
-                       metrics_log: MetricsLog | None = None) -> bool:
+                       metrics_log: MetricsLog | None = None,
+                       issue_tracker: IssueTracker | None = None) -> bool:
     """Run the planning phase: parallel study subagents → planner.
 
     Returns True if planning succeeded (plan file was written/parsed).
@@ -327,7 +345,8 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path,
 
     study_report = assemble_reports(study_results)
 
-    # Build planner context with study reports + historical metrics.
+    # Build planner context with study reports + historical metrics +
+    # round scratchpads + issue tracker.
     planner_context = f"## Study Reports\n\n{study_report}\n\n"
     if metrics_log:
         metrics_summary = metrics_log.summary()
@@ -335,6 +354,27 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path,
             planner_context += (
                 f"## Historical Campaign Metrics\n\n"
                 f"{metrics_summary}\n\n"
+            )
+    # Include prior round scratchpads for iteration continuity.
+    scratchpads = read_round_scratchpads(root, last_n=3)
+    if scratchpads:
+        planner_context += (
+            f"## Prior Round Summaries\n\n"
+            f"These are structured summaries from previous rounds. "
+            f"Use them to understand what was already tried and avoid "
+            f"repeating the same mistakes.\n\n"
+            f"{scratchpads}\n\n"
+        )
+    # Include issue tracker for cross-round finding deduplication.
+    if issue_tracker:
+        issues_summary = issue_tracker.summary()
+        if issues_summary:
+            planner_context += (
+                f"## Issue Tracker (Cross-Round)\n\n"
+                f"These are issues flagged by auditors in previous rounds. "
+                f"Recurring issues indicate the repair mechanism is not "
+                f"working. Escalated issues need a different approach.\n\n"
+                f"{issues_summary}\n\n"
             )
     planner_context += (
         "Review discrepancies against the spec and devise an "
@@ -347,6 +387,8 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path,
         "study_models, developer_models, planner_model.\n"
         "Example: roles_override: {\"skip_auditors\": [\"security\"], "
         "\"auditor_models\": {\"efficiency\": \"qwen3:8b\"}}\n"
+        "Only add `roles_override` when the metrics clearly warrant it. "
+        "Do not add it on the first round or when metrics are clean.\n"
     )
 
     planner_prompt = plan_cfg.get("planner_prompt", ".factory/prompts/planner.md")
@@ -553,7 +595,10 @@ def _finalize_success(plan: Plan, config: dict, env: dict, args,
 def run_campaign(args, config: dict, env: dict) -> int:
     base_roles = load_roles(ROOT)
     metrics_log = MetricsLog(METRICS_PATH)
+    issue_tracker = IssueTracker(
+        ISSUES_PATH, escalation_threshold=args.escalation_threshold)
     max_repairs = args.max_repairs
+    stale_threshold = args.stale_rounds
 
     # 1. Preflight.
     preflight = run_preflight(ROOT, config, env["runners"])
@@ -593,8 +638,11 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 print(f"\n=== Round {round_num} ===", file=sys.stderr)
 
                 # ── 1. PLANNING (parallel study → planner) ──
+                planning_start = time.time()
                 ok = run_planning_phase(
-                    base_roles, config, args, ROOT, metrics_log)
+                    base_roles, config, args, ROOT, metrics_log,
+                    issue_tracker)
+                planning_time = time.time() - planning_start
                 if not ok:
                     outcome = "failed"
                     reason = "planning failed"
@@ -648,15 +696,19 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 verified = False
                 vresult: VerificationResult | None = None
                 last_voutput = ""
+                impl_time_total = 0.0
+                verify_time_total = 0.0
 
                 for attempt in range(1, args.attempts + 1):
                     state.attempt_number = attempt
                     save(STATE_PATH, state)
 
+                    impl_start = time.time()
                     commit, dev_results = run_implementation_phase(
                         roles, config, args, task, ROOT,
                         verification_output=last_voutput,
                     )
+                    impl_time_total += time.time() - impl_start
                     round_dev_results.extend(dev_results)
 
                     if not commit:
@@ -666,9 +718,11 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     state.current_phase = "verification"
                     save(STATE_PATH, state)
                     _clean_verification_dirs(ROOT, config)
+                    verify_start = time.time()
                     vresult = run_task_verification(
                         task, env["runners"], ROOT, commit,
                         config_build_command(config))
+                    verify_time_total += time.time() - verify_start
 
                     if vresult.exit_code == 0:
                         verified = True
@@ -706,8 +760,20 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 # ── 4. AUDIT (parallel specialist auditors) ──
                 state.current_phase = "audit"
                 save(STATE_PATH, state)
+                audit_start = time.time()
                 report = run_audit_phase(roles, config, args, task, ROOT)
+                audit_time = time.time() - audit_start
                 round_audit_report = report
+
+                # Update the accumulating issue tracker.
+                escalated = []
+                if report.blockers:
+                    escalated = issue_tracker.add_findings(
+                        report.blockers, round_num)
+                    if escalated:
+                        print(f"  issues: {len(escalated)} issue(s) "
+                              f"ESCALATED (recurred too many times)",
+                              file=sys.stderr)
 
                 # ── 5. REPAIR CYCLE (if BLOCKERs found) ──
                 if report.has_blockers:
@@ -721,6 +787,7 @@ def run_campaign(args, config: dict, env: dict) -> int:
                           file=sys.stderr)
 
                     repair_resolved = False
+                    repair_time_total = 0.0
                     for repair_num in range(1, max_repairs + 1):
                         state.current_phase = "repair"
                         state.repair_count = repair_num
@@ -735,11 +802,13 @@ def run_campaign(args, config: dict, env: dict) -> int:
                         print(f"  repair cycle {repair_num}/{max_repairs}",
                               file=sys.stderr)
 
+                        repair_impl_start = time.time()
                         commit, dev_results = run_implementation_phase(
                             roles, config, args, task, ROOT,
                             repair_context=repair_ctx,
                             verification_output=last_voutput,
                         )
+                        repair_time_total += time.time() - repair_impl_start
                         round_dev_results.extend(dev_results)
 
                         if not commit:
@@ -800,10 +869,41 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             ROOT,
                             f"factory: task {task.id} blocked by audit "
                             f"after {max_repairs} repairs")
+
+                        # Stale round detection: no improvement.
+                        state.stale_rounds += 1
                         state.rounds_completed = round_num
                         state.current_round = round_num + 1
                         state.last_outcome = "audit_findings_unresolved"
                         save(STATE_PATH, state)
+
+                        # Write round scratchpad.
+                        write_round_scratchpad(
+                            ROOT, round_num, args.campaign_id, task,
+                            plan_summary=f"Task {task.id} selected",
+                            implementation_summary=f"{round_v_attempts} attempt(s)",
+                            verification_summary=f"passed on {vresult.runner}",
+                            audit_summary=f"{len(report.blockers)} BLOCKERs unresolved after {max_repairs} repairs",
+                            repair_summary=f"{max_repairs} repair cycles, unresolved. Stale rounds: {state.stale_rounds}",
+                            outcome="blocked",
+                            issues_summary=issue_tracker.summary(),
+                        )
+
+                        # Check for escalation.
+                        if issue_tracker.has_escalations:
+                            outcome = "escalated"
+                            reason = (f"issue(s) escalated after "
+                                      f"{args.escalation_threshold} "
+                                      f"recurrences")
+                            break
+
+                        # Check for stale rounds.
+                        if state.stale_rounds >= stale_threshold:
+                            outcome = "stale"
+                            reason = (f"no improvement for "
+                                      f"{stale_threshold} consecutive "
+                                      f"rounds")
+                            break
 
                         # Record metrics for the blocked round.
                         rm = build_round_metrics(
@@ -815,11 +915,21 @@ def run_campaign(args, config: dict, env: dict) -> int:
                             repair_cycles=round_repair_cycles,
                             repair_resolved=False,
                             outcome="blocked",
+                            planning_time_s=planning_time,
+                            implementation_time_s=impl_time_total,
+                            verification_time_s=verify_time_total,
+                            audit_time_s=audit_time,
+                            repair_time_s=repair_time_total,
+                            stale_rounds=state.stale_rounds,
+                            escalated_issues=len(issue_tracker.escalated_issues),
                         )
                         metrics_log.append(rm)
                         continue  # next round — planner may split the task
 
                 # ── 6. CHECKPOINT (clean audit or repair resolved) ──
+                # Clean audit resets stale counter.
+                state.stale_rounds = 0
+
                 if report.conflicts:
                     FINDINGS_PATH.write_text(
                         f"# Audit findings (round {round_num}, task "
@@ -840,6 +950,19 @@ def run_campaign(args, config: dict, env: dict) -> int:
                 )
                 save(STATE_PATH, state)
 
+                # Write round scratchpad for iteration continuity.
+                audit_summary = "No BLOCKERs found" if not report.has_blockers else f"{len(report.blockers)} BLOCKER(s) found and resolved in {state.repair_count} repair cycle(s)"
+                write_round_scratchpad(
+                    ROOT, round_num, args.campaign_id, task,
+                    plan_summary=f"Task {task.id}: {task.title}",
+                    implementation_summary=f"{round_v_attempts} attempt(s), verified on {vresult.runner}",
+                    verification_summary=f"exit {vresult.exit_code}, passed",
+                    audit_summary=audit_summary,
+                    repair_summary=f"{state.repair_count} repair cycle(s)" if state.repair_count > 0 else "",
+                    outcome=("completed" if state.repair_count == 0 else "completed_with_repairs"),
+                    issues_summary=issue_tracker.summary(),
+                )
+
                 # Record metrics for the completed round.
                 round_outcome = "completed" if state.repair_count == 0 else "completed_with_repairs"
                 rm = build_round_metrics(
@@ -851,6 +974,13 @@ def run_campaign(args, config: dict, env: dict) -> int:
                     repair_cycles=round_repair_cycles,
                     repair_resolved=round_repair_resolved,
                     outcome=round_outcome,
+                    planning_time_s=planning_time,
+                    implementation_time_s=impl_time_total,
+                    verification_time_s=verify_time_total,
+                    audit_time_s=audit_time,
+                    repair_time_s=repair_time_total if state.repair_count > 0 else 0.0,
+                    stale_rounds=state.stale_rounds,
+                    escalated_issues=len(issue_tracker.escalated_issues),
                 )
                 metrics_log.append(rm)
 
@@ -896,6 +1026,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--model", required=True)
     run_p.add_argument("--attempts", type=int, default=None)
     run_p.add_argument("--max-repairs", type=int, default=None)
+    run_p.add_argument("--stale-rounds", type=int, default=None)
+    run_p.add_argument("--escalation-threshold", type=int, default=None)
     run_p.add_argument("--timeout", type=int, default=None)
     return parser
 
@@ -913,6 +1045,10 @@ def main(argv: list[str] | None = None) -> int:
         args.attempts = camp.get("default_attempts", 3)
     if args.max_repairs is None:
         args.max_repairs = config_max_repairs(config)
+    if args.stale_rounds is None:
+        args.stale_rounds = config_stale_rounds(config)
+    if args.escalation_threshold is None:
+        args.escalation_threshold = config_escalation_threshold(config)
     if args.timeout is None:
         args.timeout = camp.get("default_timeout", 21600)
     return run_campaign(args, config, env)
