@@ -46,7 +46,7 @@
 [planning]
 planner_prompt = ".factory/prompts/planner.md"
 # Timeout for each study subagent and the planner (seconds).
-timeout = 900
+timeout = 3600
 
 [[planning.studies]]
 name = "spec"
