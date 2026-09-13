@@ -103,34 +103,40 @@ description = "Full-stack developer for the entire codebase"
 # ─── Audit phase ──────────────────────────────────────────────────────
 
 [audit]
-timeout = 600
+timeout = 1800
 
 [[audit.auditors]]
 name = "linting"
 prompt = ".factory/prompts/auditor-linting.md"
 description = "Language linting, readability, concise comments (no verbose noise)"
+model = "gemma4:31b"
 
 [[audit.auditors]]
 name = "efficiency"
 prompt = ".factory/prompts/auditor-efficiency.md"
 description = "Performance, resource usage, algorithmic complexity"
+model = "gemma4:31b"
 
 [[audit.auditors]]
 name = "security"
 prompt = ".factory/prompts/auditor-security.md"
 description = "Security vulnerabilities, attack surface, input validation"
+model = "gemma4:31b"
 
 [[audit.auditors]]
 name = "functional"
 prompt = ".factory/prompts/auditor-functional.md"
 description = "Functional correctness — does the code actually work"
+model = "gemma4:31b"
 
 [[audit.auditors]]
 name = "spec-compliance"
 prompt = ".factory/prompts/auditor-spec.md"
 description = "Compliance with the project specification"
+model = "gemma4:31b"
 
 [[audit.auditors]]
 name = "compatibility"
 prompt = ".factory/prompts/auditor-compatibility.md"
 description = "Platform, dependency, and API compatibility"
+model = "gemma4:31b"
