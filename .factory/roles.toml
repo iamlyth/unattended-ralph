@@ -75,7 +75,7 @@ description = "Study current bugs, test failures, and known issues"
 
 [implementation]
 integration_prompt = ".factory/prompts/integration-developer.md"
-timeout = 900
+timeout = 3600
 
 # Developers work on isolated areas.  Each receives the plan and the
 # current codebase, and outputs proposed changes for their area.
@@ -103,7 +103,7 @@ description = "Full-stack developer for the entire codebase"
 # ─── Audit phase ──────────────────────────────────────────────────────
 
 [audit]
-timeout = 1800
+timeout = 3600
 
 [[audit.auditors]]
 name = "linting"
