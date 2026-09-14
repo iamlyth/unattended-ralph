@@ -313,10 +313,38 @@ def _extract_file_refs(text: str) -> list[str]:
 def _extract_findings(auditor_name: str, output: str) -> list[AuditFinding]:
     """Parse an auditor's output into structured findings.
 
-    Heuristic: split on blank-line-separated blocks that contain
-    BLOCKER, WARN, or INFO keywords.  Each block becomes one finding.
+    A finding is only BLOCKER if the auditor explicitly labels it with a
+    positive BLOCKER severity marker (e.g. ``**BLOCKER**``, ``Severity:
+    BLOCKER``, ``### BLOCKER``).  The word "BLOCKER" appearing in a
+    negative context ("No BLOCKER issues", "No findings at BLOCKER
+    severity") does NOT create a BLOCKER finding.
     """
     findings = []
+
+    # Fast path: auditor reported no findings at all.
+    if re.match(r'^\s*(No\s+findings?\.?|No\s+issues?\.?)\s*$',
+                output.strip(), re.IGNORECASE):
+        return findings
+
+    # Positive BLOCKER severity markers that indicate a real BLOCKER finding.
+    # Matches: **BLOCKER**, *BLOCKER*, Severity: BLOCKER, Severity: **BLOCKER**,
+    # ### BLOCKER, #### BLOCKER, - **BLOCKER**, etc.
+    _POSITIVE_BLOCKER_RE = re.compile(
+        r'(\*\*?BLOCKER\*\*?|SEVERITY\s*:?\s*\*{0,2}BLOCKER\*{0,2}|' 
+        r'#{1,4}\s+\*{0,2}BLOCKER\*{0,2}\b)'
+    )
+    # Negative BLOCKER statements — the word BLOCKER appears but in a
+    # "no blockers" / "none" / "not a blocker" context.
+    _NEGATIVE_BLOCKER_RE = re.compile(
+        r'NO\s+\*{0,2}BLOCKER|'           # No BLOCKER, No **BLOCKER**
+        r'BLOCKER[s]?\s*:?\s*\*{0,2}NONE|'  # BLOCKERs: none, BLOCKERS: **NONE**
+        r'NO\s+BLOCKING|'                   # No blocking findings
+        r'NO\s+FINDINGS?\s+AT\s+BLOCKER|'  # No findings at BLOCKER severity
+        r'NOT\s+A\s+BLOCKER|'              # Not a blocker
+        r'NOT\s+\*{0,2}BLOCKER\*{0,2}',    # Not BLOCKER, Not **BLOCKER**
+        re.IGNORECASE,
+    )
+
     # Split on headers or severity markers.
     blocks = re.split(r'\n(?=#{1,4}\s|\*\*?(?:BLOCKER|WARN|INFO))', output)
     for block in blocks:
@@ -324,11 +352,13 @@ def _extract_findings(auditor_name: str, output: str) -> list[AuditFinding]:
         if not block:
             continue
         upper = block.upper()
-        # Check for negative BLOCKER statements first (e.g. "No BLOCKERs",
-        # "BLOCKERs: none", "No blocking findings") to avoid false positives.
-        has_negative_blocker = bool(re.search(
-            r'NO\s+BLOCKER|BLOCKER[s]?\s*:?\s*NONE|NO\s+BLOCKING', upper))
-        if "BLOCKER" in upper and not has_negative_blocker:
+
+        # Determine severity: only positive BLOCKER markers count.
+        has_positive_blocker = bool(_POSITIVE_BLOCKER_RE.search(block))
+        has_negative_blocker = bool(_NEGATIVE_BLOCKER_RE.search(upper))
+        is_blocker = has_positive_blocker and not has_negative_blocker
+
+        if is_blocker:
             severity = "BLOCKER"
         elif "WARN" in upper:
             severity = "WARN"

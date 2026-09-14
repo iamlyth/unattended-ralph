@@ -12,7 +12,7 @@ build_command = "rm -rf build && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug &&
 [campaign]
 default_rounds = 20
 default_attempts = 3
-default_timeout = 21600
+default_timeout = 259200
 max_repairs = 3
 stale_rounds = 3
 escalation_threshold = 3
