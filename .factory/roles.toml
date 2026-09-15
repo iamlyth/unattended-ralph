@@ -136,6 +136,18 @@ description = "Compliance with the project specification"
 model = "glm-5.3"
 
 [[audit.auditors]]
+name = "readability"
+prompt = ".factory/prompts/auditor-readability.md"
+description = "Human readability, natural code flow, clear naming and structure"
+model = "glm-5.3"
+
+[[audit.auditors]]
+name = "simplifier"
+prompt = ".factory/prompts/auditor-simplifier.md"
+description = "Code complexity reduction, dead code, duplication, over-engineering"
+model = "glm-5.3"
+
+[[audit.auditors]]
 name = "compatibility"
 prompt = ".factory/prompts/auditor-compatibility.md"
 description = "Platform, dependency, and API compatibility"

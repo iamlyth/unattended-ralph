@@ -229,11 +229,13 @@ def assemble_developer_outputs(results: list[SubagentResult]) -> str:
 # or style.
 AUDITOR_PRIORITY = [
     "linting",           # 0 — lowest
-    "efficiency",        # 1
-    "compatibility",     # 2
-    "spec-compliance",   # 3
-    "functional",        # 4
-    "security",          # 5 — highest
+    "simplifier",        # 1
+    "readability",       # 2
+    "efficiency",        # 3
+    "compatibility",     # 4
+    "spec-compliance",   # 5
+    "functional",        # 6
+    "security",          # 7 — highest
 ]
 
 
