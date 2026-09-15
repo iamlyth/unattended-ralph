@@ -136,7 +136,7 @@ def run_parallel(
     timeout: int,
     cwd: str | Path | None = None,
     approve: bool = True,
-    max_workers: int = 6,
+    max_workers: int = 8,
 ) -> list[SubagentResult]:
     """Launch multiple subagents in parallel.
 

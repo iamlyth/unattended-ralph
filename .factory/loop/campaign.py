@@ -770,18 +770,49 @@ def cmd_run(args, config: dict, env: dict) -> int:
                           f"(exit {vresult.exit_code})", file=sys.stderr)
 
                 if not verified:
-                    outcome = "failed"
-                    reason = (f"task {task.id} failed verification after "
-                              f"{args.attempts} attempts")
+                    # Mark task as blocked and continue to the next task.
+                    # A single task failing should not terminate the entire
+                    # campaign — the selector will skip blocked tasks and
+                    # pick the next pending one. The campaign only ends if ALL
+                    # remaining tasks are blocked (selector returns "blocked").
+                    task.status = "blocked"
+                    task.evidence = (
+                        f"verification failed after {args.attempts} "
+                        f"attempt(s); last exit "
+                        f"{vresult.exit_code if vresult else 'N/A'}"
+                    )
+                    PLAN_PATH.write_text(dump(plan), encoding="utf-8")
+                    gitutil.commit_all(
+                        ROOT,
+                        f"factory: task {task.id} blocked "
+                        f"(verification failed after "
+                        f"{args.attempts} attempts)")
+
+                    write_round_scratchpad(
+                        ROOT, round_num, args.campaign_id, task,
+                        plan_summary=f"Task {task.id}: {task.title}",
+                        implementation_summary=(
+                            f"{round_v_attempts} attempt(s), "
+                            f"developer did not produce verified output"),
+                        verification_summary=(
+                            f"failed after {args.attempts} attempts"),
+                        audit_summary="not reached",
+                        repair_summary="",
+                        outcome="blocked",
+                        issues_summary=issue_tracker.summary(),
+                    )
+
                     rm = build_round_metrics(
                         round_num, args.campaign_id, task, round_start,
                         dev_results=round_dev_results,
                         verification_attempts=round_v_attempts,
                         verification_passed=False,
-                        outcome="failed",
+                        outcome="blocked",
                     )
                     metrics_log.append(rm)
-                    break
+                    print(f"  checkpoint: task {task.id} blocked "
+                          f"(verification failed)", file=sys.stderr)
+                    continue  # next round, next task
 
                 # Mark task completed in the plan.
                 task.status = "completed"
