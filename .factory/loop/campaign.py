@@ -27,11 +27,13 @@ derived from plan state, Git state, exit status, and verification results.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .plan_parser import parse, dump, Plan, Task
@@ -420,6 +422,54 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path,
     return True
 
 
+# ─── Worktree management for parallel developer isolation ─────────────
+
+def _create_worktree(root: Path, name: str, base_commit: str) -> str | None:
+    """Create a detached git worktree for a developer.
+
+    Returns the worktree path, or None on failure.
+    """
+    wt_path = f"/tmp/factory-wt-{os.getpid()}-{name}"
+    # Remove stale worktree if it exists
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", wt_path],
+        cwd=str(root), capture_output=True, timeout=30,
+    )
+    result = subprocess.run(
+        ["git", "worktree", "add", "--detach", wt_path, base_commit],
+        cwd=str(root), capture_output=True, timeout=60,
+    )
+    if result.returncode != 0:
+        print(f"  worktree: failed to create {name}: "
+              f"{result.stderr.decode('utf-8', errors='replace').strip()}",
+              file=sys.stderr)
+        return None
+    return wt_path
+
+
+def _cleanup_worktrees(root: Path, wt_paths: list[str]) -> None:
+    """Remove all worktrees and prune."""
+    for wt_path in wt_paths:
+        shutil.rmtree(wt_path, ignore_errors=True)
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", wt_path],
+            cwd=str(root), capture_output=True, timeout=30,
+        )
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=str(root), capture_output=True, timeout=30,
+    )
+
+
+def _collect_patch(wt_path: str, base_commit: str) -> str:
+    """Collect git diff from a worktree as a patch string."""
+    result = subprocess.run(
+        ["git", "diff", base_commit],
+        cwd=wt_path, capture_output=True, timeout=60,
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def run_implementation_phase(
     roles: dict, config: dict, args,
     task: Task, root: Path,
@@ -485,31 +535,104 @@ def run_implementation_phase(
                f"{'repair' if repair_context else 'implementation'}")
         return gitutil.commit_all(root, msg), all_dev_results
 
-    # Multiple developers: run in parallel, then integration developer.
+    # Multiple developers: use git worktrees for parallel isolation.
+    # Each developer gets their own worktree where they can edit, build,
+    # and test independently. Patches are collected and the integration
+    # developer (judge) evaluates and applies the best one.
     label = "repair" if repair_context else "implementation"
-    print(f"  {label}: {len(developers)} developers (parallel)",
+    print(f"  {label}: {len(developers)} developers (parallel, worktree-isolated)",
           file=sys.stderr)
 
-    def dev_context(name: str, sa: dict) -> str:
+    base_commit = gitutil.current_commit(root)
+
+    # Create a worktree for each developer.
+    worktrees: list[tuple[dict, str]] = []
+    wt_paths: list[str] = []
+    for dev in developers:
+        dev_name = dev.get("name", "unnamed")
+        wt_path = _create_worktree(root, dev_name, base_commit)
+        if wt_path:
+            worktrees.append((dev, wt_path))
+            wt_paths.append(wt_path)
+
+    if not worktrees:
+        print(f"  {label}: no worktrees created, falling back", file=sys.stderr)
+        return "", all_dev_results
+
+    # Run each developer in their own worktree with --approve.
+    # Each developer can edit, build, and test independently.
+    def dev_task(dev: dict, wt_path: str) -> SubagentResult:
+        dev_name = dev.get("name", "unnamed")
+        dev_model = _resolve_model(dev, args.model)
+        dev_provider = _resolve_provider(dev, args.provider)
+        dev_timeout = int(dev.get("timeout", timeout))
         ctx = excerpt + extra_context
-        paths = sa.get("paths", [])
-        if paths:
-            ctx += f"\n\n## Your Assigned Area\n\nYou are responsible for " \
-                   f"these paths ONLY: {', '.join(paths)}\n" \
-                   f"Do not modify files outside your assigned area.\n"
+        ctx += (
+            "\n\nYou are working in an isolated git worktree. "
+            "Implement the task, build, and test your changes. "
+            "Do NOT commit \u2014 your changes will be collected as a patch "
+            "and evaluated by the integration developer.\n"
+        )
+        _name, exit_code, stdout, stderr = invoke_subagent(
+            dev["prompt"], ctx,
+            dev_provider, dev_model,
+            dev_timeout, cwd=wt_path, approve=True,
+        )
+        return SubagentResult(
+            name=dev_name, success=exit_code == 0,
+            stdout=stdout, stderr=stderr, exit_code=exit_code,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(8, len(worktrees))) as pool:
+        future_map = {}
+        for dev, wt_path in worktrees:
+            fut = pool.submit(dev_task, dev, wt_path)
+            future_map[fut] = dev.get("name", "unnamed")
+
+        for fut in as_completed(future_map):
+            name = future_map[fut]
+            try:
+                result = fut.result()
+                all_dev_results.append(result)
+                if not result.success:
+                    print(f"  {label}: {name} failed (exit {result.exit_code})",
+                          file=sys.stderr)
+            except Exception as exc:
+                all_dev_results.append(SubagentResult(
+                    name=name, success=False, stdout="",
+                    stderr=str(exc), exit_code=-1,
+                ))
+
+    # Collect patches from each worktree.
+    patches_dir = root / ".factory" / "patches"
+    patches_dir.mkdir(parents=True, exist_ok=True)
+    # Clean any stale patches
+    for f in patches_dir.glob("*.patch"):
+        f.unlink()
+
+    patch_files: list[str] = []
+    for dev, wt_path in worktrees:
+        dev_name = dev.get("name", "unnamed")
+        patch = _collect_patch(wt_path, base_commit)
+        if patch.strip():
+            patch_file = patches_dir / f"{dev_name}.patch"
+            patch_file.write_text(patch, encoding="utf-8")
+            patch_files.append(str(patch_file))
+            print(f"  {label}: {dev_name} produced "
+                  f"{len(patch)} bytes of changes", file=sys.stderr)
         else:
-            ctx += "\n\nYou are responsible for the entire codebase.\n"
-        ctx += "\nOutput your proposed changes. Do NOT commit — the " \
-               "integration developer will apply and commit all changes.\n"
-        return ctx
+            print(f"  {label}: {dev_name} produced no changes",
+                  file=sys.stderr)
 
-    dev_results = run_parallel(
-        developers, dev_context, args.provider, args.model,
-        timeout, cwd=root, approve=False,
-    )
-    all_dev_results.extend(dev_results)
+    # Clean up all worktrees.
+    _cleanup_worktrees(root, wt_paths)
 
-    proposals = assemble_developer_outputs(dev_results)
+    if not patch_files:
+        print(f"  {label}: no developers produced changes", file=sys.stderr)
+        return "", all_dev_results
+
+    # Integration developer evaluates patches and applies the best one.
+    patch_list = "\n".join(f"  - {pf}" for pf in patch_files)
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
     int_model = impl_cfg.get("integration_model") or args.model
@@ -518,7 +641,15 @@ def run_implementation_phase(
     name, exit_code, stdout, stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
-        f"## Developer Proposals\n\n{proposals}"
+        f"## Developer Patches\n\n"
+        f"{len(patch_files)} developer(s) independently implemented "
+        f"this task in isolated worktrees. Their patches are saved at:\n"
+        f"{patch_list}\n\n"
+        f"Read each patch file, evaluate it against the task's "
+        f"acceptance criteria, and apply the best one using:\n"
+        f"  git apply <patch-file>\n\n"
+        f"Or combine the best parts of multiple patches manually.\n"
+        f"After applying, build and test your changes.\n"
         + extra_context,
         int_provider, int_model,
         timeout, cwd=root, approve=True,
@@ -625,6 +756,14 @@ def cmd_plan(args, config: dict, env: dict) -> int:
         for failure in preflight.failures:
             print(f"preflight failure: {failure}", file=sys.stderr)
         return 2
+
+    # Clean up any stale worktrees from a previous interrupted campaign.
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=str(ROOT), capture_output=True, timeout=30,
+    )
+    for d in Path("/tmp").glob("factory-wt-*"):
+        shutil.rmtree(d, ignore_errors=True)
 
     with Lock(ROOT):
         branch = args.branch or config.get("project", {}).get(

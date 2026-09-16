@@ -16,14 +16,18 @@
 .factory-state/
 .factory-lock
 .bug-ledger.lock
+.factory/rounds/
+
 # Pi runtime output (agent definitions/settings remain tracked)
 .pi/output/
 .pi/subagent-schedules/
 .pi/agent-memory-local/
-# Ollama credentials and quota snapshots
-.ollama-usage-env
+
+# Ollama quota snapshots only. Credentials must never exist in the workspace,
+# even as ignored files (enforced by check-workspace-credentials.py).
 .ollama-usage-state.json
 *.env
+
 # Generic build and generated artifacts
 build/
 build-*/
@@ -35,18 +39,48 @@ coverage/
 *.a
 *.so
 *.log
+
 # Python runtime output
 __pycache__/
 *.py[cod]
+
 # Editor and OS files
 .DS_Store
 *.swp
 *.swo
 *~
+Testing/
+tests/golden-fail/
+
+# Diagnostic and installed-prefix build staging (build artifacts, never commit)
+.diag-prefix-build/
+.test-diag-inspect/
+.install-prefix/
+.build-install-diagram/
+.test-install-diagram/
+.test-install-bin/
+
 # Factory runner SSH keys (never commit)
 .factory/ssh/
-# Factory study/audit artifacts (not tracked, generated per campaign)
-.factory/artifacts/*.md
+
+# Stray study subagent output at repo root (belongs in .factory/artifacts/)
+/*SUBSYSTEM*.md
+/*subsystem*study*.md
+
+# Per-task audit artifacts (generated during campaign, not source)
+.factory/artifacts/audit-*-task*.md
+.factory/artifacts/audit-findings-task*.md
+
+# All factory artifacts except the plan are generated during campaigns
+.factory/artifacts/*
 !.factory/artifacts/implementation-plan.md
-.factory/rounds/
+
+# Stray study/audit subagent output in docs/ and src/ (not source documentation)
+docs/subsystem-*.md
+docs/*-audit-*.md
 docs/audit-*.md
+docs/*-study-*.md
+docs/review-audit-*.md
+src/*/SUBSYSTEM-*.md
+src/*/subsystem-study-*.md
+.factory/patches/
