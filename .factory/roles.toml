@@ -143,45 +143,53 @@ name = "linting"
 prompt = ".factory/prompts/auditor-linting.md"
 description = "Language linting, readability, concise comments (no verbose noise)"
 model = "glm-5.3"
+provider = "ollama-cloud"
 
 [[audit.auditors]]
 name = "efficiency"
 prompt = ".factory/prompts/auditor-efficiency.md"
 description = "Performance, resource usage, algorithmic complexity"
-model = "glm-5.3"
+model = "gpt-5.6-sol"
+provider = "openai-codex"
 
 [[audit.auditors]]
 name = "security"
 prompt = ".factory/prompts/auditor-security.md"
 description = "Security vulnerabilities, attack surface, input validation"
 model = "glm-5.3"
+provider = "ollama-cloud"
 
 [[audit.auditors]]
 name = "functional"
 prompt = ".factory/prompts/auditor-functional.md"
 description = "Functional correctness — does the code actually work"
 model = "glm-5.3"
+provider = "ollama-cloud"
 
 [[audit.auditors]]
 name = "spec-compliance"
 prompt = ".factory/prompts/auditor-spec.md"
 description = "Compliance with the project specification"
-model = "glm-5.3"
+model = "gpt-5.6-sol"
+provider = "openai-codex"
 
 [[audit.auditors]]
 name = "readability"
 prompt = ".factory/prompts/auditor-readability.md"
 description = "Human readability, natural code flow, clear naming and structure"
-model = "glm-5.3"
+model = "gpt-5.6-sol"
+provider = "openai-codex"
 
 [[audit.auditors]]
 name = "simplifier"
 prompt = ".factory/prompts/auditor-simplifier.md"
 description = "Code complexity reduction, dead code, duplication, over-engineering"
-model = "glm-5.3"
+model = "gpt-5.6-sol"
+provider = "openai-codex"
 
 [[audit.auditors]]
 name = "compatibility"
 prompt = ".factory/prompts/auditor-compatibility.md"
 description = "Platform, dependency, and API compatibility"
 model = "glm-5.3"
+provider = "ollama-cloud"
