@@ -77,28 +77,32 @@ description = "Study current bugs, test failures, and known issues"
 integration_prompt = ".factory/prompts/integration-developer.md"
 timeout = 3600
 
-# Developers work on isolated areas.  Each receives the plan and the
-# current codebase, and outputs proposed changes for their area.
-# The integration developer then applies all proposals and commits.
+# Developers work on the same task from different approaches.
+# Each receives the plan and the current codebase, and outputs proposed
+# changes. The integration developer evaluates both, selects the better
+# one (or merges the best parts), and commits.
 #
-# If no developers are defined, a single "default" developer works on
-# the entire codebase (serial, like the old harness).
+# Approach A: minimal, direct, clean — solve the problem with least code
+# Approach B: robust, defensive, comprehensive — handle edge cases explicitly
+#
+# Both run in parallel (read-only). The integration developer applies the
+# winning approach with write access.
 
 [[implementation.developers]]
-name = "default"
-prompt = ".factory/prompts/developer.md"
-description = "Full-stack developer for the entire codebase"
+name = "approach-a"
+prompt = ".factory/prompts/developer-a.md"
+description = "Minimal and direct implementation approach"
 
-# To split into areas, uncomment and edit:
+[[implementation.developers]]
+name = "approach-b"
+prompt = ".factory/prompts/developer-b.md"
+description = "Robust and defensive implementation approach"
+
+# To revert to a single developer, comment out the above and uncomment:
 # [[implementation.developers]]
-# name = "frontend"
+# name = "default"
 # prompt = ".factory/prompts/developer.md"
-# paths = ["src/manager/", "src/overlay/"]
-#
-# [[implementation.developers]]
-# name = "backend"
-# prompt = ".factory/prompts/developer.md"
-# paths = ["src/dbus/", "src/app/"]
+# description = "Full-stack developer for the entire codebase"
 
 # ─── Audit phase ──────────────────────────────────────────────────────
 
