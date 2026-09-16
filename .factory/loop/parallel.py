@@ -123,6 +123,14 @@ def _resolve_model(sa: dict, default_model: str) -> str:
     return sa.get("model") or default_model
 
 
+def _resolve_provider(sa: dict, default_provider: str) -> str:
+    """Resolve which provider to use for a subagent.
+
+    Priority: subagent's ``provider`` field > ``default_provider``.
+    """
+    return sa.get("provider") or default_provider
+
+
 def _resolve_timeout(sa: dict, default_timeout: int) -> int:
     """Resolve timeout for a subagent."""
     return int(sa.get("timeout", default_timeout))
@@ -158,10 +166,11 @@ def run_parallel(
             prompt = sa.get("prompt", "")
             ctx = context_fn(name, sa) if context_fn else ""
             sa_model = _resolve_model(sa, model)
+            sa_provider = _resolve_provider(sa, provider)
             sa_timeout = _resolve_timeout(sa, timeout)
             fut = pool.submit(
                 invoke_subagent,
-                prompt, ctx, provider, sa_model, sa_timeout, cwd, approve,
+                prompt, ctx, sa_provider, sa_model, sa_timeout, cwd, approve,
             )
             future_map[fut] = name
 

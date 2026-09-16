@@ -60,6 +60,7 @@ from .parallel import (
     load_roles,
     invoke_subagent,
     _resolve_model,
+    _resolve_provider,
 )
 from .metrics import (
     MetricsLog,
@@ -460,9 +461,10 @@ def run_implementation_phase(
         print(f"  {label}: 1 developer (serial)", file=sys.stderr)
         dev = developers[0]
         dev_model = _resolve_model(dev, args.model)
+        dev_provider = _resolve_provider(dev, args.provider)
         name, exit_code, stdout, stderr = invoke_subagent(
             dev["prompt"], excerpt + extra_context,
-            args.provider, dev_model,
+            dev_provider, dev_model,
             timeout, cwd=root, approve=True,
         )
         all_dev_results.append(SubagentResult(

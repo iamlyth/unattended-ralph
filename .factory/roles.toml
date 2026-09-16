@@ -101,22 +101,29 @@ timeout = 3600
 name = "approach-a"
 prompt = ".factory/prompts/developer-a.md"
 description = "Minimal and direct implementation approach"
+model = "deepseek-v4.1-flash"
+provider = "ollama-cloud"
 
 [[implementation.developers]]
 name = "approach-b"
 prompt = ".factory/prompts/developer-b.md"
 description = "Robust and defensive implementation approach"
+model = "gpt-5.6-luna"
+provider = "openai-codex"
 
-# Add more approaches for more thorough coverage (cheap with flash models):
-# [[implementation.developers]]
-# name = "approach-c"
-# prompt = ".factory/prompts/developer-c.md"
-# description = "Test-driven, specification-first approach"
-#
-# [[implementation.developers]]
-# name = "approach-d"
-# prompt = ".factory/prompts/developer-d.md"
-# description = "Refactor and reuse existing patterns"
+[[implementation.developers]]
+name = "approach-c"
+prompt = ".factory/prompts/developer-c.md"
+description = "Test-driven, specification-first approach"
+model = "gpt-5.6-luna"
+provider = "openai-codex"
+
+[[implementation.developers]]
+name = "approach-d"
+prompt = ".factory/prompts/developer-d.md"
+description = "Refactor and reuse existing patterns"
+model = "deepseek-v4.1-flash"
+provider = "ollama-cloud"
 
 # Single developer (old behavior, no ensemble):
 # [[implementation.developers]]
