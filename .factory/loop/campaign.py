@@ -284,6 +284,12 @@ def _clean_verification_dirs(root: Path, config: dict) -> None:
         target = root / d
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
+    # Also remove stray build-* directories created by auditors.
+    # Auditors run read-only but may still create build trees via bash
+    # commands (cmake -B build-auditN). These accumulate and waste disk.
+    for d in root.glob("build-*"):
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
     build_cmd = config_build_command(config)
     if build_cmd:
         wrapped = _wrap_nix_shell(build_cmd, root)
