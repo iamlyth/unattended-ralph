@@ -72,21 +72,30 @@ description = "Study current bugs, test failures, and known issues"
 # description = "Study the manager UI and event loop"
 
 # ─── Implementation phase ─────────────────────────────────────────────
+#
+# MULTI-APPROACH DEVELOPER PATTERN
+# Multiple developers independently attempt the same task from different
+# directions. The integration developer evaluates all proposals and
+# selects the best one (or merges the best parts). With cheap models like
+# deepseek-v4.1-flash, running 2-4 parallel approaches costs almost nothing
+# and significantly improves quality through competition.
+#
+# To control how many approaches run: add or remove [[implementation.developers]]
+# entries below. Each entry is one independent attempt.
+#
+# Available approach prompts:
+#   developer-a.md — Minimal and direct (least code, simple solutions)
+#   developer-b.md — Robust and defensive (edge cases, input validation)
+#   developer-c.md — Test-driven (specification-first, tests prove correctness)
+#   developer-d.md — Refactor and reuse (study existing code, improve as you go)
+#
+# To add more approaches, create developer-e.md, developer-f.md, etc.
+# To use a single developer (old behavior), comment out all entries and
+# uncomment the default developer below.
 
 [implementation]
 integration_prompt = ".factory/prompts/integration-developer.md"
 timeout = 3600
-
-# Developers work on the same task from different approaches.
-# Each receives the plan and the current codebase, and outputs proposed
-# changes. The integration developer evaluates both, selects the better
-# one (or merges the best parts), and commits.
-#
-# Approach A: minimal, direct, clean — solve the problem with least code
-# Approach B: robust, defensive, comprehensive — handle edge cases explicitly
-#
-# Both run in parallel (read-only). The integration developer applies the
-# winning approach with write access.
 
 [[implementation.developers]]
 name = "approach-a"
@@ -98,7 +107,18 @@ name = "approach-b"
 prompt = ".factory/prompts/developer-b.md"
 description = "Robust and defensive implementation approach"
 
-# To revert to a single developer, comment out the above and uncomment:
+# Add more approaches for more thorough coverage (cheap with flash models):
+# [[implementation.developers]]
+# name = "approach-c"
+# prompt = ".factory/prompts/developer-c.md"
+# description = "Test-driven, specification-first approach"
+#
+# [[implementation.developers]]
+# name = "approach-d"
+# prompt = ".factory/prompts/developer-d.md"
+# description = "Refactor and reuse existing patterns"
+
+# Single developer (old behavior, no ensemble):
 # [[implementation.developers]]
 # name = "default"
 # prompt = ".factory/prompts/developer.md"
