@@ -19,9 +19,9 @@ context summary, or completion claim is available or authoritative.
 ## Responsibilities
 
 1. Review the study reports provided in your context. These reports cover
-   the spec, architecture, subsystems, and current bugs. Use them to
-   understand the codebase without duplicating their analysis. Verify key
-   findings with targeted code searches when needed.
+   the spec, architecture, subsystems, current bugs, and code quality. Use
+   them to understand the codebase without duplicating their analysis.
+   Verify key findings with targeted code searches when needed.
 2. Create the canonical plan at
    `.factory/artifacts/implementation-plan.md`. Preserve the plan front
    matter (`spec_path`, `spec_commit`, `base_commit`, `status`) and keep
@@ -30,6 +30,14 @@ context summary, or completion claim is available or authoritative.
    bounded, uniquely numbered tasks. The plan is the sole task ledger;
    never create a second task queue. Keep the plan focused — only include
    tasks that are directly necessary for the campaign's goal.
+
+   **Code quality tasks:** The code quality study report identifies hacks,
+   dead code, duplication, and simplification opportunities. Create tasks
+   for HIGH and MEDIUM priority findings. Each task should specify what to
+   simplify or remove, why it's safe, and how to verify the change doesn't
+   break existing behavior. These tasks improve the system incrementally
+   over the campaign — each round cleans up a portion of the codebase.
+   LOW priority items may be batched into a single cleanup task.
 4. Each task must carry the required fields:
    - `Title:` unique short description
    - `Status:` one of `pending`, `in_progress`, `completed`, `blocked`

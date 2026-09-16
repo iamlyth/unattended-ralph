@@ -63,6 +63,11 @@ name = "bugs"
 prompt = ".factory/prompts/study-bugs.md"
 description = "Study current bugs, test failures, and known issues"
 
+[[planning.studies]]
+name = "quality"
+prompt = ".factory/prompts/study-quality.md"
+description = "Scan for hacks, dead code, duplication, and simplification opportunities"
+
 # Subsystem studies are auto-generated from the source tree.
 # To override with explicit subsystems, uncomment and edit:
 # [[planning.studies]]
