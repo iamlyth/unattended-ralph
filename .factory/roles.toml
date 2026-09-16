@@ -95,6 +95,8 @@ description = "Study current bugs, test failures, and known issues"
 
 [implementation]
 integration_prompt = ".factory/prompts/integration-developer.md"
+integration_model = "gpt-6-astra"
+integration_provider = "openai-codex"
 timeout = 3600
 
 [[implementation.developers]]

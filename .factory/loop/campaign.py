@@ -507,13 +507,14 @@ def run_implementation_phase(
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
     int_model = impl_cfg.get("integration_model") or args.model
+    int_provider = impl_cfg.get("integration_provider") or args.provider
 
     name, exit_code, stdout, stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
         f"## Developer Proposals\n\n{proposals}"
         + extra_context,
-        args.provider, int_model,
+        int_provider, int_model,
         timeout, cwd=root, approve=True,
     )
 
