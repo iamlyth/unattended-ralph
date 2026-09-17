@@ -120,6 +120,11 @@ def config_clean_dirs(config: dict) -> list[str]:
     return list(config.get("verification", {}).get("clean", []))
 
 
+def config_harness_command(config: dict) -> str:
+    """Return the agent CLI command (pi2, pi, etc.) from config."""
+    return config.get("harness", {}).get("command", "pi2")
+
+
 def config_max_repairs(config: dict) -> int:
     return int(config.get("campaign", {}).get("max_repairs", 3))
 
@@ -352,9 +357,11 @@ def run_planning_phase(roles: dict, config: dict, args, root: Path,
             ctx += f"Task: {sa['description']}\n"
         return ctx
 
+    harness_cmd = config_harness_command(config)
     study_results = run_parallel(
         studies, study_context, args.provider, args.model,
         timeout, cwd=root, approve=False,
+        harness_cmd=harness_cmd,
     )
 
     study_report = assemble_reports(study_results)
@@ -490,6 +497,7 @@ def run_implementation_phase(
     impl_cfg = roles.get("implementation", {})
     timeout = impl_cfg.get("timeout", ROLE_TIMEOUT)
     developers = list(impl_cfg.get("developers", []))
+    harness_cmd = config_harness_command(config)
 
     if not developers:
         developers = [{"name": "default", "prompt": ".factory/prompts/developer.md"}]
@@ -522,6 +530,7 @@ def run_implementation_phase(
             dev["prompt"], excerpt + extra_context,
             dev_provider, dev_model,
             timeout, cwd=root, approve=True,
+            harness_cmd=harness_cmd,
         )
         all_dev_results.append(SubagentResult(
             name=name, success=exit_code == 0,
@@ -577,6 +586,7 @@ def run_implementation_phase(
             dev["prompt"], ctx,
             dev_provider, dev_model,
             dev_timeout, cwd=wt_path, approve=True,
+            harness_cmd=harness_cmd,
         )
         return SubagentResult(
             name=dev_name, success=exit_code == 0,
@@ -653,6 +663,7 @@ def run_implementation_phase(
         + extra_context,
         int_provider, int_model,
         timeout, cwd=root, approve=True,
+        harness_cmd=harness_cmd,
     )
 
     if exit_code != 0:
@@ -674,6 +685,7 @@ def run_audit_phase(roles: dict, config: dict, args,
     """
     audit_cfg = roles.get("audit", {})
     timeout = audit_cfg.get("timeout", 600)
+    harness_cmd = config_harness_command(config)
     auditors = list(audit_cfg.get("auditors", []))
 
     if not auditors:
@@ -704,6 +716,7 @@ def run_audit_phase(roles: dict, config: dict, args,
     audit_results = run_parallel(
         auditors, audit_context, args.provider, args.model,
         timeout, cwd=root, approve=False,
+        harness_cmd=harness_cmd,
     )
 
     return assemble_audit_findings(audit_results)

@@ -9,6 +9,13 @@ command = ["./scripts/verify.sh"]
 clean = ["build"]
 build_command = "rm -rf build && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)"
 
+[harness]
+# The agent CLI command used for subagent invocations.
+# "pi2" = pi2 coding agent (default, cloud providers)
+# "pi"  = pi coding agent (offline, local models)
+# Future: "claude", "codex", "antigravity"
+command = "pi2"
+
 [campaign]
 default_rounds = 20
 default_attempts = 3

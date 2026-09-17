@@ -74,8 +74,9 @@ def invoke_subagent(
     timeout: int,
     cwd: str | Path | None = None,
     approve: bool = True,
+    harness_cmd: str = "pi2",
 ) -> tuple[str, int, str, str]:
-    """Invoke a single subagent via pi2.
+    """Invoke a single subagent via the configured harness command.
 
     Returns ``(name, exit_code, stdout, stderr)``.
     """
@@ -90,7 +91,7 @@ def invoke_subagent(
         full_input += "\n\n---\n\n## Context\n\n" + context
 
     cmd = [
-        "pi2", "--provider", provider, "--model", model,
+        harness_cmd, "--provider", provider, "--model", model,
         "--print", "--no-session",
     ]
     if approve:
@@ -145,13 +146,14 @@ def run_parallel(
     cwd: str | Path | None = None,
     approve: bool = True,
     max_workers: int = 8,
+    harness_cmd: str = "pi2",
 ) -> list[SubagentResult]:
     """Launch multiple subagents in parallel.
 
     ``context_fn(name, sa)`` is called for each subagent to produce its
-    context string.  Each subagent may specify its own ``model`` and
-    ``timeout`` in its dict; these override the defaults.  Returns
-    results in completion order.
+    context string.  Each subagent may specify its own ``model``,
+    ``provider``, and ``timeout`` in its dict; these override the defaults.
+    Returns results in completion order.
     """
     results: list[SubagentResult] = []
 
@@ -171,6 +173,7 @@ def run_parallel(
             fut = pool.submit(
                 invoke_subagent,
                 prompt, ctx, sa_provider, sa_model, sa_timeout, cwd, approve,
+                harness_cmd,
             )
             future_map[fut] = name
 
