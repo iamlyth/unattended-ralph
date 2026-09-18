@@ -122,8 +122,8 @@ provider = "openai-codex"
 name = "approach-c"
 prompt = ".factory/prompts/developer-c.md"
 description = "Test-driven, specification-first approach"
-model = "gemini-3.8-flash"
-provider = "google"
+model = "gpt-5.6-luna"
+provider = "openai-codex"
 
 [[implementation.developers]]
 name = "approach-d"
