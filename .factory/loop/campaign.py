@@ -941,11 +941,8 @@ def cmd_run(args, config: dict, env: dict) -> int:
                         f"{vresult.exit_code if vresult else 'N/A'}"
                     )
                     PLAN_PATH.write_text(dump(plan), encoding="utf-8")
-                    gitutil.commit_all(
-                        ROOT,
-                        f"factory: task {task.id} blocked "
-                        f"(verification failed after "
-                        f"{args.attempts} attempts)")
+                    # No separate commit — plan update folds into next
+                    # implementation commit via git add -A.
 
                     write_round_scratchpad(
                         ROOT, round_num, args.campaign_id, task,
@@ -1068,10 +1065,8 @@ def cmd_run(args, config: dict, env: dict) -> int:
                             f"unresolved after {max_repairs} repair cycles"
                         )
                         PLAN_PATH.write_text(dump(plan), encoding="utf-8")
-                        gitutil.commit_all(
-                            ROOT,
-                            f"factory: task {task.id} blocked by audit "
-                            f"after {max_repairs} repairs")
+                        # No separate commit — plan update folds into next
+                        # implementation commit via git add -A.
 
                         write_round_scratchpad(
                             ROOT, round_num, args.campaign_id, task,
@@ -1119,8 +1114,11 @@ def cmd_run(args, config: dict, env: dict) -> int:
                         encoding="utf-8",
                     )
 
-                gitutil.commit_all(
-                    ROOT, f"factory: checkpoint round {round_num}")
+                # No separate checkpoint commit — the plan file update
+                # will be folded into the next implementation commit via
+                # git add -A. This prevents plan-only commits (noise).
+                # The campaign reads the plan from disk, not git, so it
+                # works correctly without committing every status update.
 
                 audit_summary = ("No BLOCKERs" if not report.has_blockers
                                  else f"{len(report.blockers)} BLOCKER(s) "
