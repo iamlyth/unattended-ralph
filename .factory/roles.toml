@@ -120,13 +120,6 @@ provider = "openai-codex"
 
 [[implementation.developers]]
 name = "approach-c"
-prompt = ".factory/prompts/developer-c.md"
-description = "Test-driven, specification-first approach"
-model = "gpt-5.6-luna"
-provider = "openai-codex"
-
-[[implementation.developers]]
-name = "approach-d"
 prompt = ".factory/prompts/developer-d.md"
 description = "Refactor and reuse existing patterns"
 model = "gemini-3.8-flash"
