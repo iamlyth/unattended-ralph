@@ -48,11 +48,16 @@ def is_clean(root: str | Path) -> bool:
 
 
 def commit_all(root: str | Path, message: str) -> str:
-    """Stage all changes and commit. Returns the new commit sha."""
+    """Stage all changes and commit. Returns the new commit sha,
+    or empty string if there was nothing to commit."""
     _git(root, "add", "-A")
     r = _git(root, "commit", "-m", message)
-    # returncode 0 = committed, returncode 1 = nothing to commit
-    if r.returncode not in (0, 1):
+    if r.returncode == 1:
+        # Nothing to commit — return empty string so the caller knows
+        # no changes were made. This prevents empty commits from being
+        # treated as successful implementations.
+        return ""
+    if r.returncode != 0:
         raise RuntimeError(f"git commit failed: {r.stderr}")
     return current_commit(root)
 
