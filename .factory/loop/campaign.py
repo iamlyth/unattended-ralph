@@ -682,6 +682,7 @@ def run_implementation_phase(
         "integration_prompt", ".factory/prompts/integration-developer.md")
     int_model = impl_cfg.get("integration_model") or args.model
     int_provider = impl_cfg.get("integration_provider") or args.provider
+    int_timeout = int(impl_cfg.get("integration_timeout", timeout))
 
     name, exit_code, stdout, stderr = invoke_subagent(
         integration_prompt,
@@ -697,7 +698,7 @@ def run_implementation_phase(
         f"After applying, build and test your changes.\n"
         + extra_context,
         int_provider, int_model,
-        timeout, cwd=root, approve=True,
+        int_timeout, cwd=root, approve=True,
         harness_cmd=harness_cmd,
     )
 
