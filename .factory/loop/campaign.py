@@ -465,6 +465,8 @@ def _create_worktree(root: Path, name: str, base_commit: str) -> str | None:
 def _cleanup_worktrees(root: Path, wt_paths: list[str]) -> None:
     """Remove all worktrees, prune, and clean up backups."""
     for wt_path in wt_paths:
+        subprocess.run(["chmod", "-R", "u+w", wt_path],
+                       capture_output=True, timeout=30)
         shutil.rmtree(wt_path, ignore_errors=True)
         subprocess.run(
             ["git", "worktree", "remove", "--force", wt_path],
