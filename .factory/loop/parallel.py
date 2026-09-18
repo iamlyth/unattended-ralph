@@ -106,6 +106,7 @@ def invoke_subagent(
             text=True,
             cwd=str(cwd) if cwd else None,
             timeout=timeout,
+            start_new_session=True,
         )
     except subprocess.TimeoutExpired:
         return name, 124, "", f"subagent {name} timed out after {timeout}s"

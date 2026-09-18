@@ -834,13 +834,12 @@ def cmd_plan(args, config: dict, env: dict) -> int:
         shutil.rmtree(wt_base, ignore_errors=True)
     wt_base.mkdir(parents=True, exist_ok=True)
 
-    # Kill any stale pi2 processes from previous campaigns.
+    # Kill any stale pi/pi2 processes from previous campaigns.
     # These consume API quota and cause rate limiting for new runs.
+    # Must kill both pi2 wrappers AND bwrap child processes (pi binary).
     try:
-        subprocess.run(
-            ["pkill", "-9", "-f", "pi2.*--approve"],
-            capture_output=True, timeout=10,
-        )
+        subprocess.run(["pkill", "-9", "-f", "pi2"], capture_output=True, timeout=10)
+        subprocess.run(["pkill", "-9", "-f", "pi --provider"], capture_output=True, timeout=10)
     except Exception:
         pass  # best-effort cleanup
 
