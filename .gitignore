@@ -84,3 +84,4 @@ docs/review-audit-*.md
 src/*/SUBSYSTEM-*.md
 src/*/subsystem-study-*.md
 .factory/patches/
+.factory-worktrees/

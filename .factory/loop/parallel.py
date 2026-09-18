@@ -97,6 +97,7 @@ def invoke_subagent(
     if approve:
         cmd.append("--approve")
 
+    import sys as _sys
     try:
         proc = subprocess.run(
             cmd,
@@ -110,6 +111,12 @@ def invoke_subagent(
         return name, 124, "", f"subagent {name} timed out after {timeout}s"
     except OSError as exc:
         return name, 127, "", f"subagent {name} failed: {exc}"
+
+    if proc.returncode != 0:
+        if proc.stderr:
+            print(f"DBG ERR: {proc.stderr[:500]}", file=sys.stderr)
+        if proc.stdout:
+            print(f"DBG OUT: {proc.stdout[:300]}", file=sys.stderr)
 
     return name, proc.returncode, proc.stdout or "", proc.stderr or ""
 

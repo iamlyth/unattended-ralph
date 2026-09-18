@@ -438,8 +438,8 @@ def _create_worktree(root: Path, name: str, base_commit: str) -> str | None:
     Also backs up .git/worktrees/ metadata — pi2's bubblewrap sandbox
     deletes it when the sandbox exits, so we restore it in _collect_patch.
     """
-    wt_path = f"/tmp/factory-wt-{os.getpid()}-{name}"
-    backup_path = f"/tmp/factory-wt-backup-{os.getpid()}-{name}.tar"
+    wt_path = str(root / ".factory-worktrees" / name)
+    backup_path = str(root / ".factory-worktrees" / f"{name}.backup.tar")
     # Remove stale worktree if it exists
     subprocess.run(
         ["git", "worktree", "remove", "--force", wt_path],
@@ -476,7 +476,7 @@ def _cleanup_worktrees(root: Path, wt_paths: list[str]) -> None:
     )
     # Remove metadata backups
     import glob
-    for f in glob.glob("/tmp/factory-wt-backup-*.tar"):
+    for f in glob.glob(str(root / ".factory-worktrees" / "*.backup.tar")):
         try:
             os.unlink(f)
         except OSError:
@@ -492,7 +492,7 @@ def _collect_patch(wt_path: str, base_commit: str, root: Path,
     uses git diff --cached to capture both modifications and new files.
     """
     # Restore worktree metadata
-    backup_path = f"/tmp/factory-wt-backup-{os.getpid()}-{wt_name}.tar"
+    backup_path = str(root / ".factory-worktrees" / f"{wt_name}.backup.tar")
     wt_dir = root / ".git" / "worktrees"
     wt_dir.mkdir(parents=True, exist_ok=True)
     if os.path.exists(backup_path):
@@ -810,8 +810,10 @@ def cmd_plan(args, config: dict, env: dict) -> int:
         ["git", "worktree", "prune"],
         cwd=str(ROOT), capture_output=True, timeout=30,
     )
-    for d in Path("/tmp").glob("factory-wt-*"):
-        shutil.rmtree(d, ignore_errors=True)
+    wt_base = ROOT / ".factory-worktrees"
+    if wt_base.exists():
+        shutil.rmtree(wt_base, ignore_errors=True)
+    wt_base.mkdir(parents=True, exist_ok=True)
 
     with Lock(ROOT):
         branch = args.branch or config.get("project", {}).get(
