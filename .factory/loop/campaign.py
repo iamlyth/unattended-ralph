@@ -829,8 +829,20 @@ def cmd_plan(args, config: dict, env: dict) -> int:
     )
     wt_base = ROOT / ".factory-worktrees"
     if wt_base.exists():
+        subprocess.run(["chmod", "-R", "u+w", str(wt_base)],
+                       capture_output=True, timeout=30)
         shutil.rmtree(wt_base, ignore_errors=True)
     wt_base.mkdir(parents=True, exist_ok=True)
+
+    # Kill any stale pi2 processes from previous campaigns.
+    # These consume API quota and cause rate limiting for new runs.
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", "pi2.*--approve"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass  # best-effort cleanup
 
     with Lock(ROOT):
         branch = args.branch or config.get("project", {}).get(
