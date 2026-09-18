@@ -706,6 +706,20 @@ def run_implementation_phase(
               file=sys.stderr)
         return "", all_dev_results
 
+    # Parse which approach was selected (for model comparison metrics)
+    import re as _re
+    selected_match = _re.search(r'SELECTED:\s*approach-([a-z])', stdout or "")
+    if selected_match:
+        selected_approach = selected_match.group(1)
+        approach_models = {dev.get("name", "").replace("approach-", ""): dev.get("model", args.model)
+                           for dev in developers}
+        selected_model = approach_models.get(selected_approach, "unknown")
+        print(f"  {label}: selected approach-{selected_approach} ({selected_model})",
+              file=sys.stderr)
+    else:
+        print(f"  {label}: selected approach unknown (no SELECTED line)",
+              file=sys.stderr)
+
     msg = (f"factory: task {task.id} "
            f"{'repair' if repair_context else 'integrated implementation'}")
     return gitutil.commit_all(root, msg), all_dev_results

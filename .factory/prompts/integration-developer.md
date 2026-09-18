@@ -42,6 +42,15 @@ You will receive:
    git add -A && git commit -m "factory: task {N} implementation"
    ```
 
+7. **Report your selection.** As the VERY LAST LINE of your output,
+   print exactly:
+   ```
+   SELECTED: approach-X
+   ```
+   where X is the approach you primarily used (a, b, c, or d). If you
+   merged multiple approaches, use the one that contributed the most
+   code. This is tracked as a metric for model comparison.
+
 ## Selection guidelines
 
 - If both patches are correct, prefer the **simpler** one (less code,
