@@ -467,7 +467,7 @@ def _cleanup_worktrees(root: Path, wt_paths: list[str]) -> None:
     for wt_path in wt_paths:
         subprocess.run(["chmod", "-R", "u+w", wt_path],
                        capture_output=True, timeout=30)
-        shutil.rmtree(wt_path, ignore_errors=True)
+        subprocess.run(["rm", "-rf", wt_path], capture_output=True, timeout=30)
         subprocess.run(
             ["git", "worktree", "remove", "--force", wt_path],
             cwd=str(root), capture_output=True, timeout=30,
@@ -831,7 +831,7 @@ def cmd_plan(args, config: dict, env: dict) -> int:
     if wt_base.exists():
         subprocess.run(["chmod", "-R", "u+w", str(wt_base)],
                        capture_output=True, timeout=30)
-        shutil.rmtree(wt_base, ignore_errors=True)
+        subprocess.run(["rm", "-rf", str(wt_base)], capture_output=True, timeout=30)
     wt_base.mkdir(parents=True, exist_ok=True)
 
     # Kill any stale pi/pi2 processes from previous campaigns.
