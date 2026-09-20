@@ -678,7 +678,8 @@ def run_implementation_phase(
         print(f"  {label}: no developers produced changes", file=sys.stderr)
         return "", all_dev_results
 
-    # Integration developer evaluates patches and applies the best one.
+    # Judge evaluates patches (read-only) and selects the best one.
+    # The harness then applies the patch, verifies, and commits.
     patch_list = "\n".join(f"  - {pf}" for pf in patch_files)
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
@@ -686,7 +687,8 @@ def run_implementation_phase(
     int_provider = impl_cfg.get("integration_provider") or args.provider
     int_timeout = int(impl_cfg.get("integration_timeout", timeout))
 
-    name, exit_code, stdout, stderr = invoke_subagent(
+    # Run judge as READ-ONLY (approve=False) — it just reads and decides
+    judge_name, judge_exit, judge_stdout, judge_stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
         f"## Developer Patches\n\n"
@@ -694,38 +696,109 @@ def run_implementation_phase(
         f"this task in isolated worktrees. Their patches are saved at:\n"
         f"{patch_list}\n\n"
         f"Read each patch file, evaluate it against the task's "
-        f"acceptance criteria, and apply the best one using:\n"
-        f"  git apply <patch-file>\n\n"
-        f"Or combine the best parts of multiple patches manually.\n"
-        f"After applying, build and test your changes.\n"
-        + extra_context,
+        f"acceptance criteria, and pick the best one.\n"
+        f"Print SELECTED: approach-X as your last line.\n",
         int_provider, int_model,
-        int_timeout, cwd=root, approve=True,
+        int_timeout, cwd=root, approve=False,
         harness_cmd=harness_cmd,
     )
 
-    if exit_code != 0:
-        print(f"  {label}: integration developer failed (exit {exit_code})",
+    if judge_exit != 0:
+        print(f"  {label}: judge failed (exit {judge_exit})",
+              file=sys.stderr)
+        if judge_stderr:
+            print(f"  {label}: judge stderr: {judge_stderr[:300]}",
+                  file=sys.stderr)
+        return "", all_dev_results
+
+    # Parse the judge's selection
+    import re as _re
+    selected_match = _re.search(r'SELECTED:\s*approach-([a-z])', judge_stdout or "")
+    fallback_match = _re.search(r'FALLBACK:\s*(.+)', judge_stdout or "")
+
+    if not selected_match:
+        print(f"  {label}: judge did not output SELECTED line",
+              file=sys.stderr)
+        print(f"  {label}: judge output: {(judge_stdout or '')[:300]}",
               file=sys.stderr)
         return "", all_dev_results
 
-    # Parse which approach was selected (for model comparison metrics)
-    import re as _re
-    selected_match = _re.search(r'SELECTED:\s*approach-([a-z])', stdout or "")
-    if selected_match:
-        selected_approach = selected_match.group(1)
-        approach_models = {dev.get("name", "").replace("approach-", ""): dev.get("model", args.model)
-                           for dev in developers}
-        selected_model = approach_models.get(selected_approach, "unknown")
-        print(f"  {label}: selected approach-{selected_approach} ({selected_model})",
-              file=sys.stderr)
-    else:
-        print(f"  {label}: selected approach unknown (no SELECTED line)",
+    # Build ordered list of approaches to try (selected first, then fallbacks)
+    selected_approach = selected_match.group(1)
+    approach_order = [selected_approach]
+    if fallback_match:
+        for fb in fallback_match.group(1).split(","):
+            fb = fb.strip().replace("approach-", "")
+            if fb and fb not in approach_order:
+                approach_order.append(fb)
+
+    # Map approach letters to patch files and model names
+    patch_map = {}
+    for pf in patch_files:
+        letter = Path(pf).stem.replace("approach-", "")
+        patch_map[letter] = pf
+    approach_models = {dev.get("name", "").replace("approach-", ""): dev.get("model", args.model)
+                       for dev in developers}
+
+    # Try patches in order: apply, verify, commit
+    for approach_letter in approach_order:
+        if approach_letter not in patch_map:
+            continue
+
+        patch_file = patch_map[approach_letter]
+        model_name = approach_models.get(approach_letter, "unknown")
+        print(f"  {label}: applying approach-{approach_letter} ({model_name})",
               file=sys.stderr)
 
-    msg = (f"factory: task {task.id} "
-           f"{'repair' if repair_context else 'integrated implementation'}")
-    return gitutil.commit_all(root, msg), all_dev_results
+        # Apply the patch
+        apply_result = subprocess.run(
+            ["git", "apply", patch_file],
+            cwd=str(root), capture_output=True, timeout=30,
+        )
+        if apply_result.returncode != 0:
+            print(f"  {label}: git apply failed for approach-{approach_letter}",
+                  file=sys.stderr)
+            continue
+
+        # Clean and verify
+        _clean_untracked(root)
+        _clean_verification_dirs(root, config)
+        vresult = run_task_verification(
+            task, env["runners"], root,
+            gitutil.current_commit(root),
+            config_build_command(config),
+        )
+
+        if vresult.exit_code != 0:
+            print(f"  {label}: verification failed for approach-{approach_letter} "
+                  f"(exit {vresult.exit_code})",
+                  file=sys.stderr)
+            subprocess.run(["git", "checkout", "--", "."], cwd=str(root),
+                          capture_output=True, timeout=30)
+            subprocess.run(["git", "clean", "-fd"], cwd=str(root),
+                          capture_output=True, timeout=30)
+            continue
+
+        # Verification passed
+        print(f"  {label}: approach-{approach_letter} verified on {vresult.runner}",
+              file=sys.stderr)
+        task.status = "completed"
+        task.evidence = (f"verification exit {vresult.exit_code} "
+                        f"on {vresult.runner}")
+        PLAN_PATH.write_text(dump(plan), encoding="utf-8")
+        for f in patches_dir.glob("*.patch"):
+            f.unlink()
+        msg = (f"factory: task {task.id} "
+               f"{'repair' if repair_context else 'implementation'} "
+               f"(approach-{approach_letter}, {model_name})")
+        return gitutil.commit_all(root, msg), all_dev_results
+
+    # All approaches failed verification
+    print(f"  {label}: all approaches failed verification",
+          file=sys.stderr)
+    for f in patches_dir.glob("*.patch"):
+        f.unlink()
+    return "", all_dev_results
 
 
 def run_audit_phase(roles: dict, config: dict, args,
