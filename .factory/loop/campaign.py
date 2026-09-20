@@ -961,6 +961,27 @@ def cmd_run(args, config: dict, env: dict) -> int:
         ISSUES_PATH, escalation_threshold=args.escalation_threshold)
     max_repairs = args.max_repairs
 
+    # Auto-clean: ensure the repo is in a usable state before preflight.
+    # 1. Commit the plan file (preserve state)
+    subprocess.run(
+        ["git", "add", str(ROOT / ".factory" / "artifacts" / "implementation-plan.md")],
+        cwd=str(ROOT), capture_output=True, timeout=30,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "plan: auto-checkpoint before campaign"],
+        cwd=str(ROOT), capture_output=True, timeout=30,
+    )
+    # 2. Revert any other uncommitted changes
+    subprocess.run(
+        ["git", "checkout", "--", "."],
+        cwd=str(ROOT), capture_output=True, timeout=30,
+    )
+    # 3. Remove untracked files (respecting .gitignore)
+    subprocess.run(
+        ["git", "clean", "-fd"],
+        cwd=str(ROOT), capture_output=True, timeout=30,
+    )
+
     # Preflight.
     preflight = run_preflight(ROOT, config, env["runners"])
     if not preflight.passed:
