@@ -21,7 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+import os
 import subprocess
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -97,29 +99,29 @@ def invoke_subagent(
     if approve:
         cmd.append("--approve")
 
-    import sys as _sys
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            input=full_input,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             cwd=str(cwd) if cwd else None,
-            timeout=timeout,
             start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return name, 124, "", f"subagent {name} timed out after {timeout}s"
+        try:
+            stdout, stderr = proc.communicate(input=full_input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            stdout, stderr = proc.communicate()
+            return name, 124, stdout or "", stderr or f"subagent {name} timed out after {timeout}s"
     except OSError as exc:
         return name, 127, "", f"subagent {name} failed: {exc}"
 
-    if proc.returncode != 0:
-        if proc.stderr:
-            print(f"DBG ERR: {proc.stderr[:500]}", file=sys.stderr)
-        if proc.stdout:
-            print(f"DBG OUT: {proc.stdout[:300]}", file=sys.stderr)
-
-    return name, proc.returncode, proc.stdout or "", proc.stderr or ""
+    return name, proc.returncode, stdout or "", stderr or ""
 
 
 # ─── Parallel execution ──────────────────────────────────────────────

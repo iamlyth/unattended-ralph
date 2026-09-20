@@ -840,6 +840,7 @@ def cmd_plan(args, config: dict, env: dict) -> int:
     try:
         subprocess.run(["pkill", "-9", "-f", "pi2"], capture_output=True, timeout=10)
         subprocess.run(["pkill", "-9", "-f", "pi --provider"], capture_output=True, timeout=10)
+        subprocess.run(["pkill", "-9", "-f", "bwrap.*approach"], capture_output=True, timeout=10)
     except Exception:
         pass  # best-effort cleanup
 
