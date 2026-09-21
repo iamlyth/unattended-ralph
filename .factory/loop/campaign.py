@@ -688,27 +688,42 @@ def run_implementation_phase(
 
     # Judge evaluates patches (read-only) and selects the best one.
     # The harness then applies the patch, verifies, and commits.
-    patch_list = "\n".join(f"  - {pf}" for pf in patch_files)
     integration_prompt = impl_cfg.get(
         "integration_prompt", ".factory/prompts/integration-developer.md")
     int_model = impl_cfg.get("integration_model") or args.model
     int_provider = impl_cfg.get("integration_provider") or args.provider
     int_timeout = int(impl_cfg.get("integration_timeout", timeout))
 
-    # Run judge as READ-ONLY (approve=False) — it just reads and decides
+    # Read patch contents and include them in the judge's prompt (no tools needed)
+    approach_models = {dev.get("name", "").replace("approach-", ""): dev.get("model", args.model)
+                       for dev in developers}
+    patch_contents = ""
+    for pf in patch_files:
+        pfname = Path(pf).stem
+        pmodel = approach_models.get(pfname.replace("approach-", ""), "unknown")
+        try:
+            content = Path(pf).read_text(encoding="utf-8")
+            if len(content) > 20000:
+                content = content[:20000] + "\n... (truncated)\n"
+            patch_contents += f"\n### {pfname} ({pmodel})\n```diff\n{content}\n```\n"
+        except OSError:
+            patch_contents += f"\n### {pfname} ({pmodel})\n(patch not readable)\n"
+
+    # Run judge with NO TOOLS — patches are in the prompt, single API call
     judge_name, judge_exit, judge_stdout, judge_stderr = invoke_subagent(
         integration_prompt,
         f"## Task\n\n{excerpt}\n\n"
         f"## Developer Patches\n\n"
         f"{len(patch_files)} developer(s) independently implemented "
-        f"this task in isolated worktrees. Their patches are saved at:\n"
-        f"{patch_list}\n\n"
-        f"Read each patch file, evaluate it against the task's "
-        f"acceptance criteria, and pick the best one.\n"
+        f"this task. Their patches are below:\n"
+        f"{patch_contents}\n\n"
+        f"Read the patches, evaluate against acceptance criteria, "
+        f"and pick the best one.\n"
         f"Print SELECTED: approach-X as your last line.\n",
         int_provider, int_model,
         int_timeout, cwd=root, approve=False,
         harness_cmd=harness_cmd,
+        no_tools=True,
     )
 
     if judge_exit != 0:

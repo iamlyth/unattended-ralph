@@ -77,6 +77,7 @@ def invoke_subagent(
     cwd: str | Path | None = None,
     approve: bool = True,
     harness_cmd: str = "pi2",
+    no_tools: bool = False,
 ) -> tuple[str, int, str, str]:
     """Invoke a single subagent via the configured harness command.
 
@@ -98,6 +99,8 @@ def invoke_subagent(
     ]
     if approve:
         cmd.append("--approve")
+    if no_tools:
+        cmd.append("--no-tools")
 
     try:
         proc = subprocess.Popen(
