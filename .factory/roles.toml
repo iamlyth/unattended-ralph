@@ -100,7 +100,7 @@ description = "Scan for hacks, dead code, duplication, and simplification opport
 
 [implementation]
 integration_prompt = ".factory/prompts/integration-developer.md"
-integration_model = "gpt-6-astra"
+integration_model = "gpt-5.6-sol"
 integration_provider = "openai-codex"
 integration_timeout = 7200
 timeout = 3600
